@@ -11,10 +11,14 @@ export function Toolbar(): JSX.Element {
     setActiveFile,
     displays,
     selectedDisplayId,
-    setSelectedDisplayId
+    setSelectedDisplayId,
+    backdropImage,
+    setBackdropImage
   } = useAppStore()
 
-  const isOutputActive = isPresentationWindowOpen || activeFile?.type === 'presentation'
+  const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
+
+  const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation'
 
   const handleOpenFolder = async (): Promise<void> => {
     const path = await window.api.selectFolder()
@@ -27,17 +31,68 @@ export function Toolbar(): JSX.Element {
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
-      if (activeFile?.type === 'presentation') {
+      if (activeFile?.type === 'presentation' && backdropImage) {
+        // Seamless: open black window first, then close PowerPoint, then show backdrop
+        if (!isPresentationWindowOpen) {
+          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+          setPresentationWindowOpen(true)
+        }
         await window.api.powerpointCommand('close')
-        setActiveFile(null)
+        window.api.sendToPresentation('load-content', {
+          type: 'backdrop',
+          path: backdropImage,
+          name: 'Backdrop'
+        })
+      } else {
+        if (activeFile?.type === 'presentation') {
+          await window.api.powerpointCommand('close')
+        }
+        if (backdropImage) {
+          if (!isPresentationWindowOpen) {
+            await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+            setPresentationWindowOpen(true)
+          }
+          window.api.sendToPresentation('load-content', {
+            type: 'backdrop',
+            path: backdropImage,
+            name: 'Backdrop'
+          })
+        } else if (isPresentationWindowOpen) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+        }
       }
-      if (isPresentationWindowOpen) {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
-      }
+      setActiveFile(null)
+      setLiveChannelNull()
     } else {
-      await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-      setPresentationWindowOpen(true)
+      if (!isPresentationWindowOpen) {
+        await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+        setPresentationWindowOpen(true)
+      }
+      if (backdropImage) {
+        window.api.sendToPresentation('load-content', {
+          type: 'backdrop',
+          path: backdropImage,
+          name: 'Backdrop'
+        })
+      }
+    }
+  }
+
+  const handleSelectBackdrop = async (): Promise<void> => {
+    const path = await window.api.selectBackdropImage()
+    if (path) {
+      setBackdropImage(path)
+      // Immediately show backdrop on presentation window
+      if (!isPresentationWindowOpen) {
+        await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+        setPresentationWindowOpen(true)
+      }
+      window.api.sendToPresentation('load-content', {
+        type: 'backdrop',
+        path,
+        name: 'Backdrop'
+      })
     }
   }
 
@@ -74,6 +129,19 @@ export function Toolbar(): JSX.Element {
       )}
 
       <div className="flex-1" />
+
+      <button
+        onClick={handleSelectBackdrop}
+        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
+          backdropImage
+            ? 'bg-purple-600/80 hover:bg-purple-600 text-white'
+            : 'btn-secondary'
+        }`}
+        title={backdropImage || 'Select backdrop image'}
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        🖼 Backdrop
+      </button>
 
       {displays.length > 1 && (
         <select

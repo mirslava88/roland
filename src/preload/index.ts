@@ -24,9 +24,14 @@ const api = {
   generatePptxThumbnails: (filePath: string) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath),
 
+  readFile: (filePath: string): Promise<ArrayBuffer> =>
+    ipcRenderer.invoke('read-file', filePath),
+
   showOverlay: (displayId?: number) => ipcRenderer.invoke('show-overlay', displayId),
 
   hideOverlay: () => ipcRenderer.invoke('hide-overlay'),
+
+  selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
 
   sendToPresentation: (channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-presentation', channel, ...args)
@@ -34,6 +39,10 @@ const api = {
 
   sendToControl: (channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-control', channel, ...args)
+  },
+
+  signalReady: (): void => {
+    ipcRenderer.send('presentation-ready')
   },
 
   on: (channel: string, callback: (...args: unknown[]) => void) => {

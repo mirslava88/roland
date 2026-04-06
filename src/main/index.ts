@@ -18,7 +18,7 @@ function createWindows(): void {
     presentationWindow = null
   })
 
-  ipcMain.handle('open-presentation-window', (_event, displayId?: number) => {
+  ipcMain.handle('open-presentation-window', async (_event, displayId?: number) => {
     if (presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindow.focus()
       return
@@ -32,6 +32,15 @@ function createWindows(): void {
       : externalDisplay || primaryDisplay
 
     presentationWindow = createPresentationWindow(targetDisplay!)
+
+    // Wait for the renderer to fully load and React to mount
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => resolve(), 5000) // fallback timeout
+      ipcMain.once('presentation-ready', () => {
+        clearTimeout(timeout)
+        resolve()
+      })
+    })
 
     presentationWindow.on('closed', () => {
       presentationWindow = null

@@ -31,18 +31,18 @@ function Open-Presentation {
     try {
         while ($ppt.SlideShowWindows.Count -gt 0) {
             $ppt.SlideShowWindows(1).View.Exit()
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 500
         }
     } catch {}
 
     try {
         while ($ppt.Presentations.Count -gt 0) {
             $ppt.Presentations(1).Close()
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds 300
         }
     } catch {}
 
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds 500
 
     $presentation = $ppt.Presentations.Open($Path)
 

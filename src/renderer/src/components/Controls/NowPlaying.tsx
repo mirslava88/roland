@@ -19,7 +19,7 @@ export function NowPlaying(): JSX.Element | null {
 
   return (
     <div className="h-9 bg-surface-200 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0">
-      <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
+      <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
       <span className="text-[10px] font-bold uppercase text-gray-500 shrink-0">Now Playing</span>
 
       <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${TYPE_COLORS[activeFile.type] || 'text-gray-400'}`}>

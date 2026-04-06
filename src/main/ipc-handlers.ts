@@ -1,5 +1,5 @@
 import { BrowserWindow, ipcMain, dialog } from 'electron'
-import { readdir, stat } from 'fs/promises'
+import { readdir, stat, readFile } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -185,5 +185,20 @@ export function registerIpcHandlers(
       }
     }
     return { success: false, error: 'Unsupported platform' }
+  })
+
+  ipcMain.handle('read-file', async (_event, filePath: string) => {
+    const buffer = await readFile(filePath)
+    return buffer.buffer
+  })
+
+  ipcMain.handle('select-backdrop-image', async () => {
+    const result = await dialog.showOpenDialog(controlWindow, {
+      properties: ['openFile'],
+      title: 'Select Backdrop Image',
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
   })
 }

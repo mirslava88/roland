@@ -105,7 +105,7 @@ export function ControlBar(): JSX.Element {
   }
 
   return (
-    <div className="h-16 bg-surface-300 border-t border-gray-800 flex items-center px-4 gap-4 shrink-0">
+    <div className="h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center px-4 gap-4 shrink-0">
       {/* File navigation */}
       <div className="flex items-center gap-1">
         <button
@@ -174,18 +174,6 @@ export function ControlBar(): JSX.Element {
           />
         </div>
       )}
-
-      <div className="flex-1" />
-
-      {/* Active file name */}
-      <div className="flex items-center gap-2">
-        {isPresentationWindowOpen && (
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-        )}
-        <span className="text-xs text-gray-400 truncate max-w-[200px]">
-          {activeFile.name}{activeFile.extension}
-        </span>
-      </div>
     </div>
   )
 }

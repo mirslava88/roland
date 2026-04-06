@@ -13,7 +13,7 @@ interface SlideThumb {
 }
 
 export function SlideNavigator(): JSX.Element {
-  const { activeFile, currentSlide, setCurrentSlide, setTotalSlides } = useAppStore()
+  const { activeFile, currentSlide, setCurrentSlide, setTotalSlides, setPptxThumbnails } = useAppStore()
   const [thumbnails, setThumbnails] = useState<SlideThumb[]>([])
   const [loading, setLoading] = useState(false)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -28,7 +28,8 @@ export function SlideNavigator(): JSX.Element {
     setLoading(true)
     setThumbnails([])
     try {
-      const doc = await pdfjsLib.getDocument(`file://${filePath}`).promise
+      const data = await window.api.readFile(filePath)
+      const doc = await pdfjsLib.getDocument({ data }).promise
       setTotalSlides(doc.numPages)
       const thumbs: SlideThumb[] = []
 
@@ -54,6 +55,8 @@ export function SlideNavigator(): JSX.Element {
   const loadPptxThumbnails = useCallback(async (filePath: string) => {
     setLoading(true)
     setThumbnails([])
+    // Wait for PowerPoint slideshow to finish launching before generating thumbnails
+    await new Promise((r) => setTimeout(r, 2500))
     try {
       const result = await window.api.generatePptxThumbnails(filePath)
       if (result.success && result.thumbnails) {
@@ -62,6 +65,7 @@ export function SlideNavigator(): JSX.Element {
           dataUrl: `file://${path}`
         }))
         setThumbnails(thumbs)
+        setPptxThumbnails(result.thumbnails)
         if (result.slideCount) setTotalSlides(result.slideCount)
       }
     } catch (err) {

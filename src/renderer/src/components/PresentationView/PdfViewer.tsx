@@ -22,7 +22,8 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
 
     async function loadPdf(): Promise<void> {
       try {
-        const doc = await pdfjsLib.getDocument(`file://${filePath}`).promise
+        const data = await window.api.readFile(filePath)
+        const doc = await pdfjsLib.getDocument({ data }).promise
         if (cancelled) return
         setPdf(doc)
         setTotalPages(doc.numPages)

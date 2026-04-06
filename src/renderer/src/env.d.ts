@@ -26,10 +26,13 @@ interface Api {
   launchPowerPoint(filePath: string, monitorIndex?: number): Promise<{ success: boolean; output?: string; error?: string }>
   powerpointCommand(command: string, arg?: number): Promise<{ success: boolean; output?: string; error?: string }>
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
+  readFile(filePath: string): Promise<ArrayBuffer>
   showOverlay(displayId?: number): Promise<void>
   hideOverlay(): Promise<void>
+  selectBackdropImage(): Promise<string | null>
   sendToPresentation(channel: string, ...args: unknown[]): void
   sendToControl(channel: string, ...args: unknown[]): void
+  signalReady(): void
   on(channel: string, callback: (...args: unknown[]) => void): () => void
 }
 

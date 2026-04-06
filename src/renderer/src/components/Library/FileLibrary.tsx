@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { useAppStore, FilterType } from '../../stores/useAppStore'
 import { FileItem } from './FileItem'
+import { FileItemGrid } from './FileItemGrid'
 
 const FILTERS: { label: string; value: FilterType }[] = [
   { label: 'All', value: 'all' },
@@ -16,71 +18,10 @@ export function FileLibrary(): JSX.Element {
     setFilter,
     selectedFile,
     selectFile,
-    activeFile,
-    setActiveFile,
-    isPresentationWindowOpen,
-    setPresentationWindowOpen,
-    setCurrentSlide,
-    setTotalSlides,
-    slidePositions
+    activeFile
   } = useAppStore()
 
-  const handleActivate = async (file: FileEntry): Promise<void> => {
-    // Show black overlay to hide desktop during transition
-    await window.api.showOverlay()
-
-    setActiveFile(file)
-
-    if (file.type === 'presentation') {
-      if (isPresentationWindowOpen) {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
-      }
-      const result = await window.api.launchPowerPoint(file.path)
-      if (result.success && result.output) {
-        try {
-          const data = JSON.parse(result.output)
-          if (data.SlideCount) {
-            setTotalSlides(data.SlideCount)
-            const saved = slidePositions[file.path] || 1
-            setCurrentSlide(saved)
-            if (saved > 1) {
-              await window.api.powerpointCommand('goto', saved)
-            }
-          }
-        } catch { /* ignore parse errors */ }
-      } else if (!result.success) {
-        console.error('Failed to launch PowerPoint:', result.error)
-      }
-      // Give PowerPoint time to render, then hide overlay
-      await new Promise((r) => setTimeout(r, 800))
-      await window.api.hideOverlay()
-      return
-    }
-
-    // Close PowerPoint slideshow if switching from PPTX
-    if (activeFile?.type === 'presentation') {
-      await window.api.powerpointCommand('close')
-    }
-
-    if (!isPresentationWindowOpen) {
-      await window.api.openPresentationWindow()
-      setPresentationWindowOpen(true)
-      await new Promise((r) => setTimeout(r, 500))
-    }
-
-    const savedSlide = slidePositions[file.path] || 1
-    window.api.sendToPresentation('load-content', {
-      type: file.type,
-      path: file.path,
-      name: file.name,
-      startSlide: savedSlide
-    })
-
-    // Hide overlay after content loads
-    await new Promise((r) => setTimeout(r, 300))
-    await window.api.hideOverlay()
-  }
+  const [viewMode, setViewMode] = useState<'list' | 'grid'>('list')
 
   if (!folderPath) {
     return (
@@ -96,7 +37,7 @@ export function FileLibrary(): JSX.Element {
   return (
     <div className="w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
       <div className="p-3 border-b border-gray-800">
-        <div className="flex gap-1 bg-surface-400 rounded-lg p-0.5">
+        <div className="flex gap-1 bg-surface-400 rounded-lg p-0.5 mb-2">
           {FILTERS.map((f) => (
             <button
               key={f.value}
@@ -111,22 +52,47 @@ export function FileLibrary(): JSX.Element {
             </button>
           ))}
         </div>
+        <div className="flex justify-end gap-1">
+          <button
+            onClick={() => setViewMode('list')}
+            className={`btn-icon text-[10px] p-1 ${viewMode === 'list' ? 'text-white bg-surface-100' : ''}`}
+            title="List view"
+          >
+            ☰
+          </button>
+          <button
+            onClick={() => setViewMode('grid')}
+            className={`btn-icon text-[10px] p-1 ${viewMode === 'grid' ? 'text-white bg-surface-100' : ''}`}
+            title="Grid view"
+          >
+            ▦
+          </button>
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+      <div className={`flex-1 overflow-y-auto p-2 ${viewMode === 'grid' ? 'grid grid-cols-2 gap-2 auto-rows-min content-start' : 'space-y-1'}`}>
         {filteredFiles.length === 0 ? (
-          <p className="text-gray-500 text-xs text-center mt-8">No files found</p>
+          <p className="text-gray-500 text-xs text-center mt-8 col-span-2">No files found</p>
         ) : (
-          filteredFiles.map((file) => (
-            <FileItem
-              key={file.id}
-              file={file}
-              isSelected={selectedFile?.id === file.id}
-              isActive={activeFile?.id === file.id}
-              onSelect={() => selectFile(file)}
-              onActivate={() => handleActivate(file)}
-            />
-          ))
+          filteredFiles.map((file) =>
+            viewMode === 'list' ? (
+              <FileItem
+                key={file.id}
+                file={file}
+                isSelected={selectedFile?.id === file.id}
+                isActive={activeFile?.id === file.id}
+                onSelect={() => selectFile(file)}
+              />
+            ) : (
+              <FileItemGrid
+                key={file.id}
+                file={file}
+                isSelected={selectedFile?.id === file.id}
+                isActive={activeFile?.id === file.id}
+                onSelect={() => selectFile(file)}
+              />
+            )
+          )
         )}
       </div>
 

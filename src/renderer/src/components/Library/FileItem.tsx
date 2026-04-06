@@ -3,7 +3,6 @@ interface FileItemProps {
   isSelected: boolean
   isActive: boolean
   onSelect: () => void
-  onActivate: () => void
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -28,23 +27,26 @@ export function FileItem({
   file,
   isSelected,
   isActive,
-  onSelect,
-  onActivate
+  onSelect
 }: FileItemProps): JSX.Element {
   return (
     <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('application/json', JSON.stringify(file))
+        e.dataTransfer.effectAllowed = 'copy'
+      }}
       onClick={onSelect}
-      onDoubleClick={onActivate}
       className={`
         flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer
-        transition-colors duration-100 group select-none
+        transition-colors duration-100 select-none
         ${isActive ? 'bg-accent/20 border border-accent/40' : ''}
         ${isSelected && !isActive ? 'bg-surface-100 border border-gray-700' : ''}
         ${!isSelected && !isActive ? 'border border-transparent hover:bg-surface-100/50' : ''}
       `}
     >
       {isActive && (
-        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shrink-0" />
+        <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
       )}
       <span className="text-lg shrink-0">{TYPE_ICONS[file.type] || '📎'}</span>
 
@@ -57,17 +59,6 @@ export function FileItem({
           <span className="text-[10px] text-gray-600">{formatSize(file.size)}</span>
         </div>
       </div>
-
-      <button
-        onClick={(e) => {
-          e.stopPropagation()
-          onActivate()
-        }}
-        className="opacity-0 group-hover:opacity-100 btn-icon text-xs shrink-0"
-        title="Show on output"
-      >
-        ▶
-      </button>
     </div>
   )
 }

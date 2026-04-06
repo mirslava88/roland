@@ -3,7 +3,7 @@ import { PdfViewer } from './components/PresentationView/PdfViewer'
 import { VideoViewer } from './components/PresentationView/VideoViewer'
 
 interface ContentPayload {
-  type: 'presentation' | 'pdf' | 'video'
+  type: 'presentation' | 'pdf' | 'video' | 'backdrop'
   path: string
   name: string
   startSlide?: number
@@ -36,6 +36,9 @@ export function PresentationApp(): JSX.Element {
       setContent(null)
     })
 
+    // Signal to main process that this window is ready to receive content
+    window.api.signalReady()
+
     return () => {
       unsubLoad()
       unsubStop()
@@ -58,6 +61,14 @@ export function PresentationApp(): JSX.Element {
 
       {content?.type === 'pdf' && <PdfViewer filePath={content.path} startSlide={content.startSlide} />}
       {content?.type === 'video' && <VideoViewer filePath={content.path} />}
+      {content?.type === 'backdrop' && (
+        <img
+          src={`file://${content.path}`}
+          alt="Backdrop"
+          className="w-full h-full object-cover select-none"
+          draggable={false}
+        />
+      )}
       {content?.type === 'presentation' && (
         <div className="text-gray-500 text-center select-none">
           <p className="text-lg mb-2">PowerPoint Presentation Active</p>

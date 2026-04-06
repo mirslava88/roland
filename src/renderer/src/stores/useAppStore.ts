@@ -3,6 +3,12 @@ import { create } from 'zustand'
 export type ContentType = 'presentation' | 'pdf' | 'video' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video'
 
+export interface ChannelState {
+  file: FileEntry | null
+  slide: number
+  totalSlides: number
+}
+
 interface AppState {
   folderPath: string | null
   files: FileEntry[]
@@ -15,9 +21,22 @@ interface AppState {
   currentSlide: number
   totalSlides: number
   slidePositions: Record<string, number>
+  pptxThumbnails: string[]
+  pptxThumbnailsMap: Record<string, string[]>
   displays: DisplayInfo[]
   selectedDisplayId: number | null
+  backdropImage: string | null
 
+  channelA: ChannelState
+  channelB: ChannelState
+  liveChannel: 'A' | 'B' | null
+
+  setChannelFile: (ch: 'A' | 'B', file: FileEntry | null) => void
+  setChannelSlide: (ch: 'A' | 'B', slide: number) => void
+  setChannelTotalSlides: (ch: 'A' | 'B', total: number) => void
+  setLiveChannel: (ch: 'A' | 'B') => void
+
+  setPptxThumbnails: (thumbnails: string[]) => void
   setFolderPath: (path: string | null) => void
   setFiles: (files: FileEntry[]) => void
   setFilter: (filter: FilterType) => void
@@ -30,6 +49,7 @@ interface AppState {
   saveSlidePosition: () => void
   setDisplays: (displays: DisplayInfo[]) => void
   setSelectedDisplayId: (id: number | null) => void
+  setBackdropImage: (path: string | null) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -44,8 +64,60 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentSlide: 1,
   totalSlides: 0,
   slidePositions: {},
+  pptxThumbnails: [],
+  pptxThumbnailsMap: {},
   displays: [],
   selectedDisplayId: null,
+  backdropImage: null,
+
+  channelA: { file: null, slide: 1, totalSlides: 0 },
+  channelB: { file: null, slide: 1, totalSlides: 0 },
+  liveChannel: null,
+
+  setChannelFile: (ch, file) => {
+    const key = ch === 'A' ? 'channelA' : 'channelB'
+    const { slidePositions } = get()
+    const saved = file ? slidePositions[file.path] || 1 : 1
+    set({ [key]: { file, slide: saved, totalSlides: 0 } })
+  },
+
+  setChannelSlide: (ch, slide) => {
+    const key = ch === 'A' ? 'channelA' : 'channelB'
+    const channel = get()[key]
+    const { slidePositions, liveChannel } = get()
+    if (channel.file) {
+      slidePositions[channel.file.path] = slide
+    }
+    const updates: Partial<AppState> = { [key]: { ...channel, slide }, slidePositions: { ...slidePositions } }
+    // Sync currentSlide if this is the live channel
+    if (liveChannel === ch) {
+      updates.currentSlide = slide
+    }
+    set(updates)
+  },
+
+  setChannelTotalSlides: (ch, total) => {
+    const key = ch === 'A' ? 'channelA' : 'channelB'
+    const channel = get()[key]
+    set({ [key]: { ...channel, totalSlides: total } })
+  },
+
+  setLiveChannel: (ch) => {
+    const key = ch === 'A' ? 'channelA' : 'channelB'
+    const channel = get()[key]
+    if (channel.file) {
+      set({ liveChannel: ch, activeFile: channel.file, currentSlide: channel.slide })
+    }
+  },
+
+  setPptxThumbnails: (thumbnails) => {
+    const { activeFile, pptxThumbnailsMap } = get()
+    const updates: Partial<AppState> = { pptxThumbnails: thumbnails }
+    if (activeFile) {
+      updates.pptxThumbnailsMap = { ...pptxThumbnailsMap, [activeFile.path]: thumbnails }
+    }
+    set(updates)
+  },
 
   setFolderPath: (path) => set({ folderPath: path }),
 
@@ -69,7 +141,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setActiveFile: (file) => {
     const { activeFile, currentSlide, slidePositions } = get()
-    // Save position of the file we're leaving
     if (activeFile) {
       slidePositions[activeFile.path] = currentSlide
     }
@@ -87,7 +158,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setPresentationWindowOpen: (open) => set({ isPresentationWindowOpen: open }),
 
-  setCurrentSlide: (slide) => set({ currentSlide: slide }),
+  setCurrentSlide: (slide) => {
+    const { liveChannel, channelA, channelB } = get()
+    const updates: Partial<AppState> = { currentSlide: slide }
+    if (liveChannel === 'A') updates.channelA = { ...channelA, slide }
+    if (liveChannel === 'B') updates.channelB = { ...channelB, slide }
+    set(updates)
+  },
 
   setTotalSlides: (total) => set({ totalSlides: total }),
 
@@ -100,5 +177,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setDisplays: (displays) => set({ displays }),
 
-  setSelectedDisplayId: (id) => set({ selectedDisplayId: id })
+  setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
+  setBackdropImage: (path) => set({ backdropImage: path })
 }))
