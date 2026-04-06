@@ -1,0 +1,140 @@
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { useAppStore } from '../../stores/useAppStore'
+import * as pdfjsLib from 'pdfjs-dist'
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.mjs',
+  import.meta.url
+).toString()
+
+interface SlideThumb {
+  index: number
+  dataUrl: string
+}
+
+export function SlideNavigator(): JSX.Element {
+  const { activeFile, currentSlide, setCurrentSlide, setTotalSlides } = useAppStore()
+  const [thumbnails, setThumbnails] = useState<SlideThumb[]>([])
+  const [loading, setLoading] = useState(false)
+  const activeRef = useRef<HTMLDivElement>(null)
+
+  // Scroll active thumbnail into view
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [currentSlide])
+
+  // Generate PDF thumbnails
+  const loadPdfThumbnails = useCallback(async (filePath: string) => {
+    setLoading(true)
+    setThumbnails([])
+    try {
+      const doc = await pdfjsLib.getDocument(`file://${filePath}`).promise
+      setTotalSlides(doc.numPages)
+      const thumbs: SlideThumb[] = []
+
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i)
+        const viewport = page.getViewport({ scale: 0.3 })
+        const canvas = document.createElement('canvas')
+        canvas.width = viewport.width
+        canvas.height = viewport.height
+        const ctx = canvas.getContext('2d')!
+        await page.render({ canvasContext: ctx, viewport }).promise
+        thumbs.push({ index: i, dataUrl: canvas.toDataURL() })
+      }
+
+      setThumbnails(thumbs)
+    } catch (err) {
+      console.error('Failed to generate PDF thumbnails:', err)
+    }
+    setLoading(false)
+  }, [setTotalSlides])
+
+  // Generate PPTX thumbnails
+  const loadPptxThumbnails = useCallback(async (filePath: string) => {
+    setLoading(true)
+    setThumbnails([])
+    try {
+      const result = await window.api.generatePptxThumbnails(filePath)
+      if (result.success && result.thumbnails) {
+        const thumbs: SlideThumb[] = result.thumbnails.map((path, i) => ({
+          index: i + 1,
+          dataUrl: `file://${path}`
+        }))
+        setThumbnails(thumbs)
+        if (result.slideCount) setTotalSlides(result.slideCount)
+      }
+    } catch (err) {
+      console.error('Failed to generate PPTX thumbnails:', err)
+    }
+    setLoading(false)
+  }, [setTotalSlides])
+
+  useEffect(() => {
+    if (!activeFile) {
+      setThumbnails([])
+      return
+    }
+    if (activeFile.type === 'pdf') {
+      loadPdfThumbnails(activeFile.path)
+    } else if (activeFile.type === 'presentation') {
+      loadPptxThumbnails(activeFile.path)
+    } else {
+      setThumbnails([])
+    }
+  }, [activeFile?.path, activeFile?.type, loadPdfThumbnails, loadPptxThumbnails])
+
+  const handleClick = (index: number): void => {
+    setCurrentSlide(index)
+    if (activeFile?.type === 'presentation') {
+      window.api.powerpointCommand('goto', index)
+    } else if (activeFile?.type === 'pdf') {
+      window.api.sendToPresentation('navigate-slide', index)
+    }
+  }
+
+  if (!activeFile || (activeFile.type !== 'pdf' && activeFile.type !== 'presentation')) {
+    return <></>
+  }
+
+  return (
+    <div className="w-48 border-l border-gray-800 bg-surface-300 flex flex-col shrink-0 overflow-hidden">
+      <div className="px-3 py-2 border-b border-gray-800 text-xs text-gray-400 font-medium">
+        Slides
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+        {loading && (
+          <div className="flex items-center justify-center py-8 text-gray-600 text-xs">
+            Loading...
+          </div>
+        )}
+
+        {thumbnails.map((thumb) => (
+          <div
+            key={thumb.index}
+            ref={thumb.index === currentSlide ? activeRef : undefined}
+            onClick={() => handleClick(thumb.index)}
+            className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-colors ${
+              thumb.index === currentSlide
+                ? 'border-accent'
+                : 'border-transparent hover:border-gray-600'
+            }`}
+          >
+            <img
+              src={thumb.dataUrl}
+              alt={`Slide ${thumb.index}`}
+              className="w-full block"
+              draggable={false}
+            />
+            <div className={`text-center text-[10px] py-0.5 ${
+              thumb.index === currentSlide ? 'text-accent bg-accent/10' : 'text-gray-500'
+            }`}>
+              {thumb.index}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

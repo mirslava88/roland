@@ -1,0 +1,16 @@
+node_modules/
+out/
+dist/
+.env
+*.log
+
+# Test media files
+*.mp4
+*.pptx
+*.pdf
+*.ppt
+*.mov
+*.avi
+*.webm
+*.mkv
+roland
