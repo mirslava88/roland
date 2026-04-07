@@ -3,7 +3,7 @@ import { useAppStore } from '../../stores/useAppStore'
 const TYPE_LABELS: Record<string, string> = {
   presentation: 'PPTX',
   pdf: 'PDF',
-  video: 'Video'
+  video: 'Видео'
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -20,7 +20,7 @@ export function NowPlaying(): JSX.Element | null {
   return (
     <div className="h-9 bg-surface-200 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0">
       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
-      <span className="text-[10px] font-bold uppercase text-gray-500 shrink-0">Now Playing</span>
+      <span className="text-[10px] font-bold uppercase text-gray-500 shrink-0">Сейчас в эфире</span>
 
       <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${TYPE_COLORS[activeFile.type] || 'text-gray-400'}`}>
         {TYPE_LABELS[activeFile.type] || activeFile.extension}
@@ -38,7 +38,7 @@ export function NowPlaying(): JSX.Element | null {
 
       {activeFile.type === 'video' && (
         <span className="text-xs text-gray-500 shrink-0">
-          {isPlaying ? '▶ Playing' : '⏸ Paused'}
+          {isPlaying ? '▶ Воспроизведение' : '⏸ Пауза'}
         </span>
       )}
     </div>

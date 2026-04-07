@@ -23,6 +23,10 @@ export default function App(): JSX.Element {
       setPresentationWindowOpen(false)
     })
 
+    const unsubDisplays = window.api.on('displays-changed', (...args: unknown[]) => {
+      setDisplays(args[0] as DisplayInfo[])
+    })
+
     const unsubSlideInfo = window.api.on('slide-info', (...args: unknown[]) => {
       const data = args[0] as { current: number; total: number }
       setCurrentSlide(data.current)
@@ -39,17 +43,15 @@ export default function App(): JSX.Element {
       void data
     })
 
-    const handleKeyDown = async (e: KeyboardEvent): Promise<void> => {
+    const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
       const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
       if (!activeFile) return
 
-      const isNext = e.key === 'PageDown' || e.key === 'ArrowRight' || e.key === 'ArrowDown'
-      const isPrev = e.key === 'PageUp' || e.key === 'ArrowLeft' || e.key === 'ArrowUp'
-      if (!isNext && !isPrev) return
-      e.preventDefault()
-
       if (activeFile.type === 'presentation') {
-        const result = await window.api.powerpointCommand(isNext ? 'next' : 'prev')
+        // Don't go past the last slide (would exit slideshow)
+        if (direction === 'next' && totalSlides > 0 && currentSlide >= totalSlides) return
+        if (direction === 'prev' && currentSlide <= 1) return
+        const result = await window.api.powerpointCommand(direction === 'next' ? 'next' : 'prev')
         if (result.success && result.output) {
           try {
             const data = JSON.parse(result.output)
@@ -57,6 +59,7 @@ export default function App(): JSX.Element {
           } catch { /* ignore */ }
         }
       } else if (activeFile.type === 'pdf') {
+        const isNext = direction === 'next'
         const newSlide = isNext
           ? Math.min(currentSlide + 1, totalSlides || currentSlide + 1)
           : Math.max(currentSlide - 1, 1)
@@ -67,13 +70,28 @@ export default function App(): JSX.Element {
       }
     }
 
+    const handleKeyDown = async (e: KeyboardEvent): Promise<void> => {
+      const isNext = e.key === 'PageDown' || e.key === 'ArrowRight' || e.key === 'ArrowDown'
+      const isPrev = e.key === 'PageUp' || e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+      if (!isNext && !isPrev) return
+      e.preventDefault()
+      navigateSlide(isNext ? 'next' : 'prev')
+    }
+
+    const unsubGlobalKey = window.api.on('global-key', (...args: unknown[]) => {
+      const direction = args[0] as 'next' | 'prev'
+      navigateSlide(direction)
+    })
+
     window.addEventListener('keydown', handleKeyDown)
 
     return () => {
       unsubClose()
+      unsubDisplays()
       unsubSlideInfo()
       unsubVideoState()
       unsubVideoTime()
+      unsubGlobalKey()
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [])

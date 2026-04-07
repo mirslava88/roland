@@ -4,10 +4,10 @@ import { FileItem } from './FileItem'
 import { FileItemGrid } from './FileItemGrid'
 
 const FILTERS: { label: string; value: FilterType }[] = [
-  { label: 'All', value: 'all' },
+  { label: 'Все', value: 'all' },
   { label: 'PPTX', value: 'presentation' },
   { label: 'PDF', value: 'pdf' },
-  { label: 'Video', value: 'video' }
+  { label: 'Видео', value: 'video' }
 ]
 
 export function FileLibrary(): JSX.Element {
@@ -28,7 +28,7 @@ export function FileLibrary(): JSX.Element {
       <div className="w-72 border-r border-gray-800 flex flex-col items-center justify-center text-gray-500 p-6">
         <div className="text-4xl mb-4 opacity-50">📂</div>
         <p className="text-sm text-center">
-          Open a folder to load presentations, PDFs, and videos
+          Откройте папку для загрузки презентаций, PDF и видео
         </p>
       </div>
     )
@@ -56,14 +56,14 @@ export function FileLibrary(): JSX.Element {
           <button
             onClick={() => setViewMode('list')}
             className={`btn-icon text-[10px] p-1 ${viewMode === 'list' ? 'text-white bg-surface-100' : ''}`}
-            title="List view"
+            title="Список"
           >
             ☰
           </button>
           <button
             onClick={() => setViewMode('grid')}
             className={`btn-icon text-[10px] p-1 ${viewMode === 'grid' ? 'text-white bg-surface-100' : ''}`}
-            title="Grid view"
+            title="Плитка"
           >
             ▦
           </button>
@@ -72,7 +72,7 @@ export function FileLibrary(): JSX.Element {
 
       <div className={`flex-1 overflow-y-auto p-2 ${viewMode === 'grid' ? 'grid grid-cols-2 gap-2 auto-rows-min content-start' : 'space-y-1'}`}>
         {filteredFiles.length === 0 ? (
-          <p className="text-gray-500 text-xs text-center mt-8 col-span-2">No files found</p>
+          <p className="text-gray-500 text-xs text-center mt-8 col-span-2">Файлы не найдены</p>
         ) : (
           filteredFiles.map((file) =>
             viewMode === 'list' ? (
@@ -97,7 +97,7 @@ export function FileLibrary(): JSX.Element {
       </div>
 
       <div className="px-3 py-2 border-t border-gray-800 text-xs text-gray-500">
-        {filteredFiles.length} files
+        {filteredFiles.length} {(() => { const n = filteredFiles.length; const m = n % 10; const h = n % 100; if (h >= 11 && h <= 14) return 'файлов'; if (m === 1) return 'файл'; if (m >= 2 && m <= 4) return 'файла'; return 'файлов' })()}
       </div>
     </div>
   )

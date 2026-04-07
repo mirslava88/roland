@@ -19,7 +19,7 @@ export function ControlBar(): JSX.Element {
   if (!activeFile) {
     return (
       <div className="h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center text-gray-600 text-sm shrink-0">
-        No active content
+        Трансляция остановлена
       </div>
     )
   }
@@ -112,7 +112,7 @@ export function ControlBar(): JSX.Element {
           onClick={() => switchFile('prev')}
           disabled={!hasPrev}
           className="btn-icon text-sm disabled:opacity-30 disabled:cursor-not-allowed"
-          title="Previous file"
+          title="Предыдущий файл"
         >
           ⏮
         </button>
@@ -120,7 +120,7 @@ export function ControlBar(): JSX.Element {
           onClick={() => switchFile('next')}
           disabled={!hasNext}
           className="btn-icon text-sm disabled:opacity-30 disabled:cursor-not-allowed"
-          title="Next file"
+          title="Следующий файл"
         >
           ⏭
         </button>
@@ -169,8 +169,8 @@ export function ControlBar(): JSX.Element {
             value={goToSlide}
             onChange={(e) => setGoToSlide(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleGoToSlide()}
-            placeholder="Go to #"
-            className="w-16 bg-surface-100 text-gray-300 text-xs rounded-md px-2 py-1.5 border border-gray-700 focus:outline-none focus:border-accent"
+            placeholder="№ слайда"
+            className="w-24 bg-surface-100 text-gray-300 text-xs rounded-md px-2 py-1.5 border border-gray-700 focus:outline-none focus:border-accent"
           />
         </div>
       )}

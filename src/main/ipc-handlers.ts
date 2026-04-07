@@ -6,6 +6,8 @@ import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
 
+let originalAudioDeviceId: string | null = null
+
 const SUPPORTED_EXTENSIONS = {
   presentation: ['.pptx', '.ppt'],
   pdf: ['.pdf'],
@@ -200,5 +202,68 @@ export function registerIpcHandlers(
     })
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]
+  })
+
+  ipcMain.handle('get-audio-devices', async () => {
+    if (process.platform !== 'win32') return []
+    try {
+      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'list'
+      ])
+      return JSON.parse(stdout.trim())
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('switch-audio-to-external', async () => {
+    if (process.platform !== 'win32') return { success: false }
+    try {
+      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      // Get current default before switching
+      const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'get-default'
+      ])
+      const current = JSON.parse(defaultOut.trim())
+      originalAudioDeviceId = current.id
+
+      // Get all devices and find a non-default one (external)
+      const { stdout: listOut } = await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'list'
+      ])
+      const devices = JSON.parse(listOut.trim())
+      const external = devices.find((d: { isDefault: boolean }) => !d.isDefault)
+      if (!external) return { success: false, error: 'No external audio device found' }
+
+      await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'set',
+        '-DeviceId', external.id
+      ])
+      return { success: true, device: external.name }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('restore-audio-device', async () => {
+    if (process.platform !== 'win32' || !originalAudioDeviceId) return
+    try {
+      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'set',
+        '-DeviceId', originalAudioDeviceId
+      ])
+    } catch { /* ignore */ }
   })
 }

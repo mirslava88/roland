@@ -30,6 +30,9 @@ interface Api {
   showOverlay(displayId?: number): Promise<void>
   hideOverlay(): Promise<void>
   selectBackdropImage(): Promise<string | null>
+  switchAudioToExternal(): Promise<{ success: boolean; device?: string; error?: string }>
+  restoreAudioDevice(): Promise<void>
+  toggleGlobalHook(enable: boolean): Promise<boolean>
   sendToPresentation(channel: string, ...args: unknown[]): void
   sendToControl(channel: string, ...args: unknown[]): void
   signalReady(): void

@@ -33,6 +33,14 @@ const api = {
 
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
 
+  switchAudioToExternal: (): Promise<{ success: boolean; device?: string; error?: string }> =>
+    ipcRenderer.invoke('switch-audio-to-external'),
+
+  restoreAudioDevice: (): Promise<void> => ipcRenderer.invoke('restore-audio-device'),
+
+  toggleGlobalHook: (enable: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('toggle-global-hook', enable),
+
   sendToPresentation: (channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-presentation', channel, ...args)
   },

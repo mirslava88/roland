@@ -1,6 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Menu } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow } from './windows'
 import { registerIpcHandlers } from './ipc-handlers'
+
+Menu.setApplicationMenu(null)
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
@@ -99,6 +101,22 @@ function createWindows(): void {
     }))
   })
 
+  const sendDisplays = (): void => {
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      const displays = screen.getAllDisplays()
+      const primary = screen.getPrimaryDisplay()
+      controlWindow.webContents.send('displays-changed', displays.map((d) => ({
+        id: d.id,
+        label: `${d.size.width}x${d.size.height}`,
+        isPrimary: d.id === primary.id,
+        bounds: d.bounds
+      })))
+    }
+  }
+
+  screen.on('display-added', sendDisplays)
+  screen.on('display-removed', sendDisplays)
+
   ipcMain.on('send-to-presentation', (_event, channel: string, ...args: unknown[]) => {
     if (presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindow.webContents.send(channel, ...args)
@@ -109,6 +127,33 @@ function createWindows(): void {
     if (controlWindow && !controlWindow.isDestroyed()) {
       controlWindow.webContents.send(channel, ...args)
     }
+  })
+
+  let globalHookEnabled = false
+
+  ipcMain.handle('toggle-global-hook', (_event, enable: boolean) => {
+    if (enable && !globalHookEnabled) {
+      globalShortcut.register('PageDown', () => {
+        controlWindow?.webContents.send('global-key', 'next')
+      })
+      globalShortcut.register('PageUp', () => {
+        controlWindow?.webContents.send('global-key', 'prev')
+      })
+      globalShortcut.register('Right', () => {
+        controlWindow?.webContents.send('global-key', 'next')
+      })
+      globalShortcut.register('Left', () => {
+        controlWindow?.webContents.send('global-key', 'prev')
+      })
+      globalHookEnabled = true
+    } else if (!enable && globalHookEnabled) {
+      globalShortcut.unregister('PageDown')
+      globalShortcut.unregister('PageUp')
+      globalShortcut.unregister('Right')
+      globalShortcut.unregister('Left')
+      globalHookEnabled = false
+    }
+    return globalHookEnabled
   })
 }
 

@@ -26,11 +26,14 @@ interface AppState {
   displays: DisplayInfo[]
   selectedDisplayId: number | null
   backdropImage: string | null
+  globalHookEnabled: boolean
 
   channelA: ChannelState
   channelB: ChannelState
   liveChannel: 'A' | 'B' | null
+  selectedChannel: 'A' | 'B' | null
 
+  setSelectedChannel: (ch: 'A' | 'B' | null) => void
   setChannelFile: (ch: 'A' | 'B', file: FileEntry | null) => void
   setChannelSlide: (ch: 'A' | 'B', slide: number) => void
   setChannelTotalSlides: (ch: 'A' | 'B', total: number) => void
@@ -50,6 +53,7 @@ interface AppState {
   setDisplays: (displays: DisplayInfo[]) => void
   setSelectedDisplayId: (id: number | null) => void
   setBackdropImage: (path: string | null) => void
+  setGlobalHookEnabled: (enabled: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -69,11 +73,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   displays: [],
   selectedDisplayId: null,
   backdropImage: null,
+  globalHookEnabled: false,
 
   channelA: { file: null, slide: 1, totalSlides: 0 },
   channelB: { file: null, slide: 1, totalSlides: 0 },
   liveChannel: null,
+  selectedChannel: null,
 
+  setSelectedChannel: (ch) => set({ selectedChannel: ch }),
   setChannelFile: (ch, file) => {
     const key = ch === 'A' ? 'channelA' : 'channelB'
     const { slidePositions } = get()
@@ -178,5 +185,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDisplays: (displays) => set({ displays }),
 
   setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
-  setBackdropImage: (path) => set({ backdropImage: path })
+  setBackdropImage: (path) => set({ backdropImage: path }),
+  setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled })
 }))

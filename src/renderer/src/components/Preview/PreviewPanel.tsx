@@ -9,11 +9,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 export function PreviewPanel(): JSX.Element {
   const {
-    channelA, channelB, liveChannel,
+    channelA, channelB, liveChannel, selectedChannel, setSelectedChannel,
     setChannelFile, setChannelSlide, setChannelTotalSlides,
     isPresentationWindowOpen, setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
-    pptxThumbnails, pptxThumbnailsMap
+    pptxThumbnailsMap
   } = useAppStore()
 
   const handleTake = async (ch: 'A' | 'B'): Promise<void> => {
@@ -35,6 +35,8 @@ export function PreviewPanel(): JSX.Element {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
       }
+      // Switch audio to external display
+      await window.api.switchAudioToExternal()
       const result = await window.api.launchPowerPoint(channel.file.path)
       if (result.success && result.output) {
         try {
@@ -49,7 +51,12 @@ export function PreviewPanel(): JSX.Element {
           }
         } catch { /* ignore */ }
       }
-      await new Promise((r) => setTimeout(r, 800))
+      // Generate thumbnails for channel preview
+      const thumbResult = await window.api.generatePptxThumbnails(channel.file.path)
+      if (thumbResult.success && thumbResult.thumbnails) {
+        const { pptxThumbnailsMap } = useAppStore.getState()
+        useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file.path]: thumbResult.thumbnails } })
+      }
       await window.api.hideOverlay()
       return
     }
@@ -58,6 +65,9 @@ export function PreviewPanel(): JSX.Element {
     if (prevActiveFile?.type === 'presentation') {
       await window.api.powerpointCommand('close')
     }
+
+    // Switch audio to external display
+    await window.api.switchAudioToExternal()
 
     if (!isPresentationWindowOpen) {
       await window.api.openPresentationWindow()
@@ -76,41 +86,42 @@ export function PreviewPanel(): JSX.Element {
     await window.api.hideOverlay()
   }
 
+  // Listen for take-channel events from Toolbar's Open Output button
+  useEffect(() => {
+    const handler = (e: Event): void => {
+      const ch = (e as CustomEvent).detail as 'A' | 'B'
+      handleTake(ch)
+    }
+    window.addEventListener('take-channel', handler)
+    return () => window.removeEventListener('take-channel', handler)
+  })
+
   return (
     <div className="flex-1 flex gap-2 overflow-hidden p-3">
       <ChannelPanel
         label="A"
         channel={channelA}
         isLive={liveChannel === 'A'}
+        isSelected={selectedChannel === 'A'}
         onDrop={(file) => setChannelFile('A', file)}
         onSlideChange={(s) => setChannelSlide('A', s)}
         onSetTotalSlides={(t) => setChannelTotalSlides('A', t)}
+        onSelect={() => setSelectedChannel('A')}
         onTake={() => handleTake('A')}
-        pptxThumbnails={liveChannel === 'A' ? pptxThumbnails : (channelA.file ? pptxThumbnailsMap[channelA.file.path] || [] : [])}
+        pptxThumbnails={channelA.file ? pptxThumbnailsMap[channelA.file.path] || [] : []}
       />
-
-      <div className="flex flex-col items-center justify-center gap-2 shrink-0 px-1">
-        <button
-          onClick={() => {
-            const target = liveChannel === 'A' ? 'B' : 'A'
-            handleTake(target)
-          }}
-          className="bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold px-3 py-2 rounded-lg transition-colors"
-          title="Cut to other channel"
-        >
-          CUT
-        </button>
-      </div>
 
       <ChannelPanel
         label="B"
         channel={channelB}
         isLive={liveChannel === 'B'}
+        isSelected={selectedChannel === 'B'}
         onDrop={(file) => setChannelFile('B', file)}
         onSlideChange={(s) => setChannelSlide('B', s)}
         onSetTotalSlides={(t) => setChannelTotalSlides('B', t)}
+        onSelect={() => setSelectedChannel('B')}
         onTake={() => handleTake('B')}
-        pptxThumbnails={liveChannel === 'B' ? pptxThumbnails : (channelB.file ? pptxThumbnailsMap[channelB.file.path] || [] : [])}
+        pptxThumbnails={channelB.file ? pptxThumbnailsMap[channelB.file.path] || [] : []}
       />
     </div>
   )
@@ -120,15 +131,17 @@ interface ChannelPanelProps {
   label: string
   channel: ChannelState
   isLive: boolean
+  isSelected: boolean
   onDrop: (file: FileEntry) => void
   onSlideChange: (slide: number) => void
   onSetTotalSlides: (total: number) => void
+  onSelect: () => void
   onTake: () => void
   pptxThumbnails: string[]
 }
 
 function ChannelPanel({
-  label, channel, isLive, onDrop, onSlideChange, onSetTotalSlides, onTake, pptxThumbnails
+  label, channel, isLive, isSelected, onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, pptxThumbnails
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
 
@@ -146,8 +159,8 @@ function ChannelPanel({
     try {
       const file = JSON.parse(e.dataTransfer.getData('application/json')) as FileEntry
       onDrop(file)
-      // Pre-generate thumbnails for PPTX dropped into non-live channel
-      if (file.type === 'presentation' && !isLive) {
+      // Pre-generate thumbnails for PPTX
+      if (file.type === 'presentation') {
         const result = await window.api.generatePptxThumbnails(file.path)
         if (result.success && result.thumbnails) {
           const { pptxThumbnailsMap } = useAppStore.getState()
@@ -155,25 +168,35 @@ function ChannelPanel({
           if (result.slideCount) onSetTotalSlides(result.slideCount)
         }
       }
+      if (isLive) {
+        // Auto-take when dropping into the live channel
+        setTimeout(() => onTake(), 50)
+      }
     } catch { /* ignore */ }
   }
 
+  const { isPresentationWindowOpen, activeFile: storeActiveFile } = useAppStore()
+  const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation'
+  const showSelected = isSelected && !isOutputActive
+
   return (
     <div
-      className={`flex-1 flex flex-col overflow-hidden rounded-lg border-2 transition-colors ${
+      className={`flex-1 flex flex-col overflow-hidden rounded-lg border-2 transition-colors cursor-pointer ${
         dragOver ? 'border-accent bg-accent/5' :
-        isLive ? 'border-red-500/60' : 'border-gray-700/50'
+        isLive ? 'border-red-500/60' :
+        showSelected ? 'border-blue-500/60' : 'border-gray-700/50'
       }`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
+      onClick={onSelect}
       onDoubleClick={onTake}
     >
       {/* Header */}
-      <div className={`flex items-center gap-2 px-3 py-1.5 ${isLive ? 'bg-red-900/30' : 'bg-surface-200'}`}>
-        <span className={`w-2 h-2 rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
-        <span className={`text-[10px] font-bold uppercase ${isLive ? 'text-red-400' : 'text-gray-500'}`}>
-          CH {label} {isLive ? '• LIVE' : ''}
+      <div className={`flex items-center gap-2 px-3 py-1.5 ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
+        <span className={`w-2 h-2 rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : showSelected ? 'bg-blue-500' : 'bg-gray-600'}`} />
+        <span className={`text-[10px] font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
+          Канал {label} {isLive ? '• В ЭФИРЕ' : showSelected ? '• ВЫБРАНО' : ''}
         </span>
         {channel.file && (
           <span className="text-[11px] text-gray-400 truncate ml-1">{channel.file.name}</span>
@@ -192,7 +215,7 @@ function ChannelPanel({
         ) : (
           <div className="text-gray-600 text-xs text-center select-none p-4">
             <div className="text-2xl mb-2 opacity-30">📥</div>
-            Drag a file here
+            Перетащите файл сюда
           </div>
         )}
       </div>
@@ -200,7 +223,7 @@ function ChannelPanel({
       {/* Navigation — only for non-live channel */}
       {!isLive && channel.file && (channel.file.type === 'pdf' || channel.file.type === 'presentation') && (
         <div
-          className="flex items-center justify-center gap-3 py-1.5 bg-surface-200 border-t border-gray-800"
+          className="flex items-center justify-center gap-3 py-1.5 bg-surface-200 border-t border-gray-800 relative"
           onDoubleClick={(e) => e.stopPropagation()}
         >
           <button
@@ -221,6 +244,13 @@ function ChannelPanel({
             disabled={channel.totalSlides > 0 && channel.slide >= channel.totalSlides}
           >
             ▶
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onTake() }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded transition-colors"
+          >
+            В эфир
           </button>
         </div>
       )}
@@ -307,7 +337,7 @@ function PptxPreview({ file, currentSlide, pptxThumbnails }: {
       <div className="text-center text-gray-500 p-4">
         <div className="text-3xl mb-2">📊</div>
         <p className="text-[11px]">{file.name}</p>
-        <p className="text-[10px] text-gray-600 mt-1">Double-click to take live</p>
+        <p className="text-[10px] text-gray-600 mt-1">Двойной клик для запуска</p>
       </div>
     )
   }
