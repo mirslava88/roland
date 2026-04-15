@@ -12,12 +12,14 @@
     "package:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "pdfjs-dist": "^4.9.155",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -16,12 +16,60 @@ export function PreviewPanel(): JSX.Element {
     pptxThumbnailsMap
   } = useAppStore()
 
-  const handleTake = async (ch: 'A' | 'B'): Promise<void> => {
+  const handleClear = async (ch: 'A' | 'B'): Promise<void> => {
     const channel = ch === 'A' ? channelA : channelB
+    // Reset saved slide position so next open starts from slide 1
+    if (channel.file) {
+      const { slidePositions } = useAppStore.getState()
+      const newPositions = { ...slidePositions }
+      delete newPositions[channel.file.path]
+      useAppStore.setState({ slidePositions: newPositions })
+    }
+    // If this channel is live, close the presentation
+    if (liveChannel === ch && channel.file) {
+      if (channel.file.type === 'presentation') {
+        await window.api.powerpointCommand('close')
+      }
+      if (channel.file.type === 'other' && channel.file.isAudio) {
+        await window.api.musicStop()
+      }
+      if (channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio) {
+        await window.api.closeExternalFile(channel.file.path)
+      }
+
+      // Show backdrop if set, otherwise close presentation window
+      const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      if (backdropImage) {
+        if (!isPresentationWindowOpen) {
+          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+          setPresentationWindowOpen(true)
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        window.api.sendToPresentation('load-content', {
+          type: 'backdrop',
+          path: backdropImage,
+          name: 'Backdrop'
+        })
+      } else if (isPresentationWindowOpen) {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
+
+      await window.api.restoreAudioDevice()
+      setActiveFile(null)
+      useAppStore.setState({ liveChannel: null })
+    }
+    setChannelFile(ch, null)
+  }
+
+  const handleTake = async (ch: 'A' | 'B'): Promise<void> => {
+    // Always read fresh state from the store (not stale closure values)
+    const freshState = useAppStore.getState()
+    const channel = ch === 'A' ? freshState.channelA : freshState.channelB
     if (!channel.file) return
 
     // Save previous active file before overwriting
-    const prevActiveFile = useAppStore.getState().activeFile
+    const prevActiveFile = freshState.activeFile
 
     // Show overlay during transition
     await window.api.showOverlay()
@@ -29,14 +77,20 @@ export function PreviewPanel(): JSX.Element {
     setActiveFile(channel.file)
     setLiveChannel(ch)
 
+    // Minimize previously opened external file (Word/Excel) when switching to other content
+    if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage) {
+      await window.api.minimizeExternalFile(prevActiveFile.path)
+    }
+
     if (channel.file.type === 'presentation') {
-      // Close Electron presentation window only if it was open for PDF/video
+      window.api.setActiveContentType('presentation')
+      // Close Electron presentation window and switch audio in parallel
+      const parallelTasks: Promise<unknown>[] = [window.api.switchAudioToExternal()]
       if (isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
+        parallelTasks.push(window.api.closePresentationWindow().then(() => setPresentationWindowOpen(false)))
       }
-      // Switch audio to external display
-      await window.api.switchAudioToExternal()
+      await Promise.all(parallelTasks)
+
       const result = await window.api.launchPowerPoint(channel.file.path)
       if (result.success && result.output) {
         try {
@@ -51,38 +105,83 @@ export function PreviewPanel(): JSX.Element {
           }
         } catch { /* ignore */ }
       }
-      // Generate thumbnails for channel preview
-      const thumbResult = await window.api.generatePptxThumbnails(channel.file.path)
-      if (thumbResult.success && thumbResult.thumbnails) {
-        const { pptxThumbnailsMap } = useAppStore.getState()
-        useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file.path]: thumbResult.thumbnails } })
-      }
+      // Generate thumbnails in background (fire-and-forget)
+      window.api.generatePptxThumbnails(channel.file.path).then((thumbResult) => {
+        if (thumbResult.success && thumbResult.thumbnails) {
+          const { pptxThumbnailsMap } = useAppStore.getState()
+          useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file!.path]: thumbResult.thumbnails } })
+        }
+      })
       await window.api.hideOverlay()
       return
     }
 
-    // PDF / Video — close PowerPoint if it was previously active
+    // PDF / Video / Other — close PowerPoint and switch audio in parallel
+    const parallelTasks: Promise<unknown>[] = [window.api.switchAudioToExternal()]
     if (prevActiveFile?.type === 'presentation') {
-      await window.api.powerpointCommand('close')
+      parallelTasks.push(window.api.powerpointCommand('close'))
+    }
+    await Promise.all(parallelTasks)
+
+    // Audio files — play in built-in music player + show backdrop
+    if (channel.file.type === 'other' && channel.file.isAudio) {
+      const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      if (backdropImage) {
+        if (!isPresentationWindowOpen) {
+          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+          setPresentationWindowOpen(true)
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        window.api.sendToPresentation('load-content', {
+          type: 'backdrop',
+          path: backdropImage,
+          name: 'Backdrop'
+        })
+      } else if (isPresentationWindowOpen) {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
+      useAppStore.getState().setMusicPlaylist([channel.file.path])
+      await window.api.musicSetPlaylist([channel.file.path], 0)
+      await window.api.musicPlay()
+      await window.api.hideOverlay()
+      return
     }
 
-    // Switch audio to external display
-    await window.api.switchAudioToExternal()
+    // For 'other' non-image files (Word, Excel, etc.), open/restore on external display
+    if (channel.file.type === 'other' && !channel.file.isImage) {
+      // Close presentation window if open — not needed for external apps
+      if (isPresentationWindowOpen) {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
+      const displays = await window.api.getDisplays()
+      const external = displays.find((d) => !d.isPrimary)
+      // Minimize previous other file (different file) — don't close
+      if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && prevActiveFile.path !== channel.file.path) {
+        await window.api.minimizeExternalFile(prevActiveFile.path)
+      }
+      // Try to restore; if not tracked yet, open fresh
+      await window.api.restoreExternalFile(channel.file.path, external?.bounds)
+      await window.api.hideOverlay()
+      return
+    }
 
     if (!isPresentationWindowOpen) {
       await window.api.openPresentationWindow()
       setPresentationWindowOpen(true)
-      await new Promise((r) => setTimeout(r, 500))
+      await new Promise((r) => setTimeout(r, 300))
     }
 
     window.api.sendToPresentation('load-content', {
       type: channel.file.type,
       path: channel.file.path,
       name: channel.file.name,
-      startSlide: channel.slide
+      startSlide: channel.slide,
+      isImage: channel.file.isImage
     })
 
-    await new Promise((r) => setTimeout(r, 300))
+    await new Promise((r) => setTimeout(r, 150))
     await window.api.hideOverlay()
   }
 
@@ -108,6 +207,7 @@ export function PreviewPanel(): JSX.Element {
         onSetTotalSlides={(t) => setChannelTotalSlides('A', t)}
         onSelect={() => setSelectedChannel('A')}
         onTake={() => handleTake('A')}
+        onClear={() => handleClear('A')}
         pptxThumbnails={channelA.file ? pptxThumbnailsMap[channelA.file.path] || [] : []}
       />
 
@@ -121,6 +221,7 @@ export function PreviewPanel(): JSX.Element {
         onSetTotalSlides={(t) => setChannelTotalSlides('B', t)}
         onSelect={() => setSelectedChannel('B')}
         onTake={() => handleTake('B')}
+        onClear={() => handleClear('B')}
         pptxThumbnails={channelB.file ? pptxThumbnailsMap[channelB.file.path] || [] : []}
       />
     </div>
@@ -137,11 +238,12 @@ interface ChannelPanelProps {
   onSetTotalSlides: (total: number) => void
   onSelect: () => void
   onTake: () => void
+  onClear: () => void
   pptxThumbnails: string[]
 }
 
 function ChannelPanel({
-  label, channel, isLive, isSelected, onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, pptxThumbnails
+  label, channel, isLive, isSelected, onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, onClear, pptxThumbnails
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
 
@@ -176,7 +278,7 @@ function ChannelPanel({
   }
 
   const { isPresentationWindowOpen, activeFile: storeActiveFile } = useAppStore()
-  const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation'
+  const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation' || (storeActiveFile?.type === 'other' && !storeActiveFile.isImage)
   const showSelected = isSelected && !isOutputActive
 
   return (
@@ -200,6 +302,16 @@ function ChannelPanel({
         </span>
         {channel.file && (
           <span className="text-[11px] text-gray-400 truncate ml-1">{channel.file.name}</span>
+        )}
+        {channel.file && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onClear() }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="ml-auto text-gray-500 hover:text-white text-sm leading-none px-1 rounded hover:bg-white/10 transition-colors"
+            title="Убрать файл"
+          >
+            ✕
+          </button>
         )}
       </div>
 
@@ -254,6 +366,21 @@ function ChannelPanel({
           </button>
         </div>
       )}
+      {/* Take button for video/other in non-live channel */}
+      {!isLive && channel.file && (channel.file.type === 'video' || channel.file.type === 'other') && (
+        <div
+          className="flex items-center justify-end py-1.5 px-2 bg-surface-200 border-t border-gray-800"
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); onTake() }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded transition-colors"
+          >
+            В эфир
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -267,6 +394,7 @@ function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
   if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
   if (file.type === 'video') return <VideoPreview file={file} />
+  if (file.type === 'other') return <OtherPreview file={file} />
   return <div className="text-gray-500 text-xs">Unsupported</div>
 }
 
@@ -364,6 +492,134 @@ function VideoPreview({ file }: { file: FileEntry }): JSX.Element {
         preload="metadata"
         onLoadedMetadata={(e) => { e.currentTarget.currentTime = 1 }}
       />
+    </div>
+  )
+}
+
+const EXT_ICONS: Record<string, string> = {
+  '.doc': '📝', '.docx': '📝', '.rtf': '📝', '.odt': '📝', '.txt': '📄',
+  '.xls': '📊', '.xlsx': '📊', '.ods': '📊',
+  '.mp3': '🎵', '.wav': '🎵', '.ogg': '🎵', '.aac': '🎵', '.m4a': '🎵', '.flac': '🎵', '.wma': '🎵'
+}
+
+const DOC_EXTENSIONS = ['.doc', '.docx', '.rtf', '.odt', '.txt', '.xls', '.xlsx', '.ods']
+
+function OtherPreview({ file }: { file: FileEntry }): JSX.Element {
+  if (file.isImage) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <img
+          src={`file://${file.path}`}
+          alt={file.name}
+          className="max-w-full max-h-full object-contain"
+        />
+      </div>
+    )
+  }
+
+  if (file.isAudio) {
+    return (
+      <div className="text-center text-gray-500 p-4">
+        <div className="text-3xl mb-2">🎵</div>
+        <p className="text-[11px]">{file.name}{file.extension}</p>
+        <p className="text-[10px] text-gray-600 mt-1">Откроется во встроенном плеере</p>
+      </div>
+    )
+  }
+
+  if (DOC_EXTENSIONS.includes(file.extension)) {
+    return <DocPreview file={file} />
+  }
+
+  const icon = EXT_ICONS[file.extension] || '📎'
+  return (
+    <div className="text-center text-gray-500 p-4">
+      <div className="text-3xl mb-2">{icon}</div>
+      <p className="text-[11px]">{file.name}{file.extension}</p>
+      <p className="text-[10px] text-gray-600 mt-1">Откроется в системной программе</p>
+    </div>
+  )
+}
+
+function DocPreview({ file }: { file: FileEntry }): JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const { docPreviewsMap } = useAppStore()
+  const [loading, setLoading] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  // Generate preview PDF if not cached
+  useEffect(() => {
+    if (docPreviewsMap[file.path] || failed) return
+    let cancelled = false
+    setLoading(true)
+    window.api.generateDocPreview(file.path).then((result) => {
+      if (cancelled) return
+      if (result.success && result.pdfPath) {
+        const { docPreviewsMap: current } = useAppStore.getState()
+        useAppStore.setState({ docPreviewsMap: { ...current, [file.path]: result.pdfPath } })
+      } else {
+        setFailed(true)
+      }
+      setLoading(false)
+    }).catch(() => {
+      if (!cancelled) { setFailed(true); setLoading(false) }
+    })
+    return () => { cancelled = true }
+  }, [file.path, failed])
+
+  // Render first page of preview PDF
+  const pdfPath = docPreviewsMap[file.path]
+
+  useEffect(() => {
+    if (!pdfPath || !canvasRef.current || !containerRef.current) return
+    let cancelled = false
+
+    async function render(): Promise<void> {
+      try {
+        const data = await window.api.readFile(pdfPath!)
+        const doc = await pdfjsLib.getDocument({ data }).promise
+        const page = await doc.getPage(1)
+        if (cancelled || !canvasRef.current || !containerRef.current) return
+
+        const containerWidth = containerRef.current.clientWidth
+        const containerHeight = containerRef.current.clientHeight
+        const viewport = page.getViewport({ scale: 1 })
+        const scale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
+        const scaledViewport = page.getViewport({ scale })
+
+        canvasRef.current.width = scaledViewport.width
+        canvasRef.current.height = scaledViewport.height
+
+        const ctx = canvasRef.current.getContext('2d')
+        if (ctx) {
+          await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+        }
+      } catch {
+        if (!cancelled) setFailed(true)
+      }
+    }
+
+    render()
+    return () => { cancelled = true }
+  }, [pdfPath])
+
+  if (pdfPath) {
+    return (
+      <div ref={containerRef} className="w-full h-full flex items-center justify-center">
+        <canvas ref={canvasRef} className="max-w-full max-h-full" />
+      </div>
+    )
+  }
+
+  const icon = EXT_ICONS[file.extension] || '📎'
+  return (
+    <div className="text-center text-gray-500 p-4">
+      <div className="text-3xl mb-2">{icon}</div>
+      <p className="text-[11px]">{file.name}{file.extension}</p>
+      <p className="text-[10px] text-gray-600 mt-1">
+        {loading ? <span className="animate-pulse">Генерация предпросмотра...</span> : 'Откроется в системной программе'}
+      </p>
     </div>
   )
 }

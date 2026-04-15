@@ -1,5 +1,5 @@
-import { BrowserWindow, ipcMain, dialog } from 'electron'
-import { readdir, stat, readFile } from 'fs/promises'
+import { BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import { readdir, stat, readFile, rename } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -7,28 +7,96 @@ import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
 
 let originalAudioDeviceId: string | null = null
+// Map of file path -> { hwnd, pid } for tracking multiple external windows
+const externalFiles = new Map<string, { hwnd: number; pid: number }>()
+
+async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<void> {
+  const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+
+  if (filePath) {
+    const entry = externalFiles.get(filePath)
+    if (!entry) return
+    try {
+      const args = [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', action,
+        '-Hwnd', String(entry.hwnd),
+        '-ProcessId', String(entry.pid),
+        '-FilePath', filePath
+      ]
+      if (bounds && action === 'restore') {
+        args.push('-X', String(bounds.x), '-Y', String(bounds.y), '-Width', String(bounds.width), '-Height', String(bounds.height))
+      }
+      await execFileAsync('powershell.exe', args, { timeout: 5000 })
+    } catch { /* ignore */ }
+    if (action === 'close') externalFiles.delete(filePath)
+  } else {
+    // Apply to all tracked files
+    for (const [path, entry] of externalFiles) {
+      try {
+        const args = [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath,
+          '-Action', action,
+          '-Hwnd', String(entry.hwnd),
+          '-ProcessId', String(entry.pid)
+        ]
+        await execFileAsync('powershell.exe', args, { timeout: 5000 })
+      } catch { /* ignore */ }
+      if (action === 'close') externalFiles.delete(path)
+    }
+  }
+}
+
+export async function closeExternalFile(filePath?: string): Promise<void> {
+  await manageExternalWindow('close', filePath)
+}
+
+export async function closeAllExternalFiles(): Promise<void> {
+  await manageExternalWindow('close')
+}
 
 const SUPPORTED_EXTENSIONS = {
   presentation: ['.pptx', '.ppt'],
   pdf: ['.pdf'],
-  video: ['.mp4', '.mov', '.avi', '.webm', '.mkv']
+  video: ['.mp4', '.mov', '.avi', '.webm', '.mkv'],
+  other: [
+    '.doc', '.docx', '.xls', '.xlsx', '.txt', '.rtf', '.odt', '.ods',
+    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg',
+    '.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'
+  ]
 }
 
-function getFileType(ext: string): 'presentation' | 'pdf' | 'video' | 'unknown' {
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg']
+const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma']
+
+function getFileType(ext: string): 'presentation' | 'pdf' | 'video' | 'other' | 'unknown' {
   const lower = ext.toLowerCase()
   if (SUPPORTED_EXTENSIONS.presentation.includes(lower)) return 'presentation'
   if (SUPPORTED_EXTENSIONS.pdf.includes(lower)) return 'pdf'
   if (SUPPORTED_EXTENSIONS.video.includes(lower)) return 'video'
+  if (SUPPORTED_EXTENSIONS.other.includes(lower)) return 'other'
   return 'unknown'
+}
+
+function isImageFile(ext: string): boolean {
+  return IMAGE_EXTENSIONS.includes(ext.toLowerCase())
+}
+
+function isAudioFile(ext: string): boolean {
+  return AUDIO_EXTENSIONS.includes(ext.toLowerCase())
 }
 
 export interface FileEntry {
   id: string
   name: string
   path: string
-  type: 'presentation' | 'pdf' | 'video' | 'unknown'
+  type: 'presentation' | 'pdf' | 'video' | 'other' | 'unknown'
   extension: string
   size: number
+  isImage?: boolean
+  isAudio?: boolean
 }
 
 export function registerIpcHandlers(
@@ -51,10 +119,16 @@ export function registerIpcHandlers(
   ipcMain.handle('load-folder', async (_event, folderPath: string) => {
     const entries = await readdir(folderPath)
     const files: FileEntry[] = []
+    const subfolders: { name: string; path: string }[] = []
 
     for (const entry of entries) {
       const fullPath = join(folderPath, entry)
       const stats = await stat(fullPath)
+
+      if (stats.isDirectory()) {
+        subfolders.push({ name: entry, path: fullPath })
+        continue
+      }
 
       if (!stats.isFile()) continue
 
@@ -69,11 +143,13 @@ export function registerIpcHandlers(
         path: fullPath,
         type,
         extension: ext.toLowerCase(),
-        size: stats.size
+        size: stats.size,
+        isImage: isImageFile(ext),
+        isAudio: isAudioFile(ext)
       })
     }
 
-    return files
+    return { files, subfolders }
   })
 
   ipcMain.handle('check-powerpoint', async () => {
@@ -265,5 +341,109 @@ export function registerIpcHandlers(
         '-DeviceId', originalAudioDeviceId
       ])
     } catch { /* ignore */ }
+  })
+
+  ipcMain.handle('open-file-external', async (_event, filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
+    try {
+      if (displayBounds && process.platform === 'win32') {
+        const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath,
+          '-Action', 'open',
+          '-FilePath', filePath,
+          '-X', String(displayBounds.x),
+          '-Y', String(displayBounds.y),
+          '-Width', String(displayBounds.width),
+          '-Height', String(displayBounds.height)
+        ], { timeout: 25000 })
+        try {
+          const data = JSON.parse(stdout.trim())
+          if (data.hwnd) {
+            externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
+          }
+        } catch { /* ignore */ }
+        return { success: true }
+      }
+      await shell.openPath(filePath)
+      return { success: true }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
+
+  ipcMain.handle('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
+
+  ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
+    // If not tracked yet, open instead of restore
+    if (filePath && !externalFiles.has(filePath)) {
+      if (displayBounds && process.platform === 'win32') {
+        const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+        try {
+          const { stdout } = await execFileAsync('powershell.exe', [
+            '-ExecutionPolicy', 'Bypass',
+            '-File', scriptPath,
+            '-Action', 'open',
+            '-FilePath', filePath,
+            '-X', String(displayBounds.x),
+            '-Y', String(displayBounds.y),
+            '-Width', String(displayBounds.width),
+            '-Height', String(displayBounds.height)
+          ], { timeout: 25000 })
+          try {
+            const data = JSON.parse(stdout.trim())
+            if (data.hwnd) {
+              externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
+            }
+          } catch { /* ignore */ }
+        } catch { /* ignore */ }
+      } else {
+        await shell.openPath(filePath!)
+      }
+      return
+    }
+    await manageExternalWindow('restore', filePath, displayBounds || undefined)
+  })
+
+  ipcMain.handle('select-sound-file', async () => {
+    const result = await dialog.showOpenDialog(controlWindow, {
+      properties: ['openFile'],
+      title: 'Выберите звуковой файл',
+      filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'aac', 'm4a', 'flac'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('move-file', async (_event, srcPath: string, destFolder: string) => {
+    try {
+      const fileName = basename(srcPath)
+      const destPath = join(destFolder, fileName)
+      await rename(srcPath, destPath)
+      return { success: true, newPath: destPath }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('generate-doc-preview', async (_event, filePath: string) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    const scriptPath = join(__dirname, '../../scripts/document-preview.ps1')
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-Command',
+        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${scriptPath.replace(/'/g, "''")}' -FilePath '${filePath.replace(/'/g, "''")}'`
+      ], { timeout: 60000, encoding: 'utf8' })
+      const data = JSON.parse(stdout.trim())
+      if (data.Status === 'ok') {
+        return { success: true, pdfPath: data.Path }
+      }
+      return { success: false, error: data.Error || 'Unknown error' }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
+    }
   })
 }

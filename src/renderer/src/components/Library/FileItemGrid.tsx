@@ -17,7 +17,8 @@ interface FileItemGridProps {
 const TYPE_COLORS: Record<string, string> = {
   presentation: 'bg-orange-500/20 text-orange-400',
   pdf: 'bg-red-500/20 text-red-400',
-  video: 'bg-blue-500/20 text-blue-400'
+  video: 'bg-blue-500/20 text-blue-400',
+  other: 'bg-green-500/20 text-green-400'
 }
 
 export function FileItemGrid({
@@ -60,6 +61,8 @@ export function FileItemGrid({
             }
           } catch { /* ignore */ }
         }
+      } else if (file.type === 'other' && file.isImage) {
+        if (!cancelled) setThumbnail(`file://${file.path}`)
       } else if (file.type === 'video') {
         // Video thumbnail via hidden video element
         try {
@@ -111,7 +114,7 @@ export function FileItemGrid({
           <img src={thumbnail} alt={file.name} className="w-full h-full object-cover" draggable={false} />
         ) : (
           <span className="text-2xl opacity-30">
-            {file.type === 'presentation' ? '📊' : file.type === 'pdf' ? '📄' : '🎬'}
+            {file.type === 'presentation' ? '📊' : file.type === 'pdf' ? '📄' : file.type === 'video' ? '🎬' : '📎'}
           </span>
         )}
         {isActive && (

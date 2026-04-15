@@ -43,30 +43,42 @@ export default function App(): JSX.Element {
       void data
     })
 
-    const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
-      const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
-      if (!activeFile) return
+    let isNavigating = false
 
-      if (activeFile.type === 'presentation') {
-        // Don't go past the last slide (would exit slideshow)
-        if (direction === 'next' && totalSlides > 0 && currentSlide >= totalSlides) return
-        if (direction === 'prev' && currentSlide <= 1) return
-        const result = await window.api.powerpointCommand(direction === 'next' ? 'next' : 'prev')
-        if (result.success && result.output) {
-          try {
-            const data = JSON.parse(result.output)
-            if (data.CurrentSlide) useAppStore.getState().setCurrentSlide(data.CurrentSlide)
-          } catch { /* ignore */ }
+    const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
+      if (isNavigating) return
+      isNavigating = true
+      try {
+        const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
+        if (!activeFile) return
+
+        if (activeFile.type === 'presentation') {
+          // Get total from channel if top-level not set
+          const state = useAppStore.getState()
+          const ch = state.liveChannel === 'A' ? state.channelA : state.liveChannel === 'B' ? state.channelB : null
+          const total = totalSlides || ch?.totalSlides || 0
+          // Don't go past the last slide (would exit slideshow)
+          if (direction === 'next' && total > 0 && currentSlide >= total) return
+          if (direction === 'prev' && currentSlide <= 1) return
+          const result = await window.api.powerpointCommand(direction === 'next' ? 'next' : 'prev')
+          if (result.success && result.output) {
+            try {
+              const data = JSON.parse(result.output)
+              if (data.CurrentSlide) useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+            } catch { /* ignore */ }
+          }
+        } else if (activeFile.type === 'pdf') {
+          const isNext = direction === 'next'
+          const newSlide = isNext
+            ? Math.min(currentSlide + 1, totalSlides || currentSlide + 1)
+            : Math.max(currentSlide - 1, 1)
+          if (newSlide !== currentSlide) {
+            useAppStore.getState().setCurrentSlide(newSlide)
+            window.api.sendToPresentation('navigate-slide', newSlide)
+          }
         }
-      } else if (activeFile.type === 'pdf') {
-        const isNext = direction === 'next'
-        const newSlide = isNext
-          ? Math.min(currentSlide + 1, totalSlides || currentSlide + 1)
-          : Math.max(currentSlide - 1, 1)
-        if (newSlide !== currentSlide) {
-          useAppStore.getState().setCurrentSlide(newSlide)
-          window.api.sendToPresentation('navigate-slide', newSlide)
-        }
+      } finally {
+        isNavigating = false
       }
     }
 

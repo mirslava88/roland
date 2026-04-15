@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 
 export function ControlBar(): JSX.Element {
@@ -9,12 +9,28 @@ export function ControlBar(): JSX.Element {
     currentSlide,
     totalSlides,
     setCurrentSlide,
-    isPresentationWindowOpen,
-    filteredFiles,
-    setActiveFile
   } = useAppStore()
 
   const [goToSlide, setGoToSlide] = useState('')
+  const [videoLoop, setVideoLoop] = useState(false)
+  const [videoTime, setVideoTime] = useState(0)
+  const [videoDuration, setVideoDuration] = useState(0)
+
+  // Listen for video time/state updates from presentation window
+  useEffect(() => {
+    const unsubTime = window.api.on('video-time', (...args: unknown[]) => {
+      const data = args[0] as { currentTime: number; duration: number }
+      setVideoTime(data.currentTime)
+      setVideoDuration(data.duration)
+    })
+    const unsubState = window.api.on('video-state', (...args: unknown[]) => {
+      const data = args[0] as { playing: boolean; duration: number; currentTime: number }
+      setVideoTime(data.currentTime)
+      setVideoDuration(data.duration)
+      setIsPlaying(data.playing)
+    })
+    return () => { unsubTime(); unsubState() }
+  }, [])
 
   if (!activeFile) {
     return (
@@ -23,10 +39,6 @@ export function ControlBar(): JSX.Element {
       </div>
     )
   }
-
-  const currentIndex = filteredFiles.findIndex((f) => f.id === activeFile.id)
-  const hasPrev = currentIndex > 0
-  const hasNext = currentIndex < filteredFiles.length - 1
 
   const handlePrev = async (): Promise<void> => {
     if (currentSlide <= 1) return
@@ -78,6 +90,12 @@ export function ControlBar(): JSX.Element {
     setGoToSlide('')
   }
 
+  const formatTime = (s: number): string => {
+    const m = Math.floor(s / 60)
+    const sec = Math.floor(s % 60)
+    return `${m}:${sec.toString().padStart(2, '0')}`
+  }
+
   const handlePlayPause = (): void => {
     const newState = !isPlaying
     setIsPlaying(newState)
@@ -86,57 +104,58 @@ export function ControlBar(): JSX.Element {
 
   const handleStop = (): void => {
     setIsPlaying(false)
+    setVideoTime(0)
     window.api.sendToPresentation('stop')
   }
 
-  const switchFile = (direction: 'prev' | 'next'): void => {
-    const newIndex = direction === 'prev' ? currentIndex - 1 : currentIndex + 1
-    const newFile = filteredFiles[newIndex]
-    if (newFile) {
-      setActiveFile(newFile)
-      if (isPresentationWindowOpen) {
-        window.api.sendToPresentation('load-content', {
-          type: newFile.type,
-          path: newFile.path,
-          name: newFile.name
-        })
-      }
-    }
+  const handleVideoSeek = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const time = parseFloat(e.target.value)
+    setVideoTime(time)
+    window.api.sendToPresentation('seek', time)
   }
 
   return (
     <div className="h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center px-4 gap-4 shrink-0">
-      {/* File navigation */}
-      <div className="flex items-center gap-1">
-        <button
-          onClick={() => switchFile('prev')}
-          disabled={!hasPrev}
-          className="btn-icon text-sm disabled:opacity-30 disabled:cursor-not-allowed"
-          title="Предыдущий файл"
-        >
-          ⏮
-        </button>
-        <button
-          onClick={() => switchFile('next')}
-          disabled={!hasNext}
-          className="btn-icon text-sm disabled:opacity-30 disabled:cursor-not-allowed"
-          title="Следующий файл"
-        >
-          ⏭
-        </button>
-      </div>
-
-      <div className="w-px h-8 bg-gray-800" />
-
-      {/* Content controls */}
       {activeFile.type === 'video' && (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-1">
           <button onClick={handlePlayPause} className="btn-icon text-lg">
             {isPlaying ? '⏸' : '▶'}
           </button>
           <button onClick={handleStop} className="btn-icon text-lg">
             ⏹
           </button>
+          <button
+            onClick={() => {
+              const newLoop = !videoLoop
+              setVideoLoop(newLoop)
+              window.api.sendToPresentation('set-loop', newLoop)
+            }}
+            className={`btn-icon text-sm px-2 py-1 rounded transition-colors ${
+              videoLoop ? 'bg-blue-600/80 text-white' : 'text-gray-400'
+            }`}
+            title={videoLoop ? 'Зацикливание ВКЛ' : 'Зацикливание видео'}
+          >
+            🔁
+          </button>
+
+          <div className="w-px h-8 bg-gray-800 mx-1" />
+
+          <span className="text-[10px] text-gray-400 tabular-nums w-[38px] text-right">
+            {formatTime(videoTime)}
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={videoDuration > 0 ? videoDuration : 100}
+            step={0.5}
+            value={videoTime}
+            onChange={handleVideoSeek}
+            disabled={videoDuration === 0}
+            className="flex-1 h-1 accent-blue-500 disabled:opacity-30 min-w-[120px]"
+          />
+          <span className="text-[10px] text-gray-400 tabular-nums w-[38px]">
+            {formatTime(videoDuration)}
+          </span>
         </div>
       )}
 

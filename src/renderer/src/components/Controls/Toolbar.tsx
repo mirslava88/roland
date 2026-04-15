@@ -1,4 +1,6 @@
 import { useAppStore } from '../../stores/useAppStore'
+import { Timer } from './Timer'
+import { MusicPlayer } from './MusicPlayer'
 
 export function Toolbar(): JSX.Element {
   const {
@@ -21,19 +23,25 @@ export function Toolbar(): JSX.Element {
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 
-  const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation'
+  const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
 
   const handleOpenFolder = async (): Promise<void> => {
     const path = await window.api.selectFolder()
     if (path) {
       setFolderPath(path)
-      const files = await window.api.loadFolder(path)
-      setFiles(files)
+      useAppStore.setState({ rootFolderPath: path })
+      const result = await window.api.loadFolder(path)
+      setFiles(result.files)
+      useAppStore.setState({ subfolders: result.subfolders })
     }
   }
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
+      // Minimize external file (Word/Excel) if open — don't close it
+      if (activeFile?.type === 'other' && !activeFile.isImage) {
+        await window.api.minimizeExternalFile(activeFile.path)
+      }
       if (activeFile?.type === 'presentation' && backdropImage) {
         // Seamless: open black window first, then close PowerPoint, then show backdrop
         if (!isPresentationWindowOpen) {
@@ -63,7 +71,6 @@ export function Toolbar(): JSX.Element {
         } else if (isPresentationWindowOpen) {
           await window.api.closePresentationWindow()
           setPresentationWindowOpen(false)
-          await window.api.restoreAudioDevice()
         }
       }
       setActiveFile(null)
@@ -116,13 +123,14 @@ export function Toolbar(): JSX.Element {
 
   const handleRefresh = async (): Promise<void> => {
     if (folderPath) {
-      const files = await window.api.loadFolder(folderPath)
-      setFiles(files)
+      const result = await window.api.loadFolder(folderPath)
+      setFiles(result.files)
+      useAppStore.setState({ subfolders: result.subfolders })
     }
   }
 
   return (
-    <div className="h-12 bg-surface-300 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+    <div className="relative h-12 bg-surface-300 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
       <h1 className="text-sm font-semibold text-gray-300 mr-4" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         PDM
       </h1>
@@ -148,34 +156,38 @@ export function Toolbar(): JSX.Element {
 
       <div className="flex-1" />
 
+      <Timer />
+
+      <MusicPlayer />
+
+      <button
+        onClick={handleSelectBackdrop}
+        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
+          backdropImage
+            ? 'bg-purple-600/80 hover:bg-purple-600 text-white border-transparent'
+            : 'bg-purple-900/50 text-purple-300 hover:bg-purple-800/50 border-purple-700/50'
+        }`}
+        title={backdropImage || 'Выбрать подложку'}
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        🖼 Подложка (Фон)
+      </button>
+
       <button
         onClick={async () => {
           const newState = !globalHookEnabled
           const result = await window.api.toggleGlobalHook(newState)
           setGlobalHookEnabled(result)
         }}
-        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
+        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
           globalHookEnabled
-            ? 'bg-yellow-600/80 hover:bg-yellow-600 text-white'
-            : 'btn-secondary'
+            ? 'bg-yellow-600/80 hover:bg-yellow-600 text-white border-transparent'
+            : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
         }`}
         title={globalHookEnabled ? 'Кликер активен — нажмите для отключения' : 'Включить кликер'}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         🎮 {globalHookEnabled ? 'Кликер ВКЛ' : 'Кликер'}
-      </button>
-
-      <button
-        onClick={handleSelectBackdrop}
-        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
-          backdropImage
-            ? 'bg-purple-600/80 hover:bg-purple-600 text-white'
-            : 'btn-secondary'
-        }`}
-        title={backdropImage || 'Выбрать подложку'}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        🖼 Подложка
       </button>
 
       <button
@@ -187,7 +199,7 @@ export function Toolbar(): JSX.Element {
         }`}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        {isOutputActive ? '⏹ Закрыть эфир' : '▶ В эфир'}
+        {isOutputActive ? '⏹ Выйти из эфира' : '▶ В эфир'}
       </button>
     </div>
   )

@@ -66,6 +66,11 @@ export function VideoViewer({ filePath }: VideoViewerProps): JSX.Element {
       video.pause()
       video.currentTime = 0
       setIsPlaying(false)
+      window.api.sendToControl('video-state', {
+        playing: false,
+        duration: video.duration,
+        currentTime: 0
+      })
     })
 
     const unsubSeek = window.api.on('seek', (...args: unknown[]) => {

@@ -41,6 +41,83 @@ const api = {
   toggleGlobalHook: (enable: boolean): Promise<boolean> =>
     ipcRenderer.invoke('toggle-global-hook', enable),
 
+  selectSoundFile: (): Promise<string | null> =>
+    ipcRenderer.invoke('select-sound-file'),
+
+  moveFile: (srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }> =>
+    ipcRenderer.invoke('move-file', srcPath, destFolder),
+
+  generateDocPreview: (filePath: string): Promise<{ success: boolean; pdfPath?: string; error?: string }> =>
+    ipcRenderer.invoke('generate-doc-preview', filePath),
+
+  showTimerOverlay: (displayId?: number) => ipcRenderer.invoke('show-timer-overlay', displayId),
+
+  hideTimerOverlay: () => ipcRenderer.invoke('hide-timer-overlay'),
+
+  updateTimerOverlay: (data: {
+    remaining: number
+    running: boolean
+    duration: number
+    posX: number
+    posY: number
+    scale: number
+  }): void => {
+    ipcRenderer.send('timer-overlay-update', data)
+  },
+
+  playTimerSound: (type: string, filePath: string): void => {
+    ipcRenderer.send('timer-play-sound', type, filePath)
+  },
+
+  moveTimerOverlay: (dx: number, dy: number): void => {
+    ipcRenderer.send('move-timer-overlay', dx, dy)
+  },
+
+  resizeTimerOverlay: (w: number, h: number): void => {
+    ipcRenderer.send('resize-timer-overlay', w, h)
+  },
+
+  selectMusicFiles: (): Promise<string[] | null> => ipcRenderer.invoke('select-music-files'),
+
+  selectMusicFolder: (): Promise<string[] | null> => ipcRenderer.invoke('select-music-folder'),
+
+  musicSetPlaylist: (files: string[], startIndex?: number): Promise<void> =>
+    ipcRenderer.invoke('music-set-playlist', files, startIndex),
+
+  musicPlay: (): Promise<void> => ipcRenderer.invoke('music-play'),
+
+  musicPause: (): Promise<void> => ipcRenderer.invoke('music-pause'),
+
+  musicStop: (): Promise<void> => ipcRenderer.invoke('music-stop'),
+
+  musicNext: (): Promise<void> => ipcRenderer.invoke('music-next'),
+
+  musicPrev: (): Promise<void> => ipcRenderer.invoke('music-prev'),
+
+  musicSetLoopTrack: (value: boolean): Promise<void> => ipcRenderer.invoke('music-set-loop-track', value),
+
+  musicSetLoopPlaylist: (value: boolean): Promise<void> => ipcRenderer.invoke('music-set-loop-playlist', value),
+
+  musicSetVolume: (value: number): Promise<void> => ipcRenderer.invoke('music-set-volume', value),
+
+  musicSeek: (time: number): Promise<void> => ipcRenderer.invoke('music-seek', time),
+
+  musicGetState: (): Promise<MusicState | null> => ipcRenderer.invoke('music-get-state'),
+
+  openFileExternal: (filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('open-file-external', filePath, displayBounds),
+
+  closeExternalFile: (filePath?: string): Promise<void> => ipcRenderer.invoke('close-external-file', filePath),
+
+  minimizeExternalFile: (filePath?: string): Promise<void> => ipcRenderer.invoke('minimize-external-file', filePath),
+
+  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<void> =>
+    ipcRenderer.invoke('restore-external-file', filePath, displayBounds),
+
+  setActiveContentType: (type: string): void => {
+    ipcRenderer.send('set-active-content-type', type)
+  },
+
   sendToPresentation: (channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-presentation', channel, ...args)
   },

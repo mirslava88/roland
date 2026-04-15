@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
-export type ContentType = 'presentation' | 'pdf' | 'video' | null
-export type FilterType = 'all' | 'presentation' | 'pdf' | 'video'
+export type ContentType = 'presentation' | 'pdf' | 'video' | 'other' | null
+export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
 
 export interface ChannelState {
   file: FileEntry | null
@@ -9,8 +9,15 @@ export interface ChannelState {
   totalSlides: number
 }
 
+export interface SubfolderEntry {
+  name: string
+  path: string
+}
+
 interface AppState {
   folderPath: string | null
+  rootFolderPath: string | null
+  subfolders: SubfolderEntry[]
   files: FileEntry[]
   filteredFiles: FileEntry[]
   filter: FilterType
@@ -41,6 +48,8 @@ interface AppState {
 
   setPptxThumbnails: (thumbnails: string[]) => void
   setFolderPath: (path: string | null) => void
+  setRootFolderPath: (path: string | null) => void
+  setSubfolders: (subfolders: SubfolderEntry[]) => void
   setFiles: (files: FileEntry[]) => void
   setFilter: (filter: FilterType) => void
   selectFile: (file: FileEntry | null) => void
@@ -54,10 +63,37 @@ interface AppState {
   setSelectedDisplayId: (id: number | null) => void
   setBackdropImage: (path: string | null) => void
   setGlobalHookEnabled: (enabled: boolean) => void
+
+  // Doc previews (Word/Excel -> temp PDF path)
+  docPreviewsMap: Record<string, string>
+
+  // Music playlist (shared between MusicPlayer and channel take)
+  musicPlaylist: string[]
+  setMusicPlaylist: (files: string[]) => void
+
+  // Timer
+  timerDuration: number // total seconds set
+  timerRemaining: number // seconds remaining (negative = overtime)
+  timerRunning: boolean
+  timerSoundEnd: string | null
+  timerSoundWarning: string | null
+  timerOverlayPosition: { x: number; y: number } // percent from top-left
+  timerOverlayScale: number
+  setTimerDuration: (seconds: number) => void
+  setTimerRemaining: (seconds: number) => void
+  setTimerRunning: (running: boolean) => void
+  addTimerMinutes: (minutes: number) => void
+  resetTimer: () => void
+  setTimerSoundEnd: (path: string | null) => void
+  setTimerSoundWarning: (path: string | null) => void
+  setTimerOverlayPosition: (pos: { x: number; y: number }) => void
+  setTimerOverlayScale: (scale: number) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
   folderPath: null,
+  rootFolderPath: null,
+  subfolders: [],
   files: [],
   filteredFiles: [],
   filter: 'all',
@@ -73,7 +109,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   displays: [],
   selectedDisplayId: null,
   backdropImage: null,
-  globalHookEnabled: false,
+  globalHookEnabled: true,
 
   channelA: { file: null, slide: 1, totalSlides: 0 },
   channelB: { file: null, slide: 1, totalSlides: 0 },
@@ -127,6 +163,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setFolderPath: (path) => set({ folderPath: path }),
+  setRootFolderPath: (path) => set({ rootFolderPath: path }),
+  setSubfolders: (subfolders) => set({ subfolders }),
 
   setFiles: (files) => {
     const { filter } = get()
@@ -186,5 +224,39 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
   setBackdropImage: (path) => set({ backdropImage: path }),
-  setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled })
+  setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
+
+  // Doc previews
+  docPreviewsMap: {},
+
+  // Music
+  musicPlaylist: [],
+  setMusicPlaylist: (files) => set({ musicPlaylist: files }),
+
+  // Timer
+  timerDuration: 0,
+  timerRemaining: 0,
+  timerRunning: false,
+  timerSoundEnd: null,
+  timerSoundWarning: null,
+  timerOverlayPosition: { x: 90, y: 90 },
+  timerOverlayScale: 1,
+  setTimerDuration: (seconds) => set({ timerDuration: seconds, timerRemaining: seconds }),
+  setTimerRemaining: (seconds) => set({ timerRemaining: seconds }),
+  setTimerRunning: (running) => set({ timerRunning: running }),
+  addTimerMinutes: (minutes) => {
+    const { timerDuration, timerRemaining } = get()
+    set({
+      timerDuration: Math.max(0, timerDuration + minutes * 60),
+      timerRemaining: timerRemaining + minutes * 60
+    })
+  },
+  resetTimer: () => {
+    const { timerDuration } = get()
+    set({ timerRemaining: timerDuration, timerRunning: false })
+  },
+  setTimerSoundEnd: (path) => set({ timerSoundEnd: path }),
+  setTimerSoundWarning: (path) => set({ timerSoundWarning: path }),
+  setTimerOverlayPosition: (pos) => set({ timerOverlayPosition: pos }),
+  setTimerOverlayScale: (scale) => set({ timerOverlayScale: scale })
 }))

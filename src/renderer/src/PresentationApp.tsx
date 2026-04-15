@@ -1,18 +1,23 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { PdfViewer } from './components/PresentationView/PdfViewer'
 import { VideoViewer } from './components/PresentationView/VideoViewer'
 
 interface ContentPayload {
-  type: 'presentation' | 'pdf' | 'video' | 'backdrop'
+  type: 'presentation' | 'pdf' | 'video' | 'backdrop' | 'other'
   path: string
   name: string
   startSlide?: number
+  isImage?: boolean
 }
 
 export function PresentationApp(): JSX.Element {
   const [content, setContent] = useState<ContentPayload | null>(null)
+  const contentRef = useRef<ContentPayload | null>(null)
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [opacity, setOpacity] = useState(1)
+
+  // Keep ref in sync with state
+  contentRef.current = content
 
   const loadContent = useCallback((payload: ContentPayload) => {
     setIsTransitioning(true)
@@ -33,7 +38,10 @@ export function PresentationApp(): JSX.Element {
     })
 
     const unsubStop = window.api.on('stop', () => {
-      setContent(null)
+      // For video, don't clear content — VideoViewer handles pause+rewind
+      if (contentRef.current?.type !== 'video') {
+        setContent(null)
+      }
     })
 
     // Signal to main process that this window is ready to receive content
@@ -66,6 +74,14 @@ export function PresentationApp(): JSX.Element {
           src={`file://${content.path}`}
           alt="Backdrop"
           className="w-full h-full object-cover select-none"
+          draggable={false}
+        />
+      )}
+      {content?.type === 'other' && content.isImage && (
+        <img
+          src={`file://${content.path}`}
+          alt={content.name}
+          className="w-full h-full object-contain select-none"
           draggable={false}
         />
       )}
