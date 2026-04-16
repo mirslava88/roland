@@ -88,7 +88,6 @@ export function PreviewPanel(): JSX.Element {
         setPresentationWindowOpen(false)
       }
 
-      await window.api.restoreAudioDevice()
       setActiveFile(null)
       useAppStore.setState({ liveChannel: null })
     }

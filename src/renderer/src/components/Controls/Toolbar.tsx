@@ -1,12 +1,12 @@
+import { useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { MusicPlayer } from './MusicPlayer'
+import { SettingsModal } from './SettingsModal'
 
 export function Toolbar(): JSX.Element {
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const {
-    folderPath,
-    setFolderPath,
-    setFiles,
     isPresentationWindowOpen,
     setPresentationWindowOpen,
     activeFile,
@@ -24,17 +24,6 @@ export function Toolbar(): JSX.Element {
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 
   const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
-
-  const handleOpenFolder = async (): Promise<void> => {
-    const path = await window.api.selectFolder()
-    if (path) {
-      setFolderPath(path)
-      useAppStore.setState({ rootFolderPath: path })
-      const result = await window.api.loadFolder(path)
-      setFiles(result.files)
-      useAppStore.setState({ subfolders: result.subfolders })
-    }
-  }
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
@@ -121,38 +110,16 @@ export function Toolbar(): JSX.Element {
     }
   }
 
-  const handleRefresh = async (): Promise<void> => {
-    if (folderPath) {
-      const result = await window.api.loadFolder(folderPath)
-      setFiles(result.files)
-      useAppStore.setState({ subfolders: result.subfolders })
-    }
-  }
-
   return (
     <div className="relative h-12 bg-surface-300 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-      <h1 className="text-sm font-semibold text-gray-300 mr-4" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        PDM
-      </h1>
-
       <button
-        onClick={handleOpenFolder}
-        className="btn-secondary text-xs"
+        onClick={() => setSettingsOpen(true)}
+        className="text-xs text-gray-400 hover:text-white transition-colors px-1 flex items-center gap-1.5"
+        title="Настройки"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        <span className="mr-1.5">📁</span> Обзор
+        <span className="text-base">⚙</span> Настройки
       </button>
-
-      {folderPath && (
-        <button
-          onClick={handleRefresh}
-          className="btn-icon text-xs"
-          title="Обновить"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          ↻
-        </button>
-      )}
 
       <div className="flex-1" />
 
@@ -201,6 +168,8 @@ export function Toolbar(): JSX.Element {
       >
         {isOutputActive ? '⏹ Выйти из эфира' : '▶ В эфир'}
       </button>
+
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   )
 }

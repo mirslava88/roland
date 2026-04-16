@@ -53,6 +53,8 @@ interface Api {
   showOverlay(displayId?: number): Promise<void>
   hideOverlay(): Promise<void>
   selectBackdropImage(): Promise<string | null>
+  getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
+  setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>
   switchAudioToExternal(): Promise<{ success: boolean; device?: string; error?: string }>
   restoreAudioDevice(): Promise<void>
   toggleGlobalHook(enable: boolean): Promise<boolean>

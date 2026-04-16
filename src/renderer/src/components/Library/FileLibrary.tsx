@@ -36,6 +36,7 @@ export function FileLibrary(): JSX.Element {
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null)
   const [drives, setDrives] = useState<DriveInfo[]>([])
   const [renamingFile, setRenamingFile] = useState<string | null>(null)
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
   const [clipboardFile, setClipboardFile] = useState<{ path: string; cut: boolean; isFolder?: boolean } | null>(null)
@@ -147,6 +148,26 @@ export function FileLibrary(): JSX.Element {
 
   const cancelRename = (): void => {
     setRenamingFile(null)
+    setRenamingFolder(null)
+  }
+
+  const startFolderRename = (folder: { name: string; path: string }): void => {
+    setRenamingFolder(folder.path)
+    setRenameValue(folder.name)
+    setTimeout(() => renameInputRef.current?.select(), 50)
+  }
+
+  const commitFolderRename = async (folderPath: string): Promise<void> => {
+    const oldName = folderPath.split(/[\\/]/).pop() || ''
+    if (!renameValue.trim() || renameValue === oldName) {
+      setRenamingFolder(null)
+      return
+    }
+    const result = await window.api.renameFile(folderPath, renameValue.trim())
+    if (result.success) {
+      await refreshCurrentFolder()
+    }
+    setRenamingFolder(null)
   }
 
   // Context menu handlers
@@ -201,6 +222,11 @@ export function FileLibrary(): JSX.Element {
     startRename(file)
   }
 
+  const ctxRenameFolder = (folderPath: string, folderName: string): void => {
+    setContextMenu(null)
+    startFolderRename({ name: folderName, path: folderPath })
+  }
+
   const ctxDelete = async (path: string, permanent: boolean): Promise<void> => {
     setContextMenu(null)
     const results = await window.api.deleteItems([path], permanent)
@@ -228,8 +254,8 @@ export function FileLibrary(): JSX.Element {
   // Keyboard shortcuts
   const clipboardRef = useRef(clipboardFile)
   clipboardRef.current = clipboardFile
-  const renamingRef = useRef(renamingFile)
-  renamingRef.current = renamingFile
+  const renamingRef = useRef(renamingFile || renamingFolder)
+  renamingRef.current = renamingFile || renamingFolder
   const selectedFolderRef = useRef(selectedFolder)
   selectedFolderRef.current = selectedFolder
 
@@ -248,11 +274,20 @@ export function FileLibrary(): JSX.Element {
       const selPath = sel?.path || selFolder
       const isFolder = !sel && !!selFolder
 
-      // F2 — rename selected file
-      if (e.key === 'F2' && sel) {
-        e.preventDefault()
-        startRename(sel)
-        return
+      // F2 — rename selected file or folder
+      if (e.key === 'F2') {
+        if (sel) {
+          e.preventDefault()
+          startRename(sel)
+          return
+        }
+        if (selFolder) {
+          e.preventDefault()
+          const { subfolders: subs } = useAppStore.getState()
+          const f = subs.find(s => s.path === selFolder)
+          if (f) startFolderRename(f)
+          return
+        }
       }
 
       // Ctrl+C — copy
@@ -359,7 +394,7 @@ export function FileLibrary(): JSX.Element {
               className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-surface-100 transition-colors"
               title="Открыть папку"
             >
-              📂 Папка
+              📂 Обзор
             </button>
           </div>
         </div>
@@ -431,13 +466,6 @@ export function FileLibrary(): JSX.Element {
           <span className="text-[10px] text-gray-500 truncate flex-1" title={folderPath}>
             {currentFolderName}
           </span>
-          <button
-            onClick={handleOpenFolder}
-            className="text-[11px] text-gray-400 hover:text-white transition-colors px-1 py-0.5 rounded hover:bg-surface-100"
-            title="Открыть папку"
-          >
-            📂
-          </button>
         </div>
         {copyFeedback && (
           <div className="text-[10px] text-accent mb-1 animate-pulse">{copyFeedback}</div>
@@ -479,14 +507,14 @@ export function FileLibrary(): JSX.Element {
             onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragOverFolder('__parent__') }}
             onDragLeave={() => setDragOverFolder(null)}
             onDrop={(e) => handleMoveFile(parentPath, e)}
-            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors duration-100 select-none border ${
+            className={`flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors duration-100 select-none border ${
               dragOverFolder === '__parent__'
                 ? 'border-accent bg-accent/10'
                 : 'border-transparent hover:bg-surface-100/50'
             } ${viewMode === 'grid' ? 'flex-col text-center gap-1 py-3' : ''}`}
           >
-            <span className={viewMode === 'grid' ? 'text-2xl' : 'text-lg shrink-0'}>📁</span>
-            <p className={`text-yellow-500 truncate ${viewMode === 'grid' ? 'text-[10px] w-full' : 'text-sm font-medium'}`} title={parentPath}>
+            <span className={viewMode === 'grid' ? 'text-2xl' : 'text-sm shrink-0'}>📁</span>
+            <p className={`text-yellow-500 truncate ${viewMode === 'grid' ? 'text-[10px] w-full' : 'text-xs font-medium'}`} title={parentPath}>
               ..
             </p>
           </div>
@@ -494,27 +522,45 @@ export function FileLibrary(): JSX.Element {
 
         {/* Subfolders — accept file drops, support selection & context menu */}
         {subfolders.map((folder) => (
-          <div
-            key={folder.path}
-            onClick={(e) => { e.stopPropagation(); setSelectedFolder(folder.path); selectFile(null) }}
-            onDoubleClick={() => handleNavigateToFolder(folder)}
-            onContextMenu={(e) => handleFolderContextMenu(e, folder)}
-            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragOverFolder(folder.path) }}
-            onDragLeave={() => setDragOverFolder(null)}
-            onDrop={(e) => handleMoveFile(folder.path, e)}
-            className={`flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors duration-100 select-none border ${
-              dragOverFolder === folder.path
-                ? 'border-accent bg-accent/10'
-                : selectedFolder === folder.path
-                  ? 'border-accent/50 bg-accent/5'
-                  : 'border-transparent hover:bg-surface-100/50'
-            } ${viewMode === 'grid' ? 'flex-col text-center gap-1 py-3' : ''}`}
-          >
-            <span className={viewMode === 'grid' ? 'text-2xl' : 'text-lg shrink-0'}>📁</span>
-            <p className={`text-gray-300 truncate ${viewMode === 'grid' ? 'text-[10px] w-full' : 'text-sm font-medium'}`}>
-              {folder.name}
-            </p>
-          </div>
+          renamingFolder === folder.path ? (
+            <div key={folder.path} className="flex items-center gap-2 px-2 py-1.5 bg-surface-100 rounded-md">
+              <span className="text-sm shrink-0">📁</span>
+              <input
+                ref={renameInputRef}
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitFolderRename(folder.path)
+                  if (e.key === 'Escape') cancelRename()
+                }}
+                onBlur={() => commitFolderRename(folder.path)}
+                className="flex-1 bg-surface-400 text-white text-xs px-2 py-0.5 rounded outline-none border border-accent"
+                autoFocus
+              />
+            </div>
+          ) : (
+            <div
+              key={folder.path}
+              onClick={(e) => { e.stopPropagation(); setSelectedFolder(folder.path); selectFile(null) }}
+              onDoubleClick={() => handleNavigateToFolder(folder)}
+              onContextMenu={(e) => handleFolderContextMenu(e, folder)}
+              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDragOverFolder(folder.path) }}
+              onDragLeave={() => setDragOverFolder(null)}
+              onDrop={(e) => handleMoveFile(folder.path, e)}
+              className={`flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors duration-100 select-none border ${
+                dragOverFolder === folder.path
+                  ? 'border-accent bg-accent/10'
+                  : selectedFolder === folder.path
+                    ? 'border-accent/50 bg-accent/5'
+                    : 'border-transparent hover:bg-surface-100/50'
+              } ${viewMode === 'grid' ? 'flex-col text-center gap-1 py-3' : ''}`}
+            >
+              <span className={viewMode === 'grid' ? 'text-2xl' : 'text-sm shrink-0'}>📁</span>
+              <p className={`text-gray-300 truncate ${viewMode === 'grid' ? 'text-[10px] w-full' : 'text-xs font-medium'}`}>
+                {folder.name}
+              </p>
+            </div>
+          )
         ))}
 
         {/* Files */}
@@ -568,33 +614,33 @@ export function FileLibrary(): JSX.Element {
       {contextMenu && (() => {
         const itemPath = contextMenu.file?.path || contextMenu.folderPath
         const isFolder = !!contextMenu.folderPath
-        const cls = "w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-accent/20 hover:text-white flex items-center gap-2"
+        const cls = "w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-accent/20 hover:text-white flex items-center justify-between"
         return (
           <div
-            className="fixed z-50 bg-surface-100 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[180px]"
+            className="fixed z-50 bg-surface-100 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[200px]"
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(e) => e.stopPropagation()}
           >
             {itemPath && (
               <>
                 <button onClick={() => { ctxCopy(itemPath, isFolder) }} className={cls}>
-                  <span className="text-gray-500 text-[10px] w-16">Ctrl+C</span> Копировать
+                  <span>Копировать</span> <span className="text-gray-500 text-[10px] ml-4">Ctrl+C</span>
                 </button>
                 <button onClick={() => { ctxCut(itemPath, isFolder) }} className={cls}>
-                  <span className="text-gray-500 text-[10px] w-16">Ctrl+X</span> Вырезать
+                  <span>Вырезать</span> <span className="text-gray-500 text-[10px] ml-4">Ctrl+X</span>
                 </button>
               </>
             )}
             {clipboardFile && (
               <button onClick={ctxPaste} className={cls}>
-                <span className="text-gray-500 text-[10px] w-16">Ctrl+V</span> Вставить
+                <span>Вставить</span> <span className="text-gray-500 text-[10px] ml-4">Ctrl+V</span>
               </button>
             )}
-            {contextMenu.file && (
+            {(contextMenu.file || contextMenu.folderPath) && (
               <>
                 <div className="border-t border-gray-700 my-1" />
-                <button onClick={() => ctxRename(contextMenu.file!)} className={cls}>
-                  <span className="text-gray-500 text-[10px] w-16">F2</span> Переименовать
+                <button onClick={() => contextMenu.file ? ctxRename(contextMenu.file) : ctxRenameFolder(contextMenu.folderPath!, contextMenu.folderName!)} className={cls}>
+                  <span>Переименовать</span> <span className="text-gray-500 text-[10px] ml-4">F2</span>
                 </button>
               </>
             )}
@@ -602,10 +648,10 @@ export function FileLibrary(): JSX.Element {
               <>
                 <div className="border-t border-gray-700 my-1" />
                 <button onClick={() => ctxDelete(itemPath, false)} className={cls}>
-                  <span className="text-gray-500 text-[10px] w-16">Del</span> В корзину
+                  <span>В корзину</span> <span className="text-gray-500 text-[10px] ml-4">Del</span>
                 </button>
                 <button onClick={() => ctxDelete(itemPath, true)} className={`${cls} text-red-400 hover:text-red-300`}>
-                  <span className="text-gray-500 text-[10px] w-16">Shift+Del</span> Удалить
+                  <span>Удалить</span> <span className="text-gray-500 text-[10px] ml-4">Shift+Del</span>
                 </button>
               </>
             )}

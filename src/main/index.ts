@@ -4,11 +4,7 @@ import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import { join } from 'path'
-
-const execFileAsync = promisify(execFile)
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
@@ -52,31 +48,6 @@ function sendToWpfTimer(data: unknown): void {
   try { writeFileSync(wpfTimerDataFile, JSON.stringify(data)) } catch {}
 }
 
-async function autoSwitchAudioToExternal(): Promise<void> {
-  const displays = screen.getAllDisplays()
-  const primary = screen.getPrimaryDisplay()
-  const hasExternal = displays.some((d) => d.id !== primary.id)
-  if (hasExternal) {
-    try {
-      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
-      const { stdout: listOut } = await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-File', scriptPath,
-        '-Action', 'list'
-      ])
-      const devices = JSON.parse(listOut.trim())
-      const external = devices.find((d: { isDefault: boolean }) => !d.isDefault)
-      if (external) {
-        await execFileAsync('powershell.exe', [
-          '-ExecutionPolicy', 'Bypass',
-          '-File', scriptPath,
-          '-Action', 'set',
-          '-DeviceId', external.id
-        ])
-      }
-    } catch { /* ignore */ }
-  }
-}
 
 function restoreTaskbar(): void {
   try {
@@ -352,8 +323,11 @@ function createWindows(): void {
   }
 
   screen.on('display-added', () => {
+    // Auto-extend display (instead of duplicate) when external monitor is connected
+    if (process.platform === 'win32') {
+      spawn('DisplaySwitch.exe', ['/extend'], { stdio: 'ignore' })
+    }
     sendDisplays()
-    autoSwitchAudioToExternal()
   })
   screen.on('display-removed', sendDisplays)
 
@@ -419,8 +393,15 @@ function createWindows(): void {
 }
 
 app.whenReady().then(() => {
+  // Ensure extended display mode on startup if external monitor is connected
+  if (process.platform === 'win32') {
+    const displays = screen.getAllDisplays()
+    if (displays.length > 1) {
+      spawn('DisplaySwitch.exe', ['/extend'], { stdio: 'ignore' })
+    }
+  }
+
   createWindows()
-  autoSwitchAudioToExternal()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

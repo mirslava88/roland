@@ -8,6 +8,7 @@ import { existsSync } from 'fs'
 const execFileAsync = promisify(execFile)
 
 let originalAudioDeviceId: string | null = null
+let preferredAudioDeviceId: string | null = null // set by user in Settings
 // Map of file path -> { hwnd, pid } for tracking multiple external windows
 const externalFiles = new Map<string, { hwnd: number; pid: number }>()
 
@@ -299,12 +300,29 @@ export function registerIpcHandlers(
       const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
       const { stdout } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
-        '-File', scriptPath,
-        '-Action', 'list'
-      ])
+        '-Command',
+        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${scriptPath.replace(/'/g, "''")}' -Action list`
+      ], { encoding: 'utf8' })
       return JSON.parse(stdout.trim())
     } catch {
       return []
+    }
+  })
+
+  ipcMain.handle('set-audio-device', async (_event, deviceId: string) => {
+    if (process.platform !== 'win32') return { success: false }
+    try {
+      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'set',
+        '-DeviceId', deviceId
+      ])
+      preferredAudioDeviceId = deviceId
+      return { success: true }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
     }
   })
 
@@ -312,7 +330,33 @@ export function registerIpcHandlers(
     if (process.platform !== 'win32') return { success: false }
     try {
       const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
-      // Get current default before switching
+
+      // If user chose a preferred device in Settings, use it
+      if (preferredAudioDeviceId) {
+        // Save current default so we can restore later
+        const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath,
+          '-Action', 'get-default'
+        ])
+        const current = JSON.parse(defaultOut.trim())
+        if (!originalAudioDeviceId) originalAudioDeviceId = current.id
+
+        // Already set to preferred? Skip
+        if (current.id === preferredAudioDeviceId) {
+          return { success: true, device: current.name }
+        }
+
+        await execFileAsync('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath,
+          '-Action', 'set',
+          '-DeviceId', preferredAudioDeviceId
+        ])
+        return { success: true, device: preferredAudioDeviceId }
+      }
+
+      // Auto-detect: get current default before switching
       const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-File', scriptPath,

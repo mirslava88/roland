@@ -40,7 +40,7 @@ export function FileItem({
       }}
       onClick={onSelect}
       className={`
-        flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer
+        flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer
         transition-colors duration-100 select-none group
         ${isActive ? 'bg-accent/20 border border-accent/40' : ''}
         ${isSelected && !isActive ? 'bg-surface-100 border border-gray-700' : ''}
@@ -48,17 +48,17 @@ export function FileItem({
       `}
     >
       {isActive && (
-        <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
+        <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shrink-0" />
       )}
-      <span className="text-lg shrink-0">{TYPE_ICONS[file.type] || '📎'}</span>
+      <span className="text-sm shrink-0">{TYPE_ICONS[file.type] || '📎'}</span>
 
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-200 truncate">{file.name}</p>
-        <div className="flex items-center gap-2 mt-0.5">
-          <span className={`text-[10px] font-semibold uppercase ${TYPE_COLORS[file.type] || 'text-gray-500'}`}>
+        <p className="text-xs font-medium text-gray-200 truncate">{file.name}</p>
+        <div className="flex items-center gap-2">
+          <span className={`text-[9px] font-semibold uppercase ${TYPE_COLORS[file.type] || 'text-gray-500'}`}>
             {file.extension.replace('.', '')}
           </span>
-          <span className="text-[10px] text-gray-600">{formatSize(file.size)}</span>
+          <span className="text-[9px] text-gray-600">{formatSize(file.size)}</span>
         </div>
       </div>
       {onRename && (
