@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
@@ -49,6 +49,29 @@ const api = {
 
   generateDocPreview: (filePath: string): Promise<{ success: boolean; pdfPath?: string; error?: string }> =>
     ipcRenderer.invoke('generate-doc-preview', filePath),
+
+  hideTaskbar: (displayBounds: { x: number; y: number; width: number; height: number }): Promise<void> =>
+    ipcRenderer.invoke('hide-taskbar', displayBounds),
+
+  showTaskbar: (): Promise<void> =>
+    ipcRenderer.invoke('show-taskbar'),
+
+  getDrives: (): Promise<DriveInfo[]> => ipcRenderer.invoke('get-drives'),
+
+  renameFile: (filePath: string, newName: string): Promise<{ success: boolean; newPath?: string; error?: string }> =>
+    ipcRenderer.invoke('rename-file', filePath, newName),
+
+  copyFilesToFolder: (filePaths: string[], destFolder: string): Promise<{ success: boolean; name: string; error?: string }[]> =>
+    ipcRenderer.invoke('copy-files-to-folder', filePaths, destFolder),
+
+  deleteItems: (paths: string[], permanent: boolean): Promise<{ success: boolean; path: string; error?: string }[]> =>
+    ipcRenderer.invoke('delete-items', paths, permanent),
+
+  copyItemsToFolder: (srcPaths: string[], destFolder: string): Promise<{ success: boolean; name: string; error?: string }[]> =>
+    ipcRenderer.invoke('copy-items-to-folder', srcPaths, destFolder),
+
+  moveItem: (srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }> =>
+    ipcRenderer.invoke('move-item', srcPath, destFolder),
 
   showTimerOverlay: (displayId?: number) => ipcRenderer.invoke('show-timer-overlay', displayId),
 
@@ -129,6 +152,8 @@ const api = {
   signalReady: (): void => {
     ipcRenderer.send('presentation-ready')
   },
+
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
 
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]): void => {

@@ -12,6 +12,7 @@ interface FileItemGridProps {
   isSelected: boolean
   isActive: boolean
   onSelect: () => void
+  onRename?: () => void
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -25,7 +26,8 @@ export function FileItemGrid({
   file,
   isSelected,
   isActive,
-  onSelect
+  onSelect,
+  onRename
 }: FileItemGridProps): JSX.Element {
   const [thumbnail, setThumbnail] = useState<string | null>(null)
   const pptxThumbnailsMap = useAppStore((s) => s.pptxThumbnailsMap)
@@ -124,8 +126,17 @@ export function FileItemGrid({
           {file.extension.replace('.', '').toUpperCase()}
         </span>
       </div>
-      <div className="px-1.5 py-1 bg-surface-200">
+      <div className="px-1.5 py-1 bg-surface-200 relative group">
         <p className="text-[10px] text-gray-300 leading-tight break-words">{file.name}</p>
+        {onRename && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onRename() }}
+            className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white text-[8px] px-0.5 rounded hover:bg-white/10 transition-all"
+            title="Переименовать"
+          >
+            ✏️
+          </button>
+        )}
       </div>
     </div>
   )

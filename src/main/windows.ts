@@ -9,6 +9,7 @@ export function createControlWindow(): BrowserWindow {
     minHeight: 600,
     backgroundColor: '#11111b',
     title: 'Presentation Display Manager',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -18,6 +19,8 @@ export function createControlWindow(): BrowserWindow {
       backgroundThrottling: false
     }
   })
+
+  win.removeMenu()
 
   win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)

@@ -3,6 +3,7 @@ interface FileItemProps {
   isSelected: boolean
   isActive: boolean
   onSelect: () => void
+  onRename?: () => void
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -27,7 +28,8 @@ export function FileItem({
   file,
   isSelected,
   isActive,
-  onSelect
+  onSelect,
+  onRename
 }: FileItemProps): JSX.Element {
   return (
     <div
@@ -39,7 +41,7 @@ export function FileItem({
       onClick={onSelect}
       className={`
         flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer
-        transition-colors duration-100 select-none
+        transition-colors duration-100 select-none group
         ${isActive ? 'bg-accent/20 border border-accent/40' : ''}
         ${isSelected && !isActive ? 'bg-surface-100 border border-gray-700' : ''}
         ${!isSelected && !isActive ? 'border border-transparent hover:bg-surface-100/50' : ''}
@@ -59,6 +61,15 @@ export function FileItem({
           <span className="text-[10px] text-gray-600">{formatSize(file.size)}</span>
         </div>
       </div>
+      {onRename && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onRename() }}
+          className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white text-[10px] px-1 py-0.5 rounded hover:bg-white/10 transition-all shrink-0"
+          title="Переименовать"
+        >
+          ✏️
+        </button>
+      )}
     </div>
   )
 }

@@ -7,6 +7,37 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString()
 
+const EXT_TYPE_MAP: Record<string, FileEntry['type']> = {}
+;['.pptx', '.ppt'].forEach((e) => (EXT_TYPE_MAP[e] = 'presentation'))
+;['.pdf'].forEach((e) => (EXT_TYPE_MAP[e] = 'pdf'))
+;['.mp4', '.mov', '.avi', '.webm', '.mkv'].forEach((e) => (EXT_TYPE_MAP[e] = 'video'))
+;['.doc', '.docx', '.xls', '.xlsx', '.txt', '.rtf', '.odt', '.ods',
+  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg',
+  '.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'].forEach((e) => (EXT_TYPE_MAP[e] = 'other'))
+
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg'])
+const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'])
+
+function nativeFileToEntry(filePath: string): FileEntry | null {
+  const parts = filePath.replace(/\\/g, '/').split('/')
+  const fullName = parts.pop() || ''
+  const dotIdx = fullName.lastIndexOf('.')
+  const ext = dotIdx >= 0 ? fullName.substring(dotIdx).toLowerCase() : ''
+  const name = dotIdx >= 0 ? fullName.substring(0, dotIdx) : fullName
+  const type = EXT_TYPE_MAP[ext]
+  if (!type) return null
+  return {
+    id: `${fullName}-${Date.now()}`,
+    name,
+    path: filePath,
+    type,
+    extension: ext,
+    size: 0,
+    isImage: IMAGE_EXT.has(ext),
+    isAudio: AUDIO_EXT.has(ext)
+  }
+}
+
 export function PreviewPanel(): JSX.Element {
   const {
     channelA, channelB, liveChannel, selectedChannel, setSelectedChannel,
@@ -35,6 +66,8 @@ export function PreviewPanel(): JSX.Element {
       }
       if (channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio) {
         await window.api.closeExternalFile(channel.file.path)
+        // Restore taskbar that was hidden for Word/Excel
+        await window.api.showTaskbar()
       }
 
       // Show backdrop if set, otherwise close presentation window
@@ -150,8 +183,20 @@ export function PreviewPanel(): JSX.Element {
 
     // For 'other' non-image files (Word, Excel, etc.), open/restore on external display
     if (channel.file.type === 'other' && !channel.file.isImage) {
-      // Close presentation window if open — not needed for external apps
-      if (isPresentationWindowOpen) {
+      // Show backdrop on presentation window so it's visible when Word/Excel is minimized
+      const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      if (backdropImage) {
+        if (!isPresentationWindowOpen) {
+          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+          setPresentationWindowOpen(true)
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        window.api.sendToPresentation('load-content', {
+          type: 'backdrop',
+          path: backdropImage,
+          name: 'Backdrop'
+        })
+      } else if (isPresentationWindowOpen) {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
       }
@@ -160,6 +205,11 @@ export function PreviewPanel(): JSX.Element {
       // Minimize previous other file (different file) — don't close
       if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && prevActiveFile.path !== channel.file.path) {
         await window.api.minimizeExternalFile(prevActiveFile.path)
+      }
+      // Hide taskbar FIRST, wait for Windows to update work area, then position window
+      if (external) {
+        await window.api.hideTaskbar(external.bounds)
+        await new Promise((r) => setTimeout(r, 500))
       }
       // Try to restore; if not tracked yet, open fresh
       await window.api.restoreExternalFile(channel.file.path, external?.bounds)
@@ -257,24 +307,43 @@ function ChannelPanel({
 
   const handleDrop = async (e: React.DragEvent): Promise<void> => {
     e.preventDefault()
+    e.stopPropagation()
     setDragOver(false)
+
+    let file: FileEntry | null = null
+
+    // Try internal drag first
     try {
-      const file = JSON.parse(e.dataTransfer.getData('application/json')) as FileEntry
-      onDrop(file)
-      // Pre-generate thumbnails for PPTX
-      if (file.type === 'presentation') {
-        const result = await window.api.generatePptxThumbnails(file.path)
-        if (result.success && result.thumbnails) {
-          const { pptxThumbnailsMap } = useAppStore.getState()
-          useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [file.path]: result.thumbnails } })
-          if (result.slideCount) onSetTotalSlides(result.slideCount)
-        }
-      }
-      if (isLive) {
-        // Auto-take when dropping into the live channel
-        setTimeout(() => onTake(), 50)
+      const jsonData = e.dataTransfer.getData('application/json')
+      if (jsonData) {
+        file = JSON.parse(jsonData) as FileEntry
       }
     } catch { /* ignore */ }
+
+    // If no internal data, try native file drop from Windows Explorer
+    if (!file && e.dataTransfer.files.length > 0) {
+      const nativePath = window.api.getPathForFile(e.dataTransfer.files[0])
+      if (nativePath) {
+        file = nativeFileToEntry(nativePath)
+      }
+    }
+
+    if (!file) return
+
+    onDrop(file)
+    // Pre-generate thumbnails for PPTX
+    if (file.type === 'presentation') {
+      const result = await window.api.generatePptxThumbnails(file.path)
+      if (result.success && result.thumbnails) {
+        const { pptxThumbnailsMap } = useAppStore.getState()
+        useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [file.path]: result.thumbnails } })
+        if (result.slideCount) onSetTotalSlides(result.slideCount)
+      }
+    }
+    if (isLive) {
+      // Auto-take when dropping into the live channel
+      setTimeout(() => onTake(), 50)
+    }
   }
 
   const { isPresentationWindowOpen, activeFile: storeActiveFile } = useAppStore()

@@ -30,6 +30,15 @@ interface MusicState {
   playlistLength: number
 }
 
+interface DriveInfo {
+  name: string
+  root: string
+  label: string
+  totalSize: number
+  freeSize: number
+  isRemovable: boolean
+}
+
 interface Api {
   selectFolder(): Promise<string | null>
   loadFolder(folderPath: string): Promise<{ files: FileEntry[]; subfolders: { name: string; path: string }[] }>
@@ -50,6 +59,14 @@ interface Api {
   selectSoundFile(): Promise<string | null>
   moveFile(srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }>
   generateDocPreview(filePath: string): Promise<{ success: boolean; pdfPath?: string; error?: string }>
+  hideTaskbar(displayBounds: { x: number; y: number; width: number; height: number }): Promise<void>
+  showTaskbar(): Promise<void>
+  getDrives(): Promise<DriveInfo[]>
+  renameFile(filePath: string, newName: string): Promise<{ success: boolean; newPath?: string; error?: string }>
+  copyFilesToFolder(filePaths: string[], destFolder: string): Promise<{ success: boolean; name: string; error?: string }[]>
+  deleteItems(paths: string[], permanent: boolean): Promise<{ success: boolean; path: string; error?: string }[]>
+  copyItemsToFolder(srcPaths: string[], destFolder: string): Promise<{ success: boolean; name: string; error?: string }[]>
+  moveItem(srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }>
   showTimerOverlay(displayId?: number): Promise<void>
   hideTimerOverlay(): Promise<void>
   updateTimerOverlay(data: {
@@ -80,6 +97,7 @@ interface Api {
   closeExternalFile(filePath?: string): Promise<void>
   minimizeExternalFile(filePath?: string): Promise<void>
   restoreExternalFile(filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<void>
+  getPathForFile(file: File): string
   setActiveContentType(type: string): void
   sendToPresentation(channel: string, ...args: unknown[]): void
   sendToControl(channel: string, ...args: unknown[]): void

@@ -16,6 +16,22 @@ export default function App(): JSX.Element {
     setIsPlaying
   } = useAppStore()
 
+  // Enable native file drops from Windows Explorer:
+  // 1. dragover preventDefault — tells browser "this element accepts drops"
+  // 2. drop preventDefault — prevents Electron from navigating to the dropped file
+  // Both use ONLY preventDefault (NOT stopPropagation) so React handlers still fire.
+  // React synthetic event handlers fire BEFORE document-level handlers in bubble phase.
+  useEffect(() => {
+    const onDragOver = (e: DragEvent): void => { e.preventDefault() }
+    const onDrop = (e: DragEvent): void => { e.preventDefault() }
+    document.addEventListener('dragover', onDragOver)
+    document.addEventListener('drop', onDrop)
+    return () => {
+      document.removeEventListener('dragover', onDragOver)
+      document.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
   useEffect(() => {
     window.api.getDisplays().then(setDisplays)
 

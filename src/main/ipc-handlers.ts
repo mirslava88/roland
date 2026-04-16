@@ -1,14 +1,16 @@
 import { BrowserWindow, ipcMain, dialog, shell } from 'electron'
-import { readdir, stat, readFile, rename } from 'fs/promises'
+import { readdir, stat, readFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { existsSync } from 'fs'
 
 const execFileAsync = promisify(execFile)
 
 let originalAudioDeviceId: string | null = null
 // Map of file path -> { hwnd, pid } for tracking multiple external windows
 const externalFiles = new Map<string, { hwnd: number; pid: number }>()
+
 
 async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<void> {
   const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
@@ -117,13 +119,24 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('load-folder', async (_event, folderPath: string) => {
-    const entries = await readdir(folderPath)
+    let entries: string[]
+    try {
+      entries = await readdir(folderPath)
+    } catch {
+      return { files: [], subfolders: [] }
+    }
     const files: FileEntry[] = []
     const subfolders: { name: string; path: string }[] = []
 
     for (const entry of entries) {
       const fullPath = join(folderPath, entry)
-      const stats = await stat(fullPath)
+      let stats
+      try {
+        stats = await stat(fullPath)
+      } catch {
+        // Skip files/folders we can't access (permissions, system files)
+        continue
+      }
 
       if (stats.isDirectory()) {
         subfolders.push({ name: entry, path: fullPath })
@@ -425,6 +438,171 @@ export function registerIpcHandlers(
       return { success: true, newPath: destPath }
     } catch (error: unknown) {
       return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('hide-taskbar', async (_event, displayBounds: { x: number; y: number; width: number; height: number }) => {
+    if (process.platform !== 'win32') return
+    const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+    try {
+      await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'hide-taskbar',
+        '-X', String(displayBounds.x),
+        '-Y', String(displayBounds.y),
+        '-Width', String(displayBounds.width),
+        '-Height', String(displayBounds.height)
+      ], { timeout: 5000 })
+    } catch { /* ignore */ }
+  })
+
+  ipcMain.handle('show-taskbar', async () => {
+    if (process.platform !== 'win32') return
+    const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+    try {
+      await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
+        '-Action', 'show-taskbar'
+      ], { timeout: 5000 })
+    } catch { /* ignore */ }
+  })
+
+  ipcMain.handle('get-drives', async () => {
+    if (process.platform !== 'win32') return []
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-Command',
+        `Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root } | ForEach-Object {
+          $used = $_.Used; $free = $_.Free; $total = if ($used -ne $null -and $free -ne $null) { $used + $free } else { 0 }
+          [PSCustomObject]@{ Name=$_.Name; Root=$_.Root; Description=$_.Description; Used=$used; Free=$free; Total=$total; IsRemovable=($_.Root -ne $null) }
+        } | ConvertTo-Json -Compress`
+      ], { timeout: 5000 })
+      const parsed = JSON.parse(stdout.trim())
+      // Ensure array
+      const drives = Array.isArray(parsed) ? parsed : [parsed]
+      // Detect removable drives
+      const { stdout: wmiOut } = await execFileAsync('powershell.exe', [
+        '-Command',
+        `Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID, DriveType | ConvertTo-Json -Compress`
+      ], { timeout: 5000 })
+      const wmiParsed = JSON.parse(wmiOut.trim())
+      const wmiDrives = Array.isArray(wmiParsed) ? wmiParsed : [wmiParsed]
+      const removableSet = new Set(wmiDrives.filter((d: { DriveType: number }) => d.DriveType === 2).map((d: { DeviceID: string }) => d.DeviceID))
+
+      return drives.map((d: { Name: string; Root: string; Description: string; Total: number; Free: number }) => ({
+        name: d.Name,
+        root: d.Root,
+        label: d.Description || d.Name,
+        totalSize: d.Total || 0,
+        freeSize: d.Free || 0,
+        isRemovable: removableSet.has(d.Name + ':')
+      }))
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('rename-file', async (_event, filePath: string, newName: string) => {
+    try {
+      const dir = join(filePath, '..')
+      const ext = extname(filePath)
+      const newPath = join(dir, newName + ext)
+      if (existsSync(newPath)) {
+        return { success: false, error: 'Файл с таким именем уже существует' }
+      }
+      await rename(filePath, newPath)
+      return { success: true, newPath }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('copy-files-to-folder', async (_event, filePaths: string[], destFolder: string) => {
+    const results: { success: boolean; name: string; error?: string }[] = []
+    for (const srcPath of filePaths) {
+      try {
+        const name = basename(srcPath)
+        const destPath = join(destFolder, name)
+        await copyFile(srcPath, destPath)
+        results.push({ success: true, name })
+      } catch (error: unknown) {
+        results.push({ success: false, name: basename(srcPath), error: String(error) })
+      }
+    }
+    return results
+  })
+
+  // Delete to recycle bin (shell) or permanently (shift+del)
+  ipcMain.handle('delete-items', async (_event, paths: string[], permanent: boolean) => {
+    const results: { success: boolean; path: string; error?: string }[] = []
+    for (const itemPath of paths) {
+      try {
+        if (permanent) {
+          const s = await stat(itemPath)
+          if (s.isDirectory()) {
+            await rm(itemPath, { recursive: true, force: true })
+          } else {
+            await rm(itemPath)
+          }
+        } else {
+          // Move to recycle bin via shell
+          await shell.trashItem(itemPath)
+        }
+        results.push({ success: true, path: itemPath })
+      } catch (error: unknown) {
+        results.push({ success: false, path: itemPath, error: String(error) })
+      }
+    }
+    return results
+  })
+
+  // Copy folders recursively
+  ipcMain.handle('copy-items-to-folder', async (_event, srcPaths: string[], destFolder: string) => {
+    const results: { success: boolean; name: string; error?: string }[] = []
+    for (const srcPath of srcPaths) {
+      try {
+        const name = basename(srcPath)
+        const destPath = join(destFolder, name)
+        const s = await stat(srcPath)
+        if (s.isDirectory()) {
+          await cp(srcPath, destPath, { recursive: true })
+        } else {
+          await copyFile(srcPath, destPath)
+        }
+        results.push({ success: true, name })
+      } catch (error: unknown) {
+        results.push({ success: false, name: basename(srcPath), error: String(error) })
+      }
+    }
+    return results
+  })
+
+  // Move folder (rename across same drive)
+  ipcMain.handle('move-item', async (_event, srcPath: string, destFolder: string) => {
+    try {
+      const name = basename(srcPath)
+      const destPath = join(destFolder, name)
+      await rename(srcPath, destPath)
+      return { success: true, newPath: destPath }
+    } catch (error: unknown) {
+      // rename fails across drives — fall back to copy+delete
+      try {
+        const name = basename(srcPath)
+        const destPath = join(destFolder, name)
+        const s = await stat(srcPath)
+        if (s.isDirectory()) {
+          await cp(srcPath, destPath, { recursive: true })
+          await rm(srcPath, { recursive: true, force: true })
+        } else {
+          await copyFile(srcPath, destPath)
+          await rm(srcPath)
+        }
+        return { success: true, newPath: destPath }
+      } catch (err: unknown) {
+        return { success: false, error: String(err) }
+      }
     }
   })
 

@@ -78,6 +78,17 @@ async function autoSwitchAudioToExternal(): Promise<void> {
   }
 }
 
+function restoreTaskbar(): void {
+  try {
+    const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+    spawn('powershell.exe', [
+      '-ExecutionPolicy', 'Bypass',
+      '-File', scriptPath,
+      '-Action', 'show-taskbar'
+    ], { stdio: 'ignore', detached: true })
+  } catch { /* ignore */ }
+}
+
 function createWindows(): void {
   controlWindow = createControlWindow()
   registerIpcHandlers(controlWindow, () => presentationWindow)
@@ -90,6 +101,8 @@ function createWindows(): void {
     presentationWindow = null
     hideWpfTimer()
     closeAllExternalFiles()
+    // Restore taskbar visibility on exit
+    restoreTaskbar()
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       musicPlayerWindow.close()
     }
