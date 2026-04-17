@@ -289,12 +289,13 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы A / B</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы A / B / C / D</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Перетащите файл в канал A или B для подготовки</li>
-                  <li>Нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded">В эфир</code> чтобы вывести на внешний дисплей</li>
-                  <li>Два канала позволяют подготовить следующий контент пока текущий в эфире</li>
-                  <li>Для PPTX: навигация по слайдам стрелками или PageUp/PageDown</li>
+                  <li>Четыре канала в сетке 2×2 — можно заранее подготовить до 4 файлов</li>
+                  <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded">В эфир</code></li>
+                  <li>Активный канал подсвечен; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
+                  <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
+                  <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
                 </ul>
               </section>
 
@@ -328,14 +329,32 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">6. Кликер (глобальные клавиши)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Когда включен — стрелки и PageUp/PageDown работают глобально</li>
-                  <li>Используйте для переключения слайдов с помощью презентера (кликера)</li>
-                  <li>Отключите если нужно использовать стрелки в других приложениях</li>
+                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded">🎮 Кликер в эфире</code> — стрелки и PageUp/PageDown работают глобально (для презентера)</li>
+                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded">🎮 Кликер вне эфира</code> — клавиши работают только когда приложение в фокусе</li>
+                  <li>Переключается одним кликом по кнопке на панели инструментов</li>
                 </ul>
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">7. Горячие клавиши</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">7. Настройки — вкладка «Дисплеи»</h4>
+                <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li>Прямо из приложения: режим (Расширить / Дублировать / Только основной / Только внешний)</li>
+                  <li>Для каждого подключённого дисплея — выбор разрешения и частоты из выпадающего списка</li>
+                  <li>При подключении нового монитора автоматически включается режим «Расширить»</li>
+                  <li>Кнопка «Открыть системные настройки Windows» как резервный вариант</li>
+                </ul>
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">8. Настройки — вкладка «Аудиовыход»</h4>
+                <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li>Выбор устройства вывода звука (колонки, наушники, HDMI)</li>
+                  <li>При выводе контента на внешний дисплей звук автоматически переключается на выбранное устройство, а после — возвращается на исходное</li>
+                </ul>
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">9. Горячие клавиши</h4>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-gray-400 mt-2">
                   <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Ctrl+C</code> — Копировать</span>
                   <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Ctrl+X</code> — Вырезать</span>

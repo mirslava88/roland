@@ -4,6 +4,7 @@ import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync } from 'fs'
+import { scriptPath as resolveScript } from './paths'
 
 const execFileAsync = promisify(execFile)
 
@@ -14,7 +15,7 @@ const externalFiles = new Map<string, { hwnd: number; pid: number }>()
 
 
 async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<void> {
-  const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+  const scriptPath = resolveScript('manage-window.ps1')
 
   if (filePath) {
     const entry = externalFiles.get(filePath)
@@ -202,7 +203,7 @@ export function registerIpcHandlers(
     'launch-powerpoint',
     async (_event, filePath: string, _monitorIndex?: number) => {
       if (process.platform === 'win32') {
-        const scriptPath = join(__dirname, '../../scripts/powerpoint-control.ps1')
+        const scriptPath = resolveScript('powerpoint-control.ps1')
         try {
           const { stdout } = await execFileAsync('powershell.exe', [
             '-ExecutionPolicy', 'Bypass',
@@ -233,7 +234,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle('powerpoint-command', async (_event, command: string, arg?: number) => {
     if (process.platform === 'win32') {
-      const scriptPath = join(__dirname, '../../scripts/powerpoint-control.ps1')
+      const scriptPath = resolveScript('powerpoint-control.ps1')
       const args = [
         '-ExecutionPolicy', 'Bypass',
         '-File', scriptPath,
@@ -255,7 +256,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string) => {
     if (process.platform === 'win32') {
-      const scriptPath = join(__dirname, '../../scripts/powerpoint-control.ps1')
+      const scriptPath = resolveScript('powerpoint-control.ps1')
       try {
         const { stdout } = await execFileAsync('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
@@ -297,7 +298,7 @@ export function registerIpcHandlers(
   ipcMain.handle('get-audio-devices', async () => {
     if (process.platform !== 'win32') return []
     try {
-      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      const scriptPath = resolveScript('audio-control.ps1')
       const { stdout } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-Command',
@@ -312,7 +313,7 @@ export function registerIpcHandlers(
   ipcMain.handle('set-audio-device', async (_event, deviceId: string) => {
     if (process.platform !== 'win32') return { success: false }
     try {
-      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      const scriptPath = resolveScript('audio-control.ps1')
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-File', scriptPath,
@@ -329,7 +330,7 @@ export function registerIpcHandlers(
   ipcMain.handle('switch-audio-to-external', async () => {
     if (process.platform !== 'win32') return { success: false }
     try {
-      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      const scriptPath = resolveScript('audio-control.ps1')
 
       // If user chose a preferred device in Settings, use it
       if (preferredAudioDeviceId) {
@@ -390,7 +391,7 @@ export function registerIpcHandlers(
   ipcMain.handle('restore-audio-device', async () => {
     if (process.platform !== 'win32' || !originalAudioDeviceId) return
     try {
-      const scriptPath = join(__dirname, '../../scripts/audio-control.ps1')
+      const scriptPath = resolveScript('audio-control.ps1')
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-File', scriptPath,
@@ -403,7 +404,7 @@ export function registerIpcHandlers(
   ipcMain.handle('open-file-external', async (_event, filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
     try {
       if (displayBounds && process.platform === 'win32') {
-        const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+        const scriptPath = resolveScript('manage-window.ps1')
         const { stdout } = await execFileAsync('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
           '-File', scriptPath,
@@ -437,7 +438,7 @@ export function registerIpcHandlers(
     // If not tracked yet, open instead of restore
     if (filePath && !externalFiles.has(filePath)) {
       if (displayBounds && process.platform === 'win32') {
-        const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+        const scriptPath = resolveScript('manage-window.ps1')
         try {
           const { stdout } = await execFileAsync('powershell.exe', [
             '-ExecutionPolicy', 'Bypass',
@@ -487,7 +488,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle('hide-taskbar', async (_event, displayBounds: { x: number; y: number; width: number; height: number }) => {
     if (process.platform !== 'win32') return
-    const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+    const scriptPath = resolveScript('manage-window.ps1')
     try {
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
@@ -503,7 +504,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle('show-taskbar', async () => {
     if (process.platform !== 'win32') return
-    const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+    const scriptPath = resolveScript('manage-window.ps1')
     try {
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
@@ -652,7 +653,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle('generate-doc-preview', async (_event, filePath: string) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
-    const scriptPath = join(__dirname, '../../scripts/document-preview.ps1')
+    const scriptPath = resolveScript('document-preview.ps1')
     try {
       const { stdout } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',

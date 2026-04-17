@@ -43,21 +43,28 @@
     },
     "files": [
       "out/**/*",
-      "resources/**/*",
-      "scripts/**/*"
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": [
-        "portable"
-      ],
-      "icon": "resources/icons/icon.ico"
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
     },
     "forceCodeSigning": false,
     "mac": {
       "target": [
         "dmg"
-      ],
-      "icon": "resources/icons/icon.icns"
+      ]
     }
   }
 }

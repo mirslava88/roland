@@ -5,6 +5,7 @@ import { writeFileSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
 import { join } from 'path'
+import { scriptPath } from './paths'
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
@@ -19,13 +20,13 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
   if (wpfTimerProcess && !wpfTimerProcess.killed) return
   // Create the data file before spawning so the script can find it
   try { writeFileSync(wpfTimerDataFile, '{}') } catch {}
-  const scriptPath = join(__dirname, '../../scripts/timer-overlay.ps1')
+  const timerScript = scriptPath('timer-overlay.ps1')
   const posX = displayBounds.x + displayBounds.width - 320
   const posY = displayBounds.y + displayBounds.height - 120
   wpfTimerProcess = spawn('powershell.exe', [
     '-ExecutionPolicy', 'Bypass',
     '-STA',
-    '-File', scriptPath,
+    '-File', timerScript,
     '-X', String(posX),
     '-Y', String(posY),
     '-DataFile', wpfTimerDataFile
@@ -63,10 +64,10 @@ function ensureExtendDisplayMode(): void {
 
 function restoreTaskbar(): void {
   try {
-    const scriptPath = join(__dirname, '../../scripts/manage-window.ps1')
+    const mwScript = scriptPath('manage-window.ps1')
     spawn('powershell.exe', [
       '-ExecutionPolicy', 'Bypass',
-      '-File', scriptPath,
+      '-File', mwScript,
       '-Action', 'show-taskbar'
     ], { stdio: 'ignore', detached: true })
   } catch { /* ignore */ }
@@ -362,11 +363,11 @@ function createWindows(): void {
   ipcMain.handle('set-display-resolution', async (_event, deviceName: string, width: number, height: number, frequency?: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
     try {
-      const scriptPath = join(__dirname, '../../scripts/set-resolution.ps1')
+      const srScript = scriptPath('set-resolution.ps1')
       return await new Promise<{ success: boolean; error?: string }>((resolve) => {
         const args = [
           '-ExecutionPolicy', 'Bypass',
-          '-File', scriptPath,
+          '-File', srScript,
           '-DeviceName', deviceName,
           '-Width', String(width),
           '-Height', String(height)
@@ -388,12 +389,12 @@ function createWindows(): void {
   ipcMain.handle('get-display-modes', async () => {
     if (process.platform !== 'win32') return []
     try {
-      const scriptPath = join(__dirname, '../../scripts/get-display-modes.ps1')
+      const gdmScript = scriptPath('get-display-modes.ps1')
       return await new Promise<Array<{ deviceName: string; friendlyName: string; current: { width: number; height: number; frequency: number }; modes: Array<{ width: number; height: number; frequency: number }> }>>((resolve) => {
         let data = ''
         const child = spawn('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
-          '-File', scriptPath
+          '-File', gdmScript
         ], { stdio: ['ignore', 'pipe', 'ignore'] })
         child.stdout.on('data', (chunk) => { data += chunk.toString() })
         child.on('close', () => {
