@@ -27,22 +27,23 @@ function Open-Presentation {
     }
     $ppt.Visible = 1  # msoTrue
 
-    # Close all running slideshows and presentations first
+    # If a slideshow is already running, exit it quickly
     try {
-        while ($ppt.SlideShowWindows.Count -gt 0) {
+        if ($ppt.SlideShowWindows.Count -gt 0) {
             $ppt.SlideShowWindows(1).View.Exit()
-            Start-Sleep -Milliseconds 500
+            Start-Sleep -Milliseconds 200
         }
     } catch {}
 
+    # Close existing presentations
     try {
         while ($ppt.Presentations.Count -gt 0) {
             $ppt.Presentations(1).Close()
-            Start-Sleep -Milliseconds 300
+            Start-Sleep -Milliseconds 100
         }
     } catch {}
 
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 200
 
     $presentation = $ppt.Presentations.Open($Path)
 

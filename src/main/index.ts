@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync } from 'fs'
@@ -48,6 +48,18 @@ function sendToWpfTimer(data: unknown): void {
   try { writeFileSync(wpfTimerDataFile, JSON.stringify(data)) } catch {}
 }
 
+
+function ensureExtendDisplayMode(): void {
+  if (process.platform !== 'win32') return
+  // Run multiple times — Windows sometimes ignores the first call if the
+  // display is still being registered
+  const run = (): void => {
+    try { spawn('DisplaySwitch.exe', ['/extend'], { stdio: 'ignore', detached: true }) } catch { /* ignore */ }
+  }
+  run()
+  setTimeout(run, 800)
+  setTimeout(run, 2000)
+}
 
 function restoreTaskbar(): void {
   try {
@@ -136,7 +148,7 @@ function createWindows(): void {
       "document.getElementById('o').classList.remove('hide');document.getElementById('o').classList.add('show');"
     )
     // Wait for fade-in to complete
-    await new Promise((r) => setTimeout(r, 250))
+    await new Promise((r) => setTimeout(r, 100))
   })
 
   ipcMain.handle('hide-overlay', async () => {
@@ -145,7 +157,7 @@ function createWindows(): void {
         "document.getElementById('o').classList.remove('show');document.getElementById('o').classList.add('hide');"
       )
       // Wait for fade-out, then hide window
-      await new Promise((r) => setTimeout(r, 250))
+      await new Promise((r) => setTimeout(r, 100))
       if (overlayWindow && !overlayWindow.isDestroyed()) {
         overlayWindow.hide()
       }
@@ -324,12 +336,74 @@ function createWindows(): void {
 
   screen.on('display-added', () => {
     // Auto-extend display (instead of duplicate) when external monitor is connected
-    if (process.platform === 'win32') {
-      spawn('DisplaySwitch.exe', ['/extend'], { stdio: 'ignore' })
-    }
+    ensureExtendDisplayMode()
     sendDisplays()
   })
   screen.on('display-removed', sendDisplays)
+
+  ipcMain.handle('open-display-settings', () => {
+    if (process.platform === 'win32') {
+      shell.openExternal('ms-settings:display')
+    }
+  })
+
+  ipcMain.handle('set-display-mode', (_event, mode: 'internal' | 'clone' | 'extend' | 'external') => {
+    if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
+    const flag = { internal: '/internal', clone: '/clone', extend: '/extend', external: '/external' }[mode]
+    if (!flag) return { success: false, error: 'Invalid mode' }
+    try {
+      spawn('DisplaySwitch.exe', [flag], { stdio: 'ignore', detached: true })
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('set-display-resolution', async (_event, deviceName: string, width: number, height: number, frequency?: number) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
+    try {
+      const scriptPath = join(__dirname, '../../scripts/set-resolution.ps1')
+      return await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        const args = [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath,
+          '-DeviceName', deviceName,
+          '-Width', String(width),
+          '-Height', String(height)
+        ]
+        if (frequency && frequency > 0) {
+          args.push('-Frequency', String(frequency))
+        }
+        const child = spawn('powershell.exe', args, { stdio: 'ignore' })
+        child.on('close', (code) => {
+          resolve(code === 0 ? { success: true } : { success: false, error: `ChangeDisplaySettings returned ${code}` })
+        })
+        child.on('error', (err) => resolve({ success: false, error: String(err) }))
+      })
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('get-display-modes', async () => {
+    if (process.platform !== 'win32') return []
+    try {
+      const scriptPath = join(__dirname, '../../scripts/get-display-modes.ps1')
+      return await new Promise<Array<{ deviceName: string; friendlyName: string; current: { width: number; height: number; frequency: number }; modes: Array<{ width: number; height: number; frequency: number }> }>>((resolve) => {
+        let data = ''
+        const child = spawn('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath
+        ], { stdio: ['ignore', 'pipe', 'ignore'] })
+        child.stdout.on('data', (chunk) => { data += chunk.toString() })
+        child.on('close', () => {
+          try { resolve(JSON.parse(data || '[]')) }
+          catch { resolve([]) }
+        })
+        child.on('error', () => resolve([]))
+      })
+    } catch { return [] }
+  })
 
   ipcMain.on('set-active-content-type', (_event, type: string) => {
     activeContentType = type
@@ -397,7 +471,7 @@ app.whenReady().then(() => {
   if (process.platform === 'win32') {
     const displays = screen.getAllDisplays()
     if (displays.length > 1) {
-      spawn('DisplaySwitch.exe', ['/extend'], { stdio: 'ignore' })
+      ensureExtendDisplayMode()
     }
   }
 

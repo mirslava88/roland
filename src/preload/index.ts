@@ -8,6 +8,16 @@ const api = {
 
   getDisplays: () => ipcRenderer.invoke('get-displays'),
 
+  openDisplaySettings: () => ipcRenderer.invoke('open-display-settings'),
+
+  setDisplayMode: (mode: 'internal' | 'clone' | 'extend' | 'external') =>
+    ipcRenderer.invoke('set-display-mode', mode),
+
+  getDisplayModes: () => ipcRenderer.invoke('get-display-modes'),
+
+  setDisplayResolution: (deviceName: string, width: number, height: number, frequency?: number) =>
+    ipcRenderer.invoke('set-display-resolution', deviceName, width, height, frequency),
+
   openPresentationWindow: (displayId?: number) =>
     ipcRenderer.invoke('open-presentation-window', displayId),
 

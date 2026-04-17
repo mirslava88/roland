@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { useAppStore, ChannelState } from '../../stores/useAppStore'
+import { useAppStore, ChannelState, ChannelId, CHANNEL_IDS } from '../../stores/useAppStore'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -40,15 +40,22 @@ function nativeFileToEntry(filePath: string): FileEntry | null {
 
 export function PreviewPanel(): JSX.Element {
   const {
-    channelA, channelB, liveChannel, selectedChannel, setSelectedChannel,
+    channelA, channelB, channelC, channelD, liveChannel, selectedChannel, setSelectedChannel,
     setChannelFile, setChannelSlide, setChannelTotalSlides,
     isPresentationWindowOpen, setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
     pptxThumbnailsMap
   } = useAppStore()
 
-  const handleClear = async (ch: 'A' | 'B'): Promise<void> => {
-    const channel = ch === 'A' ? channelA : channelB
+  const channels: Record<ChannelId, ChannelState> = {
+    A: channelA,
+    B: channelB,
+    C: channelC,
+    D: channelD
+  }
+
+  const handleClear = async (ch: ChannelId): Promise<void> => {
+    const channel = channels[ch]
     // Reset saved slide position so next open starts from slide 1
     if (channel.file) {
       const { slidePositions } = useAppStore.getState()
@@ -58,22 +65,47 @@ export function PreviewPanel(): JSX.Element {
     }
     // If this channel is live, close the presentation
     if (liveChannel === ch && channel.file) {
-      if (channel.file.type === 'presentation') {
+      const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      const isPptx = channel.file.type === 'presentation'
+      const isExternalDoc = channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio
+      const isAudio = channel.file.type === 'other' && channel.file.isAudio
+      // PPTX / Word / Excel run outside Electron — we must cover the external
+      // display with the Electron window BEFORE closing them, so desktop
+      // never flashes.
+      const needsCover = isPptx || isExternalDoc
+
+      if (needsCover) {
+        if (!isPresentationWindowOpen) {
+          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+          setPresentationWindowOpen(true)
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        if (backdropImage) {
+          window.api.sendToPresentation('load-content', {
+            type: 'backdrop',
+            path: backdropImage,
+            name: 'Backdrop'
+          })
+        }
+      }
+
+      // Close underlying content
+      if (isPptx) {
         await window.api.powerpointCommand('close')
       }
-      if (channel.file.type === 'other' && channel.file.isAudio) {
+      if (isAudio) {
         await window.api.musicStop()
       }
-      if (channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio) {
+      if (isExternalDoc) {
         await window.api.closeExternalFile(channel.file.path)
-        // Restore taskbar that was hidden for Word/Excel
         await window.api.showTaskbar()
       }
 
-      // Show backdrop if set, otherwise close presentation window
-      const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      // Decide final state of the presentation window:
+      // - with backdrop: show backdrop (for any content type)
+      // - without backdrop: close the window entirely
       if (backdropImage) {
-        if (!isPresentationWindowOpen) {
+        if (!isPresentationWindowOpen && !needsCover) {
           await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
           setPresentationWindowOpen(true)
           await new Promise((r) => setTimeout(r, 300))
@@ -83,9 +115,11 @@ export function PreviewPanel(): JSX.Element {
           path: backdropImage,
           name: 'Backdrop'
         })
-      } else if (isPresentationWindowOpen) {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
+      } else {
+        if (useAppStore.getState().isPresentationWindowOpen) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+        }
       }
 
       setActiveFile(null)
@@ -94,10 +128,10 @@ export function PreviewPanel(): JSX.Element {
     setChannelFile(ch, null)
   }
 
-  const handleTake = async (ch: 'A' | 'B'): Promise<void> => {
+  const handleTake = async (ch: ChannelId): Promise<void> => {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
-    const channel = ch === 'A' ? freshState.channelA : freshState.channelB
+    const channel = freshState[`channel${ch}` as const]
     if (!channel.file) return
 
     // Save previous active file before overwriting
@@ -116,14 +150,19 @@ export function PreviewPanel(): JSX.Element {
 
     if (channel.file.type === 'presentation') {
       window.api.setActiveContentType('presentation')
-      // Close Electron presentation window and switch audio in parallel
-      const parallelTasks: Promise<unknown>[] = [window.api.switchAudioToExternal()]
-      if (isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
-        parallelTasks.push(window.api.closePresentationWindow().then(() => setPresentationWindowOpen(false)))
+      // Switch audio if coming from non-PPTX content
+      if (prevActiveFile?.type !== 'presentation') {
+        window.api.switchAudioToExternal() // fire-and-forget, don't await
       }
-      await Promise.all(parallelTasks)
 
+      // Launch PowerPoint FIRST (while presentation window still covers the screen)
       const result = await window.api.launchPowerPoint(channel.file.path)
+
+      // NOW close the Electron presentation window — PowerPoint slideshow is already visible
+      if (isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
       if (result.success && result.output) {
         try {
           const data = JSON.parse(result.output)
@@ -149,11 +188,14 @@ export function PreviewPanel(): JSX.Element {
     }
 
     // PDF / Video / Other — close PowerPoint and switch audio in parallel
-    const parallelTasks: Promise<unknown>[] = [window.api.switchAudioToExternal()]
-    if (prevActiveFile?.type === 'presentation') {
-      parallelTasks.push(window.api.powerpointCommand('close'))
+    const parallelTasks2: Promise<unknown>[] = []
+    if (prevActiveFile?.type !== channel.file.type) {
+      parallelTasks2.push(window.api.switchAudioToExternal())
     }
-    await Promise.all(parallelTasks)
+    if (prevActiveFile?.type === 'presentation') {
+      parallelTasks2.push(window.api.powerpointCommand('close'))
+    }
+    if (parallelTasks2.length > 0) await Promise.all(parallelTasks2)
 
     // Audio files — play in built-in music player + show backdrop
     if (channel.file.type === 'other' && channel.file.isAudio) {
@@ -237,7 +279,7 @@ export function PreviewPanel(): JSX.Element {
   // Listen for take-channel events from Toolbar's Open Output button
   useEffect(() => {
     const handler = (e: Event): void => {
-      const ch = (e as CustomEvent).detail as 'A' | 'B'
+      const ch = (e as CustomEvent).detail as ChannelId
       handleTake(ch)
     }
     window.addEventListener('take-channel', handler)
@@ -245,40 +287,32 @@ export function PreviewPanel(): JSX.Element {
   })
 
   return (
-    <div className="flex-1 flex gap-2 overflow-hidden p-3">
-      <ChannelPanel
-        label="A"
-        channel={channelA}
-        isLive={liveChannel === 'A'}
-        isSelected={selectedChannel === 'A'}
-        onDrop={(file) => setChannelFile('A', file)}
-        onSlideChange={(s) => setChannelSlide('A', s)}
-        onSetTotalSlides={(t) => setChannelTotalSlides('A', t)}
-        onSelect={() => setSelectedChannel('A')}
-        onTake={() => handleTake('A')}
-        onClear={() => handleClear('A')}
-        pptxThumbnails={channelA.file ? pptxThumbnailsMap[channelA.file.path] || [] : []}
-      />
-
-      <ChannelPanel
-        label="B"
-        channel={channelB}
-        isLive={liveChannel === 'B'}
-        isSelected={selectedChannel === 'B'}
-        onDrop={(file) => setChannelFile('B', file)}
-        onSlideChange={(s) => setChannelSlide('B', s)}
-        onSetTotalSlides={(t) => setChannelTotalSlides('B', t)}
-        onSelect={() => setSelectedChannel('B')}
-        onTake={() => handleTake('B')}
-        onClear={() => handleClear('B')}
-        pptxThumbnails={channelB.file ? pptxThumbnailsMap[channelB.file.path] || [] : []}
-      />
+    <div className="flex-1 grid grid-cols-2 grid-rows-2 gap-2 overflow-hidden p-3">
+      {CHANNEL_IDS.map((id) => {
+        const channel = channels[id]
+        return (
+          <ChannelPanel
+            key={id}
+            label={id}
+            channel={channel}
+            isLive={liveChannel === id}
+            isSelected={selectedChannel === id}
+            onDrop={(file) => setChannelFile(id, file)}
+            onSlideChange={(s) => setChannelSlide(id, s)}
+            onSetTotalSlides={(t) => setChannelTotalSlides(id, t)}
+            onSelect={() => setSelectedChannel(id)}
+            onTake={() => handleTake(id)}
+            onClear={() => handleClear(id)}
+            pptxThumbnails={channel.file ? pptxThumbnailsMap[channel.file.path] || [] : []}
+          />
+        )
+      })}
     </div>
   )
 }
 
 interface ChannelPanelProps {
-  label: string
+  label: ChannelId
   channel: ChannelState
   isLive: boolean
   isSelected: boolean
@@ -295,6 +329,13 @@ function ChannelPanel({
   label, channel, isLive, isSelected, onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, onClear, pptxThumbnails
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
+  const [slideInput, setSlideInput] = useState('')
+  const [slideFocused, setSlideFocused] = useState(false)
+
+  // Keep input synced with channel.slide when not being edited
+  useEffect(() => {
+    if (!slideFocused) setSlideInput(String(channel.slide))
+  }, [channel.slide, slideFocused])
 
   const handleDragOver = (e: React.DragEvent): void => {
     e.preventDefault()
@@ -414,9 +455,40 @@ function ChannelPanel({
           >
             ◀
           </button>
-          <span className="text-[10px] text-gray-400 tabular-nums min-w-[40px] text-center">
-            {channel.slide}{channel.totalSlides > 0 ? ` / ${channel.totalSlides}` : ''}
-          </span>
+          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+            <input
+              type="number"
+              min={1}
+              max={channel.totalSlides || undefined}
+              value={slideInput}
+              onClick={(e) => { e.stopPropagation(); (e.target as HTMLInputElement).select() }}
+              onFocus={(e) => { setSlideFocused(true); e.target.select() }}
+              onDoubleClick={(e) => e.stopPropagation()}
+              onChange={(e) => setSlideInput(e.target.value)}
+              onBlur={() => {
+                const n = parseInt(slideInput, 10)
+                if (!isNaN(n) && n >= 1 && (channel.totalSlides === 0 || n <= channel.totalSlides)) {
+                  onSlideChange(n)
+                } else {
+                  setSlideInput(String(channel.slide))
+                }
+                setSlideFocused(false)
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                if (e.key === 'Escape') {
+                  setSlideInput(String(channel.slide))
+                  ;(e.target as HTMLInputElement).blur()
+                }
+              }}
+              className="w-12 text-[10px] text-center bg-surface-100 border border-gray-600 focus:border-accent rounded px-1 py-0.5 text-white tabular-nums outline-none"
+              title="Введите номер слайда и нажмите Enter"
+            />
+            {channel.totalSlides > 0 && (
+              <span className="text-[10px] text-gray-500 tabular-nums">/ {channel.totalSlides}</span>
+            )}
+          </div>
           <button
             onClick={(e) => { e.stopPropagation(); if (channel.totalSlides === 0 || channel.slide < channel.totalSlides) onSlideChange(channel.slide + 1) }}
             onDoubleClick={(e) => e.stopPropagation()}

@@ -43,6 +43,16 @@ interface Api {
   selectFolder(): Promise<string | null>
   loadFolder(folderPath: string): Promise<{ files: FileEntry[]; subfolders: { name: string; path: string }[] }>
   getDisplays(): Promise<DisplayInfo[]>
+  openDisplaySettings(): Promise<void>
+  setDisplayMode(mode: 'internal' | 'clone' | 'extend' | 'external'): Promise<{ success: boolean; error?: string }>
+  getDisplayModes(): Promise<Array<{
+    deviceName: string
+    friendlyName: string
+    isPrimary: boolean
+    current: { width: number; height: number; frequency: number }
+    modes: Array<{ width: number; height: number; frequency: number }>
+  }>>
+  setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number): Promise<void>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>

@@ -67,8 +67,8 @@ export function Toolbar(): JSX.Element {
     } else {
       // If a channel is selected, take it
       if (selectedChannel) {
-        const ch = selectedChannel === 'A' ? 'channelA' : 'channelB'
-        const channel = useAppStore.getState()[ch]
+        const key = `channel${selectedChannel}` as const
+        const channel = useAppStore.getState()[key]
         if (channel.file) {
           window.dispatchEvent(new CustomEvent('take-channel', { detail: selectedChannel }))
           return
@@ -151,10 +151,10 @@ export function Toolbar(): JSX.Element {
             ? 'bg-yellow-600/80 hover:bg-yellow-600 text-white border-transparent'
             : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
         }`}
-        title={globalHookEnabled ? 'Кликер активен — нажмите для отключения' : 'Включить кликер'}
+        title={globalHookEnabled ? 'Кликер активен — нажмите для отключения' : 'Кликер выключен — нажмите для включения'}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        🎮 {globalHookEnabled ? 'Кликер ВКЛ' : 'Кликер'}
+        🎮 {globalHookEnabled ? 'Кликер в эфире' : 'Кликер вне эфира'}
       </button>
 
       <button

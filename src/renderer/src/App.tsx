@@ -71,7 +71,7 @@ export default function App(): JSX.Element {
         if (activeFile.type === 'presentation') {
           // Get total from channel if top-level not set
           const state = useAppStore.getState()
-          const ch = state.liveChannel === 'A' ? state.channelA : state.liveChannel === 'B' ? state.channelB : null
+          const ch = state.liveChannel ? state[`channel${state.liveChannel}` as const] : null
           const total = totalSlides || ch?.totalSlides || 0
           // Don't go past the last slide (would exit slideshow)
           if (direction === 'next' && total > 0 && currentSlide >= total) return

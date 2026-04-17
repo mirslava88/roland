@@ -388,7 +388,7 @@ export function FileLibrary(): JSX.Element {
       <div className="w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
         <div className="p-3 border-b border-gray-800">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-bold text-gray-400 uppercase">Проводник</span>
+            <span className="text-xs font-bold text-gray-400 uppercase">Выбор презентаций</span>
             <button
               onClick={handleOpenFolder}
               className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-surface-100 transition-colors"
@@ -405,7 +405,7 @@ export function FileLibrary(): JSX.Element {
               onClick={() => handleNavigateToDrive(drive)}
               className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors duration-100 select-none border border-transparent hover:bg-surface-100/50"
             >
-              <span className="text-lg shrink-0">{drive.isRemovable ? '🔌' : '💾'}</span>
+              <span className="text-lg shrink-0">{drive.isRemovable ? (<svg className="w-5 h-5 inline" viewBox="0 0 24 24" fill="currentColor"><path d="M8 2a2 2 0 0 0-2 2v1H5a2 2 0 0 0-2 2v12a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3V7a2 2 0 0 0-2-2h-1V4a2 2 0 0 0-2-2H8zm0 2h8v1H8V4zm-1 3h10a1 1 0 0 1 1 1v11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a1 1 0 0 1 1-1zm2 3a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1H9z"/></svg>) : (<svg className="w-5 h-5 inline" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="16" x2="21" y2="16" stroke="currentColor" strokeWidth="1.5" opacity="0.2"/><circle cx="18" cy="19" r="1" fill="#4ade80"/></svg>)}</span>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-200 truncate">
                   {drive.label || `Диск ${drive.name}`} ({drive.name}:)
@@ -439,6 +439,16 @@ export function FileLibrary(): JSX.Element {
   return (
     <div className="w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
       <div className="p-3 border-b border-gray-800">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-bold text-gray-400 uppercase">Выбор презентаций</span>
+          <button
+            onClick={handleOpenFolder}
+            className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-surface-100 transition-colors"
+            title="Открыть папку"
+          >
+            📂 Обзор
+          </button>
+        </div>
         <div className="flex gap-1 bg-surface-400 rounded-lg p-0.5 mb-2">
           {FILTERS.map((f) => (
             <button
@@ -461,11 +471,30 @@ export function FileLibrary(): JSX.Element {
             className="text-[11px] text-gray-400 hover:text-white transition-colors px-1 py-0.5 rounded hover:bg-surface-100"
             title="Все диски"
           >
-            💾
+            <svg className="w-3.5 h-3.5 inline" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="16" x2="21" y2="16" stroke="currentColor" strokeWidth="1.5" opacity="0.2"/><circle cx="18" cy="19" r="1" fill="#4ade80"/></svg>
           </button>
-          <span className="text-[10px] text-gray-500 truncate flex-1" title={folderPath}>
-            {currentFolderName}
-          </span>
+          <div className="text-[10px] text-gray-500 truncate flex-1" title={folderPath}>
+            {(() => {
+              if (!folderPath) return null
+              // Split path into segments: "C:\Users\mirslava" -> ["C:", "Users", "mirslava"]
+              const segments = folderPath.split(/[\\/]/).filter(Boolean)
+              return segments.map((seg, i) => {
+                const segPath = segments.slice(0, i + 1).join('\\') + (i === 0 ? '\\' : '')
+                const isLast = i === segments.length - 1
+                return (
+                  <span key={i}>
+                    {i > 0 && <span className="text-gray-600 mx-px">\</span>}
+                    <span
+                      onClick={(e) => { e.stopPropagation(); if (!isLast) navigateToPath(segPath) }}
+                      className={isLast ? 'text-gray-400' : 'text-gray-500 hover:text-white cursor-pointer hover:underline'}
+                    >
+                      {seg}
+                    </span>
+                  </span>
+                )
+              })
+            })()}
+          </div>
         </div>
         {copyFeedback && (
           <div className="text-[10px] text-accent mb-1 animate-pulse">{copyFeedback}</div>
