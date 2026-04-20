@@ -25,8 +25,8 @@ const api = {
 
   checkPowerPoint: (): Promise<boolean> => ipcRenderer.invoke('check-powerpoint'),
 
-  launchPowerPoint: (filePath: string, monitorIndex?: number) =>
-    ipcRenderer.invoke('launch-powerpoint', filePath, monitorIndex),
+  launchPowerPoint: (filePath: string, monitorIndex?: number, startSlide?: number) =>
+    ipcRenderer.invoke('launch-powerpoint', filePath, monitorIndex, startSlide),
 
   powerpointCommand: (command: string, arg?: number) =>
     ipcRenderer.invoke('powerpoint-command', command, arg),
@@ -34,12 +34,19 @@ const api = {
   generatePptxThumbnails: (filePath: string) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath),
 
+  generatePptxSlides: (filePath: string, width?: number, height?: number) =>
+    ipcRenderer.invoke('generate-pptx-slides', filePath, width, height),
+
   readFile: (filePath: string): Promise<ArrayBuffer> =>
     ipcRenderer.invoke('read-file', filePath),
 
-  showOverlay: (displayId?: number) => ipcRenderer.invoke('show-overlay', displayId),
+  showOverlay: (displayId?: number, freezeImageDataUrl?: string, imagePath?: string) =>
+    ipcRenderer.invoke('show-overlay', displayId, freezeImageDataUrl, imagePath),
 
   hideOverlay: () => ipcRenderer.invoke('hide-overlay'),
+
+  captureDisplay: (displayId?: number): Promise<string | null> =>
+    ipcRenderer.invoke('capture-display', displayId),
 
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
 
@@ -142,6 +149,9 @@ const api = {
   musicSeek: (time: number): Promise<void> => ipcRenderer.invoke('music-seek', time),
 
   musicGetState: (): Promise<MusicState | null> => ipcRenderer.invoke('music-get-state'),
+
+  selectVideoFiles: (): Promise<string[] | null> => ipcRenderer.invoke('select-video-files'),
+  selectVideoFolder: (): Promise<string[] | null> => ipcRenderer.invoke('select-video-folder'),
 
   openFileExternal: (filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('open-file-external', filePath, displayBounds),

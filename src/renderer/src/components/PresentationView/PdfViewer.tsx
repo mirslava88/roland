@@ -16,6 +16,7 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [totalPages, setTotalPages] = useState(0)
+  const renderTokenRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -45,28 +46,51 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
     async (pageNum: number) => {
       if (!pdf || !canvasRef.current) return
 
+      // Reassigning canvas.width/height clears the canvas to transparent —
+      // if we do that BEFORE await page.render() resolves, the audience sees
+      // a black frame for 100-300ms on first view of a page (pdf.js decodes
+      // on first touch, cached afterwards). Render to an offscreen canvas
+      // first, keeping the visible canvas showing the PREVIOUS page the
+      // whole time, then swap dimensions+content in one synchronous step.
+      const token = ++renderTokenRef.current
       const page = await pdf.getPage(pageNum)
-      const canvas = canvasRef.current
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
+      if (token !== renderTokenRef.current) return
 
       const containerWidth = window.innerWidth
       const containerHeight = window.innerHeight
       const viewport = page.getViewport({ scale: 1 })
-
-      const scaleX = containerWidth / viewport.width
-      const scaleY = containerHeight / viewport.height
-      const scale = Math.min(scaleX, scaleY)
-
+      const scale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
       const scaledViewport = page.getViewport({ scale })
 
-      canvas.width = scaledViewport.width
-      canvas.height = scaledViewport.height
+      const off = document.createElement('canvas')
+      off.width = scaledViewport.width
+      off.height = scaledViewport.height
+      const offCtx = off.getContext('2d')
+      if (!offCtx) return
 
-      await page.render({
-        canvasContext: ctx,
-        viewport: scaledViewport
-      }).promise
+      await page.render({ canvasContext: offCtx, viewport: scaledViewport }).promise
+      if (token !== renderTokenRef.current) return
+
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+
+      canvas.width = off.width
+      canvas.height = off.height
+      ctx.drawImage(off, 0, 0)
+      // drawImage writes the canvas backing store, but the compositor needs
+      // 1–2 frames before the new pixels actually reach the screen. If we
+      // fire content-ready synchronously, the overlay starts its 150ms fade
+      // while the canvas is still showing the OLD page, producing a brief
+      // visible swap through the partially-faded overlay. Wait two rAFs so
+      // the new frame is committed before telling the control window it's
+      // safe to lift the cover.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.api.sendToControl('presentation-content-ready')
+        })
+      })
     },
     [pdf]
   )
@@ -74,6 +98,18 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
   useEffect(() => {
     renderPage(currentPage)
   }, [currentPage, renderPage])
+
+  // Реагируем на изменение startSlide когда файл уже загружен (тот же PDF
+  // активируется из другого канала с заранее выставленным слайдом).
+  // Load-effect выше зависит только от filePath и не сработает для одного
+  // и того же пути.
+  useEffect(() => {
+    if (!pdf || !startSlide) return
+    if (startSlide < 1 || startSlide > totalPages) return
+    if (startSlide === currentPage) return
+    setCurrentPage(startSlide)
+    window.api.sendToControl('slide-info', { current: startSlide, total: totalPages })
+  }, [startSlide, pdf, totalPages])
 
   useEffect(() => {
     const unsubNavigate = window.api.on('navigate-slide', (...args: unknown[]) => {

@@ -78,8 +78,8 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
     width,
     height,
     frame: false,
-    transparent: true,
-    backgroundColor: '#00000000',
+    transparent: false,
+    backgroundColor: '#000000',
     alwaysOnTop: true,
     skipTaskbar: true,
     focusable: false,
@@ -90,26 +90,23 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
     }
   })
 
+  // Highest standard z-order so PowerPoint slideshow can't pop above it.
+  win.setAlwaysOnTop(true, 'screen-saver')
   win.setMenuBarVisibility(false)
   win.setIgnoreMouseEvents(true)
 
+  // Solid black page; shown opaque instantly on show(), quick fade on hide.
+  // Optional <img id="f"> holds a "freeze-frame" screenshot during seamless
+  // channel switches — the audience keeps seeing the previous slide while
+  // PowerPoint swaps behind it.
   const html = `<html><head><style>
-    body { margin:0; background:transparent; }
-    .overlay {
-      position:fixed; inset:0; background:#000;
-      opacity:0; transition: opacity 0.2s ease-in-out;
-    }
-    .overlay.show { opacity:1; }
-    .overlay.hide { opacity:0; }
+    html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+    .overlay { position:fixed; inset:0; background:#000; opacity:1; }
+    .overlay.hide { opacity:0; transition: opacity 0.15s ease-out; }
+    #f { position:absolute; inset:0; width:100%; height:100%; object-fit:contain;
+         display:none; user-select:none; -webkit-user-drag:none; }
   </style></head><body>
-    <div class="overlay" id="o"></div>
-    <script>
-      window.addEventListener('message', e => {
-        const el = document.getElementById('o');
-        if (e.data === 'fade-in') { el.classList.remove('hide'); el.classList.add('show'); }
-        if (e.data === 'fade-out') { el.classList.remove('show'); el.classList.add('hide'); }
-      });
-    </script>
+    <div class="overlay" id="o"><img id="f" /></div>
   </body></html>`
 
   win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)

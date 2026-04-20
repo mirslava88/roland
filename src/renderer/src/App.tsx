@@ -59,42 +59,49 @@ export default function App(): JSX.Element {
       void data
     })
 
-    let isNavigating = false
+    let pendingNavCount = 0
 
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
-      if (isNavigating) return
-      isNavigating = true
-      try {
-        const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
-        if (!activeFile) return
+      const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
+      if (!activeFile) return
 
-        if (activeFile.type === 'presentation') {
-          // Get total from channel if top-level not set
-          const state = useAppStore.getState()
-          const ch = state.liveChannel ? state[`channel${state.liveChannel}` as const] : null
-          const total = totalSlides || ch?.totalSlides || 0
-          // Don't go past the last slide (would exit slideshow)
-          if (direction === 'next' && total > 0 && currentSlide >= total) return
-          if (direction === 'prev' && currentSlide <= 1) return
-          const result = await window.api.powerpointCommand(direction === 'next' ? 'next' : 'prev')
+      if (activeFile.type === 'presentation') {
+        const state = useAppStore.getState()
+        const ch = state.liveChannel ? state[`channel${state.liveChannel}` as const] : null
+        const total = totalSlides || ch?.totalSlides || 0
+        // Don't go past the last slide (would exit slideshow)
+        if (direction === 'next' && total > 0 && currentSlide >= total) return
+        if (direction === 'prev' && currentSlide <= 1) return
+
+        // Optimistic UI update — instant feedback.
+        const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
+        useAppStore.getState().setCurrentSlide(optimistic)
+
+        // Reconcile with real slide index from PowerPoint.
+        // Only the LAST in a rapid burst reconciles — avoids UI bouncing
+        // when user clicks faster than PPT responds.
+        pendingNavCount++
+        window.api.powerpointCommand(direction === 'next' ? 'next' : 'prev').then((result) => {
+          pendingNavCount--
+          if (pendingNavCount > 0) return
           if (result.success && result.output) {
             try {
               const data = JSON.parse(result.output)
-              if (data.CurrentSlide) useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+              if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+                useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+              }
             } catch { /* ignore */ }
           }
-        } else if (activeFile.type === 'pdf') {
-          const isNext = direction === 'next'
-          const newSlide = isNext
-            ? Math.min(currentSlide + 1, totalSlides || currentSlide + 1)
-            : Math.max(currentSlide - 1, 1)
-          if (newSlide !== currentSlide) {
-            useAppStore.getState().setCurrentSlide(newSlide)
-            window.api.sendToPresentation('navigate-slide', newSlide)
-          }
+        }).catch(() => { pendingNavCount-- })
+      } else if (activeFile.type === 'pdf') {
+        const isNext = direction === 'next'
+        const newSlide = isNext
+          ? Math.min(currentSlide + 1, totalSlides || currentSlide + 1)
+          : Math.max(currentSlide - 1, 1)
+        if (newSlide !== currentSlide) {
+          useAppStore.getState().setCurrentSlide(newSlide)
+          window.api.sendToPresentation('navigate-slide', newSlide)
         }
-      } finally {
-        isNavigating = false
       }
     }
 

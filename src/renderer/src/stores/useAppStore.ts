@@ -2,14 +2,39 @@ import { create } from 'zustand'
 
 export type ContentType = 'presentation' | 'pdf' | 'video' | 'other' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
-export type ChannelId = 'A' | 'B' | 'C' | 'D'
+export type ChannelId = string
 
-export const CHANNEL_IDS: ChannelId[] = ['A', 'B', 'C', 'D']
+export const CHANNELS_PER_PAGE = 4
+
+// 0 -> 'A' ... 25 -> 'Z' ... 26 -> 'AA' ... 27 -> 'AB'
+export function channelIdFromIndex(i: number): ChannelId {
+  let n = i
+  let result = ''
+  while (true) {
+    result = String.fromCharCode(65 + (n % 26)) + result
+    n = Math.floor(n / 26) - 1
+    if (n < 0) break
+  }
+  return result
+}
 
 export interface ChannelState {
   file: FileEntry | null
   slide: number
   totalSlides: number
+}
+
+const EMPTY_CHANNEL: ChannelState = { file: null, slide: 1, totalSlides: 0 }
+
+function makeInitialChannels(): { channels: Record<ChannelId, ChannelState>; channelIds: ChannelId[] } {
+  const channelIds: ChannelId[] = []
+  const channels: Record<ChannelId, ChannelState> = {}
+  for (let i = 0; i < CHANNELS_PER_PAGE; i++) {
+    const id = channelIdFromIndex(i)
+    channelIds.push(id)
+    channels[id] = { ...EMPTY_CHANNEL }
+  }
+  return { channels, channelIds }
 }
 
 export interface SubfolderEntry {
@@ -33,15 +58,15 @@ interface AppState {
   slidePositions: Record<string, number>
   pptxThumbnails: string[]
   pptxThumbnailsMap: Record<string, string[]>
+  pptxSlidesMap: Record<string, string[]>
   displays: DisplayInfo[]
   selectedDisplayId: number | null
   backdropImage: string | null
   globalHookEnabled: boolean
 
-  channelA: ChannelState
-  channelB: ChannelState
-  channelC: ChannelState
-  channelD: ChannelState
+  channels: Record<ChannelId, ChannelState>
+  channelIds: ChannelId[]
+  currentChannelPage: number
   liveChannel: ChannelId | null
   selectedChannel: ChannelId | null
 
@@ -50,6 +75,9 @@ interface AppState {
   setChannelSlide: (ch: ChannelId, slide: number) => void
   setChannelTotalSlides: (ch: ChannelId, total: number) => void
   setLiveChannel: (ch: ChannelId) => void
+  addChannelPage: () => void
+  removeChannelPage: (page: number) => void
+  setCurrentChannelPage: (page: number) => void
 
   setPptxThumbnails: (thumbnails: string[]) => void
   setFolderPath: (path: string | null) => void
@@ -76,6 +104,18 @@ interface AppState {
   musicPlaylist: string[]
   setMusicPlaylist: (files: string[]) => void
 
+  // Video playlist — plays in presentation window, auto-advance on 'ended'
+  videoPlaylist: string[]
+  videoCurrentIndex: number
+  videoIsPlaying: boolean
+  videoLoopTrack: boolean
+  videoLoopPlaylist: boolean
+  setVideoPlaylist: (files: string[]) => void
+  setVideoCurrentIndex: (idx: number) => void
+  setVideoIsPlaying: (playing: boolean) => void
+  setVideoLoopTrack: (v: boolean) => void
+  setVideoLoopPlaylist: (v: boolean) => void
+
   // Timer
   timerDuration: number // total seconds set
   timerRemaining: number // seconds remaining (negative = overtime)
@@ -95,7 +135,9 @@ interface AppState {
   setTimerOverlayScale: (scale: number) => void
 }
 
-export const useAppStore = create<AppState>((set, get) => ({
+export const useAppStore = create<AppState>((set, get) => {
+  const initial = makeInitialChannels()
+  return {
   folderPath: null,
   rootFolderPath: null,
   subfolders: [],
@@ -111,35 +153,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   slidePositions: {},
   pptxThumbnails: [],
   pptxThumbnailsMap: {},
+  pptxSlidesMap: {},
   displays: [],
   selectedDisplayId: null,
   backdropImage: null,
   globalHookEnabled: true,
 
-  channelA: { file: null, slide: 1, totalSlides: 0 },
-  channelB: { file: null, slide: 1, totalSlides: 0 },
-  channelC: { file: null, slide: 1, totalSlides: 0 },
-  channelD: { file: null, slide: 1, totalSlides: 0 },
+  channels: initial.channels,
+  channelIds: initial.channelIds,
+  currentChannelPage: 0,
   liveChannel: null,
   selectedChannel: null,
 
   setSelectedChannel: (ch) => set({ selectedChannel: ch }),
+
   setChannelFile: (ch, file) => {
-    const key = `channel${ch}` as const
-    const { slidePositions } = get()
+    const { channels, slidePositions } = get()
     const saved = file ? slidePositions[file.path] || 1 : 1
-    set({ [key]: { file, slide: saved, totalSlides: 0 } })
+    set({
+      channels: { ...channels, [ch]: { file, slide: saved, totalSlides: 0 } }
+    })
   },
 
   setChannelSlide: (ch, slide) => {
-    const key = `channel${ch}` as const
-    const channel = get()[key]
-    const { slidePositions, liveChannel } = get()
+    const { channels, slidePositions, liveChannel } = get()
+    const channel = channels[ch]
+    if (!channel) return
     if (channel.file) {
       slidePositions[channel.file.path] = slide
     }
-    const updates: Partial<AppState> = { [key]: { ...channel, slide }, slidePositions: { ...slidePositions } }
-    // Sync currentSlide if this is the live channel
+    const updates: Partial<AppState> = {
+      channels: { ...channels, [ch]: { ...channel, slide } },
+      slidePositions: { ...slidePositions }
+    }
     if (liveChannel === ch) {
       updates.currentSlide = slide
     }
@@ -147,17 +193,67 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setChannelTotalSlides: (ch, total) => {
-    const key = `channel${ch}` as const
-    const channel = get()[key]
-    set({ [key]: { ...channel, totalSlides: total } })
+    const { channels } = get()
+    const channel = channels[ch]
+    if (!channel) return
+    set({ channels: { ...channels, [ch]: { ...channel, totalSlides: total } } })
   },
 
   setLiveChannel: (ch) => {
-    const key = `channel${ch}` as const
-    const channel = get()[key]
-    if (channel.file) {
+    const { channels } = get()
+    const channel = channels[ch]
+    if (channel?.file) {
       set({ liveChannel: ch, activeFile: channel.file, currentSlide: channel.slide })
     }
+  },
+
+  addChannelPage: () => {
+    const { channels, channelIds } = get()
+    const startIdx = channelIds.length
+    const newChannels = { ...channels }
+    const newIds = [...channelIds]
+    for (let i = 0; i < CHANNELS_PER_PAGE; i++) {
+      const id = channelIdFromIndex(startIdx + i)
+      newIds.push(id)
+      newChannels[id] = { ...EMPTY_CHANNEL }
+    }
+    const newPage = Math.floor(startIdx / CHANNELS_PER_PAGE)
+    set({ channels: newChannels, channelIds: newIds, currentChannelPage: newPage })
+  },
+
+  removeChannelPage: (page) => {
+    const { channels, channelIds, currentChannelPage, liveChannel, selectedChannel } = get()
+    const totalPages = Math.ceil(channelIds.length / CHANNELS_PER_PAGE)
+    // Can't remove last remaining page (always keep at least one)
+    if (totalPages <= 1) return
+    const start = page * CHANNELS_PER_PAGE
+    const pageIds = channelIds.slice(start, start + CHANNELS_PER_PAGE)
+    // Only remove if all channels on that page are empty
+    const hasFiles = pageIds.some((id) => channels[id]?.file)
+    if (hasFiles) return
+    // Don't orphan live/selected channel
+    if (liveChannel && pageIds.includes(liveChannel)) return
+    const newIds = [...channelIds.slice(0, start), ...channelIds.slice(start + CHANNELS_PER_PAGE)]
+    const newChannels = { ...channels }
+    for (const id of pageIds) delete newChannels[id]
+    let newPage = currentChannelPage
+    if (newPage >= Math.ceil(newIds.length / CHANNELS_PER_PAGE)) {
+      newPage = Math.max(0, Math.ceil(newIds.length / CHANNELS_PER_PAGE) - 1)
+    }
+    const newSelected = selectedChannel && pageIds.includes(selectedChannel) ? null : selectedChannel
+    set({
+      channels: newChannels,
+      channelIds: newIds,
+      currentChannelPage: newPage,
+      selectedChannel: newSelected
+    })
+  },
+
+  setCurrentChannelPage: (page) => {
+    const { channelIds } = get()
+    const totalPages = Math.ceil(channelIds.length / CHANNELS_PER_PAGE)
+    const clamped = Math.max(0, Math.min(page, totalPages - 1))
+    set({ currentChannelPage: clamped })
   },
 
   setPptxThumbnails: (thumbnails) => {
@@ -212,11 +308,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setCurrentSlide: (slide) => {
     const state = get()
-    const { liveChannel } = state
+    const { liveChannel, channels } = state
     const updates: Partial<AppState> = { currentSlide: slide }
-    if (liveChannel) {
-      const key = `channel${liveChannel}` as const
-      updates[key] = { ...state[key], slide }
+    if (liveChannel && channels[liveChannel]) {
+      updates.channels = { ...channels, [liveChannel]: { ...channels[liveChannel], slide } }
     }
     set(updates)
   },
@@ -242,6 +337,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Music
   musicPlaylist: [],
   setMusicPlaylist: (files) => set({ musicPlaylist: files }),
+
+  // Video playlist
+  videoPlaylist: [],
+  videoCurrentIndex: 0,
+  videoIsPlaying: false,
+  videoLoopTrack: false,
+  videoLoopPlaylist: true,
+  setVideoPlaylist: (files) => set({ videoPlaylist: files }),
+  setVideoCurrentIndex: (idx) => set({ videoCurrentIndex: idx }),
+  setVideoIsPlaying: (playing) => set({ videoIsPlaying: playing }),
+  setVideoLoopTrack: (v) => set({ videoLoopTrack: v }),
+  setVideoLoopPlaylist: (v) => set({ videoLoopPlaylist: v }),
 
   // Timer
   timerDuration: 0,
@@ -269,4 +376,5 @@ export const useAppStore = create<AppState>((set, get) => ({
   setTimerSoundWarning: (path) => set({ timerSoundWarning: path }),
   setTimerOverlayPosition: (pos) => set({ timerOverlayPosition: pos }),
   setTimerOverlayScale: (scale) => set({ timerOverlayScale: scale })
-}))
+  }
+})

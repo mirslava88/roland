@@ -1,15 +1,18 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync } from 'fs'
+import { readFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
 import { join } from 'path'
 import { scriptPath } from './paths'
+import { pptDaemon } from './powerpoint-daemon'
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
 let overlayWindow: BrowserWindow | null = null
+let overlayRaiseTimer: NodeJS.Timeout | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
 let musicPlayerWindow: BrowserWindow | null = null
@@ -132,7 +135,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('show-overlay', async (_event, displayId?: number) => {
+  ipcMain.handle('show-overlay', async (_event, displayId?: number, freezeImageDataUrl?: string, imagePath?: string) => {
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
@@ -140,28 +143,138 @@ function createWindows(): void {
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
 
+    // Hybrid mode: caller can pass a file path instead of a data URL. Read
+    // the PNG from disk and inline it so the overlay renderer (sandboxed
+    // data: URL page) can display it without file:// access.
+    let overlayImage = freezeImageDataUrl
+    if (!overlayImage && imagePath) {
+      try {
+        const buf = await readFile(imagePath)
+        const ext = imagePath.toLowerCase()
+        const mime = ext.endsWith('.jpg') || ext.endsWith('.jpeg') ? 'image/jpeg' : 'image/png'
+        overlayImage = `data:${mime};base64,${buf.toString('base64')}`
+      } catch { /* fall through to black overlay */ }
+    }
+
+    // Create overlay once and keep it persistently shown at screen-saver level
+    // with win.setOpacity(0). All further visibility toggles are instant OS
+    // opacity changes — no window show/hide animations, no black frame flash.
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       overlayWindow = createOverlayWindow(targetDisplay!)
+      await new Promise<void>((resolve) => {
+        const w = overlayWindow!
+        let done = false
+        const finish = (): void => { if (!done) { done = true; resolve() } }
+        if (!w.webContents.isLoading()) { finish() }
+        else {
+          w.webContents.once('did-finish-load', finish)
+          setTimeout(finish, 2000)
+        }
+      })
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+      overlayWindow.setIgnoreMouseEvents(true)
+      overlayWindow.setOpacity(0)
+      overlayWindow.showInactive()
     }
     overlayWindow.setBounds(targetDisplay!.bounds)
-    overlayWindow.show()
-    overlayWindow.webContents.executeJavaScript(
-      "document.getElementById('o').classList.remove('hide');document.getElementById('o').classList.add('show');"
-    )
-    // Wait for fade-in to complete
-    await new Promise((r) => setTimeout(r, 100))
+    // Native opacity must be 0 BEFORE showInactive(), otherwise the window
+    // pops in opaque for one frame showing the black body bg (the #o div is
+    // still at CSS opacity:0 from the previous .hide class) before the
+    // imgJs below runs and decodes the new image. That one frame == flicker.
+    overlayWindow.setOpacity(0)
+    if (!overlayWindow.isVisible()) overlayWindow.showInactive()
+
+    // Preload & decode the freeze image WHILE overlay is still invisible —
+    // guarantees the first visible frame already contains the image.
+    // CRITICAL: remove the `.hide` CSS class that hide-overlay added last
+    // time. Without this, the overlay div stays at opacity:0 on every
+    // subsequent show, so the freeze frame is INVISIBLE and PowerPoint's
+    // raw transition shows through.
+    // Also wait two rAF ticks so the decoded image is actually composited
+    // into the renderer's back buffer before the native window flips opaque.
+    const imgJs = overlayImage
+      ? `(async () => {
+           var o=document.getElementById('o');
+           if (o) o.classList.remove('hide');
+           var f=document.getElementById('f');
+           f.style.display='block';
+           f.src=${JSON.stringify(overlayImage)};
+           try { await f.decode(); } catch {}
+           f.getBoundingClientRect();
+           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+           return true;
+         })()`
+      : `(async () => {
+           var o=document.getElementById('o');
+           if (o) o.classList.remove('hide');
+           var f=document.getElementById('f'); f.src=''; f.style.display='none';
+           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+           return true;
+         })()`
+    try {
+      await overlayWindow.webContents.executeJavaScript(imgJs)
+    } catch { /* ignore */ }
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+    overlayWindow.moveTop()
+    overlayWindow.setOpacity(1)
+    console.log(`[MAIN ${Date.now()}] overlay opacity=1 (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
+
+    // PowerPoint's slideshow window is also TOPMOST. When Run() activates a
+    // new slideshow, Windows puts it above the overlay inside the topmost
+    // group. Reassert Z-order every tick while the overlay is visible so
+    // PowerPoint's transition (old-exit → new-run) stays HIDDEN behind us.
+    // The daemon also clears WS_EX_TOPMOST on the new slideshow window
+    // immediately after Run(), closing the race window.
+    if (overlayRaiseTimer) { clearInterval(overlayRaiseTimer); overlayRaiseTimer = null }
+    overlayRaiseTimer = setInterval(() => {
+      if (!overlayWindow || overlayWindow.isDestroyed()) return
+      try {
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+        overlayWindow.moveTop()
+      } catch { /* ignore */ }
+    }, 5)
+  })
+
+  // Grab a screenshot of the target display so the renderer can show it
+  // as a "freeze-frame" inside the overlay during a channel switch.
+  ipcMain.handle('capture-display', async (_event, displayId?: number): Promise<string | null> => {
+    try {
+      const displays = screen.getAllDisplays()
+      const primaryDisplay = screen.getPrimaryDisplay()
+      const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
+      const targetDisplay = displayId
+        ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
+        : externalDisplay || primaryDisplay
+      const { width, height } = targetDisplay.size
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width, height }
+      })
+      const idx = displays.indexOf(targetDisplay)
+      const source =
+        sources.find((s) => s.display_id === String(targetDisplay.id)) ||
+        sources[idx] ||
+        sources[0]
+      if (!source || source.thumbnail.isEmpty()) return null
+      return source.thumbnail.toDataURL()
+    } catch {
+      return null
+    }
   })
 
   ipcMain.handle('hide-overlay', async () => {
+    if (overlayRaiseTimer) { clearInterval(overlayRaiseTimer); overlayRaiseTimer = null }
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.webContents.executeJavaScript(
-        "document.getElementById('o').classList.remove('show');document.getElementById('o').classList.add('hide');"
-      )
-      // Wait for fade-out, then hide window
-      await new Promise((r) => setTimeout(r, 100))
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.hide()
-      }
+      // КРИТИЧНО: НЕ звать overlayWindow.hide(). Окно должно оставаться
+      // native-visible (с нулевой opacity) весь жизненный цикл. hide() даёт
+      // WM_SHOWWINDOW-транзишен + освобождение/переаллокацию DWM-surface,
+      // и пока окно скрыто, Electron теряет screen-saver Z-order над PP —
+      // PP slideshow (WS_EX_TOPMOST) успевает прорисоваться поверх до
+      // следующего showInactive(). Это и есть вспышка при PPTX→PPTX.
+      // setOpacity(0) — GPU-level композитная прозрачность, окно остаётся
+      // в иерархии, Z-order непрерывно доминирует над PP всё время.
+      console.log(`[MAIN ${Date.now()}] hide-overlay: opacity=0 (stay native-visible)`)
+      overlayWindow.setOpacity(0)
     }
   })
 
@@ -309,6 +422,39 @@ function createWindows(): void {
       return await musicPlayerWindow.webContents.executeJavaScript('window._getState()')
     }
     return null
+  })
+
+  // --- Video playlist: file dialogs only. Playback happens in the presentation
+  // window via existing load-content + VideoViewer flow (control-side state
+  // in useAppStore). ---
+  ipcMain.handle('select-video-files', async () => {
+    const result = await dialog.showOpenDialog(controlWindow!, {
+      properties: ['openFile', 'multiSelections'],
+      title: 'Выберите видеофайлы',
+      filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths
+  })
+
+  ipcMain.handle('select-video-folder', async () => {
+    const result = await dialog.showOpenDialog(controlWindow!, {
+      properties: ['openDirectory'],
+      title: 'Выберите папку с видео'
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    const folderPath = result.filePaths[0]
+    const { readdir } = require('fs/promises')
+    const { join, extname } = require('path')
+    const entries = await readdir(folderPath)
+    const videoExts = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.m4v']
+    const files: string[] = []
+    for (const entry of entries) {
+      if (videoExts.includes(extname(entry).toLowerCase())) {
+        files.push(join(folderPath, entry))
+      }
+    }
+    return files.length > 0 ? files : null
   })
 
   ipcMain.handle('get-displays', () => {
@@ -494,4 +640,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  void pptDaemon.shutdown()
 })

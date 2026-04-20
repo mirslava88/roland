@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { useAppStore, ChannelState, ChannelId, CHANNEL_IDS } from '../../stores/useAppStore'
+import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE } from '../../stores/useAppStore'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -40,22 +40,26 @@ function nativeFileToEntry(filePath: string): FileEntry | null {
 
 export function PreviewPanel(): JSX.Element {
   const {
-    channelA, channelB, channelC, channelD, liveChannel, selectedChannel, setSelectedChannel,
+    channels, channelIds, currentChannelPage,
+    liveChannel, selectedChannel, setSelectedChannel,
     setChannelFile, setChannelSlide, setChannelTotalSlides,
     isPresentationWindowOpen, setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
+    addChannelPage, removeChannelPage, setCurrentChannelPage,
     pptxThumbnailsMap
   } = useAppStore()
 
-  const channels: Record<ChannelId, ChannelState> = {
-    A: channelA,
-    B: channelB,
-    C: channelC,
-    D: channelD
-  }
+  const totalPages = Math.max(1, Math.ceil(channelIds.length / CHANNELS_PER_PAGE))
+  const pageStart = currentChannelPage * CHANNELS_PER_PAGE
+  const pageIds = channelIds.slice(pageStart, pageStart + CHANNELS_PER_PAGE)
+  const liveChannelPage = liveChannel
+    ? Math.floor(channelIds.indexOf(liveChannel) / CHANNELS_PER_PAGE)
+    : -1
+  const currentPageIsEmpty = pageIds.every((id) => !channels[id]?.file)
 
   const handleClear = async (ch: ChannelId): Promise<void> => {
     const channel = channels[ch]
+    if (!channel) return
     // Reset saved slide position so next open starts from slide 1
     if (channel.file) {
       const { slidePositions } = useAppStore.getState()
@@ -69,27 +73,19 @@ export function PreviewPanel(): JSX.Element {
       const isPptx = channel.file.type === 'presentation'
       const isExternalDoc = channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio
       const isAudio = channel.file.type === 'other' && channel.file.isAudio
-      // PPTX / Word / Excel run outside Electron — we must cover the external
-      // display with the Electron window BEFORE closing them, so desktop
-      // never flashes.
+      // PPTX / Word / Excel run outside Electron. The Electron presentation
+      // window is NOT topmost — when PowerPoint's slideshow exits via
+      // View.Exit(), its editor window can pop above and flash on the
+      // external display. We use the screen-saver-level overlay (same one
+      // handleTake uses for channel switches) to reliably hide everything
+      // underneath while we tear down external content.
       const needsCover = isPptx || isExternalDoc
 
       if (needsCover) {
-        if (!isPresentationWindowOpen) {
-          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-          setPresentationWindowOpen(true)
-          await new Promise((r) => setTimeout(r, 300))
-        }
-        if (backdropImage) {
-          window.api.sendToPresentation('load-content', {
-            type: 'backdrop',
-            path: backdropImage,
-            name: 'Backdrop'
-          })
-        }
+        await window.api.showOverlay(selectedDisplayId ?? undefined)
       }
 
-      // Close underlying content
+      // Close underlying content (hidden behind overlay)
       if (isPptx) {
         await window.api.powerpointCommand('close')
       }
@@ -105,7 +101,7 @@ export function PreviewPanel(): JSX.Element {
       // - with backdrop: show backdrop (for any content type)
       // - without backdrop: close the window entirely
       if (backdropImage) {
-        if (!isPresentationWindowOpen && !needsCover) {
+        if (!useAppStore.getState().isPresentationWindowOpen) {
           await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
           setPresentationWindowOpen(true)
           await new Promise((r) => setTimeout(r, 300))
@@ -115,11 +111,17 @@ export function PreviewPanel(): JSX.Element {
           path: backdropImage,
           name: 'Backdrop'
         })
+        // Give the renderer a moment to paint the backdrop before dropping the overlay
+        if (needsCover) await new Promise((r) => setTimeout(r, 150))
       } else {
         if (useAppStore.getState().isPresentationWindowOpen) {
           await window.api.closePresentationWindow()
           setPresentationWindowOpen(false)
         }
+      }
+
+      if (needsCover) {
+        await window.api.hideOverlay()
       }
 
       setActiveFile(null)
@@ -131,14 +133,72 @@ export function PreviewPanel(): JSX.Element {
   const handleTake = async (ch: ChannelId): Promise<void> => {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
-    const channel = freshState[`channel${ch}` as const]
-    if (!channel.file) return
+    const channel = freshState.channels[ch]
+    if (!channel?.file) return
 
     // Save previous active file before overwriting
     const prevActiveFile = freshState.activeFile
 
-    // Show overlay during transition
-    await window.api.showOverlay()
+    const T0 = performance.now()
+    const log = (step: string): void => console.log(`[TAKE ${(performance.now() - T0).toFixed(0)}ms] ${step}`)
+    log(`BEGIN prev=${prevActiveFile?.type} next=${channel.file.type} slide=${channel.slide}`)
+
+    const isPptxToPptx =
+      prevActiveFile?.type === 'presentation' && channel.file.type === 'presentation'
+    // Same-file PPTX→PPTX: PowerPoint handles this as an instant GotoSlide on
+    // the already-running slideshow (no Run(), no teardown). There is nothing
+    // to mask — showing an overlay only creates its own visible flicker as it
+    // appears/disappears with PNG renders that don't pixel-match PP's live
+    // DirectWrite output. Skip the overlay entirely in this case.
+    const isSameFilePptx =
+      isPptxToPptx &&
+      prevActiveFile?.type === 'presentation' &&
+      channel.file.type === 'presentation' &&
+      prevActiveFile.path === channel.file.path
+    // PPTX→PPTX (different file): capture current display so the overlay
+    // appears holding the EXACT pixels that were on screen a moment ago —
+    // no visible content cut when the overlay fades in. The pre-rendered
+    // PNG path (pptxSlidesMap) used to cover this case, but PP's own
+    // Slide.Export renders through a different pipeline (GDI+) than the
+    // live slideshow (DirectWrite), so during the 150ms hide-fade the
+    // AA/hinting shift produced a faint but visible flicker. Matching the
+    // PDF→PDF pattern: two real screen captures cross-fading have nothing
+    // to misalign. pptxSlidesMap is still generated in the background and
+    // used for the preview panel — just not wired into the overlay.
+    let freezeFrame: string | null = null
+    if (isPptxToPptx && !isSameFilePptx) {
+      const { selectedDisplayId } = freshState
+      try {
+        freezeFrame = await window.api.captureDisplay(selectedDisplayId ?? undefined)
+        log(`pptx→pptx freezeFrame: captureDisplay returned ${freezeFrame ? 'image' : 'null'}`)
+      } catch { /* fall back to black overlay */ }
+    }
+
+    // Non-PPTX transitions where prev content was rendered in the Electron
+    // presentation window (PDF / video / image). Capture the current display
+    // so the overlay shows a still of the old content instead of a black
+    // rectangle — matches the seamless PPTX→PPTX look. Skipped when prev is
+    // PPTX (overlay covers PP teardown; black is fine there) or when there
+    // is no prev content at all (black is the correct starting state).
+    const prevIsPresentationWindowContent =
+      prevActiveFile &&
+      (prevActiveFile.type === 'pdf' ||
+        prevActiveFile.type === 'video' ||
+        (prevActiveFile.type === 'other' && (prevActiveFile.isImage || prevActiveFile.isAudio)))
+    if (!isPptxToPptx && prevIsPresentationWindowContent && !freezeFrame) {
+      const { selectedDisplayId } = freshState
+      try {
+        freezeFrame = await window.api.captureDisplay(selectedDisplayId ?? undefined)
+        log(`non-pptx freezeFrame: captureDisplay returned ${freezeFrame ? 'image' : 'null'}`)
+      } catch { /* fall back to black overlay */ }
+    }
+
+    if (!isSameFilePptx) {
+      await window.api.showOverlay(undefined, freezeFrame || undefined)
+      log('overlay opaque (showOverlay returned)')
+    } else {
+      log('same-file PPTX: skipping overlay (PP GotoSlide is instant)')
+    }
 
     setActiveFile(channel.file)
     setLiveChannel(ch)
@@ -155,8 +215,13 @@ export function PreviewPanel(): JSX.Element {
         window.api.switchAudioToExternal() // fire-and-forget, don't await
       }
 
-      // Launch PowerPoint FIRST (while presentation window still covers the screen)
-      const result = await window.api.launchPowerPoint(channel.file.path)
+      // Launch PowerPoint FIRST (while overlay still covers the screen).
+      // Pass target slide so the daemon starts the slideshow directly at it —
+      // no slide-1 flash before jumping.
+      const targetSlide = channel.slide > 1 ? channel.slide : undefined
+      log('launchPowerPoint: BEGIN')
+      const result = await window.api.launchPowerPoint(channel.file.path, undefined, targetSlide)
+      log(`launchPowerPoint: END success=${result.success}`)
 
       // NOW close the Electron presentation window — PowerPoint slideshow is already visible
       if (isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
@@ -169,10 +234,7 @@ export function PreviewPanel(): JSX.Element {
           if (data.SlideCount) {
             setTotalSlides(data.SlideCount)
             setChannelTotalSlides(ch, data.SlideCount)
-            if (channel.slide > 1) {
-              await window.api.powerpointCommand('goto', channel.slide)
-            }
-            setCurrentSlide(channel.slide)
+            setCurrentSlide(data.CurrentSlide || channel.slide)
           }
         } catch { /* ignore */ }
       }
@@ -183,7 +245,24 @@ export function PreviewPanel(): JSX.Element {
           useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file!.path]: thumbResult.thumbnails } })
         }
       })
-      await window.api.hideOverlay()
+      // Pre-render full-resolution slides for future zero-flicker switches
+      const pptxPath = channel.file.path
+      const { pptxSlidesMap: existingSlides } = useAppStore.getState()
+      if (!existingSlides[pptxPath]) {
+        window.api.generatePptxSlides(pptxPath).then((slidesResult) => {
+          if (slidesResult.success && slidesResult.slides) {
+            const { pptxSlidesMap } = useAppStore.getState()
+            useAppStore.setState({ pptxSlidesMap: { ...pptxSlidesMap, [pptxPath]: slidesResult.slides } })
+          }
+        })
+      }
+      if (!isSameFilePptx) {
+        log('pre-fade wait 250ms')
+        await new Promise((r) => setTimeout(r, 250))
+        log('hideOverlay: BEGIN')
+        await window.api.hideOverlay()
+        log('hideOverlay: END (overlay window hidden)')
+      }
       return
     }
 
@@ -264,6 +343,23 @@ export function PreviewPanel(): JSX.Element {
       await new Promise((r) => setTimeout(r, 300))
     }
 
+    // Subscribe BEFORE sending load-content so we can't miss the signal.
+    // PdfViewer emits 'presentation-content-ready' after its first drawImage;
+    // <img> elements (backdrop / other-image) emit it from onLoad. Video
+    // currently has no emitter, so the timeout fallback catches it.
+    const contentReady = new Promise<void>((resolve) => {
+      const unsub = window.api.on('presentation-content-ready', () => {
+        log('content-ready received')
+        unsub()
+        resolve()
+      })
+      setTimeout(() => {
+        log('content-ready TIMEOUT (2000ms)')
+        unsub()
+        resolve()
+      }, 2000)
+    })
+
     window.api.sendToPresentation('load-content', {
       type: channel.file.type,
       path: channel.file.path,
@@ -272,7 +368,7 @@ export function PreviewPanel(): JSX.Element {
       isImage: channel.file.isImage
     })
 
-    await new Promise((r) => setTimeout(r, 150))
+    await contentReady
     await window.api.hideOverlay()
   }
 
@@ -287,26 +383,96 @@ export function PreviewPanel(): JSX.Element {
   })
 
   return (
-    <div className="flex-1 grid grid-cols-2 grid-rows-2 gap-2 overflow-hidden p-3">
-      {CHANNEL_IDS.map((id) => {
-        const channel = channels[id]
-        return (
-          <ChannelPanel
-            key={id}
-            label={id}
-            channel={channel}
-            isLive={liveChannel === id}
-            isSelected={selectedChannel === id}
-            onDrop={(file) => setChannelFile(id, file)}
-            onSlideChange={(s) => setChannelSlide(id, s)}
-            onSetTotalSlides={(t) => setChannelTotalSlides(id, t)}
-            onSelect={() => setSelectedChannel(id)}
-            onTake={() => handleTake(id)}
-            onClear={() => handleClear(id)}
-            pptxThumbnails={channel.file ? pptxThumbnailsMap[channel.file.path] || [] : []}
-          />
-        )
-      })}
+    <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 grid grid-cols-2 grid-rows-2 gap-2 overflow-hidden p-3 relative">
+        {pageIds.map((id) => {
+          const channel = channels[id] || { file: null, slide: 1, totalSlides: 0 }
+          return (
+            <ChannelPanel
+              key={id}
+              label={id}
+              channel={channel}
+              isLive={liveChannel === id}
+              isSelected={selectedChannel === id}
+              onDrop={(file) => setChannelFile(id, file)}
+              onSlideChange={(s) => setChannelSlide(id, s)}
+              onSetTotalSlides={(t) => setChannelTotalSlides(id, t)}
+              onSelect={() => setSelectedChannel(id)}
+              onTake={() => handleTake(id)}
+              onClear={() => handleClear(id)}
+              pptxThumbnails={channel.file ? pptxThumbnailsMap[channel.file.path] || [] : []}
+            />
+          )
+        })}
+
+        {/* Центральная "+" — добавить 4 новых канала на новой странице */}
+        <button
+          onClick={() => addChannelPage()}
+          title="Добавить 4 канала (новая страница)"
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-surface-100/90 hover:bg-accent/90 hover:text-white text-gray-300 text-xl font-bold border border-gray-700 shadow-lg backdrop-blur-sm transition-colors z-10 flex items-center justify-center"
+        >
+          +
+        </button>
+      </div>
+
+      {/* Pagination footer — показываем только если есть больше одной страницы */}
+      {totalPages > 1 && (
+        <div className="shrink-0 h-8 bg-surface-300 border-t border-gray-800 flex items-center justify-center gap-1 px-3 select-none">
+          <button
+            onClick={() => setCurrentChannelPage(currentChannelPage - 1)}
+            disabled={currentChannelPage === 0}
+            className="w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
+            title="Предыдущая страница"
+          >
+            ‹
+          </button>
+
+          {/* Dots с указанием страницы где live */}
+          <div className="flex items-center gap-1 px-1">
+            {Array.from({ length: totalPages }).map((_, i) => {
+              const isActive = i === currentChannelPage
+              const isLive = i === liveChannelPage
+              return (
+                <button
+                  key={i}
+                  onClick={() => setCurrentChannelPage(i)}
+                  className={`min-w-[22px] h-5 px-1.5 rounded text-[10px] font-medium transition-colors ${
+                    isActive
+                      ? 'bg-blue-600/80 text-white'
+                      : isLive
+                      ? 'bg-red-900/50 text-red-300 hover:bg-red-800/60'
+                      : 'bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'
+                  }`}
+                  title={isLive ? `Страница ${i + 1} — в эфире` : `Страница ${i + 1}`}
+                >
+                  {i + 1}
+                  {isLive && <span className="ml-0.5">●</span>}
+                </button>
+              )
+            })}
+          </div>
+
+          <button
+            onClick={() => setCurrentChannelPage(currentChannelPage + 1)}
+            disabled={currentChannelPage >= totalPages - 1}
+            className="w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
+            title="Следующая страница"
+          >
+            ›
+          </button>
+
+          {/* Удалить страницу (только если пуста и не единственная) */}
+          {currentPageIsEmpty && totalPages > 1 && liveChannelPage !== currentChannelPage && (
+            <button
+              onClick={() => removeChannelPage(currentChannelPage)}
+              className="ml-2 w-6 h-6 rounded text-gray-500 hover:text-red-400 hover:bg-red-900/30 transition-colors text-xs"
+              title="Удалить пустую страницу"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -378,6 +544,18 @@ function ChannelPanel({
         const { pptxThumbnailsMap } = useAppStore.getState()
         useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [file.path]: result.thumbnails } })
         if (result.slideCount) onSetTotalSlides(result.slideCount)
+      }
+      // Pre-render full-resolution slides in background for zero-flicker
+      // PPTX→PPTX channel switches (Option 2 Hybrid mode).
+      const filePath = file.path
+      const { pptxSlidesMap: existingSlides } = useAppStore.getState()
+      if (!existingSlides[filePath]) {
+        window.api.generatePptxSlides(filePath).then((slidesResult) => {
+          if (slidesResult.success && slidesResult.slides) {
+            const { pptxSlidesMap } = useAppStore.getState()
+            useAppStore.setState({ pptxSlidesMap: { ...pptxSlidesMap, [filePath]: slidesResult.slides } })
+          }
+        })
       }
     }
     if (isLive) {

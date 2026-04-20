@@ -145,6 +145,9 @@ export function VideoViewer({ filePath }: VideoViewerProps): JSX.Element {
       duration: videoRef.current?.duration || 0,
       currentTime: videoRef.current?.duration || 0
     })
+    // Сигнал для плейлиста в control — переключает на след. ролик.
+    // Не вызывается когда video.loop=true (браузер не шлёт 'ended' при loop).
+    window.api.sendToControl('video-ended')
   }
 
   return (

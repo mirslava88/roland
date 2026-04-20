@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 
 export function ControlBar(): JSX.Element {
@@ -15,6 +15,7 @@ export function ControlBar(): JSX.Element {
   const [videoLoop, setVideoLoop] = useState(false)
   const [videoTime, setVideoTime] = useState(0)
   const [videoDuration, setVideoDuration] = useState(0)
+  const pendingNavCount = useRef(0)
 
   // Listen for video time/state updates from presentation window
   useEffect(() => {
@@ -40,17 +41,29 @@ export function ControlBar(): JSX.Element {
     )
   }
 
-  const handlePrev = async (): Promise<void> => {
-    if (currentSlide <= 1) return
-
-    if (activeFile.type === 'presentation') {
-      const result = await window.api.powerpointCommand('prev')
+  const navigatePptx = (direction: 'next' | 'prev'): void => {
+    const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
+    setCurrentSlide(optimistic)
+    pendingNavCount.current++
+    window.api.powerpointCommand(direction).then((result) => {
+      pendingNavCount.current--
+      if (pendingNavCount.current > 0) return
       if (result.success && result.output) {
         try {
           const data = JSON.parse(result.output)
-          if (data.CurrentSlide) setCurrentSlide(data.CurrentSlide)
-        } catch { setCurrentSlide(currentSlide - 1) }
+          if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+            useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+          }
+        } catch { /* ignore */ }
       }
+    }).catch(() => { pendingNavCount.current-- })
+  }
+
+  const handlePrev = (): void => {
+    if (currentSlide <= 1) return
+
+    if (activeFile.type === 'presentation') {
+      navigatePptx('prev')
     } else if (activeFile.type === 'pdf') {
       const newSlide = currentSlide - 1
       setCurrentSlide(newSlide)
@@ -58,17 +71,11 @@ export function ControlBar(): JSX.Element {
     }
   }
 
-  const handleNext = async (): Promise<void> => {
+  const handleNext = (): void => {
     if (totalSlides > 0 && currentSlide >= totalSlides) return
 
     if (activeFile.type === 'presentation') {
-      const result = await window.api.powerpointCommand('next')
-      if (result.success && result.output) {
-        try {
-          const data = JSON.parse(result.output)
-          if (data.CurrentSlide) setCurrentSlide(data.CurrentSlide)
-        } catch { setCurrentSlide(currentSlide + 1) }
-      }
+      navigatePptx('next')
     } else if (activeFile.type === 'pdf') {
       const newSlide = currentSlide + 1
       setCurrentSlide(newSlide)
@@ -76,13 +83,25 @@ export function ControlBar(): JSX.Element {
     }
   }
 
-  const handleGoToSlide = async (): Promise<void> => {
+  const handleGoToSlide = (): void => {
     const num = parseInt(goToSlide)
     if (num < 1 || (totalSlides > 0 && num > totalSlides)) return
 
     if (activeFile.type === 'presentation') {
-      const result = await window.api.powerpointCommand('goto', num)
-      if (result.success) setCurrentSlide(num)
+      setCurrentSlide(num)
+      pendingNavCount.current++
+      window.api.powerpointCommand('goto', num).then((result) => {
+        pendingNavCount.current--
+        if (pendingNavCount.current > 0) return
+        if (result.success && result.output) {
+          try {
+            const data = JSON.parse(result.output)
+            if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+              useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+            }
+          } catch { /* ignore */ }
+        }
+      }).catch(() => { pendingNavCount.current-- })
     } else if (activeFile.type === 'pdf') {
       setCurrentSlide(num)
       window.api.sendToPresentation('navigate-slide', num)

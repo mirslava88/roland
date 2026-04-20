@@ -56,12 +56,14 @@ interface Api {
   openPresentationWindow(displayId?: number): Promise<void>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
-  launchPowerPoint(filePath: string, monitorIndex?: number): Promise<{ success: boolean; output?: string; error?: string }>
+  launchPowerPoint(filePath: string, monitorIndex?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
   powerpointCommand(command: string, arg?: number): Promise<{ success: boolean; output?: string; error?: string }>
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
+  generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>
-  showOverlay(displayId?: number): Promise<void>
+  showOverlay(displayId?: number, freezeImageDataUrl?: string, imagePath?: string): Promise<void>
   hideOverlay(): Promise<void>
+  captureDisplay(displayId?: number): Promise<string | null>
   selectBackdropImage(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
   setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>
@@ -105,6 +107,8 @@ interface Api {
   musicSetVolume(value: number): Promise<void>
   musicSeek(time: number): Promise<void>
   musicGetState(): Promise<MusicState | null>
+  selectVideoFiles(): Promise<string[] | null>
+  selectVideoFolder(): Promise<string[] | null>
   openFileExternal(filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
   closeExternalFile(filePath?: string): Promise<void>
   minimizeExternalFile(filePath?: string): Promise<void>

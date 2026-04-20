@@ -13,23 +13,18 @@ interface ContentPayload {
 export function PresentationApp(): JSX.Element {
   const [content, setContent] = useState<ContentPayload | null>(null)
   const contentRef = useRef<ContentPayload | null>(null)
-  const [isTransitioning, setIsTransitioning] = useState(false)
-  const [opacity, setOpacity] = useState(1)
 
   // Keep ref in sync with state
   contentRef.current = content
 
+  // Content swap is instant — the overlay (screen-saver level, managed from
+  // the control window) is what masks the switch. A local fade here just
+  // creates a visible black period between the old and new content: the
+  // overlay is hidden as soon as content-ready fires, but if we were also
+  // mid-fade the audience would see the presentation window blink through
+  // black. No fade → overlay fully owns the transition.
   const loadContent = useCallback((payload: ContentPayload) => {
-    setIsTransitioning(true)
-    setOpacity(0)
-
-    setTimeout(() => {
-      setContent(payload)
-      setTimeout(() => {
-        setOpacity(1)
-        setIsTransitioning(false)
-      }, 50)
-    }, 300)
+    setContent(payload)
   }, [])
 
   useEffect(() => {
@@ -53,14 +48,21 @@ export function PresentationApp(): JSX.Element {
     }
   }, [loadContent])
 
+  const signalContentReady = (): void => {
+    // img.onLoad fires after decode but BEFORE the new pixels are composited
+    // to the screen — ~1 frame of latency. Defer the ready signal by two
+    // rAFs so the overlay fade starts against a fully-painted presentation
+    // window; otherwise the audience sees a brief cross-fade between old
+    // and new content through the still-translucent overlay.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.api.sendToControl('presentation-content-ready')
+      })
+    })
+  }
+
   return (
-    <div
-      className="w-screen h-screen bg-black flex items-center justify-center overflow-hidden"
-      style={{
-        opacity,
-        transition: 'opacity 300ms ease-in-out'
-      }}
-    >
+    <div className="w-screen h-screen bg-black flex items-center justify-center overflow-hidden">
       {!content && (
         <div className="text-gray-700 text-lg select-none">
           Waiting for content...
@@ -75,6 +77,7 @@ export function PresentationApp(): JSX.Element {
           alt="Backdrop"
           className="w-full h-full object-cover select-none"
           draggable={false}
+          onLoad={signalContentReady}
         />
       )}
       {content?.type === 'other' && content.isImage && (
@@ -83,6 +86,7 @@ export function PresentationApp(): JSX.Element {
           alt={content.name}
           className="w-full h-full object-contain select-none"
           draggable={false}
+          onLoad={signalContentReady}
         />
       )}
       {content?.type === 'presentation' && (

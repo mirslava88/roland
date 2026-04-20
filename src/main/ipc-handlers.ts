@@ -5,6 +5,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync } from 'fs'
 import { scriptPath as resolveScript } from './paths'
+import { pptDaemon } from './powerpoint-daemon'
 
 const execFileAsync = promisify(execFile)
 
@@ -201,17 +202,23 @@ export function registerIpcHandlers(
 
   ipcMain.handle(
     'launch-powerpoint',
-    async (_event, filePath: string, _monitorIndex?: number) => {
+    async (_event, filePath: string, _monitorIndex?: number, startSlide?: number) => {
       if (process.platform === 'win32') {
-        const scriptPath = resolveScript('powerpoint-control.ps1')
         try {
-          const { stdout } = await execFileAsync('powershell.exe', [
-            '-ExecutionPolicy', 'Bypass',
-            '-File', scriptPath,
-            '-Action', 'open',
-            '-FilePath', filePath
-          ])
-          return { success: true, output: stdout }
+          const args: Record<string, unknown> = { path: filePath }
+          if (typeof startSlide === 'number' && startSlide > 1) {
+            args.slide = startSlide
+          }
+          console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') BEGIN slide=${startSlide ?? 1}`)
+          const res = await pptDaemon.send('open', args, 60000)
+          console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') END ok=${res.ok}`)
+          if (!res.ok) return { success: false, error: res.error || 'open failed' }
+          const output = JSON.stringify({
+            Status: 'ok',
+            SlideCount: res.slideCount ?? 0,
+            CurrentSlide: res.slide ?? 1
+          })
+          return { success: true, output }
         } catch (error: unknown) {
           return { success: false, error: String(error) }
         }
@@ -233,25 +240,20 @@ export function registerIpcHandlers(
   )
 
   ipcMain.handle('powerpoint-command', async (_event, command: string, arg?: number) => {
-    if (process.platform === 'win32') {
-      const scriptPath = resolveScript('powerpoint-control.ps1')
-      const args = [
-        '-ExecutionPolicy', 'Bypass',
-        '-File', scriptPath,
-        '-Action', command
-      ]
-      if (arg !== undefined) {
-        args.push('-SlideNumber', String(arg))
-      }
-      try {
-        const { stdout } = await execFileAsync('powershell.exe', args)
-        return { success: true, output: stdout }
-      } catch (error: unknown) {
-        return { success: false, error: String(error) }
-      }
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    try {
+      const res = command === 'goto' && typeof arg === 'number'
+        ? await pptDaemon.send('goto', { slide: arg })
+        : await pptDaemon.send(command)
+      const output = JSON.stringify({
+        Status: res.ok ? 'ok' : 'error',
+        CurrentSlide: res.slide,
+        Message: res.error
+      })
+      return { success: res.ok, output }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
     }
-
-    return { success: false, error: 'Unsupported platform' }
   })
 
   ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string) => {
@@ -278,6 +280,32 @@ export function registerIpcHandlers(
       }
     }
     return { success: false, error: 'Unsupported platform' }
+  })
+
+  ipcMain.handle('generate-pptx-slides', async (_event, filePath: string, width?: number, height?: number) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    const scriptPath = resolveScript('powerpoint-control.ps1')
+    const w = width && width > 0 ? width : 1920
+    const h = height && height > 0 ? height : 1080
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-Command',
+        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & "${scriptPath}" -Action renderslides -FilePath "${filePath}" -Width ${w} -Height ${h}`
+      ], { timeout: 120000, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 })
+      const data = JSON.parse(stdout)
+      if (data.Status === 'ok') {
+        const slidesDir = data.SlidesDir
+        const slides: string[] = []
+        for (let i = 1; i <= data.SlideCount; i++) {
+          slides.push(join(slidesDir, `slide_${i}.png`))
+        }
+        return { success: true, slides, slideCount: data.SlideCount }
+      }
+      return { success: false, error: stdout }
+    } catch (error: unknown) {
+      return { success: false, error: String(error) }
+    }
   })
 
   ipcMain.handle('read-file', async (_event, filePath: string) => {

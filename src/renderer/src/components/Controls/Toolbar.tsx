@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { MusicPlayer } from './MusicPlayer'
+import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
 
 export function Toolbar(): JSX.Element {
@@ -67,9 +68,9 @@ export function Toolbar(): JSX.Element {
     } else {
       // If a channel is selected, take it
       if (selectedChannel) {
-        const key = `channel${selectedChannel}` as const
-        const channel = useAppStore.getState()[key]
-        if (channel.file) {
+        const { channels } = useAppStore.getState()
+        const channel = channels[selectedChannel]
+        if (channel?.file) {
           window.dispatchEvent(new CustomEvent('take-channel', { detail: selectedChannel }))
           return
         }
@@ -126,6 +127,8 @@ export function Toolbar(): JSX.Element {
       <Timer />
 
       <MusicPlayer />
+
+      <VideoPlayer />
 
       <button
         onClick={handleSelectBackdrop}
