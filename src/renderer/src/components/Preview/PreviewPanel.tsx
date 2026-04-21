@@ -46,7 +46,7 @@ export function PreviewPanel(): JSX.Element {
     isPresentationWindowOpen, setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
     addChannelPage, removeChannelPage, setCurrentChannelPage,
-    pptxThumbnailsMap
+    pptxThumbnailsMap, setOverlayState
   } = useAppStore()
 
   const totalPages = Math.max(1, Math.ceil(channelIds.length / CHANNELS_PER_PAGE))
@@ -238,14 +238,36 @@ export function PreviewPanel(): JSX.Element {
           }
         } catch { /* ignore */ }
       }
-      // Generate thumbnails in background (fire-and-forget)
+      if (!isSameFilePptx) {
+        // Persistent overlay: снимок живого slideshow PP через PrintWindow.
+        // Подменяем последний кадр оверлея на этот снимок, НО оверлей НЕ
+        // скрываем — остаётся висеть pixel-perfect поверх живого PP. PP
+        // работает под ним невидимо. Оверлей скроется только когда юзер
+        // нажмёт next/prev/goto — в этот момент PP начнёт играть свой
+        // slide-transition, и DWM-гонка на hide попадёт внутрь анимации
+        // (200–500мс) → визуально неразличима.
+        log('snapshotSlideshow: BEGIN')
+        const snapPath = await window.api.snapshotSlideshow()
+        log(`snapshotSlideshow: END path=${snapPath ? 'ok' : 'null'}`)
+        if (snapPath) {
+          await window.api.swapOverlayImage(snapPath)
+          log('swap overlay → live PP snapshot (overlay remains pinned)')
+        }
+        setOverlayState({ kind: 'pinned-pptx', pptxPath: channel.file.path })
+        log('overlay pinned for pptxPath')
+      }
+      // Генерим превью/слайды ПОСЛЕ hideOverlay. Эти вызовы спавнят отдельный
+      // powerpoint-control.ps1 процесс, который делает $ppt.WindowState=2 +
+      // $ppt.Visible=1 + Hide-PPEditorWindow на том же COM-инстансе, который
+      // daemon уже держит со слайдшоу. Если это делать ПОКА оверлей ещё висит,
+      // PP может мигнуть editor-окном / ре-активировать slideshow прямо под
+      // оверлеем — user видит новый слайд до того, как оверлей исчезает.
       window.api.generatePptxThumbnails(channel.file.path).then((thumbResult) => {
         if (thumbResult.success && thumbResult.thumbnails) {
           const { pptxThumbnailsMap } = useAppStore.getState()
           useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file!.path]: thumbResult.thumbnails } })
         }
       })
-      // Pre-render full-resolution slides for future zero-flicker switches
       const pptxPath = channel.file.path
       const { pptxSlidesMap: existingSlides } = useAppStore.getState()
       if (!existingSlides[pptxPath]) {
@@ -255,13 +277,6 @@ export function PreviewPanel(): JSX.Element {
             useAppStore.setState({ pptxSlidesMap: { ...pptxSlidesMap, [pptxPath]: slidesResult.slides } })
           }
         })
-      }
-      if (!isSameFilePptx) {
-        log('pre-fade wait 250ms')
-        await new Promise((r) => setTimeout(r, 250))
-        log('hideOverlay: BEGIN')
-        await window.api.hideOverlay()
-        log('hideOverlay: END (overlay window hidden)')
       }
       return
     }
