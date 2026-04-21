@@ -12,7 +12,6 @@ import { pptDaemon } from './powerpoint-daemon'
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
 let overlayWindow: BrowserWindow | null = null
-let overlayRaiseTimer: NodeJS.Timeout | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
 let musicPlayerWindow: BrowserWindow | null = null
@@ -218,21 +217,9 @@ function createWindows(): void {
     overlayWindow.moveTop()
     overlayWindow.setOpacity(1)
     console.log(`[MAIN ${Date.now()}] overlay opacity=1 (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
-
-    // PowerPoint's slideshow window is also TOPMOST. When Run() activates a
-    // new slideshow, Windows puts it above the overlay inside the topmost
-    // group. Reassert Z-order every tick while the overlay is visible so
-    // PowerPoint's transition (old-exit → new-run) stays HIDDEN behind us.
-    // The daemon also clears WS_EX_TOPMOST on the new slideshow window
-    // immediately after Run(), closing the race window.
-    if (overlayRaiseTimer) { clearInterval(overlayRaiseTimer); overlayRaiseTimer = null }
-    overlayRaiseTimer = setInterval(() => {
-      if (!overlayWindow || overlayWindow.isDestroyed()) return
-      try {
-        overlayWindow.setAlwaysOnTop(true, 'screen-saver')
-        overlayWindow.moveTop()
-      } catch { /* ignore */ }
-    }, 5)
+    // NB: No raise-timer. Poller data (2026-04-25 session) proved PP
+    // slideshow has exStyle=0x0 — it's NOT topmost — so there is no
+    // z-order race to fight. Electron's HWND_TOPMOST set once is enough.
   })
 
   // Grab a screenshot of the target display so the renderer can show it
@@ -262,8 +249,39 @@ function createWindows(): void {
     }
   })
 
+  // Hybrid PPTX→PPTX: overlay holds freeze-frame of OLD content while PP
+  // tears down and starts NEW slideshow. Right before hideOverlay, we swap
+  // the overlay image to a PRE-RENDERED PNG of the target slide — so the
+  // overlay's last visible frame matches PP's first visible frame pixel-wise.
+  // Even if DWM compositor races on hide/reveal, user sees no content change.
+  // The img element stays visible while the new src decodes; browser paints
+  // the old image until the new bitmap is ready, then swaps atomically on
+  // the next frame. No opacity toggle = no DWM flicker window.
+  ipcMain.handle('swap-overlay-image', async (_event, imagePath: string) => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return
+    try {
+      const buf = await readFile(imagePath)
+      const ext = imagePath.toLowerCase()
+      const mime = ext.endsWith('.jpg') || ext.endsWith('.jpeg') ? 'image/jpeg' : 'image/png'
+      const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+      const js = `(async () => {
+        var f=document.getElementById('f');
+        if (!f) return false;
+        var img = new Image();
+        img.src = ${JSON.stringify(dataUrl)};
+        try { await img.decode(); } catch {}
+        f.src = img.src;
+        f.style.display='block';
+        var o=document.getElementById('o');
+        if (o) o.classList.remove('hide');
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        return true;
+      })()`
+      await overlayWindow.webContents.executeJavaScript(js)
+    } catch { /* ignore */ }
+  })
+
   ipcMain.handle('hide-overlay', async () => {
-    if (overlayRaiseTimer) { clearInterval(overlayRaiseTimer); overlayRaiseTimer = null }
     if (overlayWindow && !overlayWindow.isDestroyed()) {
       // КРИТИЧНО: НЕ звать overlayWindow.hide(). Окно должно оставаться
       // native-visible (с нулевой opacity) весь жизненный цикл. hide() даёт
