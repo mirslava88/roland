@@ -122,6 +122,7 @@ export function PreviewPanel(): JSX.Element {
 
       if (needsCover) {
         await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
       }
 
       setActiveFile(null)
