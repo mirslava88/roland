@@ -86,7 +86,15 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
     show: false,
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Критично: при setOpacity(0) Chromium считает окно "скрытым" и троттлит
+      // рендер (rAF не тикают, f.src не добирается до compositor). Следующий
+      // showOverlay обновляет f.src ЧЕРЕЗ executeJavaScript + 2 rAF, но на
+      // троттленном рендере эти 2 rAF откладываются на секунды, и setOpacity(1)
+      // поднимает окно ДО того как новый кадр отрисуется → видно старый кадр
+      // (слайд 1 с момента пиннинга) пока не придёт новый. Выключаем троттлинг:
+      // renderer всегда активен, f.src обновляется моментально.
+      backgroundThrottling: false
     }
   })
 
