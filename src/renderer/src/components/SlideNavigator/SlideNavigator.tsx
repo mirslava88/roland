@@ -107,7 +107,7 @@ export function SlideNavigator(): JSX.Element {
   const handleClick = (index: number): void => {
     setCurrentSlide(index)
     if (activeFile?.type === 'presentation') {
-      window.api.powerpointCommand('goto', index)
+      useAppStore.getState().navigatePptx('goto', index)
     } else if (activeFile?.type === 'pdf') {
       window.api.sendToPresentation('navigate-slide', index)
     }
