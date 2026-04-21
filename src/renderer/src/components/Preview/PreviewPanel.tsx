@@ -329,6 +329,7 @@ export function PreviewPanel(): JSX.Element {
       await window.api.musicSetPlaylist([channel.file.path], 0)
       await window.api.musicPlay()
       await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
       return
     }
 
@@ -365,6 +366,7 @@ export function PreviewPanel(): JSX.Element {
       // Try to restore; if not tracked yet, open fresh
       await window.api.restoreExternalFile(channel.file.path, external?.bounds)
       await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
       return
     }
 
@@ -401,6 +403,7 @@ export function PreviewPanel(): JSX.Element {
 
     await contentReady
     await window.api.hideOverlay()
+    setOverlayState({ kind: 'hidden' })
   }
 
   // Listen for take-channel events from Toolbar's Open Output button
