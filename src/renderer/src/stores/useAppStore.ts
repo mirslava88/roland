@@ -4,6 +4,10 @@ export type ContentType = 'presentation' | 'pdf' | 'video' | 'other' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
 export type ChannelId = string
 
+export type OverlayState =
+  | { kind: 'hidden' }
+  | { kind: 'pinned-pptx'; pptxPath: string }
+
 export const CHANNELS_PER_PAGE = 4
 
 // 0 -> 'A' ... 25 -> 'Z' ... 26 -> 'AA' ... 27 -> 'AB'
@@ -63,6 +67,10 @@ interface AppState {
   selectedDisplayId: number | null
   backdropImage: string | null
   globalHookEnabled: boolean
+
+  overlayState: OverlayState
+  setOverlayState: (state: OverlayState) => void
+  navigatePptx: (command: 'next' | 'prev' | 'goto', arg?: number) => Promise<{ success: boolean; output?: string; error?: string }>
 
   channels: Record<ChannelId, ChannelState>
   channelIds: ChannelId[]
@@ -158,6 +166,8 @@ export const useAppStore = create<AppState>((set, get) => {
   selectedDisplayId: null,
   backdropImage: null,
   globalHookEnabled: true,
+
+  overlayState: { kind: 'hidden' } as OverlayState,
 
   channels: initial.channels,
   channelIds: initial.channelIds,
@@ -330,6 +340,23 @@ export const useAppStore = create<AppState>((set, get) => {
   setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
   setBackdropImage: (path) => set({ backdropImage: path }),
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
+
+  setOverlayState: (state) => set({ overlayState: state }),
+
+  // Navigate active PPTX. Если оверлей в pinned-pptx (висит после file-switch),
+  // прячем его параллельно с PP-командой — DWM-гонка на hide попадает внутрь
+  // PP slide-transition анимации и становится визуально неразличимой.
+  navigatePptx: async (command, arg) => {
+    const { overlayState } = get()
+    if (overlayState.kind === 'pinned-pptx') {
+      window.api.hideOverlay()
+      set({ overlayState: { kind: 'hidden' } })
+    }
+    if (command === 'goto' && typeof arg === 'number') {
+      return window.api.powerpointCommand('goto', arg)
+    }
+    return window.api.powerpointCommand(command)
+  },
 
   // Doc previews
   docPreviewsMap: {},
