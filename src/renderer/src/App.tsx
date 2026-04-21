@@ -81,7 +81,7 @@ export default function App(): JSX.Element {
         // Only the LAST in a rapid burst reconciles — avoids UI bouncing
         // when user clicks faster than PPT responds.
         pendingNavCount++
-        window.api.powerpointCommand(direction === 'next' ? 'next' : 'prev').then((result) => {
+        useAppStore.getState().navigatePptx(direction).then((result) => {
           pendingNavCount--
           if (pendingNavCount > 0) return
           if (result.success && result.output) {
