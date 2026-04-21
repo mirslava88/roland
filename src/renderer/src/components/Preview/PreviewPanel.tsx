@@ -238,6 +238,21 @@ export function PreviewPanel(): JSX.Element {
           }
         } catch { /* ignore */ }
       }
+      // Same-file goto: если оверлей уже в pinned-pptx (висит с предыдущего
+      // переключения), обновить его snapshot на новый слайд. PP уже выполнил
+      // GotoSlide внутри launchPowerPoint (daemon handles same-file как goto
+      // без teardown). Без этого оверлей оставался бы со старым кадром.
+      if (isSameFilePptx) {
+        const cur = useAppStore.getState().overlayState
+        if (cur.kind === 'pinned-pptx') {
+          log('same-file PPTX + pinned overlay: refreshing snapshot')
+          const snapPath = await window.api.snapshotSlideshow()
+          if (snapPath) {
+            await window.api.swapOverlayImage(snapPath)
+            setOverlayState({ kind: 'pinned-pptx', pptxPath: channel.file.path })
+          }
+        }
+      }
       if (!isSameFilePptx) {
         // Persistent overlay: снимок живого slideshow PP через PrintWindow.
         // Подменяем последний кадр оверлея на этот снимок, НО оверлей НЕ
