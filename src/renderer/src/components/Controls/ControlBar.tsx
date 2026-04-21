@@ -9,6 +9,7 @@ export function ControlBar(): JSX.Element {
     currentSlide,
     totalSlides,
     setCurrentSlide,
+    navigatePptx,
   } = useAppStore()
 
   const [goToSlide, setGoToSlide] = useState('')
@@ -41,11 +42,11 @@ export function ControlBar(): JSX.Element {
     )
   }
 
-  const navigatePptx = (direction: 'next' | 'prev'): void => {
+  const handlePptxNav = (direction: 'next' | 'prev'): void => {
     const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
     setCurrentSlide(optimistic)
     pendingNavCount.current++
-    window.api.powerpointCommand(direction).then((result) => {
+    navigatePptx(direction).then((result) => {
       pendingNavCount.current--
       if (pendingNavCount.current > 0) return
       if (result.success && result.output) {
@@ -63,7 +64,7 @@ export function ControlBar(): JSX.Element {
     if (currentSlide <= 1) return
 
     if (activeFile.type === 'presentation') {
-      navigatePptx('prev')
+      handlePptxNav('prev')
     } else if (activeFile.type === 'pdf') {
       const newSlide = currentSlide - 1
       setCurrentSlide(newSlide)
@@ -75,7 +76,7 @@ export function ControlBar(): JSX.Element {
     if (totalSlides > 0 && currentSlide >= totalSlides) return
 
     if (activeFile.type === 'presentation') {
-      navigatePptx('next')
+      handlePptxNav('next')
     } else if (activeFile.type === 'pdf') {
       const newSlide = currentSlide + 1
       setCurrentSlide(newSlide)
@@ -90,7 +91,7 @@ export function ControlBar(): JSX.Element {
     if (activeFile.type === 'presentation') {
       setCurrentSlide(num)
       pendingNavCount.current++
-      window.api.powerpointCommand('goto', num).then((result) => {
+      navigatePptx('goto', num).then((result) => {
         pendingNavCount.current--
         if (pendingNavCount.current > 0) return
         if (result.success && result.output) {
