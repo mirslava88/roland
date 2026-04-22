@@ -421,9 +421,37 @@ while ($true) {
             'next' {
                 $ppt = Get-PPT
                 if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
-                    $view = $ppt.SlideShowWindows(1).View
+                    $sw = $ppt.SlideShowWindows(1)
+                    $view = $sw.View
+                    $total = 0
+                    try { $total = [int]$sw.Presentation.Slides.Count } catch {}
+                    # Retry-on-stuck: если быстрый клик пришёл во время slide-to-slide
+                    # transition, PP трактует Next() как "завершить текущий transition",
+                    # не продвигая слайд (slide X->X, click 0->0, dur ~25-45ms).
+                    # Повторный Next() сразу после этого реально перейдёт на след.
+                    # слайд. Guard $sBefore < $total — на последнем слайде повтор
+                    # не делаем, чтобы не дёргать exit slideshow. Retry НЕ срабатывает
+                    # при click index != 0 (это build-анимация, которую юзер и хотел).
+                    $sBefore = [int]$view.Slide.SlideIndex
+                    $cBefore = -1
+                    try { $cBefore = [int]$view.GetClickIndex() } catch {}
+                    $t0 = [DateTime]::UtcNow.Ticks
                     $view.Next()
-                    Reply @{ id = $id; ok = $true; slide = [int]$view.Slide.SlideIndex }
+                    $sMid = [int]$view.Slide.SlideIndex
+                    $cMid = -1
+                    try { $cMid = [int]$view.GetClickIndex() } catch {}
+                    $retried = 0
+                    if ($sMid -eq $sBefore -and $cMid -eq $cBefore -and $sBefore -lt $total) {
+                        $view.Next()
+                        $retried = 1
+                    }
+                    $t1 = [DateTime]::UtcNow.Ticks
+                    $sAfter = [int]$view.Slide.SlideIndex
+                    $cAfter = -1
+                    try { $cAfter = [int]$view.GetClickIndex() } catch {}
+                    Log ("next: slide {0}->{1} click {2}->{3} retry={4} dur={5}ms" -f `
+                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, [int](($t1-$t0)/10000))
+                    Reply @{ id = $id; ok = $true; slide = $sAfter }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }
@@ -432,8 +460,28 @@ while ($true) {
                 $ppt = Get-PPT
                 if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
                     $view = $ppt.SlideShowWindows(1).View
+                    # См. комментарий к 'next'. Guard $sBefore > 1 — со слайда 1
+                    # повтор не делаем.
+                    $sBefore = [int]$view.Slide.SlideIndex
+                    $cBefore = -1
+                    try { $cBefore = [int]$view.GetClickIndex() } catch {}
+                    $t0 = [DateTime]::UtcNow.Ticks
                     $view.Previous()
-                    Reply @{ id = $id; ok = $true; slide = [int]$view.Slide.SlideIndex }
+                    $sMid = [int]$view.Slide.SlideIndex
+                    $cMid = -1
+                    try { $cMid = [int]$view.GetClickIndex() } catch {}
+                    $retried = 0
+                    if ($sMid -eq $sBefore -and $cMid -eq $cBefore -and $sBefore -gt 1) {
+                        $view.Previous()
+                        $retried = 1
+                    }
+                    $t1 = [DateTime]::UtcNow.Ticks
+                    $sAfter = [int]$view.Slide.SlideIndex
+                    $cAfter = -1
+                    try { $cAfter = [int]$view.GetClickIndex() } catch {}
+                    Log ("prev: slide {0}->{1} click {2}->{3} retry={4} dur={5}ms" -f `
+                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, [int](($t1-$t0)/10000))
+                    Reply @{ id = $id; ok = $true; slide = $sAfter }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }
