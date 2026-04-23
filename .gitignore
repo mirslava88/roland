@@ -2,6 +2,11 @@ node_modules/
 out/
 dist/
 .env
+.env.*
+*.pem
+*.key
+id_rsa
+credentials*.json
 *.log
 
 # Test media files
@@ -14,3 +19,15 @@ dist/
 *.webm
 *.mkv
 roland
+
+# Working-tree artifacts (screenshots, tmp frames, scratch)
+capture*.png
+icon-preview.html
+test-el.js
+test-app/
+tmp_frames/
+scripts/_test-*.ps1
+
+# Claude / audit local
+.claude/
+audit/

@@ -137,18 +137,20 @@ class PowerPointDaemon {
   }
 
   fireAndForget(cmd: string, args: Record<string, unknown> = {}): void {
+    // Тихое подавление ошибок тут раньше скрывало daemon crash: операторы
+    // видели "команда не сработала" без единого лога (audit F-202). Логируем.
     this.ensureReady()
       .then(() => {
         const id = this.nextId++
         const req = { id, cmd, ...args }
         try {
           this.proc!.stdin!.write(JSON.stringify(req) + '\n')
-        } catch {
-          /* ignore */
+        } catch (err) {
+          console.error(`[DAEMON] fireAndForget stdin write failed cmd=${cmd}:`, err)
         }
       })
-      .catch(() => {
-        /* ignore */
+      .catch((err) => {
+        console.error(`[DAEMON] fireAndForget ensureReady failed cmd=${cmd}:`, err)
       })
   }
 

@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# UTF-8 stdout чтобы JSON с Cyrillic-путями не ломался при чтении в main.ts.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 # Win32 ShowWindow — используем чтобы СРАЗУ спрятать редактор PP после Visible=1.
 # $ppt.WindowState=2 (ppWindowMinimized) — COM-свойство, обрабатывается PP асинхронно:
 # между выполнением Visible=1 и фактическим сворачиванием проходит 100-300ms,

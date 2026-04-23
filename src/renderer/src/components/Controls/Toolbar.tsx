@@ -40,6 +40,7 @@ export function Toolbar(): JSX.Element {
           setPresentationWindowOpen(true)
         }
         await window.api.powerpointCommand('close')
+        await window.api.showTaskbar()
         window.api.sendToPresentation('load-content', {
           type: 'backdrop',
           path: backdropImage,
@@ -52,6 +53,7 @@ export function Toolbar(): JSX.Element {
       } else {
         if (activeFile?.type === 'presentation') {
           await window.api.powerpointCommand('close')
+          await window.api.showTaskbar()
         }
         if (backdropImage) {
           if (!isPresentationWindowOpen) {

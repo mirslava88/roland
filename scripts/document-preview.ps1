@@ -5,6 +5,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# UTF-8 stdout чтобы JSON с Cyrillic-путями не ломался при чтении в main.ts.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 $ext = [System.IO.Path]::GetExtension($FilePath).ToLower()
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) 'roland-doc-previews'
 if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }

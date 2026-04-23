@@ -142,6 +142,8 @@ export function PreviewPanel(): JSX.Element {
       // Close underlying content (hidden behind overlay)
       if (isPptx) {
         await window.api.powerpointCommand('close')
+        // Restore taskbar hidden на take PPTX
+        await window.api.showTaskbar()
       }
       if (isAudio) {
         await window.api.musicStop()
@@ -186,6 +188,20 @@ export function PreviewPanel(): JSX.Element {
   }
 
   const handleTake = async (ch: ChannelId): Promise<void> => {
+    // Top-level safety net: если handleTake бросит (daemon crash,
+    // launchPowerPoint reject, capturePage fail), overlay оставался бы
+    // opacity=1 чёрным НАВСЕГДА — юзер видит зависший чёрный экран без
+    // способа recovery (audit F-205). Ловим, логируем, force-hide overlay.
+    try {
+      await doTake(ch)
+    } catch (err) {
+      console.error('[TAKE] unhandled error, forcing overlay hide:', err)
+      try { await window.api.hideOverlay() } catch { /* last resort */ }
+      setOverlayState({ kind: 'hidden' })
+    }
+  }
+
+  const doTake = async (ch: ChannelId): Promise<void> => {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
     const channel = freshState.channels[ch]
@@ -323,6 +339,16 @@ export function PreviewPanel(): JSX.Element {
       log('awaitPptxGotoChainIdle: BEGIN')
       await awaitPptxGotoChainIdle()
       log('awaitPptxGotoChainIdle: END')
+
+      // Скрываем Shell_SecondaryTrayWnd на внешнем дисплее. PP slideshow
+      // идёт HWND_TOPMOST, но во время GotoSlide/Next transition-гонок
+      // таскбар иногда проскакивает поверх — юзер видит его на слайде.
+      // Прячем явно через ShowWindow(SW_HIDE); восстанавливаем на exit.
+      try {
+        const { selectedDisplayId: sid, displays: disps } = useAppStore.getState()
+        const td = disps.find((d) => d.id === sid) || disps.find((d) => !d.isPrimary) || disps[0]
+        if (td) window.api.hideTaskbar(td.bounds)
+      } catch { /* ignore */ }
 
       const slideAfterLaunch = useAppStore.getState().currentSlide
       const userNavigatedDuringLaunch = slideAfterLaunch !== slideBeforeLaunch

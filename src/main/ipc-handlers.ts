@@ -278,10 +278,15 @@ export function registerIpcHandlers(
     if (process.platform === 'win32') {
       const scriptPath = resolveScript('powerpoint-control.ps1')
       try {
+        // -File + argv: filePath уходит как literal argument, не через shell-
+        // строку. Иначе имя файла вроде `a"; rm -rf; echo "` → command
+        // injection (F-002, audit 2026-04-20).
         const { stdout } = await execFileAsync('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
-          '-Command',
-          `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & "${scriptPath}" -Action thumbnails -FilePath "${filePath}"`
+          '-NoProfile',
+          '-File', scriptPath,
+          '-Action', 'thumbnails',
+          '-FilePath', filePath
         ], { timeout: 30000, encoding: 'utf8' })
         const data = JSON.parse(stdout)
         if (data.Status === 'ok') {
@@ -306,10 +311,15 @@ export function registerIpcHandlers(
     const w = width && width > 0 ? width : 1920
     const h = height && height > 0 ? height : 1080
     try {
+      // -File + argv (см. F-003, audit 2026-04-20).
       const { stdout } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
-        '-Command',
-        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & "${scriptPath}" -Action renderslides -FilePath "${filePath}" -Width ${w} -Height ${h}`
+        '-NoProfile',
+        '-File', scriptPath,
+        '-Action', 'renderslides',
+        '-FilePath', filePath,
+        '-Width', String(w),
+        '-Height', String(h)
       ], { timeout: 120000, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 })
       const data = JSON.parse(stdout)
       if (data.Status === 'ok') {
@@ -701,10 +711,12 @@ export function registerIpcHandlers(
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const scriptPath = resolveScript('document-preview.ps1')
     try {
+      // -File + argv (см. F-004, audit 2026-04-20).
       const { stdout } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
-        '-Command',
-        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${scriptPath.replace(/'/g, "''")}' -FilePath '${filePath.replace(/'/g, "''")}'`
+        '-NoProfile',
+        '-File', scriptPath,
+        '-FilePath', filePath
       ], { timeout: 60000, encoding: 'utf8' })
       const data = JSON.parse(stdout.trim())
       if (data.Status === 'ok') {

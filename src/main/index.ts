@@ -474,8 +474,10 @@ function createWindows(): void {
 
   ipcMain.handle('music-set-playlist', async (_event, files: string[], startIndex?: number) => {
     const win = ensureMusicWindow()
+    // Number() каст защищает от JS-injection если renderer прислал строку
+    // вроде "0); alert(1); (" вместо числа (audit 2026-04-20 F-005).
     await win.webContents.executeJavaScript(
-      `window._setPlaylist(${JSON.stringify(files)}, ${startIndex || 0})`
+      `window._setPlaylist(${JSON.stringify(files)}, ${Number(startIndex) || 0})`
     )
   })
 
@@ -510,25 +512,26 @@ function createWindows(): void {
 
   ipcMain.handle('music-set-loop-track', async (_event, value: boolean) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
-      await musicPlayerWindow.webContents.executeJavaScript(`window._setLoopTrack(${value})`)
+      // Boolean() каст: см. audit F-005. Renderer может прислать строку.
+      await musicPlayerWindow.webContents.executeJavaScript(`window._setLoopTrack(${Boolean(value)})`)
     }
   })
 
   ipcMain.handle('music-set-loop-playlist', async (_event, value: boolean) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
-      await musicPlayerWindow.webContents.executeJavaScript(`window._setLoopPlaylist(${value})`)
+      await musicPlayerWindow.webContents.executeJavaScript(`window._setLoopPlaylist(${Boolean(value)})`)
     }
   })
 
   ipcMain.handle('music-set-volume', async (_event, value: number) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
-      await musicPlayerWindow.webContents.executeJavaScript(`window._setVolume(${value})`)
+      await musicPlayerWindow.webContents.executeJavaScript(`window._setVolume(${Number(value) || 0})`)
     }
   })
 
   ipcMain.handle('music-seek', async (_event, time: number) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
-      await musicPlayerWindow.webContents.executeJavaScript(`window._seek(${time})`)
+      await musicPlayerWindow.webContents.executeJavaScript(`window._seek(${Number(time) || 0})`)
     }
   })
 
