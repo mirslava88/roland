@@ -1,6 +1,29 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 
+// Play timer sound file. File URL требует URL-encoding для кириллицы/
+// пробелов/других non-ASCII символов в пути — иначе Chromium не загружает
+// (load error, тихо отваливается, sound не слышен). Ошибки логируются
+// через dbgLog чтобы диагностируемо было в main stdout.
+function playTimerSound(rawPath: string, kind: 'warning' | 'end'): void {
+  try {
+    // Путь: C:\Users\...\звук.mp3 → file:///C:/Users/.../%D0%B7%D0%B2%D1%83%D0%BA.mp3
+    const forward = rawPath.replace(/\\/g, '/')
+    // encodeURI оставляет ':', '/' и латиницу, шифрует кириллицу/пробелы.
+    const url = 'file:///' + encodeURI(forward)
+    window.api.dbgLog(`Timer: play ${kind} sound url=${url}`)
+    const a = new Audio(url)
+    a.volume = 1.0
+    a.play().then(() => {
+      window.api.dbgLog(`Timer: ${kind} sound playing OK`)
+    }).catch((e) => {
+      window.api.dbgLog(`Timer: ${kind} sound play() failed: ${String(e)}`)
+    })
+  } catch (e) {
+    window.api.dbgLog(`Timer: ${kind} sound Audio() threw: ${String(e)}`)
+  }
+}
+
 function formatTime(totalSeconds: number): string {
   const negative = totalSeconds < 0
   const abs = Math.abs(totalSeconds)
@@ -75,22 +98,20 @@ export function Timer(): JSX.Element {
         setTimerRemaining(newR)
         syncTimer(newR, true)
 
-        // Warning sound at 60 seconds
-        if (newR === 60 && sw && !warnedRef.current) {
+        // Warning sound: первый тик где remaining опускается на/ниже 60
+        // (но не в overtime). Было `=== 60` — ломалось если interval-drift
+        // или add/sub-minutes перепрыгивали через 60 точно.
+        if (newR <= 60 && newR >= 0 && sw && !warnedRef.current) {
           warnedRef.current = true
-          try {
-            const a = new Audio('file:///' + sw.replace(/\\/g, '/'))
-            a.play().catch(() => {})
-          } catch {}
+          window.api.dbgLog(`Timer: tick r=${r}→${newR}, warning triggered (sw=${!!sw})`)
+          playTimerSound(sw, 'warning')
         }
 
-        // End sound at 0
-        if (newR === 0 && se && !endedRef.current) {
+        // End sound: первый тик где remaining достиг 0 или ушёл в overtime.
+        if (newR <= 0 && se && !endedRef.current) {
           endedRef.current = true
-          try {
-            const a = new Audio('file:///' + se.replace(/\\/g, '/'))
-            a.play().catch(() => {})
-          } catch {}
+          window.api.dbgLog(`Timer: tick r=${r}→${newR}, end triggered (se=${!!se})`)
+          playTimerSound(se, 'end')
         }
       }, 1000)
     } else if (intervalRef.current) {
@@ -149,10 +170,19 @@ export function Timer(): JSX.Element {
     if (timerDuration === 0) {
       handleSetTime()
     }
-    warnedRef.current = timerRemaining <= 60
-    endedRef.current = timerRemaining <= 0
+    // КРИТИЧНО: читаем timerRemaining свежим через getState().
+    // handleSetTime выше вызывает setTimerDuration → setTimerRemaining(total)
+    // в store, но React ещё не перерендерил компонент к этому моменту.
+    // Destructured `timerRemaining` из useAppStore() в closure = СТАРОЕ
+    // значение (обычно 0 если юзер не клацал «Установить» отдельно).
+    // warnedRef=(0<=60)=true и endedRef=(0<=0)=true гасят ОБА звука навсегда,
+    // interval.tick никогда не проходит guard → sound не играет.
+    const freshRemaining = useAppStore.getState().timerRemaining
+    warnedRef.current = freshRemaining <= 60
+    endedRef.current = freshRemaining <= 0
+    window.api.dbgLog(`Timer: handleStart freshRemaining=${freshRemaining} warnedRef=${warnedRef.current} endedRef=${endedRef.current}`)
     setTimerRunning(true)
-    syncTimer(timerRemaining, true)
+    syncTimer(freshRemaining, true)
   }
 
   const handlePause = (): void => {
@@ -328,7 +358,14 @@ export function Timer(): JSX.Element {
                 {timerSoundWarning ? timerSoundWarning.split(/[\\/]/).pop() : '🔔 Выбрать'}
               </button>
               {timerSoundWarning && (
-                <button onClick={() => setTimerSoundWarning(null)} className="text-[10px] text-gray-500 hover:text-white">✕</button>
+                <>
+                  <button
+                    onClick={() => playTimerSound(timerSoundWarning, 'warning')}
+                    className="text-[10px] text-gray-400 hover:text-white"
+                    title="Проверить"
+                  >🔊</button>
+                  <button onClick={() => setTimerSoundWarning(null)} className="text-[10px] text-gray-500 hover:text-white">✕</button>
+                </>
               )}
             </div>
             <div className="flex items-center gap-2">
@@ -345,7 +382,14 @@ export function Timer(): JSX.Element {
                 {timerSoundEnd ? timerSoundEnd.split(/[\\/]/).pop() : '🔔 Выбрать'}
               </button>
               {timerSoundEnd && (
-                <button onClick={() => setTimerSoundEnd(null)} className="text-[10px] text-gray-500 hover:text-white">✕</button>
+                <>
+                  <button
+                    onClick={() => playTimerSound(timerSoundEnd, 'end')}
+                    className="text-[10px] text-gray-400 hover:text-white"
+                    title="Проверить"
+                  >🔊</button>
+                  <button onClick={() => setTimerSoundEnd(null)} className="text-[10px] text-gray-500 hover:text-white">✕</button>
+                </>
               )}
             </div>
           </div>

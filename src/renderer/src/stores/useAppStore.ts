@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist, createJSONStorage } from 'zustand/middleware'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
 // для контекста. inflight = текущая chain promise; pendingTarget = последний
@@ -214,7 +215,8 @@ interface AppState {
   setTimerOverlayScale: (scale: number) => void
 }
 
-export const useAppStore = create<AppState>((set, get) => {
+export const useAppStore = create<AppState>()(persist(
+  (set, get) => {
   const initial = makeInitialChannels()
   return {
   folderPath: null,
@@ -486,4 +488,22 @@ export const useAppStore = create<AppState>((set, get) => {
   setTimerOverlayPosition: (pos) => set({ timerOverlayPosition: pos }),
   setTimerOverlayScale: (scale) => set({ timerOverlayScale: scale })
   }
-})
+  },
+  {
+    // Сохраняем в localStorage только user-preferences (не runtime state).
+    // Файлы/слайды/live-channel начинаются заново на каждый запуск.
+    name: 'roland-app-preferences',
+    storage: createJSONStorage(() => localStorage),
+    partialize: (state) => ({
+      timerSoundEnd: state.timerSoundEnd,
+      timerSoundWarning: state.timerSoundWarning,
+      selectedDisplayId: state.selectedDisplayId,
+      backdropImage: state.backdropImage,
+      folderPath: state.folderPath,
+      rootFolderPath: state.rootFolderPath,
+      globalHookEnabled: state.globalHookEnabled,
+      timerOverlayPosition: state.timerOverlayPosition,
+      timerOverlayScale: state.timerOverlayScale,
+    }),
+  }
+))
