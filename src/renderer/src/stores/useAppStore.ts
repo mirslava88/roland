@@ -492,11 +492,25 @@ export const useAppStore = create<AppState>()(persist(
   {
     // Сохраняем в localStorage только user-preferences (не runtime state).
     // Файлы/слайды/live-channel начинаются заново на каждый запуск.
+    //
+    // NOT persist-ится: timerSoundEnd/Warning — юзер явно не хочет чтобы
+    // звуки подтягивались автоматом. Каждая сессия начинается с null,
+    // нужно выбирать звук через настройки таймера.
+    //
+    // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
+    version: 2,
     storage: createJSONStorage(() => localStorage),
+    migrate: (persistedState, version) => {
+      // v1 → v2: дропаем timerSoundEnd/Warning из уже сохранённого state.
+      if (version < 2 && persistedState && typeof persistedState === 'object') {
+        const { timerSoundEnd: _a, timerSoundWarning: _b, ...rest } = persistedState as Record<string, unknown>
+        void _a; void _b
+        return rest
+      }
+      return persistedState
+    },
     partialize: (state) => ({
-      timerSoundEnd: state.timerSoundEnd,
-      timerSoundWarning: state.timerSoundWarning,
       selectedDisplayId: state.selectedDisplayId,
       backdropImage: state.backdropImage,
       folderPath: state.folderPath,
