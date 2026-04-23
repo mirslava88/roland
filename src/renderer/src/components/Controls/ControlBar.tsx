@@ -43,24 +43,18 @@ export function ControlBar(): JSX.Element {
   }
 
   const handlePptxNav = (direction: 'next' | 'prev'): void => {
+    // Паттерн из SlideNavigator — goto(target) + fire-and-forget, без reconcile.
+    // Читаем currentSlide из стора напрямую: при быстрых кликах React ещё не
+    // перерендерил компонент, замыкание держит старое значение — второй клик
+    // считал бы тот же optimistic и терялся. getState() всегда свежее.
+    const { currentSlide } = useAppStore.getState()
     const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
     setCurrentSlide(optimistic)
-    pendingNavCount.current++
-    navigatePptx(direction).then((result) => {
-      pendingNavCount.current--
-      if (pendingNavCount.current > 0) return
-      if (result.success && result.output) {
-        try {
-          const data = JSON.parse(result.output)
-          if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
-            useAppStore.getState().setCurrentSlide(data.CurrentSlide)
-          }
-        } catch { /* ignore */ }
-      }
-    }).catch(() => { pendingNavCount.current-- })
+    navigatePptx('goto', optimistic)
   }
 
   const handlePrev = (): void => {
+    const { currentSlide } = useAppStore.getState()
     if (currentSlide <= 1) return
 
     if (activeFile.type === 'presentation') {
@@ -73,6 +67,7 @@ export function ControlBar(): JSX.Element {
   }
 
   const handleNext = (): void => {
+    const { currentSlide, totalSlides } = useAppStore.getState()
     if (totalSlides > 0 && currentSlide >= totalSlides) return
 
     if (activeFile.type === 'presentation') {

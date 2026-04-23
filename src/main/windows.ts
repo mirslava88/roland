@@ -39,6 +39,14 @@ export function createControlWindow(): BrowserWindow {
 export function createPresentationWindow(display: Display): BrowserWindow {
   const { x, y, width, height } = display.bounds
 
+  // show: false — создаём скрытым. Иначе Windows DWM при показе fullscreen
+  // окна может мгновенно promote его выше overlay screen-saver в z-order
+  // (WM_CREATE + SW_SHOW синхронно), и его #000 background вспыхивает
+  // через → вспышка при переходе на новый контент. Caller должен:
+  // 1. createPresentationWindow (скрытым)
+  // 2. re-assert overlay topmost
+  // 3. presentationWindow.show()
+  // Тогда первый paint окна happens уже ПОД overlay.
   const win = new BrowserWindow({
     x,
     y,
@@ -46,6 +54,7 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     height,
     fullscreen: true,
     frame: false,
+    show: false,
     backgroundColor: '#000000',
     title: 'Presentation',
     webPreferences: {

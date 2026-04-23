@@ -230,13 +230,15 @@ while ($true) {
                     # external display ends up one or more slides ahead of the
                     # in-app slide number. ppSlideShowManualAdvance = 1.
                     try { $s.AdvanceMode = 1 } catch {}
-                    if ($startSlide -gt 1) {
-                        try {
-                            $s.StartingSlide = $startSlide
-                            $s.EndingSlide   = $count
-                            $s.RangeType     = 2  # ppShowSlideRange
-                        } catch {}
-                    }
+                    # НЕ используем RangeType=2 (ppShowSlideRange) даже для
+                    # startSlide > 1 — иначе slideshow создаётся с диапазоном
+                    # [startSlide..count], и SlideShowView.Slides.Count = размер
+                    # диапазона, не размер презы. GotoSlide(N) работает на индекс
+                    # ВНУТРИ диапазона: GotoSlide(8) при startSlide=9 даёт
+                    # "out of range 1 to 1" если файл 9 слайдов. Backward-
+                    # навигация ломается полностью. Вместо этого запускаем
+                    # slideshow на полный диапазон, post-Run GotoSlide($startSlide)
+                    # ниже перепрыгнет на нужный слайд (под overlay невидимо).
                     # Zero out the entry transition on the starting slide.
                     # PPTX templates often apply a Fade/Wipe/Spotlight effect
                     # (500-1500ms) that fires on Run(). The overlay hides
@@ -401,6 +403,36 @@ while ($true) {
                     }
                 }
 
+                # Wait for PP COM to reflect the new slideshow in
+                # SlideShowWindows collection. After teardown OLD (closing
+                # the previous file's Presentation), PP COM enters a transient
+                # state where SlideShowWindows.Count returns 0 for several
+                # seconds — even though the Win32 slideshow window exists
+                # (snapshot via FindSlideShowHwnds works fine). Without this
+                # wait, navigations immediately after take return 'no slideshow'
+                # until COM auto-recovers ~3sec later.
+                $verifyStart = [DateTime]::UtcNow
+                $verifyOk = $false
+                while ((([DateTime]::UtcNow - $verifyStart).TotalMilliseconds) -lt 4000) {
+                    try {
+                        $cnt = [int]$ppt.SlideShowWindows.Count
+                        if ($cnt -gt 0) {
+                            for ($i = 1; $i -le $cnt; $i++) {
+                                try {
+                                    if ($ppt.SlideShowWindows($i).Presentation.FullName -ieq $pres.FullName) {
+                                        $verifyOk = $true
+                                        break
+                                    }
+                                } catch {}
+                            }
+                            if ($verifyOk) { break }
+                        }
+                    } catch {}
+                    Start-Sleep -Milliseconds 50
+                }
+                $verifyMs = [int]([DateTime]::UtcNow - $verifyStart).TotalMilliseconds
+                Log ("open: SlideShowWindows verify ok={0} took={1}ms" -f $verifyOk, $verifyMs)
+
                 Reply @{ id = $id; ok = $true; slideCount = $count; slide = $startSlide }
             }
             'close' {
@@ -491,10 +523,22 @@ while ($true) {
                 if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
                     $view = $ppt.SlideShowWindows(1).View
                     $n = [int]$req.slide
-                    $view.GotoSlide($n)
-                    Reply @{ id = $id; ok = $true; slide = $n }
+                    $threw = $false
+                    try { $view.GotoSlide($n) } catch {
+                        $threw = $true
+                        Log "goto($n) threw: $($_.Exception.Message)"
+                    }
+                    # ALWAYS read actual slide PP ended up on. Even if GotoSlide
+                    # threw (target out of bounds — e.g. slide=N+1 when file has
+                    # only N slides), PP stays at previous slide. Returning
+                    # actual lets renderer sync UI back to PP state — иначе
+                    # optimistic UI уходит вперёд от PP, юзер видит «слайд
+                    # пропустился» при следующем клике (UI догоняет).
+                    $actual = -1
+                    try { $actual = [int]$view.Slide.SlideIndex } catch {}
+                    Reply @{ id = $id; ok = (-not $threw); slide = $actual }
                 } else {
-                    Reply @{ id = $id; ok = $false; error = 'no slideshow' }
+                    Reply @{ id = $id; ok = $false; error = 'no slideshow'; slide = -1 }
                 }
             }
             'current' {

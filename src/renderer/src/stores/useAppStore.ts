@@ -1,5 +1,76 @@
 import { create } from 'zustand'
 
+// Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
+// для контекста. inflight = текущая chain promise; pendingTarget = последний
+// запрошенный target slide (null если нет ожидающего).
+type PptxResult = { success: boolean; output?: string; error?: string }
+let _pptxGotoInflight: Promise<PptxResult> | null = null
+let _pptxGotoPendingTarget: number | null = null
+
+// Reset collapse state. Вызывается из handleTake перед launchPowerPoint
+// чтобы chain от навигации предыдущего файла не пересекался с новым PPTX.
+// Если предыдущий chain ещё в процессе await — его resolve просто не
+// повлияет на новые клики (мы пере-стартуем chain как только pending
+// будет установлен следующим кликом).
+export function resetPptxNavState(): void {
+  _pptxGotoInflight = null
+  _pptxGotoPendingTarget = null
+}
+
+// Ждёт пока goto-chain полностью завершится. Используется в handleTake
+// перед snapshotSlideshow чтобы не захватить промежуточный слайд PP
+// если user кликал кликером ВО ВРЕМЯ launchPowerPoint (queued goto's
+// ещё не отработали daemon-ом к моменту snapshot → overlay pinned с
+// картинкой не того слайда, который PP в итоге покажет).
+export async function awaitPptxGotoChainIdle(): Promise<void> {
+  while (_pptxGotoInflight) {
+    try { await _pptxGotoInflight } catch { /* ignore */ }
+  }
+}
+
+function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
+  _pptxGotoPendingTarget = target
+  const wasInflight = !!_pptxGotoInflight
+  window.api.dbgLog(`dispatchPptxGoto: target=${target} wasInflight=${wasInflight}`)
+  if (_pptxGotoInflight) return _pptxGotoInflight
+  const chain = (async (): Promise<PptxResult> => {
+    let lastResult: PptxResult = { success: true }
+    while (_pptxGotoPendingTarget !== null) {
+      const t = _pptxGotoPendingTarget
+      _pptxGotoPendingTarget = null
+      lastResult = await new Promise<PptxResult>((resolve) => {
+        const timer = setTimeout(() => {
+          resolve({ success: false, error: `goto(${t}) timeout 3000ms` })
+        }, 3000)
+        window.api.powerpointCommand('goto', t).then(
+          (r) => { clearTimeout(timer); resolve(r) },
+          (e) => { clearTimeout(timer); resolve({ success: false, error: String(e) }) }
+        )
+      })
+    }
+    _pptxGotoInflight = null
+    // Sync UI с РЕАЛЬНЫМ состоянием PP. daemon goto всегда возвращает
+    // фактический slide (даже при out-of-bounds GotoSlide — PP остаётся
+    // на предыдущем слайде). Если optimistic UI ушёл в N+1 а PP не
+    // смог туда попасть, lastResult.slide = реальный N. Откатываем UI
+    // в N — иначе на следующий клик UI «пропустит» слайд догоняя PP.
+    try {
+      const data = lastResult.output ? JSON.parse(lastResult.output) : null
+      const actualSlide = data?.CurrentSlide
+      if (typeof actualSlide === 'number' && actualSlide > 0) {
+        const { currentSlide, setCurrentSlide } = useAppStore.getState()
+        if (actualSlide !== currentSlide) {
+          window.api.dbgLog(`dispatchPptxGoto: sync UI ${currentSlide}→${actualSlide} (PP actual)`)
+          setCurrentSlide(actualSlide)
+        }
+      }
+    } catch { /* ignore */ }
+    return lastResult
+  })()
+  _pptxGotoInflight = chain
+  return chain
+}
+
 export type ContentType = 'presentation' | 'pdf' | 'video' | 'other' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
 export type ChannelId = string
@@ -346,15 +417,26 @@ export const useAppStore = create<AppState>((set, get) => {
   // Navigate active PPTX. Если оверлей в pinned-pptx (висит после file-switch),
   // прячем его параллельно с PP-командой — DWM-гонка на hide попадает внутрь
   // PP slide-transition анимации и становится визуально неразличимой.
+  //
+  // Goto rapid-click collapsing: при быстрой навигации (5 нажатий next подряд)
+  // все вызовы goto делят ОДИН inflight chain — pending target обновляется
+  // на каждом клике, но в PP отправляется только текущий inflight + затем
+  // финальный pending. Это предотвращает рассинхрон UI/PP когда оптимистичный
+  // setCurrentSlide уходит вперёд, а PP не успевает (PP transitions ~200-500мс
+  // каждый, retry-on-stuck может пропустить click). После collapsing PP
+  // прыгает напрямую к финальному target — синхрон гарантирован.
   navigatePptx: async (command, arg) => {
+    window.api.dbgLog(`navigatePptx: ENTER command=${command} arg=${arg} typeof-arg=${typeof arg}`)
     const { overlayState } = get()
     if (overlayState.kind === 'pinned-pptx') {
       window.api.hideOverlay()
       set({ overlayState: { kind: 'hidden' } })
     }
     if (command === 'goto' && typeof arg === 'number') {
-      return window.api.powerpointCommand('goto', arg)
+      window.api.dbgLog(`navigatePptx: dispatching goto(${arg})`)
+      return dispatchPptxGotoCollapsed(arg)
     }
+    window.api.dbgLog(`navigatePptx: direct powerpointCommand(${command})`)
     return window.api.powerpointCommand(command)
   },
 

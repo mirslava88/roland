@@ -239,12 +239,29 @@ export function registerIpcHandlers(
     }
   )
 
+  // Снимок живого slideshow-окна PP через PrintWindow(PW_RENDERFULLCONTENT).
+  // Вызывается ПОСЛЕ launchPowerPoint в hybrid-флоу для PPTX→PPTX: кадр,
+  // который PP только что отрисовал, захватывается в PNG и подкладывается
+  // в оверлей перед hideOverlay. Оверлей и PP показывают пиксель-в-пиксель
+  // одно изображение — композиторная гонка DWM перестаёт быть видимой.
+  ipcMain.handle('snapshot-slideshow', async (): Promise<string | null> => {
+    if (process.platform !== 'win32') return null
+    try {
+      const res = await pptDaemon.send('snapshot', {}, 5000)
+      if (res.ok && res.path) return res.path
+    } catch { /* ignore */ }
+    return null
+  })
+
   ipcMain.handle('powerpoint-command', async (_event, command: string, arg?: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    console.log(`[IPC ${Date.now()}] powerpoint-command: BEGIN command=${command} arg=${arg}`)
     try {
+      const t0 = Date.now()
       const res = command === 'goto' && typeof arg === 'number'
         ? await pptDaemon.send('goto', { slide: arg })
         : await pptDaemon.send(command)
+      console.log(`[IPC ${Date.now()}] powerpoint-command: END command=${command} ok=${res.ok} slide=${res.slide} dur=${Date.now() - t0}ms`)
       const output = JSON.stringify({
         Status: res.ok ? 'ok' : 'error',
         CurrentSlide: res.slide,
@@ -252,6 +269,7 @@ export function registerIpcHandlers(
       })
       return { success: res.ok, output }
     } catch (error: unknown) {
+      console.log(`[IPC ${Date.now()}] powerpoint-command: ERROR ${String(error)}`)
       return { success: false, error: String(error) }
     }
   })

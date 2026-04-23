@@ -97,8 +97,17 @@ function createWindows(): void {
     app.quit()
   })
 
+  // dbg-log: renderer processes (control + presentation) forward debug strings
+  // here so everything lands in the main-process stdout stream alongside
+  // [MAIN ...] and [DAEMON ...] lines. Single interleaved timeline for
+  // diagnosing PDF↔PPTX flicker timing.
+  ipcMain.on('dbg-log', (_event, msg: string) => {
+    console.log(`[R ${Date.now()}] ${msg}`)
+  })
+
   ipcMain.handle('open-presentation-window', async (_event, displayId?: number) => {
     if (presentationWindow && !presentationWindow.isDestroyed()) {
+      console.log(`[MAIN ${Date.now()}] open-presentation-window: already open, focusing`)
       presentationWindow.focus()
       return
     }
@@ -110,18 +119,45 @@ function createWindows(): void {
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
 
+    console.log(`[MAIN ${Date.now()}] open-presentation-window: createPresentationWindow BEGIN display=${targetDisplay!.id} bounds=${targetDisplay!.bounds.width}x${targetDisplay!.bounds.height}`)
     presentationWindow = createPresentationWindow(targetDisplay!)
+    console.log(`[MAIN ${Date.now()}] open-presentation-window: createPresentationWindow END (show=false, hidden), waiting for presentation-ready`)
+
+    // Window создано скрытым (show:false в createPresentationWindow). Renderer
+    // process активен, React монтируется, signalReady() прилетит. Главное —
+    // paint surface окна ЕЩЁ не в DWM, оно не может всплыть поверх overlay.
+    const raiseOverlay = (reason: string): void => {
+      if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()) {
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+        overlayWindow.moveTop()
+        console.log(`[MAIN ${Date.now()}] open-presentation-window: overlay re-asserted topmost (${reason})`)
+      }
+    }
 
     // Wait for the renderer to fully load and React to mount
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => resolve(), 5000) // fallback timeout
+      const timeout = setTimeout(() => {
+        console.log(`[MAIN ${Date.now()}] open-presentation-window: TIMEOUT (5000ms) waiting for presentation-ready`)
+        resolve()
+      }, 5000)
       ipcMain.once('presentation-ready', () => {
         clearTimeout(timeout)
+        console.log(`[MAIN ${Date.now()}] open-presentation-window: presentation-ready received`)
         resolve()
       })
     })
 
+    // Critical sequence: raise overlay FIRST, THEN show presentation window.
+    // SW_SHOW на скрытом fullscreen window может моментально promote его
+    // выше overlay в DWM, поэтому overlay должен уже лежать поверх в этот
+    // момент. После show() ещё раз re-assert на всякий случай.
+    raiseOverlay('before-show')
+    presentationWindow.showInactive()
+    console.log(`[MAIN ${Date.now()}] open-presentation-window: presentationWindow.showInactive() called`)
+    raiseOverlay('after-show')
+
     presentationWindow.on('closed', () => {
+      console.log(`[MAIN ${Date.now()}] presentation-window: closed`)
       presentationWindow = null
       controlWindow?.webContents.send('presentation-window-closed')
     })
@@ -135,6 +171,7 @@ function createWindows(): void {
   })
 
   ipcMain.handle('show-overlay', async (_event, displayId?: number, freezeImageDataUrl?: string, imagePath?: string) => {
+    console.log(`[MAIN ${Date.now()}] show-overlay: ENTER hasDataUrl=${!!freezeImageDataUrl} hasPath=${!!imagePath}`)
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
@@ -158,7 +195,9 @@ function createWindows(): void {
     // Create overlay once and keep it persistently shown at screen-saver level
     // with win.setOpacity(0). All further visibility toggles are instant OS
     // opacity changes — no window show/hide animations, no black frame flash.
-    if (!overlayWindow || overlayWindow.isDestroyed()) {
+    const freshlyCreated = !overlayWindow || overlayWindow.isDestroyed()
+    if (freshlyCreated) {
+      console.log(`[MAIN ${Date.now()}] show-overlay: creating overlay window (first time)`)
       overlayWindow = createOverlayWindow(targetDisplay!)
       await new Promise<void>((resolve) => {
         const w = overlayWindow!
@@ -175,22 +214,23 @@ function createWindows(): void {
       overlayWindow.setOpacity(0)
       overlayWindow.showInactive()
     }
+    const prevOpacity = overlayWindow.getOpacity()
+    const wasVisible = overlayWindow.isVisible()
+    const keepOpaque = prevOpacity >= 1
+    console.log(`[MAIN ${Date.now()}] show-overlay: before setBounds prevOpacity=${prevOpacity} wasVisible=${wasVisible} freshlyCreated=${freshlyCreated} keepOpaque=${keepOpaque}`)
     overlayWindow.setBounds(targetDisplay!.bounds)
-    // Native opacity must be 0 BEFORE showInactive(), otherwise the window
-    // pops in opaque for one frame showing the black body bg (the #o div is
-    // still at CSS opacity:0 from the previous .hide class) before the
-    // imgJs below runs and decodes the new image. That one frame == flicker.
-    overlayWindow.setOpacity(0)
-    if (!overlayWindow.isVisible()) overlayWindow.showInactive()
+    if (!keepOpaque) {
+      overlayWindow.setOpacity(0)
+      if (!overlayWindow.isVisible()) overlayWindow.showInactive()
+      console.log(`[MAIN ${Date.now()}] show-overlay: opacity forced to 0, window visible`)
+    } else {
+      console.log(`[MAIN ${Date.now()}] show-overlay: overlay already opaque, keeping opacity=1 — atomically swap image`)
+    }
 
-    // Preload & decode the freeze image WHILE overlay is still invisible —
-    // guarantees the first visible frame already contains the image.
-    // CRITICAL: remove the `.hide` CSS class that hide-overlay added last
-    // time. Without this, the overlay div stays at opacity:0 on every
-    // subsequent show, so the freeze frame is INVISIBLE and PowerPoint's
-    // raw transition shows through.
-    // Also wait two rAF ticks so the decoded image is actually composited
-    // into the renderer's back buffer before the native window flips opaque.
+    // Single <img id="f"> with atomic src swap. Browser keeps OLD image
+    // visible until NEW decoded, then one paint swap. Single boundary
+    // (atomic jump) vs ghost-prone crossfade — атомарный swap выбран
+    // как лучший из плохих вариантов для different-content transitions.
     const imgJs = overlayImage
       ? `(async () => {
            var o=document.getElementById('o');
@@ -210,13 +250,20 @@ function createWindows(): void {
            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
            return true;
          })()`
+    const jsT0 = Date.now()
+    console.log(`[MAIN ${jsT0}] show-overlay: executeJavaScript BEGIN (decode+2rAF)`)
     try {
       await overlayWindow.webContents.executeJavaScript(imgJs)
     } catch { /* ignore */ }
+    console.log(`[MAIN ${Date.now()}] show-overlay: executeJavaScript END dur=${Date.now() - jsT0}ms`)
     overlayWindow.setAlwaysOnTop(true, 'screen-saver')
     overlayWindow.moveTop()
-    overlayWindow.setOpacity(1)
-    console.log(`[MAIN ${Date.now()}] overlay opacity=1 (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
+    if (!keepOpaque) {
+      overlayWindow.setOpacity(1)
+      console.log(`[MAIN ${Date.now()}] overlay opacity=1 (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
+    } else {
+      console.log(`[MAIN ${Date.now()}] overlay stayed opaque, image swapped atomically (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
+    }
     // NB: No raise-timer. Poller data (2026-04-25 session) proved PP
     // slideshow has exStyle=0x0 — it's NOT topmost — so there is no
     // z-order race to fight. Electron's HWND_TOPMOST set once is enough.
@@ -281,17 +328,58 @@ function createWindows(): void {
     } catch { /* ignore */ }
   })
 
+  // Перед hide-overlay: захватываем именно то что СЕЙЧАС нарисовано в
+  // presentation window (webContents.capturePage force-flush paint в DirectX
+  // surface перед снятием), swap overlay image в этот кадр. После этого
+  // overlay image = presentation window pixels pixel-perfect — последующий
+  // hide-overlay превращается в «убрать идентичный слой поверх идентичного»,
+  // любая DWM compositor гонка невидима. Паттерн зеркалит PPTX→PPTX где
+  // snapshotSlideshow + swap даёт pixel-match и работает бесшовно.
+  ipcMain.handle('capture-and-swap-overlay', async () => {
+    if (!presentationWindow || presentationWindow.isDestroyed()) {
+      console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: no presentation window, skip`)
+      return
+    }
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: no overlay window, skip`)
+      return
+    }
+    const t0 = Date.now()
+    try {
+      const nativeImage = await presentationWindow.webContents.capturePage()
+      const buffer = nativeImage.toPNG()
+      const dataUrl = `data:image/png;base64,${buffer.toString('base64')}`
+      console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: capturePage done (${Date.now() - t0}ms, ${buffer.length} bytes)`)
+      const js = `(async () => {
+        var f=document.getElementById('f');
+        if (!f) return false;
+        var img = new Image();
+        img.src = ${JSON.stringify(dataUrl)};
+        try { await img.decode(); } catch {}
+        f.src = img.src;
+        f.style.display='block';
+        var o=document.getElementById('o');
+        if (o) o.classList.remove('hide');
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        return true;
+      })()`
+      await overlayWindow.webContents.executeJavaScript(js)
+      console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: swap done (total ${Date.now() - t0}ms)`)
+    } catch (e) {
+      console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: ERROR ${String(e)}`)
+    }
+  })
+
   ipcMain.handle('hide-overlay', async () => {
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      // КРИТИЧНО: НЕ звать overlayWindow.hide(). Окно должно оставаться
-      // native-visible (с нулевой opacity) весь жизненный цикл. hide() даёт
-      // WM_SHOWWINDOW-транзишен + освобождение/переаллокацию DWM-surface,
-      // и пока окно скрыто, Electron теряет screen-saver Z-order над PP —
-      // PP slideshow (WS_EX_TOPMOST) успевает прорисоваться поверх до
-      // следующего showInactive(). Это и есть вспышка при PPTX→PPTX.
-      // setOpacity(0) — GPU-level композитная прозрачность, окно остаётся
-      // в иерархии, Z-order непрерывно доминирует над PP всё время.
-      console.log(`[MAIN ${Date.now()}] hide-overlay: opacity=0 (stay native-visible)`)
+      // Native setOpacity(0) с 33мс DWM grace. Мгновенное скрытие
+      // overlay — единственная transition boundary. Poliмат из
+      // captureAndSwap перед hide = overlay image совпадает с
+      // содержимым presentation window → hide невидим. Без
+      // captureAndSwap (first-take с prev-hidden) видна jump от
+      // overlay к window content.
+      await new Promise<void>((resolve) => setTimeout(resolve, 33))
+      console.log(`[MAIN ${Date.now()}] hide-overlay: opacity=0 (stay native-visible, after 33ms DWM grace)`)
       overlayWindow.setOpacity(0)
     }
   })

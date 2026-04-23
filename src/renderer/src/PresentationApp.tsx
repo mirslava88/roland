@@ -24,12 +24,15 @@ export function PresentationApp(): JSX.Element {
   // mid-fade the audience would see the presentation window blink through
   // black. No fade → overlay fully owns the transition.
   const loadContent = useCallback((payload: ContentPayload) => {
+    window.api.dbgLog(`PresApp: setContent type=${payload.type} path=${payload.path.split(/[\\\\/]/).pop()} startSlide=${payload.startSlide ?? '-'}`)
     setContent(payload)
   }, [])
 
   useEffect(() => {
     const unsubLoad = window.api.on('load-content', (...args: unknown[]) => {
-      loadContent(args[0] as ContentPayload)
+      const p = args[0] as ContentPayload
+      window.api.dbgLog(`PresApp: load-content received type=${p.type}`)
+      loadContent(p)
     })
 
     const unsubStop = window.api.on('stop', () => {
@@ -54,8 +57,10 @@ export function PresentationApp(): JSX.Element {
     // rAFs so the overlay fade starts against a fully-painted presentation
     // window; otherwise the audience sees a brief cross-fade between old
     // and new content through the still-translucent overlay.
+    window.api.dbgLog('PresApp: onLoad fired, scheduling 2xrAF → content-ready')
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        window.api.dbgLog('PresApp: sendToControl(presentation-content-ready)')
         window.api.sendToControl('presentation-content-ready')
       })
     })

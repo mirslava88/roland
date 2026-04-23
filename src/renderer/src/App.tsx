@@ -59,8 +59,6 @@ export default function App(): JSX.Element {
       void data
     })
 
-    let pendingNavCount = 0
-
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
       const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
       if (!activeFile) return
@@ -73,26 +71,12 @@ export default function App(): JSX.Element {
         if (direction === 'next' && total > 0 && currentSlide >= total) return
         if (direction === 'prev' && currentSlide <= 1) return
 
-        // Optimistic UI update — instant feedback.
+        // Паттерн из SlideNavigator — goto(target) без reconcile.
+        // View.Next/Previous могут играть/откатывать animation builds не меняя
+        // slide index — reconcile откатывал бы UI. GotoSlide прыгает однозначно.
         const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
         useAppStore.getState().setCurrentSlide(optimistic)
-
-        // Reconcile with real slide index from PowerPoint.
-        // Only the LAST in a rapid burst reconciles — avoids UI bouncing
-        // when user clicks faster than PPT responds.
-        pendingNavCount++
-        useAppStore.getState().navigatePptx(direction).then((result) => {
-          pendingNavCount--
-          if (pendingNavCount > 0) return
-          if (result.success && result.output) {
-            try {
-              const data = JSON.parse(result.output)
-              if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
-                useAppStore.getState().setCurrentSlide(data.CurrentSlide)
-              }
-            } catch { /* ignore */ }
-          }
-        }).catch(() => { pendingNavCount-- })
+        useAppStore.getState().navigatePptx('goto', optimistic)
       } else if (activeFile.type === 'pdf') {
         const isNext = direction === 'next'
         const newSlide = isNext

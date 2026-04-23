@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE } from '../../stores/useAppStore'
+import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -17,6 +17,60 @@ const EXT_TYPE_MAP: Record<string, FileEntry['type']> = {}
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg'])
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'])
+
+// Render a single PDF page to a base64 PNG dataUrl, sized to fit display.
+// Used in handleTake to compute overlay freeze-frame matching what the
+// presentation window will render after load-content. Pixel-match between
+// freeze and actual rendered PDF makes the captureAndSwap+hide invisible.
+async function renderPdfPageToDataUrl(
+  filePath: string,
+  pageNum: number,
+  displayWidth: number,
+  displayHeight: number
+): Promise<string | null> {
+  try {
+    const ab = await window.api.readFile(filePath)
+    const doc = await pdfjsLib.getDocument({ data: ab }).promise
+    const safePage = Math.max(1, Math.min(pageNum || 1, doc.numPages))
+    const page = await doc.getPage(safePage)
+    const baseViewport = page.getViewport({ scale: 1 })
+    const scale = Math.min(displayWidth / baseViewport.width, displayHeight / baseViewport.height)
+    const scaledViewport = page.getViewport({ scale })
+    const canvas = document.createElement('canvas')
+    canvas.width = scaledViewport.width
+    canvas.height = scaledViewport.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+    return canvas.toDataURL('image/png')
+  } catch {
+    return null
+  }
+}
+
+// Read an image file (PNG/JPEG) from disk via main process and convert to
+// base64 dataUrl for embedding into overlay. Used for PPTX freeze-frame
+// (pre-rendered slides via generatePptxSlides).
+async function imageFileToDataUrl(filePath: string): Promise<string | null> {
+  try {
+    const ab = await window.api.readFile(filePath)
+    const bytes = new Uint8Array(ab)
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(
+        null,
+        Array.from(bytes.subarray(i, i + chunkSize))
+      )
+    }
+    const base64 = btoa(binary)
+    const lower = filePath.toLowerCase()
+    const mime = lower.endsWith('.jpg') || lower.endsWith('.jpeg') ? 'image/jpeg' : 'image/png'
+    return `data:${mime};base64,${base64}`
+  } catch {
+    return null
+  }
+}
 
 function nativeFileToEntry(filePath: string): FileEntry | null {
   const parts = filePath.replace(/\\/g, '/').split('/')
@@ -141,7 +195,13 @@ export function PreviewPanel(): JSX.Element {
     const prevActiveFile = freshState.activeFile
 
     const T0 = performance.now()
-    const log = (step: string): void => console.log(`[TAKE ${(performance.now() - T0).toFixed(0)}ms] ${step}`)
+    const log = (step: string): void => {
+      const ms = (performance.now() - T0).toFixed(0)
+      console.log(`[TAKE ${ms}ms] ${step}`)
+      // Дублируем в main stdout чтобы иметь единый timeline вместе с
+      // [MAIN], [DAEMON], [R] логами при диагностике мерцаний.
+      window.api.dbgLog(`TAKE +${ms}ms: ${step}`)
+    }
     log(`BEGIN prev=${prevActiveFile?.type} next=${channel.file.type} slide=${channel.slide}`)
 
     const isPptxToPptx =
@@ -156,42 +216,58 @@ export function PreviewPanel(): JSX.Element {
       prevActiveFile?.type === 'presentation' &&
       channel.file.type === 'presentation' &&
       prevActiveFile.path === channel.file.path
-    // PPTX→PPTX (different file): capture current display so the overlay
-    // appears holding the EXACT pixels that were on screen a moment ago —
-    // no visible content cut when the overlay fades in. The pre-rendered
-    // PNG path (pptxSlidesMap) used to cover this case, but PP's own
-    // Slide.Export renders through a different pipeline (GDI+) than the
-    // live slideshow (DirectWrite), so during the 150ms hide-fade the
-    // AA/hinting shift produced a faint but visible flicker. Matching the
-    // PDF→PDF pattern: two real screen captures cross-fading have nothing
-    // to misalign. pptxSlidesMap is still generated in the background and
-    // used for the preview panel — just not wired into the overlay.
+    // Архитектурный фикс after-navigation flicker:
+    // Freeze-кадр для overlay = pre-render TARGET'a (того, куда переключаемся),
+    // а НЕ captureDisplay PREV-стейта. Это убирает видимую границу «overlay
+    // OLD freeze → overlay NEW capture» внутри opaque overlay при swap, потому
+    // что freeze И финальный captureAndSwap показывают одну и ту же страницу
+    // NEW. Юзер видит ОДНУ видимую транзицию: PREV live → overlay с NEW
+    // thumbnail (это семантически «начался свитч»). Дальше всё pixel-match
+    // и invisible.
+    //
+    // Источник thumbnail:
+    // - PPTX: pptxSlidesMap[path][slide-1] (pre-rendered через generatePptxSlides
+    //   при drag-drop в канал).
+    // - PDF: рендерим страницу через pdfjsLib в control-окне.
+    // - Else (video/image/other): fallback на captureDisplay PREV state.
     let freezeFrame: string | null = null
-    if (isPptxToPptx && !isSameFilePptx) {
-      const { selectedDisplayId } = freshState
-      try {
-        freezeFrame = await window.api.captureDisplay(selectedDisplayId ?? undefined)
-        log(`pptx→pptx freezeFrame: captureDisplay returned ${freezeFrame ? 'image' : 'null'}`)
-      } catch { /* fall back to black overlay */ }
-    }
+    if (!isSameFilePptx) {
+      const { selectedDisplayId, displays } = freshState
+      const targetDisplay = displays.find((d) => d.id === selectedDisplayId)
+        || displays.find((d) => !d.isPrimary)
+        || displays[0]
+      const dispW = targetDisplay?.bounds.width ?? 1920
+      const dispH = targetDisplay?.bounds.height ?? 1080
 
-    // Non-PPTX transitions where prev content was rendered in the Electron
-    // presentation window (PDF / video / image). Capture the current display
-    // so the overlay shows a still of the old content instead of a black
-    // rectangle — matches the seamless PPTX→PPTX look. Skipped when prev is
-    // PPTX (overlay covers PP teardown; black is fine there) or when there
-    // is no prev content at all (black is the correct starting state).
-    const prevIsPresentationWindowContent =
-      prevActiveFile &&
-      (prevActiveFile.type === 'pdf' ||
-        prevActiveFile.type === 'video' ||
-        (prevActiveFile.type === 'other' && (prevActiveFile.isImage || prevActiveFile.isAudio)))
-    if (!isPptxToPptx && prevIsPresentationWindowContent && !freezeFrame) {
-      const { selectedDisplayId } = freshState
       try {
-        freezeFrame = await window.api.captureDisplay(selectedDisplayId ?? undefined)
-        log(`non-pptx freezeFrame: captureDisplay returned ${freezeFrame ? 'image' : 'null'}`)
-      } catch { /* fall back to black overlay */ }
+        if (channel.file.type === 'pdf') {
+          log('freezeFrame: rendering PDF target page via pdfjs')
+          freezeFrame = await renderPdfPageToDataUrl(channel.file.path, channel.slide, dispW, dispH)
+          log(`freezeFrame: PDF render returned ${freezeFrame ? 'image' : 'null'}`)
+        } else if (channel.file.type === 'presentation') {
+          const slidesMap = freshState.pptxSlidesMap[channel.file.path]
+          const slidePath = slidesMap?.[(channel.slide || 1) - 1]
+          if (slidePath) {
+            log('freezeFrame: reading PPTX target slide from pptxSlidesMap')
+            freezeFrame = await imageFileToDataUrl(slidePath)
+            log(`freezeFrame: PPTX read returned ${freezeFrame ? 'image' : 'null'}`)
+          } else {
+            log('freezeFrame: pptxSlidesMap not ready for target, will fallback')
+          }
+        }
+      } catch (e) {
+        log(`freezeFrame: target render error ${String(e)}`)
+      }
+
+      // Fallback на captureDisplay если target render не удался ИЛИ нет prev
+      // (для перехода без prev контент freeze не нужен — overlay появится
+      // чёрным).
+      if (!freezeFrame && prevActiveFile) {
+        try {
+          freezeFrame = await window.api.captureDisplay(selectedDisplayId ?? undefined)
+          log(`freezeFrame: captureDisplay fallback returned ${freezeFrame ? 'image' : 'null'}`)
+        } catch { /* fall back to black overlay */ }
+      }
     }
 
     if (!isSameFilePptx) {
@@ -211,6 +287,12 @@ export function PreviewPanel(): JSX.Element {
 
     if (channel.file.type === 'presentation') {
       window.api.setActiveContentType('presentation')
+      // Reset goto-collapse state — старая chain от навигации предыдущего
+      // PPTX может быть inflight и блокировать новые goto на новом файле
+      // (все клики получали бы зависший shared promise → preview advances
+      // optimistic, PP не двигается). После reset новые клики стартуют
+      // свежий chain на новый daemon-loaded PP.
+      resetPptxNavState()
       // Switch audio if coming from non-PPTX content
       if (prevActiveFile?.type !== 'presentation') {
         window.api.switchAudioToExternal() // fire-and-forget, don't await
@@ -221,8 +303,30 @@ export function PreviewPanel(): JSX.Element {
       // no slide-1 flash before jumping.
       const targetSlide = channel.slide > 1 ? channel.slide : undefined
       log('launchPowerPoint: BEGIN')
+      // Снимок currentSlide ДО await launchPowerPoint. Если юзер во время
+      // launch нажал Next/Prev на кликере (globalShortcut → App.navigateSlide
+      // → setCurrentSlide(optimistic) + navigatePptx goto), значение в store
+      // изменится. После await сравним — и если был user nav, НЕ override
+      // currentSlide результатом launch (data.CurrentSlide отражает только
+      // Run()'s starting slide, не учитывает queued goto's выполненные daemon
+      // после Run → откат UI назад к 1 при PP уже на 2 = off-by-N рассинхрон).
+      const slideBeforeLaunch = useAppStore.getState().currentSlide
       const result = await window.api.launchPowerPoint(channel.file.path, undefined, targetSlide)
       log(`launchPowerPoint: END success=${result.success}`)
+
+      // КРИТИЧНО: ждём пока goto-chain (от user-кликов кликером во время
+      // launch) полностью отработает daemon. Иначе snapshotSlideshow
+      // ниже захватит ПРОМЕЖУТОЧНЫЙ слайд PP, а не финальный, на котором
+      // юзер действительно остановился — overlay pinned с картинкой
+      // не той страницы → PP под overlay показывает одно, overlay поверх
+      // другое.
+      log('awaitPptxGotoChainIdle: BEGIN')
+      await awaitPptxGotoChainIdle()
+      log('awaitPptxGotoChainIdle: END')
+
+      const slideAfterLaunch = useAppStore.getState().currentSlide
+      const userNavigatedDuringLaunch = slideAfterLaunch !== slideBeforeLaunch
+      log(`userNavigatedDuringLaunch=${userNavigatedDuringLaunch} (${slideBeforeLaunch}→${slideAfterLaunch})`)
 
       // NOW close the Electron presentation window — PowerPoint slideshow is already visible
       if (isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
@@ -235,7 +339,11 @@ export function PreviewPanel(): JSX.Element {
           if (data.SlideCount) {
             setTotalSlides(data.SlideCount)
             setChannelTotalSlides(ch, data.SlideCount)
-            setCurrentSlide(data.CurrentSlide || channel.slide)
+            if (!userNavigatedDuringLaunch) {
+              setCurrentSlide(data.CurrentSlide || channel.slide)
+            } else {
+              log('skipping setCurrentSlide override — preserving user navigation during launch')
+            }
           }
         } catch { /* ignore */ }
       }
@@ -402,6 +510,16 @@ export function PreviewPanel(): JSX.Element {
     })
 
     await contentReady
+    // capture-and-swap перед hide: снимок presentation window через
+    // capturePage → swap overlay image в него. Теперь overlay pixels
+    // pixel-match с underlying window pixels. hide-overlay превращается
+    // в removal идентичного слоя → DWM compositor race невидим для
+    // зрителя. Для first-takes (OLD freeze ≈ NEW content) — бесшовно.
+    // Для after-navigation takes (OLD ≠ NEW) — swap сам визуально
+    // заметен на opaque overlay, это отдельная нерешённая проблема.
+    log('capture-and-swap-overlay: BEGIN')
+    await window.api.captureAndSwapOverlay()
+    log('capture-and-swap-overlay: END')
     await window.api.hideOverlay()
     setOverlayState({ kind: 'hidden' })
   }

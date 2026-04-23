@@ -43,7 +43,15 @@ const api = {
   showOverlay: (displayId?: number, freezeImageDataUrl?: string, imagePath?: string) =>
     ipcRenderer.invoke('show-overlay', displayId, freezeImageDataUrl, imagePath),
 
+  swapOverlayImage: (imagePath: string): Promise<void> =>
+    ipcRenderer.invoke('swap-overlay-image', imagePath),
+
+  snapshotSlideshow: (): Promise<string | null> =>
+    ipcRenderer.invoke('snapshot-slideshow'),
+
   hideOverlay: () => ipcRenderer.invoke('hide-overlay'),
+
+  captureAndSwapOverlay: (): Promise<void> => ipcRenderer.invoke('capture-and-swap-overlay'),
 
   captureDisplay: (displayId?: number): Promise<string | null> =>
     ipcRenderer.invoke('capture-display', displayId),
@@ -177,6 +185,10 @@ const api = {
 
   signalReady: (): void => {
     ipcRenderer.send('presentation-ready')
+  },
+
+  dbgLog: (msg: string): void => {
+    ipcRenderer.send('dbg-log', msg)
   },
 
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

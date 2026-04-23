@@ -15,6 +15,7 @@ export interface DaemonResponse {
   slideCount?: number
   error?: string
   event?: string
+  path?: string
 }
 
 class PowerPointDaemon {

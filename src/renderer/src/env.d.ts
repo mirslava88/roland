@@ -62,7 +62,10 @@ interface Api {
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>
   showOverlay(displayId?: number, freezeImageDataUrl?: string, imagePath?: string): Promise<void>
+  swapOverlayImage(imagePath: string): Promise<void>
+  snapshotSlideshow(): Promise<string | null>
   hideOverlay(): Promise<void>
+  captureAndSwapOverlay(): Promise<void>
   captureDisplay(displayId?: number): Promise<string | null>
   selectBackdropImage(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
@@ -118,6 +121,7 @@ interface Api {
   sendToPresentation(channel: string, ...args: unknown[]): void
   sendToControl(channel: string, ...args: unknown[]): void
   signalReady(): void
+  dbgLog(msg: string): void
   on(channel: string, callback: (...args: unknown[]) => void): () => void
 }
 
