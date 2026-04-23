@@ -15,14 +15,36 @@ export function VideoViewer({ filePath }: VideoViewerProps): JSX.Element {
     video.src = `file://${filePath}`
     video.load()
 
+    let readySent = false
+    const sendContentReady = (): void => {
+      if (readySent) return
+      readySent = true
+      // 2xrAF чтобы первый видео-кадр гарантированно committed в DWM surface
+      // ДО того как handleTake снимет overlay. Без этого overlay скрывается
+      // на 2-секундном content-ready TIMEOUT, и под overlay видео уже играет
+      // 2+ сек невидимо для зрителя.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          window.api.sendToControl('presentation-content-ready')
+        })
+      })
+    }
+
     const handleCanPlay = (): void => {
-      video.play()
+      const p = video.play()
       setIsPlaying(true)
       window.api.sendToControl('video-state', {
         playing: true,
         duration: video.duration,
         currentTime: 0
       })
+      // play() возвращает Promise, резолвится когда playback реально стартует.
+      // После этого + 2 rAF — первый кадр гарантированно на экране.
+      if (p && typeof p.then === 'function') {
+        p.then(sendContentReady).catch(sendContentReady)
+      } else {
+        sendContentReady()
+      }
     }
 
     video.addEventListener('canplay', handleCanPlay, { once: true })

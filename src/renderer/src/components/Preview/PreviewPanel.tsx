@@ -567,58 +567,89 @@ export function PreviewPanel(): JSX.Element {
         </button>
       </div>
 
-      {/* Pagination footer — показываем только если есть больше одной страницы */}
+      {/* Pagination footer — показываем только если есть больше одной страницы.
+          Dots wrapped в overflow-x-auto чтобы при 30+ страницах они не
+          выталкивали кнопку удаления за край окна. ✕ delete placed вне
+          scrollable — всегда доступен на правом краю. */}
       {totalPages > 1 && (
-        <div className="shrink-0 h-8 bg-surface-300 border-t border-gray-800 flex items-center justify-center gap-1 px-3 select-none">
+        <div className="shrink-0 h-8 bg-surface-300 border-t border-gray-800 flex items-center gap-1 px-3 select-none">
           <button
             onClick={() => setCurrentChannelPage(currentChannelPage - 1)}
             disabled={currentChannelPage === 0}
-            className="w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
+            className="shrink-0 w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
             title="Предыдущая страница"
           >
             ‹
           </button>
 
-          {/* Dots с указанием страницы где live */}
-          <div className="flex items-center gap-1 px-1">
-            {Array.from({ length: totalPages }).map((_, i) => {
-              const isActive = i === currentChannelPage
-              const isLive = i === liveChannelPage
-              return (
-                <button
-                  key={i}
-                  onClick={() => setCurrentChannelPage(i)}
-                  className={`min-w-[22px] h-5 px-1.5 rounded text-[10px] font-medium transition-colors ${
-                    isActive
-                      ? 'bg-blue-600/80 text-white'
-                      : isLive
-                      ? 'bg-red-900/50 text-red-300 hover:bg-red-800/60'
-                      : 'bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'
-                  }`}
-                  title={isLive ? `Страница ${i + 1} — в эфире` : `Страница ${i + 1}`}
-                >
-                  {i + 1}
-                  {isLive && <span className="ml-0.5">●</span>}
-                </button>
-              )
-            })}
+          {/* Dots с указанием страницы где live.
+              flex-1 + min-w-0 позволяет контейнеру сжиматься и скроллиться
+              при большом количестве страниц. justify-center внутри центрирует
+              точки когда их мало, но overflow-x-auto даёт скролл когда много.
+              onWheel: превращаем вертикальную прокрутку колёсика (deltaY)
+              в горизонтальный scrollLeft — юзер крутит мышь прямо по точкам
+              без Shift. */}
+          <div
+            className="flex-1 min-w-0 overflow-x-auto"
+            onWheel={(e) => {
+              if (e.deltaY !== 0) {
+                e.currentTarget.scrollLeft += e.deltaY
+              }
+            }}
+          >
+            <div className="flex items-center gap-1 px-1 justify-center min-w-min">
+              {Array.from({ length: totalPages }).map((_, i) => {
+                const isActive = i === currentChannelPage
+                const isLive = i === liveChannelPage
+                return (
+                  <button
+                    key={i}
+                    onClick={() => setCurrentChannelPage(i)}
+                    className={`shrink-0 min-w-[22px] h-5 px-1.5 rounded text-[10px] font-medium transition-colors ${
+                      isActive
+                        ? 'bg-blue-600/80 text-white'
+                        : isLive
+                        ? 'bg-red-900/50 text-red-300 hover:bg-red-800/60'
+                        : 'bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'
+                    }`}
+                    title={isLive ? `Страница ${i + 1} — в эфире` : `Страница ${i + 1}`}
+                  >
+                    {i + 1}
+                    {isLive && <span className="ml-0.5">●</span>}
+                  </button>
+                )
+              })}
+            </div>
           </div>
 
           <button
             onClick={() => setCurrentChannelPage(currentChannelPage + 1)}
             disabled={currentChannelPage >= totalPages - 1}
-            className="w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
+            className="shrink-0 w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
             title="Следующая страница"
           >
             ›
           </button>
 
-          {/* Удалить страницу (только если пуста и не единственная) */}
-          {currentPageIsEmpty && totalPages > 1 && liveChannelPage !== currentChannelPage && (
+          {/* Удалить страницу (если она не единственная и не live).
+              shrink-0 + вне scrollable: кнопка всегда видна и доступна.
+              Если на странице есть файлы — confirm() + очистка перед
+              removeChannelPage (store сам не удаляет непустые страницы,
+              поэтому чистим channel.file у всех каналов страницы). */}
+          {totalPages > 1 && liveChannelPage !== currentChannelPage && (
             <button
-              onClick={() => removeChannelPage(currentChannelPage)}
-              className="ml-2 w-6 h-6 rounded text-gray-500 hover:text-red-400 hover:bg-red-900/30 transition-colors text-xs"
-              title="Удалить пустую страницу"
+              onClick={() => {
+                if (!currentPageIsEmpty) {
+                  const ok = window.confirm(
+                    'На странице есть файлы в каналах. Удалить страницу со всем содержимым?'
+                  )
+                  if (!ok) return
+                  pageIds.forEach((id) => setChannelFile(id, null))
+                }
+                removeChannelPage(currentChannelPage)
+              }}
+              className="shrink-0 ml-1 w-6 h-6 rounded text-gray-500 hover:text-red-400 hover:bg-red-900/30 transition-colors text-xs"
+              title={currentPageIsEmpty ? 'Удалить страницу' : 'Удалить страницу (с подтверждением)'}
             >
               ✕
             </button>
@@ -733,20 +764,22 @@ function ChannelPanel({
       onClick={onSelect}
       onDoubleClick={onTake}
     >
-      {/* Header */}
-      <div className={`flex items-center gap-2 px-3 py-1.5 ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
+      {/* Header. min-w-0 на flex-контейнере + shrink-0 на фиксированных
+          элементах (dot, label, ✕). Имя файла с flex-1 + min-w-0 + truncate
+          — сжимается и обрезается многоточием вместо выталкивания ✕. */}
+      <div className={`flex items-center gap-2 px-3 py-1.5 min-w-0 ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
         <span className={`w-2 h-2 rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : showSelected ? 'bg-blue-500' : 'bg-gray-600'}`} />
-        <span className={`text-[10px] font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
+        <span className={`shrink-0 text-[10px] font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
           Канал {label} {isLive ? '• В ЭФИРЕ' : showSelected ? '• ВЫБРАНО' : ''}
         </span>
         {channel.file && (
-          <span className="text-[11px] text-gray-400 truncate ml-1">{channel.file.name}</span>
+          <span className="flex-1 min-w-0 text-[11px] text-gray-400 truncate ml-1" title={channel.file.name}>{channel.file.name}</span>
         )}
         {channel.file && (
           <button
             onClick={(e) => { e.stopPropagation(); onClear() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="ml-auto text-gray-500 hover:text-white text-sm leading-none px-1 rounded hover:bg-white/10 transition-colors"
+            className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded hover:bg-white/10 transition-colors"
             title="Убрать файл"
           >
             ✕

@@ -17,15 +17,26 @@ Add-Type -AssemblyName System.Windows.Forms
 $code = @"
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Threading;
 
 public class TimerOverlay
 {
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+
     private Window window;
+    private IntPtr windowHwnd = IntPtr.Zero;
     private TextBlock text;
     private Border border;
     private string dataFile;
@@ -94,6 +105,18 @@ public class TimerOverlay
                 Math.Round(24 * scale), Math.Round(8 * scale));
         };
 
+        // Get HWND once window is loaded — нужен для SetWindowPos
+        // чтобы периодически поднимать таймер поверх Electron overlay.
+        // Electron overlay screen-saver level на Windows = HWND_TOPMOST,
+        // WPF Topmost=true тоже HWND_TOPMOST — конкурируют, последний
+        // raise выигрывает. overlay делает moveTop при show/pin, затирая
+        // наш timer — таймер уходит ПОД непрозрачный overlay (с PP snap)
+        // = невидим. Периодический SetWindowPos возвращает таймер сверху.
+        window.SourceInitialized += (s, e) =>
+        {
+            windowHwnd = new WindowInteropHelper(window).Handle;
+        };
+
         var timer = new DispatcherTimer();
         timer.Interval = TimeSpan.FromMilliseconds(100);
         timer.Tick += OnTick;
@@ -104,6 +127,15 @@ public class TimerOverlay
 
     private void OnTick(object sender, EventArgs e)
     {
+        // Re-assert HWND_TOPMOST каждый tick чтобы таймер оставался поверх
+        // Electron overlay (screen-saver level на Windows = тот же
+        // HWND_TOPMOST). Без этого overlay.moveTop() при показе/пиннинге
+        // уходит таймер ПОД overlay.
+        if (windowHwnd != IntPtr.Zero)
+        {
+            try { SetWindowPos(windowHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE); } catch {}
+        }
+
         try
         {
             if (!File.Exists(dataFile)) return;

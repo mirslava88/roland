@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
-import { writeFileSync, unlinkSync } from 'fs'
+import { writeFileSync, unlinkSync, existsSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
@@ -20,8 +20,17 @@ let timerActive = false // whether timer overlay is currently shown
 
 function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
   if (wpfTimerProcess && !wpfTimerProcess.killed) return
-  // Create the data file before spawning so the script can find it
-  try { writeFileSync(wpfTimerDataFile, '{}') } catch {}
+  // Create the data file before spawning so the script can find it.
+  // НЕ затираем существующий файл — handleSetTime в Timer.tsx делает
+  // syncTimer (пишет {remaining,duration,...} в файл) ДО того как
+  // useEffect запускает showTimerOverlay → showWpfTimer. Если затереть
+  // на '{}', WPF на первом poll прочитает duration=0/remaining=0 и
+  // покажет 00:00 вместо настроенного времени.
+  try {
+    if (!existsSync(wpfTimerDataFile)) {
+      writeFileSync(wpfTimerDataFile, '{}')
+    }
+  } catch {}
   const timerScript = scriptPath('timer-overlay.ps1')
   const posX = displayBounds.x + displayBounds.width - 320
   const posY = displayBounds.y + displayBounds.height - 120

@@ -56,6 +56,19 @@ export function FileLibrary(): JSX.Element {
     return () => clearInterval(interval)
   }, [])
 
+  // Hydrate folder contents on mount: persist восстанавливает folderPath,
+  // но files/subfolders — нет (это runtime-данные ФС). Без этого юзер
+  // видит сохранённый путь, но "Файлы не найдены" пока вручную не зайдёт
+  // в папку. Подгружаем содержимое один раз при монтировании.
+  useEffect(() => {
+    const fp = useAppStore.getState().folderPath
+    if (!fp) return
+    window.api.loadFolder(fp).then((result) => {
+      useAppStore.getState().setFiles(result.files)
+      useAppStore.getState().setSubfolders(result.subfolders)
+    }).catch(() => { /* ignore — folder may have been deleted */ })
+  }, [])
+
   const refreshCurrentFolder = async (): Promise<void> => {
     // Always read fresh folderPath from store (not from closure which can be stale)
     const currentPath = useAppStore.getState().folderPath

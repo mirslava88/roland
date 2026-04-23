@@ -19,7 +19,8 @@ export function Toolbar(): JSX.Element {
     setBackdropImage,
     globalHookEnabled,
     setGlobalHookEnabled,
-    selectedChannel
+    selectedChannel,
+    setOverlayState
   } = useAppStore()
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
@@ -44,6 +45,10 @@ export function Toolbar(): JSX.Element {
           path: backdropImage,
           name: 'Backdrop'
         })
+        // Дать backdrop отрисоваться в Electron окне до того как уберём
+        // overlay — иначе overlay (с PP snap) исчезнет, а под ним ещё не
+        // нарисованный backdrop = чёрный flash.
+        await new Promise((r) => setTimeout(r, 200))
       } else {
         if (activeFile?.type === 'presentation') {
           await window.api.powerpointCommand('close')
@@ -58,11 +63,18 @@ export function Toolbar(): JSX.Element {
             path: backdropImage,
             name: 'Backdrop'
           })
+          await new Promise((r) => setTimeout(r, 200))
         } else if (isPresentationWindowOpen) {
           await window.api.closePresentationWindow()
           setPresentationWindowOpen(false)
         }
       }
+      // КРИТИЧНО: всегда скрываем overlay при выходе из эфира. Если PPTX был
+      // в эфире, overlay висит pinned-pptx (opacity=1, PP snapshot pixel-
+      // perfect). Без hideOverlay юзер видит снапшот PP даже после close PP +
+      // backdrop loaded — overlay поверх всего из-за screen-saver z-order.
+      await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
       setActiveFile(null)
       setLiveChannelNull()
     } else {

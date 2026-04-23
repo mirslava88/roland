@@ -289,31 +289,38 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы A / B / C / D</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы (A / B / C / D и более)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Четыре канала в сетке 2×2 — можно заранее подготовить до 4 файлов</li>
-                  <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded">В эфир</code></li>
-                  <li>Активный канал подсвечен; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
+                  <li>Каналы в сетке 2×2, сгруппированы по страницам — можно заранее подготовить много файлов</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">+</code> в центре — добавить новую страницу из 4 каналов (A/B/C/D, E/F/G/H, …)</li>
+                  <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
+                  <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded">✕</code> справа от пагинации</li>
+                  <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded">В эфир</code> или двойной клик по каналу</li>
+                  <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
                   <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
                 </ul>
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">3. Подложка (Фон)</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">3. Подложка (Фон) и выход из эфира</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">🖼 Подложка</code> — выбор фонового изображения</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">🖼 Подложка (Фон)</code> — выбор фонового изображения для внешнего дисплея</li>
                   <li>Подложка отображается когда нет активного контента</li>
-                  <li>При открытии Word/Excel подложка видна если свернуть документ</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">⏹ Выйти из эфира</code> — закрывает активный контент (PPTX/PDF/видео) и показывает подложку. Если подложка не настроена — просто чёрный экран</li>
                 </ul>
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">4. Таймер</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">4. Таймер (⏱)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Обратный отсчет с настраиваемой длительностью</li>
-                  <li>Отображается поверх контента на внешнем дисплее</li>
-                  <li>Можно задать звук оповещения при истечении времени</li>
+                  <li>Обратный отсчёт с настраиваемой длительностью (часы/минуты)</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">Установить</code> применяет введённое время. Нажатие <code className="text-gray-300 bg-surface-400 px-1 rounded">▶</code> без «Установить» стартует со значения из полей</li>
+                  <li>Быстрые кнопки: +1/+5/+10 мин, -1/-5/-10 мин и произвольное значение</li>
+                  <li>Отображается отдельным окном поверх контента на внешнем дисплее. Можно <b>перетаскивать</b> мышью и <b>масштабировать</b> колёсиком</li>
+                  <li>Цвета: зелёный — идёт отсчёт; жёлтый — меньше минуты; красный — overtime (минусовое время)</li>
+                  <li>Два звука оповещения: <b>«Звук (1 мин)»</b> срабатывает при достижении 60 секунд, <b>«Звук (конец)»</b> — при достижении 0</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">🔊</code> — принудительный запуск звука таймера</li>
                 </ul>
               </section>
 

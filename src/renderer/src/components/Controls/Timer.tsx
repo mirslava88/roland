@@ -158,11 +158,16 @@ export function Timer(): JSX.Element {
     const h = parseInt(inputH) || 0
     const m = parseInt(inputM) || 0
     const total = h * 3600 + m * 60
+    window.api.dbgLog(`Timer: handleSetTime inputH="${inputH}" inputM="${inputM}" h=${h} m=${m} total=${total}`)
     if (total > 0) {
       setTimerDuration(total)
+      const after = useAppStore.getState()
+      window.api.dbgLog(`Timer: after setTimerDuration store={duration=${after.timerDuration}, remaining=${after.timerRemaining}, running=${after.timerRunning}}`)
       warnedRef.current = false
       endedRef.current = false
       syncTimer(total, false)
+    } else {
+      window.api.dbgLog(`Timer: handleSetTime total=0, SKIP setTimerDuration`)
     }
   }
 
