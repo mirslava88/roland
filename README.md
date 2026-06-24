@@ -17,7 +17,7 @@
 ![Chromium](https://img.shields.io/badge/Chromium-148-4285F4?logo=googlechrome&logoColor=white)
 ![Node](https://img.shields.io/badge/Node-24-339933?logo=node.js&logoColor=white)
 
-![License](https://img.shields.io/badge/license-Proprietary-red)
+![License](https://img.shields.io/badge/license-Free-brightgreen)
 ![npm audit](https://img.shields.io/badge/npm_audit-0_vulnerabilities-success?logo=npm)
 ![Security](https://img.shields.io/badge/security-hardened-success?logo=shieldsdotio)
 ![Offline](https://img.shields.io/badge/network-fully_offline-success)
@@ -56,7 +56,7 @@
 | **PDF** | pdfjs-dist · Windows.Data.Pdf (WinRT) |
 | **Таймер** | WPF (PowerShell `Add-Type`) |
 
-## 🔐 Безопасность — готово к корпоративному периметру
+## 🔐 Безопасность
 
 Приложение прошло **состязательный многоагентный security-аудит** и хардненинг:
 
@@ -98,7 +98,7 @@ compliance/    — SBOM, лицензии, сетевое поведение
 
 ## 📜 Лицензия
 
-Проприетарное ПО (`UNLICENSED`). Все права защищены. © Roland.
+Free.
 
 ---
 
@@ -122,7 +122,7 @@ compliance/    — SBOM, лицензии, сетевое поведение
 ### 🛠️ Stack
 Electron 42 (Chromium 148, Node 24) · React 19 · TypeScript · Tailwind · electron-vite / Vite 6 · electron-builder 26 (NSIS) · zustand · PowerShell + COM Automation · pdfjs-dist / Windows.Data.Pdf.
 
-### 🔐 Security — corporate-perimeter ready
+### 🔐 Security
 Passed an adversarial multi-agent security audit and hardening: Authenticode-signed NSIS installer; hardened Electron Fuses; `sandbox` + `webSecurity` on, strict CSP, local media served via a custom privileged `pdm-media://` protocol; navigation / permission guards and path allow-lists; `-NoProfile` on all PowerShell spawns; **0 npm vulnerabilities**, permissive-only dependency licenses; **fully offline** (no outbound connections). Compliance artifacts (CycloneDX SBOM, license report, network-behavior doc) live in [`compliance/`](compliance/).
 
 ### 🚀 Run & build
@@ -135,6 +135,6 @@ powershell -File build\build-signed.ps1   # signed installer -> dist/
 > If `ELECTRON_RUN_AS_NODE=1` is set in the environment, clear it before `npm run dev` (or use `dev.cmd`). For production signing, point `CSC_LINK` at the corporate `.pfx` and set `CSC_KEY_PASSWORD`.
 
 ### 📜 License
-Proprietary (`UNLICENSED`). All rights reserved. © Roland.
+Free.
 
 </details>
