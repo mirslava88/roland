@@ -764,7 +764,10 @@ const MEDIA_EXTENSIONS = new Set([
 function isAllowedNavigation(url: string): boolean {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl && url.startsWith(devUrl)) return true
-  return url.startsWith('file://') || url.startsWith('data:text/html')
+  // data: is intentionally NOT a permitted navigation target: the overlay/music
+  // windows load their data: page as the INITIAL load (not via will-navigate), so
+  // denying data: here closes an XSS-via-navigation vector without breaking them.
+  return url.startsWith('file://')
 }
 
 app.whenReady().then(() => {
@@ -777,7 +780,16 @@ app.whenReady().then(() => {
       const filePath = decodeURIComponent(new URL(request.url).pathname.replace(/^\//, ''))
       const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase()
       if (!MEDIA_EXTENSIONS.has(ext)) return new Response('forbidden', { status: 403 })
-      return await net.fetch(pathToFileURL(filePath).toString())
+      // Only serve LOCAL drive-letter paths. Reject UNC (\\host\share — yields a
+      // non-empty file:// host) and non-absolute paths, so a compromised renderer
+      // cannot turn this privileged fetch into outbound SMB / NTLM-leak (SSRF).
+      // NOTE: this also blocks media on network shares — switch to library-root
+      // confinement if UNC media must be supported.
+      const fileUrl = pathToFileURL(filePath)
+      if (fileUrl.host !== '' || !/^[A-Za-z]:[\\/]/.test(filePath)) {
+        return new Response('forbidden', { status: 403 })
+      }
+      return await net.fetch(fileUrl.toString())
     } catch {
       return new Response('not found', { status: 404 })
     }

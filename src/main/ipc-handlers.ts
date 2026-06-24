@@ -113,6 +113,10 @@ const DANGEROUS_OPEN_EXTENSIONS = new Set([
 // so this does not reject any real flow — the renderer's load-folder already
 // filters out 'unknown' files, so openable items are always supported types.
 function isOpenable(filePath: string): boolean {
+  // Reject UNC paths (\\host\share, //host/...) — launching/opening from a network
+  // path is an EDR-flagged vector. NOTE: also blocks opening docs from network
+  // shares; relax to a trusted-host allow-list if that is needed.
+  if (/^[\\/]{2}/.test(filePath)) return false
   const ext = extname(filePath).toLowerCase()
   if (DANGEROUS_OPEN_EXTENSIONS.has(ext)) return false
   return getFileType(ext) !== 'unknown'
@@ -717,7 +721,7 @@ export function registerIpcHandlers(
       // Guard (CWE-23): newName must be a bare file name. basename() strips any
       // directory part, so a value containing \ or / or '..' is rejected before
       // it can escape the file's folder. Legit renames never contain separators.
-      if (!newName || newName !== basename(newName) || newName === '.' || newName === '..') {
+      if (!newName || newName !== basename(newName) || newName === '.' || newName === '..' || /[:<>"|?*\\/]/.test(newName)) {
         return { success: false, error: 'Недопустимое имя файла' }
       }
       const dir = join(filePath, '..')

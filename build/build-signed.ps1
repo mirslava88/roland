@@ -38,7 +38,14 @@ if ($LASTEXITCODE -ne 0) { throw "fuse flip failed" }
 # The fuse flip rewrites the binary and invalidates its Authenticode signature,
 # and --prepackaged (phase 3) does NOT re-sign the main exe — so re-sign it here.
 $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:CSC_KEY_PASSWORD)
-$sig = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256
+# Add an RFC-3161 timestamp so the signature outlives the cert; fall back to no
+# timestamp if the TSA is unreachable (don't fail the build on a flaky server).
+try {
+  $sig = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com' -ErrorAction Stop
+} catch {
+  Write-Host "      (timestamp server unreachable - signing without timestamp)" -ForegroundColor Yellow
+  $sig = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256
+}
 Write-Host ("      main exe re-signed: " + $sig.Status)
 
 Write-Host "[3/3] building signed NSIS installer from fixed dir (--prepackaged)" -ForegroundColor Cyan
