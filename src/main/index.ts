@@ -780,16 +780,13 @@ app.whenReady().then(() => {
       const filePath = decodeURIComponent(new URL(request.url).pathname.replace(/^\//, ''))
       const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase()
       if (!MEDIA_EXTENSIONS.has(ext)) return new Response('forbidden', { status: 403 })
-      // Only serve LOCAL drive-letter paths. Reject UNC (\\host\share — yields a
-      // non-empty file:// host) and non-absolute paths, so a compromised renderer
-      // cannot turn this privileged fetch into outbound SMB / NTLM-leak (SSRF).
-      // NOTE: this also blocks media on network shares — switch to library-root
-      // confinement if UNC media must be supported.
-      const fileUrl = pathToFileURL(filePath)
-      if (fileUrl.host !== '' || !/^[A-Za-z]:[\\/]/.test(filePath)) {
-        return new Response('forbidden', { status: 403 })
-      }
-      return await net.fetch(fileUrl.toString())
+      // Paths (including UNC network shares) are served as-is — the app must open
+      // media from network drives. Residual SSRF/arbitrary-read risk is ACCEPTED:
+      // the renderer loads only local bundled code under a strict CSP (no
+      // remote-content / XSS vector to forge a pdm-media request), and the
+      // read-file IPC is already a broader arbitrary-read primitive. Tighten via
+      // library-root confinement if that threat model changes.
+      return await net.fetch(pathToFileURL(filePath).toString())
     } catch {
       return new Response('not found', { status: 404 })
     }

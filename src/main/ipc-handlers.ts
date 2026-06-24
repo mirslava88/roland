@@ -113,10 +113,9 @@ const DANGEROUS_OPEN_EXTENSIONS = new Set([
 // so this does not reject any real flow — the renderer's load-folder already
 // filters out 'unknown' files, so openable items are always supported types.
 function isOpenable(filePath: string): boolean {
-  // Reject UNC paths (\\host\share, //host/...) — launching/opening from a network
-  // path is an EDR-flagged vector. NOTE: also blocks opening docs from network
-  // shares; relax to a trusted-host allow-list if that is needed.
-  if (/^[\\/]{2}/.test(filePath)) return false
+  // UNC / network-share paths are allowed — the app opens documents from network
+  // drives. Executables are still hard-denied below (DANGEROUS_OPEN_EXTENSIONS),
+  // which is the actual protection here.
   const ext = extname(filePath).toLowerCase()
   if (DANGEROUS_OPEN_EXTENSIONS.has(ext)) return false
   return getFileType(ext) !== 'unknown'
