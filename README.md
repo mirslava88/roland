@@ -17,7 +17,7 @@
 ![Chromium](https://img.shields.io/badge/Chromium-148-4285F4?logo=googlechrome&logoColor=white)
 ![Node](https://img.shields.io/badge/Node-24-339933?logo=node.js&logoColor=white)
 
-![License](https://img.shields.io/badge/license-Free-brightgreen)
+[![License](https://img.shields.io/badge/license-Free_(MIT)-brightgreen)](LICENSE)
 ![npm audit](https://img.shields.io/badge/npm_audit-0_vulnerabilities-success?logo=npm)
 ![Security](https://img.shields.io/badge/security-hardened-success?logo=shieldsdotio)
 ![Offline](https://img.shields.io/badge/network-fully_offline-success)
@@ -98,7 +98,7 @@ compliance/    — SBOM, лицензии, сетевое поведение
 
 ## 📜 Лицензия
 
-Free.
+**Free** — распространяется под [лицензией MIT](LICENSE): свободное использование, изменение и распространение.
 
 ---
 
@@ -135,6 +135,6 @@ powershell -File build\build-signed.ps1   # signed installer -> dist/
 > If `ELECTRON_RUN_AS_NODE=1` is set in the environment, clear it before `npm run dev` (or use `dev.cmd`). For production signing, point `CSC_LINK` at the corporate `.pfx` and set `CSC_KEY_PASSWORD`.
 
 ### 📜 License
-Free.
+**Free** — released under the [MIT License](LICENSE): free to use, modify and distribute.
 
 </details>

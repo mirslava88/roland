@@ -2,7 +2,7 @@
   "name": "presentation-display-manager",
   "version": "1.0.0",
   "author": "Roland",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
