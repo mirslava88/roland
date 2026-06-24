@@ -42,6 +42,7 @@ interface DriveInfo {
 interface Api {
   selectFolder(): Promise<string | null>
   loadFolder(folderPath: string): Promise<{ files: FileEntry[]; subfolders: { name: string; path: string }[] }>
+  watchFolder(folderPath: string | null): Promise<void>
   getDisplays(): Promise<DisplayInfo[]>
   openDisplaySettings(): Promise<void>
   setDisplayMode(mode: 'internal' | 'clone' | 'extend' | 'external'): Promise<{ success: boolean; error?: string }>
@@ -64,6 +65,7 @@ interface Api {
   showOverlay(displayId?: number, freezeImageDataUrl?: string, imagePath?: string): Promise<void>
   swapOverlayImage(imagePath: string): Promise<void>
   snapshotSlideshow(): Promise<string | null>
+  renderPdfPage(filePath: string, pageIndex: number, width: number): Promise<string | null>
   hideOverlay(): Promise<void>
   captureAndSwapOverlay(): Promise<void>
   captureDisplay(displayId?: number): Promise<string | null>
@@ -99,7 +101,7 @@ interface Api {
   resizeTimerOverlay(w: number, h: number): void
   selectMusicFiles(): Promise<string[] | null>
   selectMusicFolder(): Promise<string[] | null>
-  musicSetPlaylist(files: string[], startIndex?: number): Promise<void>
+  musicSetPlaylist(files: string[], startIndex?: number, autoplay?: boolean): Promise<void>
   musicPlay(): Promise<void>
   musicPause(): Promise<void>
   musicStop(): Promise<void>

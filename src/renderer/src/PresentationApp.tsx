@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { mediaUrl } from './media'
 import { PdfViewer } from './components/PresentationView/PdfViewer'
 import { VideoViewer } from './components/PresentationView/VideoViewer'
 
@@ -78,7 +79,7 @@ export function PresentationApp(): JSX.Element {
       {content?.type === 'video' && <VideoViewer filePath={content.path} />}
       {content?.type === 'backdrop' && (
         <img
-          src={`file://${content.path}`}
+          src={mediaUrl(content.path)}
           alt="Backdrop"
           className="w-full h-full object-cover select-none"
           draggable={false}
@@ -87,7 +88,7 @@ export function PresentationApp(): JSX.Element {
       )}
       {content?.type === 'other' && content.isImage && (
         <img
-          src={`file://${content.path}`}
+          src={mediaUrl(content.path)}
           alt={content.name}
           className="w-full h-full object-contain select-none"
           draggable={false}

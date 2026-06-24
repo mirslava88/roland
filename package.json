@@ -1,6 +1,9 @@
 {
   "name": "presentation-display-manager",
   "version": "1.0.0",
+  "author": "Roland",
+  "license": "UNLICENSED",
+  "private": true,
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
   "scripts": {
@@ -12,21 +15,20 @@
     "package:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
-    "adm-zip": "^0.5.17",
     "pdfjs-dist": "^4.9.155",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "@types/adm-zip": "^0.5.8",
+    "@electron/fuses": "^2.1.2",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
-    "electron": "^35.7.5",
-    "electron-builder": "^25.1.8",
+    "electron": "^42.5.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "postcss": "^8.4.49",
     "react": "^19.0.0",
@@ -49,16 +51,30 @@
       {
         "from": "scripts",
         "to": "scripts",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
+    "afterPack": "./build/afterPack.js",
     "win": {
       "target": [
         {
-          "target": "portable",
-          "arch": ["x64"]
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Presentation Display Manager"
     },
     "forceCodeSigning": false,
     "mac": {

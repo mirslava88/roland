@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
+import { mediaUrl } from '../../media'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -13,6 +14,7 @@ interface PdfViewerProps {
 
 export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [totalPages, setTotalPages] = useState(0)
@@ -65,10 +67,37 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
     }
   }, [filePath])
 
+  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 })
+
+  // Track container size — window.innerWidth/innerHeight могло быть нестабильным
+  // (читалось до того как окно достигнет финального размера на внешнем дисплее).
+  // ResizeObserver гарантирует re-render когда div родителя реально получит
+  // финальные dimensions.
+  useEffect(() => {
+    const c = containerRef.current
+    if (!c) return
+    const update = (): void => {
+      const w = c.clientWidth
+      const h = c.clientHeight
+      setContainerSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }))
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(c)
+    window.addEventListener('resize', update)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [])
+
   const renderPage = useCallback(
-    async (pageNum: number) => {
-      if (!pdf || !canvasRef.current) return
-      window.api.dbgLog(`PdfViewer: renderPage BEGIN page=${pageNum}`)
+    async (pageNum: number, cw: number, ch: number) => {
+      if (!pdf || !canvasRef.current || cw === 0 || ch === 0) return
+      const dpr = window.devicePixelRatio || 1
+      window.api.dbgLog(
+        `PdfViewer: renderPage BEGIN page=${pageNum} container=${cw}x${ch} dpr=${dpr} winInner=${window.innerWidth}x${window.innerHeight}`
+      )
 
       // Reassigning canvas.width/height clears the canvas to transparent —
       // if we do that BEFORE await page.render() resolves, the audience sees
@@ -83,22 +112,40 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
         return
       }
 
-      const containerWidth = window.innerWidth
-      const containerHeight = window.innerHeight
-      const viewport = page.getViewport({ scale: 1 })
-      const scale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
-      const scaledViewport = page.getViewport({ scale })
+      const baseViewport = page.getViewport({ scale: 1 })
+      const fitScale = Math.min(cw / baseViewport.width, ch / baseViewport.height)
+      const cssWidth = Math.round(baseViewport.width * fitScale)
+      const cssHeight = Math.round(baseViewport.height * fitScale)
+      const targetBufW = Math.round(cssWidth * dpr)
+      const targetBufH = Math.round(cssHeight * dpr)
 
-      const off = document.createElement('canvas')
-      off.width = scaledViewport.width
-      off.height = scaledViewport.height
-      const offCtx = off.getContext('2d')
-      if (!offCtx) return
+      // КРИТИЧНО: pdf.js имеет баг с TilingPattern при scale > 1 — pattern
+      // не покрывает всю область, контент обрезается справа. PDF от PowerPoint
+      // часто использует tiling pattern для фона. Пытаемся отрендерить через
+      // нативный Windows.Data.Pdf engine (без бага, pixel-perfect качество).
+      // Native render возвращает путь к PNG; рисуем его на canvas через Image.
+      window.api.dbgLog(
+        `PdfViewer: renderPage SCALE pdf=${baseViewport.width}x${baseViewport.height} fit=${fitScale.toFixed(3)} css=${cssWidth}x${cssHeight} bufTarget=${targetBufW}x${targetBufH}`
+      )
 
-      await page.render({ canvasContext: offCtx, viewport: scaledViewport }).promise
+      const nativePath = await window.api.renderPdfPage(filePath, pageNum - 1, targetBufW)
       if (token !== renderTokenRef.current) {
-        window.api.dbgLog(`PdfViewer: renderPage STALE token post-render page=${pageNum}`)
+        window.api.dbgLog(`PdfViewer: renderPage STALE token post-nativeRender page=${pageNum}`)
         return
+      }
+
+      let nativeImg: HTMLImageElement | null = null
+      if (nativePath) {
+        try {
+          nativeImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const im = new Image()
+            im.onload = () => resolve(im)
+            im.onerror = () => reject(new Error('image load failed'))
+            im.src = `${mediaUrl(nativePath)}?t=${Date.now()}`
+          })
+        } catch (e) {
+          window.api.dbgLog(`PdfViewer: native image load failed ${String(e)}, fallback to pdf.js`)
+        }
       }
 
       const canvas = canvasRef.current
@@ -106,25 +153,39 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
       const ctx = canvas.getContext('2d')
       if (!ctx) return
 
-      // Переназначение canvas.width/height — даже с тем же значением —
-      // всегда сбрасывает canvas в transparent. Если между reset и drawImage
-      // DWM compositor захватит frame, зритель видит BG родителя (bg-black)
-      // вместо предыдущего кадра → micro-flash. Для PDF→PDF где оба файла
-      // рендерятся 1112x1440, это даёт заметное мерцание на transition.
-      // Меняем размер только когда он РЕАЛЬНО изменился.
-      if (canvas.width !== off.width || canvas.height !== off.height) {
-        canvas.width = off.width
-        canvas.height = off.height
+      if (canvas.width !== targetBufW || canvas.height !== targetBufH) {
+        canvas.width = targetBufW
+        canvas.height = targetBufH
       }
-      ctx.drawImage(off, 0, 0)
-      window.api.dbgLog(`PdfViewer: drawImage done page=${pageNum} size=${off.width}x${off.height}, scheduling 2xrAF → content-ready`)
-      // drawImage writes the canvas backing store, but the compositor needs
-      // 1–2 frames before the new pixels actually reach the screen. If we
-      // fire content-ready synchronously, the overlay starts its 150ms fade
-      // while the canvas is still showing the OLD page, producing a brief
-      // visible swap through the partially-faded overlay. Wait two rAFs so
-      // the new frame is committed before telling the control window it's
-      // safe to lift the cover.
+      canvas.style.width = `${cssWidth}px`
+      canvas.style.height = `${cssHeight}px`
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+
+      if (nativeImg) {
+        // Lossless native render — рисуем напрямую (native image может быть
+        // больше targetBuf если Windows.Data.Pdf применил свой DPI; canvas
+        // ужмёт его, всё равно качественно).
+        ctx.drawImage(nativeImg, 0, 0, nativeImg.naturalWidth, nativeImg.naturalHeight, 0, 0, targetBufW, targetBufH)
+        window.api.dbgLog(
+          `PdfViewer: drawImage NATIVE done page=${pageNum} src=${nativeImg.naturalWidth}x${nativeImg.naturalHeight} dst=${targetBufW}x${targetBufH}`
+        )
+      } else {
+        // Fallback: pdf.js на native scale + upscale (низкое качество, но
+        // обходит TilingPattern bug). Срабатывает если native engine не
+        // отработал (не-Win платформа, ошибка PS, и т.д.).
+        const off = document.createElement('canvas')
+        off.width = Math.round(baseViewport.width)
+        off.height = Math.round(baseViewport.height)
+        const offCtx = off.getContext('2d')
+        if (!offCtx) return
+        await page.render({ canvasContext: offCtx, viewport: baseViewport }).promise
+        if (token !== renderTokenRef.current) return
+        ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, targetBufW, targetBufH)
+        window.api.dbgLog(
+          `PdfViewer: drawImage FALLBACK pdf.js page=${pageNum} src=${off.width}x${off.height} dst=${targetBufW}x${targetBufH}`
+        )
+      }
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           window.api.dbgLog(`PdfViewer: sendToControl(presentation-content-ready) page=${pageNum}`)
@@ -136,8 +197,10 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
   )
 
   useEffect(() => {
-    renderPage(currentPage)
-  }, [currentPage, renderPage])
+    if (containerSize.w > 0 && containerSize.h > 0) {
+      renderPage(currentPage, containerSize.w, containerSize.h)
+    }
+  }, [currentPage, renderPage, containerSize])
 
   // Реагируем на изменение startSlide когда файл уже загружен (тот же PDF
   // активируется из другого канала с заранее выставленным слайдом).
@@ -191,7 +254,7 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
   }, [currentPage, totalPages])
 
   return (
-    <div className="w-full h-full flex items-center justify-center bg-black">
+    <div ref={containerRef} className="w-full h-full flex items-center justify-center bg-black">
       <canvas ref={canvasRef} />
     </div>
   )

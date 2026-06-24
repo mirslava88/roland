@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, net } from 'electron'
+import { pathToFileURL } from 'url'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
-import { writeFileSync, unlinkSync, existsSync } from 'fs'
+import { writeFileSync, unlinkSync, existsSync, appendFileSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
@@ -36,6 +37,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
   const posY = displayBounds.y + displayBounds.height - 120
   wpfTimerProcess = spawn('powershell.exe', [
     '-ExecutionPolicy', 'Bypass',
+    '-NoProfile',
     '-STA',
     '-File', timerScript,
     '-X', String(posX),
@@ -78,6 +80,7 @@ function restoreTaskbar(): void {
     const mwScript = scriptPath('manage-window.ps1')
     spawn('powershell.exe', [
       '-ExecutionPolicy', 'Bypass',
+      '-NoProfile',
       '-File', mwScript,
       '-Action', 'show-taskbar'
     ], { stdio: 'ignore', detached: true })
@@ -109,9 +112,15 @@ function createWindows(): void {
   // dbg-log: renderer processes (control + presentation) forward debug strings
   // here so everything lands in the main-process stdout stream alongside
   // [MAIN ...] and [DAEMON ...] lines. Single interleaved timeline for
-  // diagnosing PDF↔PPTX flicker timing.
+  // diagnosing PDF↔PPTX flicker timing. Also persisted to a tmpdir file so
+  // diagnostics survive process exit and can be read after the session.
+  const dbgLogFile = join(tmpdir(), 'roland-dbg.log')
+  try { writeFileSync(dbgLogFile, `=== session start ${new Date().toISOString()} ===\n`) } catch {}
+  console.log(`[MAIN ${Date.now()}] dbg-log file: ${dbgLogFile}`)
   ipcMain.on('dbg-log', (_event, msg: string) => {
-    console.log(`[R ${Date.now()}] ${msg}`)
+    const line = `[R ${Date.now()}] ${msg}`
+    console.log(line)
+    try { appendFileSync(dbgLogFile, line + '\n') } catch {}
   })
 
   ipcMain.handle('open-presentation-window', async (_event, displayId?: number) => {
@@ -472,12 +481,12 @@ function createWindows(): void {
     return files.length > 0 ? files : null
   })
 
-  ipcMain.handle('music-set-playlist', async (_event, files: string[], startIndex?: number) => {
+  ipcMain.handle('music-set-playlist', async (_event, files: string[], startIndex?: number, autoplay?: boolean) => {
     const win = ensureMusicWindow()
-    // Number() каст защищает от JS-injection если renderer прислал строку
-    // вроде "0); alert(1); (" вместо числа (audit 2026-04-20 F-005).
+    // Number()/Boolean() каст защищает от JS-injection если renderer прислал
+    // строку вроде "0); alert(1); (" вместо числа (audit 2026-04-20 F-005).
     await win.webContents.executeJavaScript(
-      `window._setPlaylist(${JSON.stringify(files)}, ${Number(startIndex) || 0})`
+      `window._setPlaylist(${JSON.stringify(files)}, ${Number(startIndex) || 0}, ${Boolean(autoplay)})`
     )
   })
 
@@ -631,6 +640,7 @@ function createWindows(): void {
       return await new Promise<{ success: boolean; error?: string }>((resolve) => {
         const args = [
           '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
           '-File', srScript,
           '-DeviceName', deviceName,
           '-Width', String(width),
@@ -658,6 +668,7 @@ function createWindows(): void {
         let data = ''
         const child = spawn('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
           '-File', gdmScript
         ], { stdio: ['ignore', 'pipe', 'ignore'] })
         child.stdout.on('data', (chunk) => { data += chunk.toString() })
@@ -731,7 +742,59 @@ function createWindows(): void {
   })
 }
 
+// Privileged scheme for serving validated local media to renderers running with
+// webSecurity:true (a file:// document can't load cross-origin file:// itself).
+// MUST be registered before app 'ready' — this runs at module load, which is
+// before whenReady resolves.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'pdm-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
+])
+
+const MEDIA_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg',
+  '.mp4', '.mov', '.avi', '.webm', '.mkv',
+  '.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'
+])
+
+// Navigation hardening: deny any top-level navigation away from the app's own
+// origin (file:// in prod, the dev-server URL, or our self-built data: pages),
+// and deny window.open from non-control windows. The app never navigates
+// top-level or opens child windows, so this only blocks a hijacked renderer
+// from pivoting to a remote origin while still holding the privileged preload.
+function isAllowedNavigation(url: string): boolean {
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  if (devUrl && url.startsWith(devUrl)) return true
+  return url.startsWith('file://') || url.startsWith('data:text/html')
+}
+
 app.whenReady().then(() => {
+  // Serve local media for webSecurity:true renderers. The renderer references
+  // files as pdm-media://file/<encodeURIComponent(absPath)>; we decode, gate by
+  // media extension, and stream the file via net.fetch(file://) (handles range
+  // requests + content-type so <video> seeking works).
+  protocol.handle('pdm-media', async (request) => {
+    try {
+      const filePath = decodeURIComponent(new URL(request.url).pathname.replace(/^\//, ''))
+      const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase()
+      if (!MEDIA_EXTENSIONS.has(ext)) return new Response('forbidden', { status: 403 })
+      return await net.fetch(pathToFileURL(filePath).toString())
+    } catch {
+      return new Response('not found', { status: 404 })
+    }
+  })
+
+  app.on('web-contents-created', (_e, contents) => {
+    contents.on('will-navigate', (e, url) => { if (!isAllowedNavigation(url)) e.preventDefault() })
+    contents.on('will-redirect', (e, url) => { if (!isAllowedNavigation(url)) e.preventDefault() })
+    // Deny window.open by default. The control window installs its own handler
+    // (with an http/https/mailto allow-list) that overrides this for itself.
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // Deny all renderer permission requests (camera/mic/geo/notifications/midi/
+    // etc.). This is a local presentation tool that requests none — verified no
+    // requestFullscreen/getUserMedia/Notification usage in the renderer.
+    contents.session.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
+  })
+
   // Ensure extended display mode on startup if external monitor is connected
   if (process.platform === 'win32') {
     const displays = screen.getAllDisplays()

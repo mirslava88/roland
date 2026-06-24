@@ -12,18 +12,25 @@ export function createControlWindow(): BrowserWindow {
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false,
+      webSecurity: true,
       backgroundThrottling: false
     }
   })
 
   win.removeMenu()
 
-  win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    // Only hand real web/mail links to the OS; deny file: and custom schemes
+    // (ms-msdt:, search-ms:, etc.) that could be abused as a launch vector.
+    try {
+      const u = new URL(url)
+      if (u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:') {
+        shell.openExternal(url)
+      }
+    } catch { /* ignore malformed url */ }
     return { action: 'deny' }
   })
 
@@ -59,10 +66,10 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     title: 'Presentation',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false
+      webSecurity: true
     }
   })
 
@@ -153,7 +160,7 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
     title: '',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       webSecurity: false
@@ -305,7 +312,7 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
     thickFrame: false,
     title: '',
     webPreferences: {
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       webSecurity: false
@@ -347,18 +354,21 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
       player.addEventListener('play', () => window._sendState());
       player.addEventListener('pause', () => window._sendState());
 
-      function loadAndPlay() {
+      function loadAndPlay(autoplay) {
         if (currentIndex < 0 || currentIndex >= playlist.length) return;
         const filePath = playlist[currentIndex];
         player.src = 'file:///' + filePath.replace(/\\\\/g, '/');
-        player.play().catch(() => {});
+        // autoplay === false → only load the track (set src), don't start.
+        if (autoplay !== false) player.play().catch(() => {});
         window._sendState();
       }
 
-      window._setPlaylist = function(files, startIndex) {
+      window._setPlaylist = function(files, startIndex, autoplay) {
         playlist = files;
         currentIndex = startIndex || 0;
-        if (playlist.length > 0) loadAndPlay();
+        // Picking files via the music button loads without playing (autoplay
+        // defaults to false); the user presses Play to start.
+        if (playlist.length > 0) loadAndPlay(autoplay === true);
         else window._sendState();
       };
 

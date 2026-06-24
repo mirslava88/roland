@@ -4,6 +4,8 @@ import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync } from 'fs'
+import { tmpdir } from 'os'
+import { createHash } from 'crypto'
 import { scriptPath as resolveScript } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 
@@ -24,6 +26,7 @@ async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', fi
     try {
       const args = [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', action,
         '-Hwnd', String(entry.hwnd),
@@ -42,6 +45,7 @@ async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', fi
       try {
         const args = [
           '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
           '-File', scriptPath,
           '-Action', action,
           '-Hwnd', String(entry.hwnd),
@@ -93,6 +97,27 @@ function isAudioFile(ext: string): boolean {
   return AUDIO_EXTENSIONS.includes(ext.toLowerCase())
 }
 
+// Extensions that must NEVER be launched via external-open (LOLBin / RCE vector).
+// Defense-in-depth on top of the getFileType allowlist in isOpenable().
+const DANGEROUS_OPEN_EXTENSIONS = new Set([
+  '.exe', '.com', '.bat', '.cmd', '.scr', '.pif', '.lnk', '.hta', '.cpl',
+  '.msi', '.msp', '.reg', '.ps1', '.psm1', '.vbs', '.vbe', '.js', '.jse',
+  '.wsf', '.wsh', '.gadget', '.jar'
+])
+
+// Main-side gate for the external-open / Start-Process surface (audit finding,
+// "open-file-external launches arbitrary renderer-controlled path"). Deny-by-
+// default: only file types the app legitimately surfaces (getFileType !==
+// 'unknown') may be opened externally; all executables fall into 'unknown' and
+// are also explicitly hard-denied. Legit external opens are always docs/media,
+// so this does not reject any real flow — the renderer's load-folder already
+// filters out 'unknown' files, so openable items are always supported types.
+function isOpenable(filePath: string): boolean {
+  const ext = extname(filePath).toLowerCase()
+  if (DANGEROUS_OPEN_EXTENSIONS.has(ext)) return false
+  return getFileType(ext) !== 'unknown'
+}
+
 export interface FileEntry {
   id: string
   name: string
@@ -119,6 +144,42 @@ export function registerIpcHandlers(
     }
 
     return result.filePaths[0]
+  })
+
+  // Folder watcher: fs.watch на текущей папке, при любых изменениях шлём
+  // 'folder-changed' в renderer (он re-load list). Debounce 200мс — Windows
+  // часто шлёт несколько событий на одно действие (create + write + close).
+  // Только один активный watcher; смена папки переинициализирует.
+  let activeWatcher: ReturnType<typeof import('fs').watch> | null = null
+  let activeWatchPath: string | null = null
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  ipcMain.handle('watch-folder', (_event, folderPath: string | null) => {
+    if (activeWatcher && activeWatchPath === folderPath) return
+    if (activeWatcher) {
+      try { activeWatcher.close() } catch { /* ignore */ }
+      activeWatcher = null
+      activeWatchPath = null
+    }
+    if (!folderPath) return
+    try {
+      const fs = require('fs') as typeof import('fs')
+      activeWatcher = fs.watch(folderPath, { persistent: false }, () => {
+        if (debounceTimer) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(() => {
+          if (!controlWindow.isDestroyed()) {
+            controlWindow.webContents.send('folder-changed', folderPath)
+          }
+        }, 200)
+      })
+      activeWatchPath = folderPath
+      activeWatcher.on('error', () => {
+        if (activeWatcher) { try { activeWatcher.close() } catch {} }
+        activeWatcher = null
+        activeWatchPath = null
+      })
+    } catch (e) {
+      console.error('[IPC] watch-folder failed:', e)
+    }
   })
 
   ipcMain.handle('load-folder', async (_event, folderPath: string) => {
@@ -172,6 +233,7 @@ export function registerIpcHandlers(
     if (process.platform === 'win32') {
       try {
         await execFileAsync('powershell.exe', [
+          '-NoProfile',
           '-Command',
           'Get-ItemProperty "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\powerpnt.exe" -ErrorAction Stop'
         ])
@@ -251,6 +313,35 @@ export function registerIpcHandlers(
       if (res.ok && res.path) return res.path
     } catch { /* ignore */ }
     return null
+  })
+
+  // Render a single PDF page to PNG via Windows.Data.Pdf (native WinRT engine).
+  // pdf.js has a bug truncating renders for PDFs with TilingPattern at scale>1,
+  // which corrupts presentation slides exported from PowerPoint. Native engine
+  // renders pixel-perfect at any size. Results are cached on disk by content
+  // hash to keep navigation snappy.
+  ipcMain.handle('render-pdf-page', async (_event, filePath: string, pageIndex: number, width: number): Promise<string | null> => {
+    if (process.platform !== 'win32') return null
+    try {
+      const st = await stat(filePath)
+      const key = createHash('md5').update(`${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${width}`).digest('hex')
+      const outPath = join(tmpdir(), `pdm-pdfpage-${key}.png`)
+      if (existsSync(outPath)) return outPath
+      const script = resolveScript('render-pdf-page.ps1')
+      await execFileAsync('powershell.exe', [
+        '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
+        '-File', script,
+        '-PdfPath', filePath,
+        '-PageIndex', String(pageIndex),
+        '-OutPath', outPath,
+        '-Width', String(width)
+      ], { timeout: 15000 })
+      return existsSync(outPath) ? outPath : null
+    } catch (e) {
+      console.error('[IPC] render-pdf-page error:', e)
+      return null
+    }
   })
 
   ipcMain.handle('powerpoint-command', async (_event, command: string, arg?: number) => {
@@ -357,6 +448,7 @@ export function registerIpcHandlers(
       const scriptPath = resolveScript('audio-control.ps1')
       const { stdout } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-Command',
         `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${scriptPath.replace(/'/g, "''")}' -Action list`
       ], { encoding: 'utf8' })
@@ -372,6 +464,7 @@ export function registerIpcHandlers(
       const scriptPath = resolveScript('audio-control.ps1')
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'set',
         '-DeviceId', deviceId
@@ -393,6 +486,7 @@ export function registerIpcHandlers(
         // Save current default so we can restore later
         const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
           '-File', scriptPath,
           '-Action', 'get-default'
         ])
@@ -406,6 +500,7 @@ export function registerIpcHandlers(
 
         await execFileAsync('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
           '-File', scriptPath,
           '-Action', 'set',
           '-DeviceId', preferredAudioDeviceId
@@ -416,6 +511,7 @@ export function registerIpcHandlers(
       // Auto-detect: get current default before switching
       const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'get-default'
       ])
@@ -425,6 +521,7 @@ export function registerIpcHandlers(
       // Get all devices and find a non-default one (external)
       const { stdout: listOut } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'list'
       ])
@@ -434,6 +531,7 @@ export function registerIpcHandlers(
 
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'set',
         '-DeviceId', external.id
@@ -450,6 +548,7 @@ export function registerIpcHandlers(
       const scriptPath = resolveScript('audio-control.ps1')
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'set',
         '-DeviceId', originalAudioDeviceId
@@ -458,11 +557,13 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('open-file-external', async (_event, filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
+    if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла для внешнего открытия' }
     try {
       if (displayBounds && process.platform === 'win32') {
         const scriptPath = resolveScript('manage-window.ps1')
         const { stdout } = await execFileAsync('powershell.exe', [
           '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
           '-File', scriptPath,
           '-Action', 'open',
           '-FilePath', filePath,
@@ -493,11 +594,13 @@ export function registerIpcHandlers(
   ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
     // If not tracked yet, open instead of restore
     if (filePath && !externalFiles.has(filePath)) {
+      if (!isOpenable(filePath)) return
       if (displayBounds && process.platform === 'win32') {
         const scriptPath = resolveScript('manage-window.ps1')
         try {
           const { stdout } = await execFileAsync('powershell.exe', [
             '-ExecutionPolicy', 'Bypass',
+            '-NoProfile',
             '-File', scriptPath,
             '-Action', 'open',
             '-FilePath', filePath,
@@ -548,6 +651,7 @@ export function registerIpcHandlers(
     try {
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'hide-taskbar',
         '-X', String(displayBounds.x),
@@ -564,6 +668,7 @@ export function registerIpcHandlers(
     try {
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
+        '-NoProfile',
         '-File', scriptPath,
         '-Action', 'show-taskbar'
       ], { timeout: 5000 })
@@ -574,6 +679,7 @@ export function registerIpcHandlers(
     if (process.platform !== 'win32') return []
     try {
       const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoProfile',
         '-Command',
         `Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root } | ForEach-Object {
           $used = $_.Used; $free = $_.Free; $total = if ($used -ne $null -and $free -ne $null) { $used + $free } else { 0 }
@@ -585,6 +691,7 @@ export function registerIpcHandlers(
       const drives = Array.isArray(parsed) ? parsed : [parsed]
       // Detect removable drives
       const { stdout: wmiOut } = await execFileAsync('powershell.exe', [
+        '-NoProfile',
         '-Command',
         `Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID, DriveType | ConvertTo-Json -Compress`
       ], { timeout: 5000 })
@@ -607,6 +714,12 @@ export function registerIpcHandlers(
 
   ipcMain.handle('rename-file', async (_event, filePath: string, newName: string) => {
     try {
+      // Guard (CWE-23): newName must be a bare file name. basename() strips any
+      // directory part, so a value containing \ or / or '..' is rejected before
+      // it can escape the file's folder. Legit renames never contain separators.
+      if (!newName || newName !== basename(newName) || newName === '.' || newName === '..') {
+        return { success: false, error: 'Недопустимое имя файла' }
+      }
       const dir = join(filePath, '..')
       const ext = extname(filePath)
       const newPath = join(dir, newName + ext)

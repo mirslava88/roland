@@ -69,6 +69,27 @@ export function FileLibrary(): JSX.Element {
     }).catch(() => { /* ignore — folder may have been deleted */ })
   }, [])
 
+  // Watch текущей папки через fs.watch в main процессе. Любое изменение
+  // (новый файл, удаление, переименование извне Windows Explorer) триггерит
+  // 'folder-changed' → re-load список.
+  useEffect(() => {
+    window.api.watchFolder(folderPath ?? null)
+    if (!folderPath) return
+    const unsub = window.api.on('folder-changed', (...args: unknown[]) => {
+      const changedPath = args[0] as string
+      // Только если изменилась активно открытая папка
+      const cur = useAppStore.getState().folderPath
+      if (changedPath !== cur) return
+      window.api.loadFolder(cur).then((result) => {
+        useAppStore.getState().setFiles(result.files)
+        useAppStore.getState().setSubfolders(result.subfolders)
+      }).catch(() => { /* ignore */ })
+    })
+    return () => {
+      unsub()
+    }
+  }, [folderPath])
+
   const refreshCurrentFolder = async (): Promise<void> => {
     // Always read fresh folderPath from store (not from closure which can be stale)
     const currentPath = useAppStore.getState().folderPath

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
+import { mediaUrl } from '../../media'
 
 // Play timer sound file. File URL требует URL-encoding для кириллицы/
 // пробелов/других non-ASCII символов в пути — иначе Chromium не загружает
@@ -7,10 +8,9 @@ import { useAppStore } from '../../stores/useAppStore'
 // через dbgLog чтобы диагностируемо было в main stdout.
 function playTimerSound(rawPath: string, kind: 'warning' | 'end'): void {
   try {
-    // Путь: C:\Users\...\звук.mp3 → file:///C:/Users/.../%D0%B7%D0%B2%D1%83%D0%BA.mp3
-    const forward = rawPath.replace(/\\/g, '/')
-    // encodeURI оставляет ':', '/' и латиницу, шифрует кириллицу/пробелы.
-    const url = 'file:///' + encodeURI(forward)
+    // Served via the pdm-media:// privileged scheme (mediaUrl handles encoding
+    // of Cyrillic/spaces/backslashes) so it loads under webSecurity:true.
+    const url = mediaUrl(rawPath)
     window.api.dbgLog(`Timer: play ${kind} sound url=${url}`)
     const a = new Audio(url)
     a.volume = 1.0

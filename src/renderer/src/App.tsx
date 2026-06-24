@@ -64,19 +64,29 @@ export default function App(): JSX.Element {
       if (!activeFile) return
 
       if (activeFile.type === 'presentation') {
-        const state = useAppStore.getState()
-        const ch = state.liveChannel ? state[`channel${state.liveChannel}` as const] : null
-        const total = totalSlides || ch?.totalSlides || 0
-        // Don't go past the last slide (would exit slideshow)
-        if (direction === 'next' && total > 0 && currentSlide >= total) return
-        if (direction === 'prev' && currentSlide <= 1) return
+        // НЕ блокируем next/prev по slide index. На слайдах с pending
+        // click-анимациями slide index не меняется при Next()/Previous() —
+        // старые guard'ы ловили эти случаи и не пускали анимацию в daemon.
+        // Для prev на первом слайде Previous() откатывает анимацию назад
+        // (clickIndex уменьшается). Daemon сам останавливается на границах
+        // через retry-on-stuck guards $sBefore < $total и $sBefore > 1.
 
-        // Паттерн из SlideNavigator — goto(target) без reconcile.
-        // View.Next/Previous могут играть/откатывать animation builds не меняя
-        // slide index — reconcile откатывал бы UI. GotoSlide прыгает однозначно.
-        const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
-        useAppStore.getState().setCurrentSlide(optimistic)
-        useAppStore.getState().navigatePptx('goto', optimistic)
+        // View.Next()/Previous() — уважают click-анимации внутри слайда.
+        // Если на слайде есть pending entrance-эффекты, Next() проиграет
+        // следующий шаг, slide index не меняется. Когда все анимации
+        // сыграны, Next() переходит на следующий слайд. UI обновляется
+        // по фактическому slide от daemon (а не optimistic — иначе counter
+        // обгонит PP когда тот ещё проигрывает анимацию на текущем).
+        const cmd = direction === 'next' ? 'next' : 'prev'
+        const result = await useAppStore.getState().navigatePptx(cmd)
+        if (result?.success && result.output) {
+          try {
+            const data = JSON.parse(result.output)
+            if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+              useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+            }
+          } catch { /* ignore */ }
+        }
       } else if (activeFile.type === 'pdf') {
         const isNext = direction === 'next'
         const newSlide = isNext

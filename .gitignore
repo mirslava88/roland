@@ -31,3 +31,7 @@ scripts/_test-*.ps1
 # Claude / audit local
 .claude/
 audit/
+
+# Code-signing (local placeholder cert — NEVER commit; swap for corporate-CA cert on prod)
+build/certs/
+*.pfx

@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
+import { mediaUrl } from '../../media'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -62,7 +63,7 @@ export function SlideNavigator(): JSX.Element {
       if (result.success && result.thumbnails) {
         const thumbs: SlideThumb[] = result.thumbnails.map((path, i) => ({
           index: i + 1,
-          dataUrl: `file://${path}`
+          dataUrl: mediaUrl(path)
         }))
         setThumbnails(thumbs)
         setPptxThumbnails(result.thumbnails)
@@ -91,7 +92,7 @@ export function SlideNavigator(): JSX.Element {
       if (existing && existing.length > 0) {
         const thumbs: SlideThumb[] = existing.map((path, i) => ({
           index: i + 1,
-          dataUrl: `file://${path}`
+          dataUrl: mediaUrl(path)
         }))
         setThumbnails(thumbs)
         setPptxThumbnails(existing)

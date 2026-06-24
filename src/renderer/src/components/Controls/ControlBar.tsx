@@ -43,19 +43,29 @@ export function ControlBar(): JSX.Element {
   }
 
   const handlePptxNav = (direction: 'next' | 'prev'): void => {
-    // Паттерн из SlideNavigator — goto(target) + fire-and-forget, без reconcile.
-    // Читаем currentSlide из стора напрямую: при быстрых кликах React ещё не
-    // перерендерил компонент, замыкание держит старое значение — второй клик
-    // считал бы тот же optimistic и терялся. getState() всегда свежее.
-    const { currentSlide } = useAppStore.getState()
-    const optimistic = direction === 'next' ? currentSlide + 1 : currentSlide - 1
-    setCurrentSlide(optimistic)
-    navigatePptx('goto', optimistic)
+    // View.Next()/Previous() — уважают click-анимации внутри слайда.
+    // Не выставляем optimistic currentSlide: на слайде с pending анимациями
+    // Next() сыграет следующий шаг, slide index не изменится — optimistic
+    // обгонит реальное состояние PP. UI обновляется по фактическому slide
+    // от daemon после ответа.
+    navigatePptx(direction).then((result) => {
+      if (result?.success && result.output) {
+        try {
+          const data = JSON.parse(result.output)
+          if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+            setCurrentSlide(data.CurrentSlide)
+          }
+        } catch { /* ignore */ }
+      }
+    })
   }
 
   const handlePrev = (): void => {
     const { currentSlide } = useAppStore.getState()
-    if (currentSlide <= 1) return
+    // Для PPTX НЕ блокируем prev на первом слайде — Previous() откатывает
+    // click-анимацию назад (clickIndex уменьшается, slide index не меняется).
+    // Daemon сам останавливается на границе через retry guard $sBefore > 1.
+    if (activeFile.type !== 'presentation' && currentSlide <= 1) return
 
     if (activeFile.type === 'presentation') {
       handlePptxNav('prev')
@@ -68,7 +78,11 @@ export function ControlBar(): JSX.Element {
 
   const handleNext = (): void => {
     const { currentSlide, totalSlides } = useAppStore.getState()
-    if (totalSlides > 0 && currentSlide >= totalSlides) return
+    // Для PPTX НЕ блокируем по slide index — анимации внутри слайда не
+    // меняют slide index, guard «съедал» бы анимационные клики на последнем
+    // слайде с pending entrance-эффектами. Daemon сам останавливается на
+    // границе через retry-on-stuck guard $sBefore < $total.
+    if (activeFile.type !== 'presentation' && totalSlides > 0 && currentSlide >= totalSlides) return
 
     if (activeFile.type === 'presentation') {
       handlePptxNav('next')
@@ -194,6 +208,23 @@ export function ControlBar(): JSX.Element {
             className="btn-icon text-sm disabled:opacity-30"
           >
             ▶
+          </button>
+
+          <button
+            onClick={() => {
+              if (activeFile.type === 'presentation') {
+                setCurrentSlide(1)
+                navigatePptx('goto', 1)
+              } else if (activeFile.type === 'pdf') {
+                setCurrentSlide(1)
+                window.api.sendToPresentation('navigate-slide', 1)
+              }
+            }}
+            disabled={currentSlide <= 1}
+            className="btn-icon text-sm disabled:opacity-30"
+            title="К первому слайду"
+          >
+            ⏮
           </button>
 
           <div className="w-px h-6 bg-gray-800 mx-1" />

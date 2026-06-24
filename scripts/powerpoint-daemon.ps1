@@ -230,6 +230,11 @@ while ($true) {
                     # external display ends up one or more slides ahead of the
                     # in-app slide number. ppSlideShowManualAdvance = 1.
                     try { $s.AdvanceMode = 1 } catch {}
+                    # Loop: после последнего слайда View.Next() переходит на
+                    # первый вместо Exit. Аналогично с Previous() с первого
+                    # на последний. В Speaker mode работает как мягкий цикл,
+                    # без авто-advance.
+                    try { $s.LoopUntilStopped = $true } catch {}
                     # НЕ используем RangeType=2 (ppShowSlideRange) даже для
                     # startSlide > 1 — иначе slideshow создаётся с диапазоном
                     # [startSlide..count], и SlideShowView.Slides.Count = размер
@@ -432,6 +437,26 @@ while ($true) {
                 }
                 $verifyMs = [int]([DateTime]::UtcNow - $verifyStart).TotalMilliseconds
                 Log ("open: SlideShowWindows verify ok={0} took={1}ms" -f $verifyOk, $verifyMs)
+
+                # Diagnostic: dump slideshow state to detect animation issues.
+                # Click index = 0 means "before any click animation". If we see
+                # finalised state (clickIndex == animCount), animations were
+                # played somewhere during open.
+                try {
+                    $diagCi = -1
+                    $diagSi = -1
+                    $diagState = -1
+                    $diagAnimCount = -1
+                    $diagShowType = -1
+                    $diagAdvMode = -1
+                    try { $diagSi = [int]$newSW.View.Slide.SlideIndex } catch {}
+                    try { $diagCi = [int]$newSW.View.GetClickIndex() } catch {}
+                    try { $diagState = [int]$newSW.View.State } catch {}
+                    try { $diagAnimCount = [int]$pres.Slides($diagSi).TimeLine.MainSequence.Count } catch {}
+                    try { $diagShowType = [int]$pres.SlideShowSettings.ShowType } catch {}
+                    try { $diagAdvMode = [int]$pres.SlideShowSettings.AdvanceMode } catch {}
+                    Log ("open: post-Run state slide=$diagSi clickIndex=$diagCi viewState=$diagState animCount=$diagAnimCount showType=$diagShowType advMode=$diagAdvMode")
+                } catch {}
 
                 Reply @{ id = $id; ok = $true; slideCount = $count; slide = $startSlide }
             }

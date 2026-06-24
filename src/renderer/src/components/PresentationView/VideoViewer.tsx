@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { mediaUrl } from '../../media'
 
 interface VideoViewerProps {
   filePath: string
@@ -12,7 +13,7 @@ export function VideoViewer({ filePath }: VideoViewerProps): JSX.Element {
     const video = videoRef.current
     if (!video) return
 
-    video.src = `file://${filePath}`
+    video.src = mediaUrl(filePath)
     video.load()
 
     let readySent = false

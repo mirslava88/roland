@@ -44,13 +44,17 @@ class PowerPointDaemon {
       if (this.proc.stderr) {
         this.proc.stderr.setEncoding('utf8')
         let buf = ''
+        const dbgLogFile = require('path').join(require('os').tmpdir(), 'roland-dbg.log')
         this.proc.stderr.on('data', (chunk: string) => {
           buf += chunk
           let idx: number
           while ((idx = buf.indexOf('\n')) !== -1) {
             const line = buf.slice(0, idx).replace(/\r$/, '')
             buf = buf.slice(idx + 1)
-            if (line.length > 0) console.log(line)
+            if (line.length > 0) {
+              console.log(line)
+              try { require('fs').appendFileSync(dbgLogFile, `[DAEMON] ${line}\n`) } catch {}
+            }
           }
         })
       }

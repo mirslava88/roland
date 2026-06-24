@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
+import { mediaUrl } from '../../media'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -52,24 +53,24 @@ export function FileItemGrid({
       } else if (file.type === 'presentation') {
         const cached = pptxThumbnailsMap[file.path]
         if (cached && cached.length > 0) {
-          setThumbnail(`file://${cached[0]}`)
+          setThumbnail(mediaUrl(cached[0]))
         } else {
           try {
             const result = await window.api.generatePptxThumbnails(file.path)
             if (!cancelled && result.success && result.thumbnails && result.thumbnails.length > 0) {
-              setThumbnail(`file://${result.thumbnails[0]}`)
+              setThumbnail(mediaUrl(result.thumbnails[0]))
               const current = useAppStore.getState().pptxThumbnailsMap
               useAppStore.setState({ pptxThumbnailsMap: { ...current, [file.path]: result.thumbnails } })
             }
           } catch { /* ignore */ }
         }
       } else if (file.type === 'other' && file.isImage) {
-        if (!cancelled) setThumbnail(`file://${file.path}`)
+        if (!cancelled) setThumbnail(mediaUrl(file.path))
       } else if (file.type === 'video') {
         // Video thumbnail via hidden video element
         try {
           const video = document.createElement('video')
-          video.src = `file://${file.path}`
+          video.src = mediaUrl(file.path)
           video.muted = true
           video.preload = 'metadata'
           await new Promise<void>((resolve) => {

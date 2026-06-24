@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
+import { mediaUrl } from '../../media'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -34,14 +35,27 @@ async function renderPdfPageToDataUrl(
     const safePage = Math.max(1, Math.min(pageNum || 1, doc.numPages))
     const page = await doc.getPage(safePage)
     const baseViewport = page.getViewport({ scale: 1 })
+    // Render at NATIVE pdf size — pdf.js имеет баг с TilingPattern при scale>1
+    // (PDF с tiling-pattern фоном рендерится с обрезкой справа). Native render
+    // не триггерит bug; затем drawImage upscale до display target size.
+    const off = document.createElement('canvas')
+    off.width = baseViewport.width
+    off.height = baseViewport.height
+    const offCtx = off.getContext('2d')
+    if (!offCtx) return null
+    await page.render({ canvasContext: offCtx, viewport: baseViewport }).promise
+
     const scale = Math.min(displayWidth / baseViewport.width, displayHeight / baseViewport.height)
-    const scaledViewport = page.getViewport({ scale })
+    const dstW = Math.round(baseViewport.width * scale)
+    const dstH = Math.round(baseViewport.height * scale)
     const canvas = document.createElement('canvas')
-    canvas.width = scaledViewport.width
-    canvas.height = scaledViewport.height
+    canvas.width = dstW
+    canvas.height = dstH
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
-    await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, dstW, dstH)
     return canvas.toDataURL('image/png')
   } catch {
     return null
@@ -261,15 +275,13 @@ export function PreviewPanel(): JSX.Element {
           freezeFrame = await renderPdfPageToDataUrl(channel.file.path, channel.slide, dispW, dispH)
           log(`freezeFrame: PDF render returned ${freezeFrame ? 'image' : 'null'}`)
         } else if (channel.file.type === 'presentation') {
-          const slidesMap = freshState.pptxSlidesMap[channel.file.path]
-          const slidePath = slidesMap?.[(channel.slide || 1) - 1]
-          if (slidePath) {
-            log('freezeFrame: reading PPTX target slide from pptxSlidesMap')
-            freezeFrame = await imageFileToDataUrl(slidePath)
-            log(`freezeFrame: PPTX read returned ${freezeFrame ? 'image' : 'null'}`)
-          } else {
-            log('freezeFrame: pptxSlidesMap not ready for target, will fallback')
-          }
+          // НЕ используем pptxSlidesMap как freezeFrame — это pre-rendered
+          // thumbnail в ФИНАЛЬНОМ состоянии слайда (со всеми анимированными
+          // элементами visible). На слайдах с click-анимациями PP стартует
+          // в INITIAL state (элементы скрыты, ждут click). Overlay тогда
+          // показывал бы full→empty swap = "анимации в обратку". Лучше
+          // показать чёрный (или captureDisplay fallback) → snapshot.
+          log('freezeFrame: skipping pptxSlidesMap (would show final state on animated slides)')
         }
       } catch (e) {
         log(`freezeFrame: target render error ${String(e)}`)
@@ -355,9 +367,15 @@ export function PreviewPanel(): JSX.Element {
       log(`userNavigatedDuringLaunch=${userNavigatedDuringLaunch} (${slideBeforeLaunch}→${slideAfterLaunch})`)
 
       // NOW close the Electron presentation window — PowerPoint slideshow is already visible
-      if (isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
+      // ВСЕГДА закрываем при переходе на PPTX (даже если флаг isPresentationWindowOpen
+      // не синхрон с реальностью — например после PDF→PPTX без переоткрытия,
+      // window мог остаться. Не закрытый window перекрывает PP slideshow белым
+      // фоном на target дисплее → юзер видит белое, anim играют невидимо.
+      log(`closing presentation window: flag=${isPresentationWindowOpen} prevType=${prevActiveFile?.type}`)
+      if (prevActiveFile?.type !== 'presentation') {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
+        log('presentation window closed')
       }
       if (result.success && result.output) {
         try {
@@ -887,6 +905,15 @@ function ChannelPanel({
             ▶
           </button>
           <button
+            onClick={(e) => { e.stopPropagation(); if (channel.slide > 1) onSlideChange(1) }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="btn-icon text-[10px]"
+            disabled={channel.slide <= 1}
+            title="К первому слайду"
+          >
+            ⏮
+          </button>
+          <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
             className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded transition-colors"
@@ -1002,7 +1029,7 @@ function PptxPreview({ file, currentSlide, pptxThumbnails }: {
   return (
     <div className="w-full h-full flex items-center justify-center">
       <img
-        src={`file://${thumbPath}`}
+        src={mediaUrl(thumbPath)}
         alt={`Slide ${currentSlide}`}
         className="max-w-full max-h-full object-contain"
       />
@@ -1014,7 +1041,7 @@ function VideoPreview({ file }: { file: FileEntry }): JSX.Element {
   return (
     <div className="w-full h-full flex items-center justify-center">
       <video
-        src={`file://${file.path}`}
+        src={mediaUrl(file.path)}
         className="max-w-full max-h-full rounded-lg"
         controls={false}
         muted
@@ -1038,7 +1065,7 @@ function OtherPreview({ file }: { file: FileEntry }): JSX.Element {
     return (
       <div className="w-full h-full flex items-center justify-center">
         <img
-          src={`file://${file.path}`}
+          src={mediaUrl(file.path)}
           alt={file.name}
           className="max-w-full max-h-full object-contain"
         />

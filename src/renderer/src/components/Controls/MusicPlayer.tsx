@@ -91,7 +91,7 @@ export function MusicPlayer(): JSX.Element {
   }
 
   const handlePlayTrack = async (index: number): Promise<void> => {
-    await window.api.musicSetPlaylist(playlist, index)
+    await window.api.musicSetPlaylist(playlist, index, true)
     pollState()
   }
 

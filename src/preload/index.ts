@@ -6,6 +6,8 @@ const api = {
 
   loadFolder: (folderPath: string) => ipcRenderer.invoke('load-folder', folderPath),
 
+  watchFolder: (folderPath: string | null) => ipcRenderer.invoke('watch-folder', folderPath),
+
   getDisplays: () => ipcRenderer.invoke('get-displays'),
 
   openDisplaySettings: () => ipcRenderer.invoke('open-display-settings'),
@@ -48,6 +50,9 @@ const api = {
 
   snapshotSlideshow: (): Promise<string | null> =>
     ipcRenderer.invoke('snapshot-slideshow'),
+
+  renderPdfPage: (filePath: string, pageIndex: number, width: number): Promise<string | null> =>
+    ipcRenderer.invoke('render-pdf-page', filePath, pageIndex, width),
 
   hideOverlay: () => ipcRenderer.invoke('hide-overlay'),
 
@@ -135,8 +140,8 @@ const api = {
 
   selectMusicFolder: (): Promise<string[] | null> => ipcRenderer.invoke('select-music-folder'),
 
-  musicSetPlaylist: (files: string[], startIndex?: number): Promise<void> =>
-    ipcRenderer.invoke('music-set-playlist', files, startIndex),
+  musicSetPlaylist: (files: string[], startIndex?: number, autoplay?: boolean): Promise<void> =>
+    ipcRenderer.invoke('music-set-playlist', files, startIndex, autoplay),
 
   musicPlay: (): Promise<void> => ipcRenderer.invoke('music-play'),
 
