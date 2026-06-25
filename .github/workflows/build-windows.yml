@@ -46,7 +46,7 @@ jobs:
         run: npx electron-vite build
 
       - name: Pack app directory (no installer yet)
-        run: npx electron-builder --win --dir
+        run: npx electron-builder --win --dir --publish never
 
       # electron-builder 26 + Electron 42 force EnableEmbeddedAsarIntegrityValidation
       # ON and embed a MISMATCHED hash -> FATAL "Integrity check failed" on launch.
@@ -61,7 +61,7 @@ jobs:
           npx --yes @electron/fuses read --app "$exe"
 
       - name: Build NSIS installer from fixed dir
-        run: npx electron-builder --win --prepackaged "dist/win-unpacked"
+        run: npx electron-builder --win --prepackaged "dist/win-unpacked" --publish never
 
       - name: Upload installer as workflow artifact
         uses: actions/upload-artifact@v4
