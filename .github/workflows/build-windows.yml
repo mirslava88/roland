@@ -1,0 +1,79 @@
+name: Build Windows Installer
+
+# Trigger:
+#   - manually from the Actions tab ("Run workflow")
+#   - automatically on a version tag push (v*) -> also publishes a GitHub Release
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create a Release on tag builds
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22      # >=22.12 required by @electron/fuses v2
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure Electron binary is downloaded
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "node_modules/electron/dist/electron.exe")) {
+            Write-Host "Electron binary missing after npm ci - running install.js"
+            node node_modules/electron/install.js
+          }
+
+      - name: Build (electron-vite)
+        run: npx electron-vite build
+
+      - name: Pack app directory (no installer yet)
+        run: npx electron-builder --win --dir
+
+      # electron-builder 26 + Electron 42 force EnableEmbeddedAsarIntegrityValidation
+      # ON and embed a MISMATCHED hash -> FATAL "Integrity check failed" on launch.
+      # Disable it on the packed exe (sticks once electron-builder is done), then
+      # build the installer from the fixed dir via --prepackaged.
+      - name: Disable broken asar-integrity fuses
+        shell: pwsh
+        run: |
+          $exe = "dist/win-unpacked/Presentation Display Manager.exe"
+          npx --yes @electron/fuses write --app "$exe" EnableEmbeddedAsarIntegrityValidation=off OnlyLoadAppFromAsar=off
+          Write-Host "--- fuse state after flip ---"
+          npx --yes @electron/fuses read --app "$exe"
+
+      - name: Build NSIS installer from fixed dir
+        run: npx electron-builder --win --prepackaged "dist/win-unpacked"
+
+      - name: Upload installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = (Get-ChildItem dist -Filter *.exe).FullName
+          gh release create $env:GITHUB_REF_NAME $assets `
+            --title "Presentation Display Manager $env:GITHUB_REF_NAME" `
+            --notes "Automated Windows build (GitHub Actions). Unsigned installer - Windows SmartScreen will show ""Unknown Publisher""; the app still installs and runs. To produce a trusted build, add CSC_LINK/CSC_KEY_PASSWORD secrets and sign."
