@@ -15,6 +15,11 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      # Build UNSIGNED in CI (no signing cert in the repo). This disables
+      # electron-builder's signing auto-discovery so signtool is never invoked
+      # (otherwise it tries to sign elevate/uninstaller/Setup and fails).
+      CSC_IDENTITY_AUTO_DISCOVERY: false
 
     steps:
       - name: Checkout
