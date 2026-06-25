@@ -7,6 +7,13 @@
 
 <br/>
 
+## ⬇️ [Скачать для Windows · Download for Windows (.exe)](https://github.com/mirslava88/roland/releases/latest)
+
+[![Download .exe](https://img.shields.io/github/v/release/mirslava88/roland?label=download%20.exe&logo=github&style=for-the-badge&color=success)](https://github.com/mirslava88/roland/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?logo=github&style=for-the-badge&label=downloads)](https://github.com/mirslava88/roland/releases)
+
+<br/>
+
 ![Electron](https://img.shields.io/badge/Electron-42-47848F?logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
@@ -24,6 +31,23 @@
 ![last commit](https://img.shields.io/github/last-commit/mirslava88/roland)
 
 </div>
+
+---
+
+## 📥 Установка / Download
+
+Готовый установщик для Windows — на странице **[Releases](https://github.com/mirslava88/roland/releases/latest)**:
+
+| | |
+|--|--|
+| 🔗 Релиз | **[github.com/mirslava88/roland/releases/latest](https://github.com/mirslava88/roland/releases/latest)** |
+| 📦 Прямая ссылка на `.exe` | [Presentation.Display.Manager.Setup.x.x.x.exe](https://github.com/mirslava88/roland/releases/latest) |
+| 🛠️ Сборка | автоматически через GitHub Actions ([workflow](.github/workflows/build-windows.yml)) |
+
+> Скачай `.exe` → запусти → установится в Program Files.
+> ⚠️ Сборка **без подписи**: Windows SmartScreen покажет «Неизвестный издатель» → *Подробнее → Выполнить в любом случае*. Приложение полностью рабочее.
+
+> *The Windows installer is a GitHub **Release asset** (binaries can't live in the repo tree due to GitHub's 100 MB file limit). Built automatically by GitHub Actions.*
 
 ---
 
