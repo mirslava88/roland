@@ -235,7 +235,7 @@ export function ControlBar(): JSX.Element {
             onChange={(e) => setGoToSlide(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleGoToSlide()}
             placeholder="№ слайда"
-            className="w-24 bg-surface-100 text-gray-300 text-xs rounded-md px-2 py-1.5 border border-gray-700 focus:outline-none focus:border-accent"
+            className="w-24 bg-surface-100 text-gray-300 text-xs rounded-md px-2 py-1.5 border border-gray-700 focus:outline-hidden focus:border-accent"
           />
         </div>
       )}

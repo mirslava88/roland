@@ -289,12 +289,12 @@ export function VideoPlayer(): JSX.Element {
           <div className="flex items-center gap-2 mb-3 relative">
             <button
               onClick={() => setShowMenu(!showMenu)}
-              className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
+              className="text-[10px] px-2 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors"
             >
               Выбор видео ▾
             </button>
             {showMenu && (
-              <div ref={menuRef} className="absolute top-full left-0 mt-1 bg-surface-200 border border-gray-600 rounded shadow-lg z-50 overflow-hidden">
+              <div ref={menuRef} className="absolute top-full left-0 mt-1 bg-surface-200 border border-gray-600 rounded-sm shadow-lg z-50 overflow-hidden">
                 <button onClick={handleSelectFiles} className="block w-full text-left text-[10px] px-3 py-1.5 text-gray-300 hover:bg-gray-600 transition-colors whitespace-nowrap">
                   Выбрать файлы
                 </button>
@@ -334,14 +334,14 @@ export function VideoPlayer(): JSX.Element {
 
           {/* Controls */}
           <div className="flex items-center gap-1 mb-2">
-            <button onClick={handlePrev} disabled={playlist.length === 0} className="text-sm w-8 h-8 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-30" title="Предыдущий">⏮</button>
+            <button onClick={handlePrev} disabled={playlist.length === 0} className="text-sm w-8 h-8 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-30" title="Предыдущий">⏮</button>
             {isPlaying ? (
-              <button onClick={handlePause} className="text-sm w-8 h-8 rounded bg-yellow-700 hover:bg-yellow-600 text-white transition-colors" title="Пауза">⏸</button>
+              <button onClick={handlePause} className="text-sm w-8 h-8 rounded-sm bg-yellow-700 hover:bg-yellow-600 text-white transition-colors" title="Пауза">⏸</button>
             ) : (
-              <button onClick={handlePlay} disabled={playlist.length === 0} className="text-sm w-8 h-8 rounded bg-green-700 hover:bg-green-600 text-white transition-colors disabled:opacity-30" title="Воспроизвести">▶</button>
+              <button onClick={handlePlay} disabled={playlist.length === 0} className="text-sm w-8 h-8 rounded-sm bg-green-700 hover:bg-green-600 text-white transition-colors disabled:opacity-30" title="Воспроизвести">▶</button>
             )}
-            <button onClick={handleStop} className="text-sm w-8 h-8 rounded bg-red-700 hover:bg-red-600 text-white transition-colors" title="Стоп">⏹</button>
-            <button onClick={handleNext} disabled={playlist.length === 0} className="text-sm w-8 h-8 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-30" title="Следующий">⏭</button>
+            <button onClick={handleStop} className="text-sm w-8 h-8 rounded-sm bg-red-700 hover:bg-red-600 text-white transition-colors" title="Стоп">⏹</button>
+            <button onClick={handleNext} disabled={playlist.length === 0} className="text-sm w-8 h-8 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors disabled:opacity-30" title="Следующий">⏭</button>
 
             <div className="w-px h-6 bg-gray-600 mx-1" />
 

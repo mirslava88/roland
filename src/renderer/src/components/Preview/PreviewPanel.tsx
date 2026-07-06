@@ -605,7 +605,7 @@ export function PreviewPanel(): JSX.Element {
         <button
           onClick={() => addChannelPage()}
           title="Добавить 4 канала (новая страница)"
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-surface-100/90 hover:bg-accent/90 hover:text-white text-gray-300 text-xl font-bold border border-gray-700 shadow-lg backdrop-blur-sm transition-colors z-10 flex items-center justify-center"
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-surface-100/90 hover:bg-accent/90 hover:text-white text-gray-300 text-xl font-bold border border-gray-700 shadow-lg backdrop-blur-xs transition-colors z-10 flex items-center justify-center"
         >
           +
         </button>
@@ -620,7 +620,7 @@ export function PreviewPanel(): JSX.Element {
           <button
             onClick={() => setCurrentChannelPage(currentChannelPage - 1)}
             disabled={currentChannelPage === 0}
-            className="shrink-0 w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
+            className="shrink-0 w-7 h-6 rounded-sm text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
             title="Предыдущая страница"
           >
             ‹
@@ -669,7 +669,7 @@ export function PreviewPanel(): JSX.Element {
           <button
             onClick={() => setCurrentChannelPage(currentChannelPage + 1)}
             disabled={currentChannelPage >= totalPages - 1}
-            className="shrink-0 w-7 h-6 rounded text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
+            className="shrink-0 w-7 h-6 rounded-sm text-gray-400 hover:text-white hover:bg-gray-700 disabled:opacity-30 disabled:hover:bg-transparent transition-colors text-sm"
             title="Следующая страница"
           >
             ›
@@ -692,7 +692,7 @@ export function PreviewPanel(): JSX.Element {
                 }
                 removeChannelPage(currentChannelPage)
               }}
-              className="shrink-0 ml-1 w-6 h-6 rounded text-gray-500 hover:text-red-400 hover:bg-red-900/30 transition-colors text-xs"
+              className="shrink-0 ml-1 w-6 h-6 rounded-sm text-gray-500 hover:text-red-400 hover:bg-red-900/30 transition-colors text-xs"
               title={currentPageIsEmpty ? 'Удалить страницу' : 'Удалить страницу (с подтверждением)'}
             >
               ✕
@@ -823,7 +823,7 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onClear() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded hover:bg-white/10 transition-colors"
+            className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded-sm hover:bg-white/10 transition-colors"
             title="Убрать файл"
           >
             ✕
@@ -889,7 +889,7 @@ function ChannelPanel({
                   ;(e.target as HTMLInputElement).blur()
                 }
               }}
-              className="w-12 text-[10px] text-center bg-surface-100 border border-gray-600 focus:border-accent rounded px-1 py-0.5 text-white tabular-nums outline-none"
+              className="w-12 text-[10px] text-center bg-surface-100 border border-gray-600 focus:border-accent rounded-sm px-1 py-0.5 text-white tabular-nums outline-hidden"
               title="Введите номер слайда и нажмите Enter"
             />
             {channel.totalSlides > 0 && (
@@ -916,7 +916,7 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded transition-colors"
+            className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors"
           >
             В эфир
           </button>
@@ -931,7 +931,7 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded transition-colors"
+            className="bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors"
           >
             В эфир
           </button>

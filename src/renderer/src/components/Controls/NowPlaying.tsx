@@ -22,7 +22,7 @@ export function NowPlaying(): JSX.Element | null {
       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
       <span className="text-[10px] font-bold uppercase text-gray-500 shrink-0">Сейчас в эфире</span>
 
-      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${TYPE_COLORS[activeFile.type] || 'text-gray-400'}`}>
+      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-sm ${TYPE_COLORS[activeFile.type] || 'text-gray-400'}`}>
         {TYPE_LABELS[activeFile.type] || activeFile.extension}
       </span>
 

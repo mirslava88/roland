@@ -112,7 +112,7 @@ export function FileItemGrid({
         ${!isSelected && !isActive ? 'hover:ring-1 hover:ring-gray-700' : ''}
       `}
     >
-      <div className="aspect-[4/3] bg-black/60 flex items-center justify-center overflow-hidden relative">
+      <div className="aspect-4/3 bg-black/60 flex items-center justify-center overflow-hidden relative">
         {thumbnail ? (
           <img src={thumbnail} alt={file.name} className="w-full h-full object-cover" draggable={false} />
         ) : (
@@ -123,16 +123,16 @@ export function FileItemGrid({
         {isActive && (
           <span className="absolute top-1 left-1 w-2 h-2 rounded-full bg-red-500 animate-pulse" />
         )}
-        <span className={`absolute top-1 right-1 text-[8px] font-bold px-1 py-0.5 rounded ${TYPE_COLORS[file.type] || 'text-gray-400'}`}>
+        <span className={`absolute top-1 right-1 text-[8px] font-bold px-1 py-0.5 rounded-sm ${TYPE_COLORS[file.type] || 'text-gray-400'}`}>
           {file.extension.replace('.', '').toUpperCase()}
         </span>
       </div>
       <div className="px-1.5 py-1 bg-surface-200 relative group">
-        <p className="text-[10px] text-gray-300 leading-tight break-words">{file.name}</p>
+        <p className="text-[10px] text-gray-300 leading-tight wrap-break-word">{file.name}</p>
         {onRename && (
           <button
             onClick={(e) => { e.stopPropagation(); onRename() }}
-            className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white text-[8px] px-0.5 rounded hover:bg-white/10 transition-all"
+            className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 text-gray-500 hover:text-white text-[8px] px-0.5 rounded-sm hover:bg-white/10 transition-all"
             title="Переименовать"
           >
             ✏️

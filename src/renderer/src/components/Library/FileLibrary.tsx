@@ -425,7 +425,7 @@ export function FileLibrary(): JSX.Element {
             <span className="text-xs font-bold text-gray-400 uppercase">Выбор презентаций</span>
             <button
               onClick={handleOpenFolder}
-              className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-surface-100 transition-colors"
+              className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
               title="Открыть папку"
             >
               📂 Обзор
@@ -477,7 +477,7 @@ export function FileLibrary(): JSX.Element {
           <span className="text-xs font-bold text-gray-400 uppercase">Выбор презентаций</span>
           <button
             onClick={handleOpenFolder}
-            className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-surface-100 transition-colors"
+            className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
             title="Открыть папку"
           >
             📂 Обзор
@@ -502,7 +502,7 @@ export function FileLibrary(): JSX.Element {
         <div className="flex items-center gap-1 mb-2">
           <button
             onClick={handleGoToDrives}
-            className="text-[11px] text-gray-400 hover:text-white transition-colors px-1 py-0.5 rounded hover:bg-surface-100"
+            className="text-[11px] text-gray-400 hover:text-white transition-colors px-1 py-0.5 rounded-sm hover:bg-surface-100"
             title="Все диски"
           >
             <svg className="w-3.5 h-3.5 inline" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="16" x2="21" y2="16" stroke="currentColor" strokeWidth="1.5" opacity="0.2"/><circle cx="18" cy="19" r="1" fill="#4ade80"/></svg>
@@ -597,7 +597,7 @@ export function FileLibrary(): JSX.Element {
                   if (e.key === 'Escape') cancelRename()
                 }}
                 onBlur={() => commitFolderRename(folder.path)}
-                className="flex-1 bg-surface-400 text-white text-xs px-2 py-0.5 rounded outline-none border border-accent"
+                className="flex-1 bg-surface-400 text-white text-xs px-2 py-0.5 rounded-sm outline-hidden border border-accent"
                 autoFocus
               />
             </div>
@@ -643,7 +643,7 @@ export function FileLibrary(): JSX.Element {
                       if (e.key === 'Escape') cancelRename()
                     }}
                     onBlur={() => commitRename(file)}
-                    className="flex-1 bg-surface-400 text-white text-xs px-2 py-1 rounded outline-none border border-accent"
+                    className="flex-1 bg-surface-400 text-white text-xs px-2 py-1 rounded-sm outline-hidden border border-accent"
                     autoFocus
                   />
                 </div>

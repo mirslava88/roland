@@ -286,7 +286,7 @@ export function Timer(): JSX.Element {
                 max={23}
                 value={inputH}
                 onChange={(e) => setInputH(e.target.value)}
-                className="w-14 bg-gray-800 text-white text-xs text-center rounded px-1 py-1 border border-gray-600"
+                className="w-14 bg-gray-800 text-white text-xs text-center rounded-sm px-1 py-1 border border-gray-600"
               />
               <span className="text-[10px] text-gray-500">ч</span>
             </div>
@@ -298,53 +298,53 @@ export function Timer(): JSX.Element {
                 max={59}
                 value={inputM}
                 onChange={(e) => setInputM(e.target.value)}
-                className="w-14 bg-gray-800 text-white text-xs text-center rounded px-1 py-1 border border-gray-600"
+                className="w-14 bg-gray-800 text-white text-xs text-center rounded-sm px-1 py-1 border border-gray-600"
               />
               <span className="text-[10px] text-gray-500">мин</span>
             </div>
-            <button onClick={handleSetTime} className="text-[10px] px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors">
+            <button onClick={handleSetTime} className="text-[10px] px-2 py-1 rounded-sm bg-blue-600 hover:bg-blue-500 text-white transition-colors">
               Установить
             </button>
             {!timerRunning ? (
-              <button onClick={handleStart} className="text-[10px] px-2 py-1 rounded bg-green-700 hover:bg-green-600 text-white transition-colors" title="Старт">▶</button>
+              <button onClick={handleStart} className="text-[10px] px-2 py-1 rounded-sm bg-green-700 hover:bg-green-600 text-white transition-colors" title="Старт">▶</button>
             ) : (
-              <button onClick={handlePause} className="text-[10px] px-2 py-1 rounded bg-yellow-700 hover:bg-yellow-600 text-white transition-colors" title="Пауза">⏸</button>
+              <button onClick={handlePause} className="text-[10px] px-2 py-1 rounded-sm bg-yellow-700 hover:bg-yellow-600 text-white transition-colors" title="Пауза">⏸</button>
             )}
-            <button onClick={handleStop} className="text-[10px] px-2 py-1 rounded bg-red-700 hover:bg-red-600 text-white transition-colors" title="Стоп">⏹</button>
+            <button onClick={handleStop} className="text-[10px] px-2 py-1 rounded-sm bg-red-700 hover:bg-red-600 text-white transition-colors" title="Стоп">⏹</button>
           </div>
 
           {/* Add/subtract minutes */}
           <div className="flex items-center gap-2 mb-1">
             <label className="text-[11px] text-gray-400 shrink-0 w-16">Добавить:</label>
-            <button onClick={() => handleAddMin(1)} className="text-[10px] w-14 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">+1 мин</button>
-            <button onClick={() => handleAddMin(5)} className="text-[10px] w-14 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">+5 мин</button>
-            <button onClick={() => handleAddMin(10)} className="text-[10px] w-16 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">+10 мин</button>
+            <button onClick={() => handleAddMin(1)} className="text-[10px] w-14 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">+1 мин</button>
+            <button onClick={() => handleAddMin(5)} className="text-[10px] w-14 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">+5 мин</button>
+            <button onClick={() => handleAddMin(10)} className="text-[10px] w-16 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">+10 мин</button>
             <input
               type="number"
               min={1}
               value={addMinInput}
               onChange={(e) => setAddMinInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCustomAdd()}
-              className="w-14 bg-gray-800 text-white text-xs text-center rounded px-1 py-1 border border-gray-600"
+              className="w-14 bg-gray-800 text-white text-xs text-center rounded-sm px-1 py-1 border border-gray-600"
               placeholder="мин"
             />
-            <button onClick={handleCustomAdd} className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">+</button>
+            <button onClick={handleCustomAdd} className="text-[10px] px-2 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">+</button>
           </div>
           <div className="flex items-center gap-2 mb-3">
             <label className="text-[11px] text-gray-400 shrink-0 w-16">Убавить:</label>
-            <button onClick={() => handleAddMin(-1)} className="text-[10px] w-14 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">-1 мин</button>
-            <button onClick={() => handleAddMin(-5)} className="text-[10px] w-14 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">-5 мин</button>
-            <button onClick={() => handleAddMin(-10)} className="text-[10px] w-16 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">-10 мин</button>
+            <button onClick={() => handleAddMin(-1)} className="text-[10px] w-14 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">-1 мин</button>
+            <button onClick={() => handleAddMin(-5)} className="text-[10px] w-14 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">-5 мин</button>
+            <button onClick={() => handleAddMin(-10)} className="text-[10px] w-16 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors text-center">-10 мин</button>
             <input
               type="number"
               min={1}
               value={subMinInput}
               onChange={(e) => setSubMinInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleCustomSub()}
-              className="w-14 bg-gray-800 text-white text-xs text-center rounded px-1 py-1 border border-gray-600"
+              className="w-14 bg-gray-800 text-white text-xs text-center rounded-sm px-1 py-1 border border-gray-600"
               placeholder="мин"
             />
-            <button onClick={handleCustomSub} className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">-</button>
+            <button onClick={handleCustomSub} className="text-[10px] px-2 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">-</button>
           </div>
 
           {/* Sound settings */}
@@ -357,7 +357,7 @@ export function Timer(): JSX.Element {
                   const path = await window.api.selectSoundFile()
                   if (path) setTimerSoundWarning(path)
                 }}
-                className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors truncate max-w-[160px]"
+                className="text-[10px] px-2 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors truncate max-w-[160px]"
                 title={timerSoundWarning || 'Выбрать звук'}
               >
                 {timerSoundWarning ? timerSoundWarning.split(/[\\/]/).pop() : '🔔 Выбрать'}
@@ -381,7 +381,7 @@ export function Timer(): JSX.Element {
                   const path = await window.api.selectSoundFile()
                   if (path) setTimerSoundEnd(path)
                 }}
-                className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors truncate max-w-[160px]"
+                className="text-[10px] px-2 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors truncate max-w-[160px]"
                 title={timerSoundEnd || 'Выбрать звук'}
               >
                 {timerSoundEnd ? timerSoundEnd.split(/[\\/]/).pop() : '🔔 Выбрать'}

@@ -237,7 +237,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                         </div>
                         <label className="text-[10px] text-gray-500 block mb-1">Разрешение</label>
                         <select
-                          className="w-full bg-surface-200 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 outline-none hover:border-gray-600 focus:border-accent"
+                          className="w-full bg-surface-200 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-200 outline-hidden hover:border-gray-600 focus:border-accent"
                           value={`${d.current.width}x${d.current.height}x${d.current.frequency}`}
                           onChange={(e) => {
                             const [w, h, f] = e.target.value.split('x').map(Number)
@@ -282,7 +282,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Выберите диск или папку с файлами</li>
                   <li>Фильтры вверху: Все, PPTX, PDF, Видео, Разное</li>
-                  <li>Двойной клик на папку — войти внутрь, <code className="text-gray-300 bg-surface-400 px-1 rounded">..</code> — назад</li>
+                  <li>Двойной клик на папку — войти внутрь, <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">..</code> — назад</li>
                   <li>Перетаскивание файлов между папками и из Проводника Windows</li>
                   <li>Правый клик — контекстное меню (копировать, вырезать, вставить, переименовать, удалить)</li>
                 </ul>
@@ -292,12 +292,12 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы (A / B / C / D и более)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Каналы в сетке 2×2, сгруппированы по страницам — можно заранее подготовить много файлов</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">+</code> в центре — добавить новую страницу из 4 каналов (A/B/C/D, E/F/G/H, …)</li>
-                  <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
-                  <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded">✕</code> справа от пагинации</li>
-                  <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded">В эфир</code> или двойной клик по каналу</li>
-                  <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
-                  <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> в центре — добавить новую страницу из 4 каналов (A/B/C/D, E/F/G/H, …)</li>
+                  <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
+                  <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> справа от пагинации</li>
+                  <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или двойной клик по каналу</li>
+                  <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
+                  <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
                   <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
                 </ul>
               </section>
@@ -305,9 +305,9 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">3. Подложка (Фон) и выход из эфира</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">🖼 Подложка (Фон)</code> — выбор фонового изображения для внешнего дисплея</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖼 Подложка (Фон)</code> — выбор фонового изображения для внешнего дисплея</li>
                   <li>Подложка отображается когда нет активного контента</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">⏹ Выйти из эфира</code> — закрывает активный контент (PPTX/PDF/видео) и показывает подложку. Если подложка не настроена — просто чёрный экран</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⏹ Выйти из эфира</code> — закрывает активный контент (PPTX/PDF/видео) и показывает подложку. Если подложка не настроена — просто чёрный экран</li>
                 </ul>
               </section>
 
@@ -315,12 +315,12 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">4. Таймер (⏱)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Обратный отсчёт с настраиваемой длительностью (часы/минуты)</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">Установить</code> применяет введённое время. Нажатие <code className="text-gray-300 bg-surface-400 px-1 rounded">▶</code> без «Установить» стартует со значения из полей</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Установить</code> применяет введённое время. Нажатие <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">▶</code> без «Установить» стартует со значения из полей</li>
                   <li>Быстрые кнопки: +1/+5/+10 мин, -1/-5/-10 мин и произвольное значение</li>
                   <li>Отображается отдельным окном поверх контента на внешнем дисплее. Можно <b>перетаскивать</b> мышью и <b>масштабировать</b> колёсиком</li>
                   <li>Цвета: зелёный — идёт отсчёт; жёлтый — меньше минуты; красный — overtime (минусовое время)</li>
                   <li>Два звука оповещения: <b>«Звук (1 мин)»</b> срабатывает при достижении 60 секунд, <b>«Звук (конец)»</b> — при достижении 0</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded">🔊</code> — принудительный запуск звука таймера</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🔊</code> — принудительный запуск звука таймера</li>
                 </ul>
               </section>
 
@@ -336,8 +336,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">6. Кликер (глобальные клавиши)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded">🎮 Кликер в эфире</code> — стрелки и PageUp/PageDown работают глобально (для презентера)</li>
-                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded">🎮 Кликер вне эфира</code> — клавиши работают только когда приложение в фокусе</li>
+                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🎮 Кликер в эфире</code> — стрелки и PageUp/PageDown работают глобально (для презентера)</li>
+                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🎮 Кликер вне эфира</code> — клавиши работают только когда приложение в фокусе</li>
                   <li>Переключается одним кликом по кнопке на панели инструментов</li>
                 </ul>
               </section>
@@ -363,14 +363,14 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">9. Горячие клавиши</h4>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-gray-400 mt-2">
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Ctrl+C</code> — Копировать</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Ctrl+X</code> — Вырезать</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Ctrl+V</code> — Вставить</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">F2</code> — Переименовать</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Del</code> — В корзину</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">Shift+Del</code> — Удалить навсегда</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">←→</code> — Слайды</span>
-                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded">PgUp/PgDn</code> — Слайды</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+C</code> — Копировать</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+X</code> — Вырезать</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+V</code> — Вставить</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">F2</code> — Переименовать</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Del</code> — В корзину</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Shift+Del</code> — Удалить навсегда</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">←→</code> — Слайды</span>
+                  <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">PgUp/PgDn</code> — Слайды</span>
                 </div>
               </section>
             </div>
