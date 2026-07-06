@@ -759,7 +759,11 @@ export function registerIpcHandlers(
         if (permanent) {
           const s = await stat(itemPath)
           if (s.isDirectory()) {
-            await rm(itemPath, { recursive: true, force: true })
+            // NO force: respect the read-only attribute + NTFS ACLs exactly as
+            // Windows Explorer does. A read-only or permission-denied file throws
+            // here instead of being silently bypassed — the app never deletes
+            // anything the user couldn't delete through standard Windows.
+            await rm(itemPath, { recursive: true })
           } else {
             await rm(itemPath)
           }
@@ -811,7 +815,8 @@ export function registerIpcHandlers(
         const s = await stat(srcPath)
         if (s.isDirectory()) {
           await cp(srcPath, destPath, { recursive: true })
-          await rm(srcPath, { recursive: true, force: true })
+          // NO force — respect read-only / NTFS permissions (see delete-items).
+          await rm(srcPath, { recursive: true })
         } else {
           await copyFile(srcPath, destPath)
           await rm(srcPath)
