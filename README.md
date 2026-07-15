@@ -1,164 +1,199 @@
 <div align="center">
 
-# 🎬 Presentation Display Manager
+<img src="build/icon.png" width="128" alt="Presentation Display Manager icon" />
 
-### Бесшовное переключение презентаций, PDF, видео и изображений на втором экране
-*Seamless switching of presentations, PDFs, videos & images on a secondary display*
+# Presentation Display Manager
 
-<br/>
+**Управление презентациями и медиаконтентом на втором экране без суеты в эфире**
 
-## ⬇️ [Скачать для Windows · Download for Windows (.exe)](https://github.com/mirslava88/roland/releases/latest)
+Оператор видит библиотеку, каналы и управление — зрители видят только готовый контент.
 
-[![Download .exe](https://img.shields.io/github/v/release/mirslava88/roland?label=download%20.exe&logo=github&style=for-the-badge&color=success)](https://github.com/mirslava88/roland/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?logo=github&style=for-the-badge&label=downloads)](https://github.com/mirslava88/roland/releases)
+[![Скачать для Windows](https://img.shields.io/badge/Скачать_для_Windows-.exe-16a34a?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/latest)
 
-<br/>
+[![Latest release](https://img.shields.io/github/v/release/mirslava88/roland?label=версия&logo=github)](https://github.com/mirslava88/roland/releases/latest)
+[![Build Windows](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml)
+[![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?label=загрузки&logo=github)](https://github.com/mirslava88/roland/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
-![Electron](https://img.shields.io/badge/Electron-42-47848F?logo=electron&logoColor=white)
-![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-6-646CFF?logo=vite&logoColor=white)
-![Tailwind](https://img.shields.io/badge/Tailwind-3-06B6D4?logo=tailwindcss&logoColor=white)
-
-![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
-![Chromium](https://img.shields.io/badge/Chromium-148-4285F4?logo=googlechrome&logoColor=white)
-![Node](https://img.shields.io/badge/Node-24-339933?logo=node.js&logoColor=white)
-
-[![License](https://img.shields.io/badge/license-Free_(MIT)-brightgreen)](LICENSE)
-![npm audit](https://img.shields.io/badge/npm_audit-0_vulnerabilities-success?logo=npm)
-![Security](https://img.shields.io/badge/security-hardened-success?logo=shieldsdotio)
-![Offline](https://img.shields.io/badge/network-fully_offline-success)
-![last commit](https://img.shields.io/github/last-commit/mirslava88/roland)
+![Electron](https://img.shields.io/badge/Electron-43.1.1-47848f?logo=electron&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=111827)
+![TypeScript](https://img.shields.io/badge/TypeScript-7-3178c6?logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-7-646cff?logo=vite&logoColor=white)
+![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-06b6d4?logo=tailwindcss&logoColor=white)
 
 </div>
 
 ---
 
-## 📥 Установка / Download
+## Что это
 
-Готовый установщик для Windows — на странице **[Releases](https://github.com/mirslava88/roland/releases/latest)**:
+Presentation Display Manager — Windows-приложение для конференций, докладов, трансляций и мероприятий с двумя экранами. Главное окно остаётся у оператора, а PowerPoint, PDF, видео, изображения и таймер выводятся на выбранный проектор или дополнительный монитор.
 
-| | |
-|--|--|
-| 🔗 Релиз | **[github.com/mirslava88/roland/releases/latest](https://github.com/mirslava88/roland/releases/latest)** |
-| 📦 Прямая ссылка на `.exe` | [Presentation.Display.Manager.Setup.x.x.x.exe](https://github.com/mirslava88/roland/releases/latest) |
-| 🛠️ Сборка | автоматически через GitHub Actions ([workflow](.github/workflows/build-windows.yml)) |
-
-> Скачай `.exe` → запусти → установится в Program Files.
-> ⚠️ Сборка **без подписи**: Windows SmartScreen покажет «Неизвестный издатель» → *Подробнее → Выполнить в любом случае*. Приложение полностью рабочее.
-
-> *The Windows installer is a GitHub **Release asset** (binaries can't live in the repo tree due to GitHub's 100 MB file limit). Built automatically by GitHub Actions.*
-
----
-
-## 📖 О проекте
-
-**Presentation Display Manager** — десктопное приложение для **Windows**, управляющее контентом на втором экране (проектор / монитор зала) с **бесшовными переходами без чёрных кадров и мерцания**.
-
-Сделано для докладчиков, конференций, любых сцен, где переключение между **PowerPoint, PDF, видео и изображениями** должно быть мгновенным и чистым — оператор видит библиотеку и панель управления, зал видит только готовый контент.
-
-## ✨ Возможности
-
-- 🔄 **Бесшовные «takes»** — переходы PPTX ↔ PDF ↔ видео ↔ картинка без чёрных кадров: оверлей перекрывает композиторную гонку DWM, пока новый контент готовится «за кадром».
-- 📊 **PowerPoint через COM** — нативное управление слайдшоу (next / prev / goto / close) через persistent PowerShell-демон с JSON-протоколом.
-- 📄 **PDF** — нативный рендер `Windows.Data.Pdf` (WinRT) + pdf.js, попиксельно точный на любом размере.
-- 🎥 **Видео**, 🖼️ **изображения**, 🎵 **аудио** на втором экране.
-- ⏱️ **Таймер-оверлей** для докладчика (WPF-окно, перетаскивание + масштаб колесом, звуковые предупреждения).
-- 🎵 **Музыкальный плеер** — фоновые плейлисты с loop/seek/volume.
-- 🗂️ **Файловая библиотека** — просмотр дисков (вкл. сетевые), превью, drag-and-drop, переименование/перемещение/удаление.
-- 🔊 Переключение **аудио-устройства**, скрытие **таскбара** на нужном экране, смена **разрешения** дисплея.
-
-## 🛠️ Технологический стек
-
-| Слой | Технологии |
-|------|-----------|
-| **Runtime** | Electron 42 (Chromium 148, Node 24) |
-| **UI** | React 19 · TypeScript 5 · Tailwind CSS 3 |
-| **Сборка** | electron-vite · Vite 6 · electron-builder 26 (NSIS) |
-| **Состояние** | zustand |
-| **PowerPoint** | PowerShell + COM Automation (persistent daemon) |
-| **PDF** | pdfjs-dist · Windows.Data.Pdf (WinRT) |
-| **Таймер** | WPF (PowerShell `Add-Type`) |
-
-## 🔐 Безопасность
-
-Приложение прошло **состязательный многоагентный security-аудит** и хардненинг:
-
-- ✅ **Подписанный** NSIS-инсталлятор (Authenticode), установка в Program Files
-- ✅ **Electron Fuses** закалены — `RunAsNode` / `NodeOptions` / `NodeCliInspect` отключены, cookie-шифрование включено
-- ✅ `sandbox: true`, `webSecurity: true`, строгий **CSP**; локальное медиа отдаётся через кастомный привилегированный протокол **`pdm-media://`** вместо `file://`
-- ✅ Глобальные nav/permission-guards, allowlist'ы путей и расширений, `-NoProfile` на всех PowerShell-вызовах
-- ✅ **0 уязвимостей** (`npm audit`), все лицензии зависимостей пермиссивные (без GPL/AGPL)
-- ✅ **Полностью офлайн** — ноль исходящих сетевых соединений (подходит для air-gapped-среды)
-- 📋 Compliance-артефакты (CycloneDX SBOM, отчёт по лицензиям, описание сетевого поведения) — в [`compliance/`](compliance/)
-
-## 🚀 Запуск и сборка
-
-```bash
-npm install
-
-npm run dev          # режим разработки (hot-reload)
-npm run build        # компиляция в out/
-
-# подписанный установщик → dist/Presentation Display Manager Setup x.x.x.exe
-powershell -File build\build-signed.ps1
+```text
+Библиотека файлов → каналы A / B / C / D → «В эфир» → внешний дисплей
+       операторское окно                         экран зрителей
 ```
 
-> ⚠️ Если в окружении выставлена `ELECTRON_RUN_AS_NODE=1` — очисти её перед `npm run dev` (или запускай через `dev.cmd`), иначе Electron стартует как Node.
->
-> 🔑 Для продакшен-подписи замени плейсхолдер-сертификат: укажи `CSC_LINK` на корпоративный `.pfx` и `CSC_KEY_PASSWORD` — остальной pipeline в `build-signed.ps1` уже готов.
+Приложение рассчитано на быстрые переключения: следующий материал можно подготовить в отдельном канале, не меняя текущую картинку в эфире.
 
-## 📁 Структура проекта
+## Основные возможности
 
+- **Каналы A / B / C / D и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
+- **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint.
+- **PDF и офисные документы** — показ PDF, а также предпросмотр Word и Excel через установленный Microsoft Office.
+- **Видео без потери позиции** — play/pause, seek, громкость и продолжение с сохранённого момента после переключения между каналами в текущей сессии.
+- **Изображения и подложка** — фон показывается только после явного выбора и не переносится в следующую сессию.
+- **Таймер поверх эфира** — перетаскивание, масштабирование, прозрачность текста, звуковые сигналы и отдельные цвета для основного времени, последней минуты и перелимита.
+- **Музыкальный плеер** — плейлист, громкость, переход между треками и режимы повтора.
+- **Управление дисплеями** — выбор внешнего экрана, режима Windows, разрешения и частоты обновления.
+- **Масштаб Windows** — эфирное окно учитывает координаты и DPI выбранного дисплея, включая распространённый масштаб 150%.
+- **Аудиовыход** — выбор устройства с корректным отображением русских названий.
+- **Кликер** — глобальное управление слайдами стрелками и Page Up/Page Down.
+- **Диагностика** — постоянный журнал с данными о дисплеях, PowerPoint, экспорте превью и воспроизведении медиа.
+
+## Поддерживаемые форматы
+
+| Тип | Форматы |
+|---|---|
+| Презентации | `.pptx`, `.ppt` |
+| Документы | `.pdf`, `.doc`, `.docx`, `.xls`, `.xlsx`, `.txt`, `.rtf`, `.odt`, `.ods` |
+| Видео | `.mp4`, `.mov`, `.avi`, `.webm`, `.mkv` |
+| Изображения | `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.webp`, `.tiff`, `.tif`, `.svg` |
+| Аудио | `.mp3`, `.wav`, `.ogg`, `.aac`, `.m4a`, `.flac`, `.wma` |
+
+> Фактическое воспроизведение конкретного видео- или аудиокодека зависит от поддержки Chromium и Windows, а не только от расширения файла.
+
+## Установка
+
+1. Скачайте актуальный `.exe` на странице [Releases](https://github.com/mirslava88/roland/releases/latest).
+2. Запустите `Presentation Display Manager Setup x.x.x.exe`.
+3. Выберите папку установки и завершите установку.
+4. Подключите второй монитор или проектор и включите в Windows режим **«Расширить»**.
+5. В приложении откройте настройки дисплеев и выберите экран для эфира.
+
+CI-сборки публикуются без коммерческой цифровой подписи. Поэтому Windows SmartScreen может показать предупреждение «Неизвестный издатель»: нажмите **«Подробнее» → «Выполнить в любом случае»**, если установщик скачан из официального раздела Releases этого репозитория.
+
+### Системные требования
+
+- Windows 10/11 x64;
+- второй дисплей или проектор для полноценного эфирного режима;
+- Microsoft PowerPoint desktop для показа PPT/PPTX и создания превью слайдов;
+- Microsoft Word/Excel desktop для предпросмотра соответствующих документов.
+
+PDF, изображения, видео, музыка и таймер не требуют установленного PowerPoint.
+
+## Как работать
+
+1. Выберите папку с материалами в левой панели.
+2. Перетащите файлы в каналы A, B, C или D. Кнопка `+` добавляет ещё одну страницу из четырёх каналов.
+3. При необходимости заранее выберите слайд или поставьте видео на нужную позицию.
+4. Нажмите **«В эфир»** или дважды щёлкните по каналу.
+5. Кнопка **«Выйти из эфира»** закрывает текущий материал. Если в этой сессии выбрана подложка, появится она; иначе внешний экран станет чёрным.
+
+Для PPTX и PDF доступны стрелки и прямой ввод номера слайда. Позиции слайдов сохраняются отдельно для каждого файла. При переключении с поставленного на паузу видео на другой канал его позиция сохраняется до закрытия приложения.
+
+## Таймер
+
+Таймер открывается поверх контента на внешнем дисплее и не мешает управлению презентацией. Доступны:
+
+- длительность и быстрые поправки `±1`, `±5`, `±10` минут;
+- перетаскивание мышью и масштабирование колёсиком;
+- прозрачность текста;
+- **цвет основного таймера**;
+- **цвет за одну минуту до окончания**;
+- **цвет перелимита времени**;
+- отдельные звуковые сигналы на отметках 1:00 и 0:00.
+
+Положение, масштаб и оформление сохраняются. Текущее время и выбранные звуки начинаются заново при каждом запуске.
+
+## Диагностика
+
+Если на конкретном компьютере не создаются превью PPTX, появляется чёрный экран или некорректно определяется монитор:
+
+1. Запустите приложение и воспроизведите проблему.
+2. Откройте **Настройки → Диагностика**.
+3. Нажмите **«Открыть папку логов»**.
+4. Передайте файл `pdm-diagnostic.log` разработчику.
+
+Лог содержит версии приложения, Windows, Electron и Office, параметры экранов и DPI, этапы запуска PowerPoint, экспорт превью и ошибки медиапротокола. При достижении 8 МБ он автоматически ротируется; предыдущая версия сохраняется рядом.
+
+## Разработка и сборка
+
+Понадобятся Node.js 22+ и Windows PowerShell.
+
+```powershell
+npm ci
+
+npm run dev          # режим разработки с hot reload
+npm run build        # сборка main/preload/renderer в out/
+npm run package:win  # Windows NSIS installer в dist/
 ```
+
+Подписанная локальная сборка поддерживается отдельным сценарием и требует собственного `.pfx`-сертификата:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
+```
+
+Для автоматической сборки используется [GitHub Actions](.github/workflows/build-windows.yml). Ручной запуск создаёт artifact, а push тега `v*` дополнительно публикует GitHub Release.
+
+## Технологии
+
+| Слой | Реализация |
+|---|---|
+| Desktop runtime | Electron 43 |
+| Интерфейс | React 19, TypeScript 7, Tailwind CSS 4 |
+| Состояние | Zustand 5 |
+| Сборка | electron-vite 5, Vite 7, electron-builder 26, NSIS |
+| PowerPoint | PowerShell, COM Automation, постоянный JSON-демон |
+| PDF | pdfjs-dist и нативный Windows.Data.Pdf |
+| Таймер | WPF-оверлей через PowerShell |
+
+## Безопасность и приватность
+
+- renderer работает с `sandbox`, `contextIsolation`, `webSecurity` и Content Security Policy;
+- локальные файлы передаются через ограниченный протокол `pdm-media://`, а не открываются напрямую через `file://`;
+- переходы, разрешения и допустимые пути проверяются в main process;
+- Electron Fuses отключают `RunAsNode`, `NODE_OPTIONS` и CLI Inspector; шифрование cookies включено;
+- приложение не требует учётной записи и работает офлайн;
+- CI не хранит сертификаты подписи в репозитории.
+
+Технические материалы находятся в папке [`compliance/`](compliance/).
+
+## Структура проекта
+
+```text
 src/
-  main/        — главный процесс: окна, IPC, overlay, PowerPoint-демон, протокол pdm-media
-  renderer/    — UI на React (control + presentation окна)
-  preload/     — contextBridge API (изолированный мост renderer↔main)
-scripts/       — PowerShell: COM-управление PP, рендер PDF, таймер, аудио, окна
-build/         — afterPack (fuses) + двухфазная подписанная сборка
-compliance/    — SBOM, лицензии, сетевое поведение
+  main/       окна, IPC, диагностика, PowerPoint-демон, pdm-media
+  preload/    изолированный API между renderer и main process
+  renderer/   React-интерфейс оператора и эфирного окна
+scripts/      PowerShell: Office COM, таймер, аудио и дисплеи
+build/        иконка, NSIS-настройки, Electron Fuses и подпись
+compliance/   документы по безопасности и сетевому поведению
 ```
 
-## 📜 Лицензия
+## Лицензия
 
-**Free** — распространяется под [лицензией MIT](LICENSE): свободное использование, изменение и распространение.
+Проект распространяется по лицензии [MIT](LICENSE): его можно свободно использовать, изменять и распространять с сохранением текста лицензии.
 
 ---
 
 <details>
-<summary><b>🇬🇧 English version</b></summary>
+<summary><strong>English summary</strong></summary>
 
-<br/>
+### Presentation Display Manager
 
-**Presentation Display Manager** is a **Windows** desktop app that drives a secondary display (projector / hall monitor) with **seamless, flicker-free transitions**. Built for speakers, conferences and any stage where switching between **PowerPoint, PDF, video and images** must be instant and clean — the operator sees the library and controls, the audience sees only finished content.
+Presentation Display Manager is a Windows desktop application for driving a projector or secondary display during conferences, talks, streams, and live events. The operator keeps the library, channel grid, and playback controls on the primary monitor while the audience sees only the selected content.
 
-### ✨ Features
-- 🔄 **Seamless "takes"** — PPTX ↔ PDF ↔ video ↔ image transitions with no black frames (an overlay masks the DWM compositor race while the next content is prepared off-screen).
-- 📊 **PowerPoint via COM** — native slideshow control (next / prev / goto / close) through a persistent PowerShell daemon with a JSON protocol.
-- 📄 **PDF** — native `Windows.Data.Pdf` (WinRT) render + pdf.js, pixel-perfect at any size.
-- 🎥 Video, 🖼️ images, 🎵 audio on the secondary display.
-- ⏱️ **Timer overlay** for the speaker (WPF window, drag + scroll-to-scale, sound warnings).
-- 🎵 **Music player** — background playlists with loop / seek / volume.
-- 🗂️ **File library** — drive browsing (incl. network shares), previews, drag-and-drop, rename / move / delete.
-- 🔊 Audio-device switching, per-display taskbar hiding, display-resolution control.
+Key features include multi-page A/B/C/D channels, native PowerPoint control and slide previews, PDF and Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
 
-### 🛠️ Stack
-Electron 42 (Chromium 148, Node 24) · React 19 · TypeScript · Tailwind · electron-vite / Vite 6 · electron-builder 26 (NSIS) · zustand · PowerShell + COM Automation · pdfjs-dist / Windows.Data.Pdf.
+Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 
-### 🔐 Security
-Passed an adversarial multi-agent security audit and hardening: Authenticode-signed NSIS installer; hardened Electron Fuses; `sandbox` + `webSecurity` on, strict CSP, local media served via a custom privileged `pdm-media://` protocol; navigation / permission guards and path allow-lists; `-NoProfile` on all PowerShell spawns; **0 npm vulnerabilities**, permissive-only dependency licenses; **fully offline** (no outbound connections). Compliance artifacts (CycloneDX SBOM, license report, network-behavior doc) live in [`compliance/`](compliance/).
-
-### 🚀 Run & build
-```bash
-npm install
-npm run dev          # development
-npm run build        # compile to out/
-powershell -File build\build-signed.ps1   # signed installer -> dist/
+```powershell
+npm ci
+npm run dev
+npm run build
+npm run package:win
 ```
-> If `ELECTRON_RUN_AS_NODE=1` is set in the environment, clear it before `npm run dev` (or use `dev.cmd`). For production signing, point `CSC_LINK` at the corporate `.pfx` and set `CSC_KEY_PASSWORD`.
-
-### 📜 License
-**Free** — released under the [MIT License](LICENSE): free to use, modify and distribute.
 
 </details>
