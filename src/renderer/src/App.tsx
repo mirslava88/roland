@@ -50,13 +50,25 @@ export default function App(): JSX.Element {
     })
 
     const unsubVideoState = window.api.on('video-state', (...args: unknown[]) => {
-      const data = args[0] as { playing: boolean }
+      const data = args[0] as { path?: string; playing: boolean; currentTime?: number; duration?: number; ended?: boolean }
       setIsPlaying(data.playing)
+      if (data.path) {
+        useAppStore.getState().setVideoPlayback(data.path, {
+          currentTime: data.ended ? 0 : (data.currentTime ?? 0),
+          duration: data.duration ?? 0,
+          playing: data.playing
+        })
+      }
     })
 
     const unsubVideoTime = window.api.on('video-time', (...args: unknown[]) => {
-      const data = args[0] as { currentTime: number; duration: number }
-      void data
+      const data = args[0] as { path?: string; currentTime: number; duration: number }
+      if (data.path) {
+        useAppStore.getState().setVideoPlayback(data.path, {
+          currentTime: data.currentTime,
+          duration: data.duration
+        })
+      }
     })
 
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {

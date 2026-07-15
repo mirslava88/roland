@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import { BrowserWindow, ipcMain, dialog, shell, screen } from 'electron'
 import { readdir, stat, readFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
@@ -8,11 +8,86 @@ import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { scriptPath as resolveScript } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
+import {
+  diagnosticLog,
+  formatDiagnosticError,
+  getDiagnosticLogDirectory
+} from './diagnostic-log'
 
 const execFileAsync = promisify(execFile)
 
+// PowerPoint is effectively a single COM automation target. Several renderer
+// surfaces can request the same preview at once (grid tile, channel card and
+// slide navigator); concurrent exporters race over PowerPoint and temp files.
+const pptxExportInflight = new Map<string, Promise<unknown>>()
+let pptxExportQueue: Promise<void> = Promise.resolve()
+
+function enqueuePptxExport<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const existing = pptxExportInflight.get(key) as Promise<T> | undefined
+  if (existing) {
+    diagnosticLog('pptx-preview', `join existing job key=${key}`)
+    return existing
+  }
+
+  diagnosticLog('pptx-preview', `queue job key=${key}`)
+  const job = pptxExportQueue.then(work, work)
+  pptxExportQueue = job.then(() => undefined, () => undefined)
+  pptxExportInflight.set(key, job)
+  const cleanup = (): void => {
+    if (pptxExportInflight.get(key) === job) pptxExportInflight.delete(key)
+  }
+  job.then(cleanup, cleanup)
+  return job
+}
+
+function pptxExportDirectory(
+  kind: 'thumbs' | 'slides',
+  filePath: string,
+  size: number,
+  mtimeMs: number,
+  width: number,
+  height: number
+): string {
+  const hash = createHash('sha256')
+    .update(`daemon-export-v1|${filePath.toLowerCase()}|${size}|${mtimeMs}|${width}|${height}`)
+    .digest('hex')
+    .slice(0, 24)
+  return join(tmpdir(), `pdm-${kind}-${hash}`)
+}
+
+async function readPptxExportCache(directory: string): Promise<string[] | null> {
+  try {
+    const count = Number((await readFile(join(directory, 'complete.txt'), 'utf8')).trim())
+    if (!Number.isInteger(count) || count < 1) return null
+    const images: string[] = []
+    for (let i = 1; i <= count; i++) {
+      const imagePath = join(directory, `slide_${i}.png`)
+      if (!existsSync(imagePath)) return null
+      images.push(imagePath)
+    }
+    return images
+  } catch {
+    return null
+  }
+}
+
 let originalAudioDeviceId: string | null = null
 let preferredAudioDeviceId: string | null = null // set by user in Settings
+
+async function runAudioControlJson<T>(action: 'list' | 'get-default'): Promise<T> {
+  const audioScriptPath = resolveScript('audio-control.ps1')
+  const { stdout } = await execFileAsync('powershell.exe', [
+    '-ExecutionPolicy', 'Bypass',
+    '-NoProfile',
+    '-File', audioScriptPath,
+    '-Action', `${action}-base64`
+  ], { timeout: 15000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
+  const encoded = String(stdout).trim().split(/\r?\n/).filter(Boolean).at(-1)
+  if (!encoded) throw new Error(`Audio control returned no data for ${action}`)
+  const json = Buffer.from(encoded, 'base64').toString('utf8')
+  return JSON.parse(json) as T
+}
+
 // Map of file path -> { hwnd, pid } for tracking multiple external windows
 const externalFiles = new Map<string, { hwnd: number; pid: number }>()
 
@@ -136,6 +211,13 @@ export function registerIpcHandlers(
   controlWindow: BrowserWindow,
   getPresentationWindow: () => BrowserWindow | null
 ): void {
+  ipcMain.handle('open-diagnostic-log-folder', async () => {
+    const path = getDiagnosticLogDirectory()
+    diagnosticLog('diagnostics', `open log folder path=${path}`)
+    const error = await shell.openPath(path)
+    return { success: error.length === 0, path, error: error || undefined }
+  })
+
   ipcMain.handle('select-folder', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openDirectory'],
@@ -267,16 +349,30 @@ export function registerIpcHandlers(
 
   ipcMain.handle(
     'launch-powerpoint',
-    async (_event, filePath: string, _monitorIndex?: number, startSlide?: number) => {
+    async (_event, filePath: string, displayId?: number, startSlide?: number) => {
       if (process.platform === 'win32') {
         try {
           const args: Record<string, unknown> = { path: filePath }
+          const displays = screen.getAllDisplays()
+          const primaryDisplay = screen.getPrimaryDisplay()
+          const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
+          const targetDisplay = typeof displayId === 'number'
+            ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
+            : externalDisplay || primaryDisplay
+
+          // Electron bounds are DIP while SetWindowPos expects physical pixels.
+          args.bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
           if (typeof startSlide === 'number' && startSlide > 1) {
             args.slide = startSlide
           }
-          console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') BEGIN slide=${startSlide ?? 1}`)
-          const res = await pptDaemon.send('open', args, 60000)
-          console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') END ok=${res.ok}`)
+          let res: Awaited<ReturnType<typeof pptDaemon.send>> = { id: 0, ok: false, error: 'not attempted' }
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') BEGIN attempt=${attempt} slide=${startSlide ?? 1} display=${targetDisplay.id} bounds=${JSON.stringify(args.bounds)}`)
+            res = await pptDaemon.send('open', args, 60000)
+            console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') END attempt=${attempt} ok=${res.ok} error=${res.error ?? '-'}`)
+            if (res.ok) break
+            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 750))
+          }
           if (!res.ok) return { success: false, error: res.error || 'open failed' }
           const output = JSON.stringify({
             Status: 'ok',
@@ -370,64 +466,72 @@ export function registerIpcHandlers(
 
   ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string) => {
     if (process.platform === 'win32') {
-      const scriptPath = resolveScript('powerpoint-control.ps1')
-      try {
-        // -File + argv: filePath уходит как literal argument, не через shell-
-        // строку. Иначе имя файла вроде `a"; rm -rf; echo "` → command
-        // injection (F-002, audit 2026-04-20).
-        const { stdout } = await execFileAsync('powershell.exe', [
-          '-ExecutionPolicy', 'Bypass',
-          '-NoProfile',
-          '-File', scriptPath,
-          '-Action', 'thumbnails',
-          '-FilePath', filePath
-        ], { timeout: 30000, encoding: 'utf8' })
-        const data = JSON.parse(stdout)
-        if (data.Status === 'ok') {
-          const thumbDir = data.ThumbnailDir
-          const thumbFiles: string[] = []
-          for (let i = 1; i <= data.SlideCount; i++) {
-            thumbFiles.push(join(thumbDir, `slide_${i}.png`))
+      diagnosticLog('pptx-preview', `thumbnail request file=${filePath}`)
+      return enqueuePptxExport(`thumbnails:${filePath.toLowerCase()}`, async () => {
+        const started = Date.now()
+        try {
+          const fileStats = await stat(filePath)
+          const thumbDir = pptxExportDirectory('thumbs', filePath, fileStats.size, fileStats.mtimeMs, 320, 240)
+          diagnosticLog('pptx-preview', `thumbnail start exporter=daemon size=${fileStats.size} mtime=${fileStats.mtime.toISOString()} dir=${thumbDir}`)
+          const cached = await readPptxExportCache(thumbDir)
+          if (cached) {
+            diagnosticLog('pptx-preview', `thumbnail cache hit count=${cached.length} dir=${thumbDir}`)
+            return { success: true, thumbnails: cached, slideCount: cached.length }
           }
-          return { success: true, thumbnails: thumbFiles, slideCount: data.SlideCount }
+          const result = await pptDaemon.send('export', {
+            path: filePath,
+            outputDir: thumbDir,
+            width: 320,
+            height: 240
+          }, 180000)
+          if (!result.ok) throw new Error(result.error || 'PowerPoint daemon export failed')
+          const thumbFiles = await readPptxExportCache(thumbDir)
+          if (!thumbFiles) throw new Error(`PowerPoint daemon returned an incomplete thumbnail export: ${thumbDir}`)
+          diagnosticLog('pptx-preview', `thumbnail success exporter=daemon count=${thumbFiles.length} dir=${thumbDir} dur=${Date.now() - started}ms`)
+          return { success: true, thumbnails: thumbFiles, slideCount: thumbFiles.length }
+        } catch (error: unknown) {
+          console.error('[IPC] generate-pptx-thumbnails failed:', error)
+          diagnosticLog('pptx-preview', `thumbnail failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`)
+          return { success: false, error: String(error) }
         }
-        return { success: false, error: stdout }
-      } catch (error: unknown) {
-        return { success: false, error: String(error) }
-      }
+      })
     }
     return { success: false, error: 'Unsupported platform' }
   })
 
   ipcMain.handle('generate-pptx-slides', async (_event, filePath: string, width?: number, height?: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
-    const scriptPath = resolveScript('powerpoint-control.ps1')
     const w = width && width > 0 ? width : 1920
     const h = height && height > 0 ? height : 1080
-    try {
-      // -File + argv (см. F-003, audit 2026-04-20).
-      const { stdout } = await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'renderslides',
-        '-FilePath', filePath,
-        '-Width', String(w),
-        '-Height', String(h)
-      ], { timeout: 120000, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 })
-      const data = JSON.parse(stdout)
-      if (data.Status === 'ok') {
-        const slidesDir = data.SlidesDir
-        const slides: string[] = []
-        for (let i = 1; i <= data.SlideCount; i++) {
-          slides.push(join(slidesDir, `slide_${i}.png`))
+    diagnosticLog('pptx-preview', `full-slide request file=${filePath} size=${w}x${h}`)
+    return enqueuePptxExport(`slides:${filePath.toLowerCase()}:${w}x${h}`, async () => {
+      const started = Date.now()
+      try {
+        const fileStats = await stat(filePath)
+        const slidesDir = pptxExportDirectory('slides', filePath, fileStats.size, fileStats.mtimeMs, w, h)
+        diagnosticLog('pptx-preview', `full-slide start exporter=daemon fileSize=${fileStats.size} mtime=${fileStats.mtime.toISOString()} output=${w}x${h} dir=${slidesDir}`)
+        const cached = await readPptxExportCache(slidesDir)
+        if (cached) {
+          diagnosticLog('pptx-preview', `full-slide cache hit count=${cached.length} dir=${slidesDir}`)
+          return { success: true, slides: cached, slideCount: cached.length }
         }
-        return { success: true, slides, slideCount: data.SlideCount }
+        const result = await pptDaemon.send('export', {
+          path: filePath,
+          outputDir: slidesDir,
+          width: w,
+          height: h
+        }, 240000)
+        if (!result.ok) throw new Error(result.error || 'PowerPoint daemon export failed')
+        const slides = await readPptxExportCache(slidesDir)
+        if (!slides) throw new Error(`PowerPoint daemon returned an incomplete full-slide export: ${slidesDir}`)
+        diagnosticLog('pptx-preview', `full-slide success exporter=daemon count=${slides.length} dir=${slidesDir} dur=${Date.now() - started}ms`)
+        return { success: true, slides, slideCount: slides.length }
+      } catch (error: unknown) {
+        console.error('[IPC] generate-pptx-slides failed:', error)
+        diagnosticLog('pptx-preview', `full-slide failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`)
+        return { success: false, error: String(error) }
       }
-      return { success: false, error: stdout }
-    } catch (error: unknown) {
-      return { success: false, error: String(error) }
-    }
+    })
   })
 
   ipcMain.handle('read-file', async (_event, filePath: string) => {
@@ -448,15 +552,11 @@ export function registerIpcHandlers(
   ipcMain.handle('get-audio-devices', async () => {
     if (process.platform !== 'win32') return []
     try {
-      const scriptPath = resolveScript('audio-control.ps1')
-      const { stdout } = await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-Command',
-        `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '${scriptPath.replace(/'/g, "''")}' -Action list`
-      ], { encoding: 'utf8' })
-      return JSON.parse(stdout.trim())
-    } catch {
+      const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
+      diagnosticLog('audio', `device list success count=${devices.length} names=${JSON.stringify(devices.map((d) => d.name))}`)
+      return devices
+    } catch (error) {
+      diagnosticLog('audio', `device list failed ${formatDiagnosticError(error)}`)
       return []
     }
   })
@@ -487,13 +587,7 @@ export function registerIpcHandlers(
       // If user chose a preferred device in Settings, use it
       if (preferredAudioDeviceId) {
         // Save current default so we can restore later
-        const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
-          '-ExecutionPolicy', 'Bypass',
-          '-NoProfile',
-          '-File', scriptPath,
-          '-Action', 'get-default'
-        ])
-        const current = JSON.parse(defaultOut.trim())
+        const current = await runAudioControlJson<{ id: string; name: string }>('get-default')
         if (!originalAudioDeviceId) originalAudioDeviceId = current.id
 
         // Already set to preferred? Skip
@@ -512,24 +606,12 @@ export function registerIpcHandlers(
       }
 
       // Auto-detect: get current default before switching
-      const { stdout: defaultOut } = await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'get-default'
-      ])
-      const current = JSON.parse(defaultOut.trim())
+      const current = await runAudioControlJson<{ id: string; name: string }>('get-default')
       originalAudioDeviceId = current.id
 
       // Get all devices and find a non-default one (external)
-      const { stdout: listOut } = await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'list'
-      ])
-      const devices = JSON.parse(listOut.trim())
-      const external = devices.find((d: { isDefault: boolean }) => !d.isDefault)
+      const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
+      const external = devices.find((d) => !d.isDefault)
       if (!external) return { success: false, error: 'No external audio device found' }
 
       await execFileAsync('powershell.exe', [

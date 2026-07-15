@@ -1,14 +1,15 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, net } from 'electron'
-import { pathToFileURL } from 'url'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
-import { writeFileSync, unlinkSync, existsSync, appendFileSync } from 'fs'
-import { readFile } from 'fs/promises'
+import { writeFileSync, unlinkSync, existsSync, createReadStream } from 'fs'
+import { readFile, stat } from 'fs/promises'
+import { Readable } from 'stream'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
 import { join } from 'path'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
+import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
@@ -114,13 +115,12 @@ function createWindows(): void {
   // [MAIN ...] and [DAEMON ...] lines. Single interleaved timeline for
   // diagnosing PDF↔PPTX flicker timing. Also persisted to a tmpdir file so
   // diagnostics survive process exit and can be read after the session.
-  const dbgLogFile = join(tmpdir(), 'roland-dbg.log')
-  try { writeFileSync(dbgLogFile, `=== session start ${new Date().toISOString()} ===\n`) } catch {}
+  const dbgLogFile = getDiagnosticLogPath()
   console.log(`[MAIN ${Date.now()}] dbg-log file: ${dbgLogFile}`)
   ipcMain.on('dbg-log', (_event, msg: string) => {
     const line = `[R ${Date.now()}] ${msg}`
     console.log(line)
-    try { appendFileSync(dbgLogFile, line + '\n') } catch {}
+    diagnosticLog('renderer', msg)
   })
 
   ipcMain.handle('open-presentation-window', async (_event, displayId?: number) => {
@@ -409,6 +409,10 @@ function createWindows(): void {
     posX: number
     posY: number
     scale: number
+    textColor: string
+    warningTextColor: string
+    overtimeTextColor: string
+    textOpacity: number
   }) => {
     sendToWpfTimer(data)
   })
@@ -756,6 +760,38 @@ const MEDIA_EXTENSIONS = new Set([
   '.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'
 ])
 
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.webm', '.mkv'])
+const MEDIA_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp',
+  '.tiff': 'image/tiff', '.tif': 'image/tiff', '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
+  '.webm': 'video/webm', '.mkv': 'video/x-matroska',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+  '.aac': 'audio/aac', '.m4a': 'audio/mp4', '.flac': 'audio/flac',
+  '.wma': 'audio/x-ms-wma'
+}
+
+function parseByteRange(value: string, size: number): { start: number; end: number } | null {
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(value.trim())
+  if (!match || (!match[1] && !match[2])) return null
+  let start: number
+  let end: number
+  if (!match[1]) {
+    const suffixLength = Number(match[2])
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null
+    start = Math.max(0, size - suffixLength)
+    end = size - 1
+  } else {
+    start = Number(match[1])
+    end = match[2] ? Number(match[2]) : size - 1
+  }
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size || end < start) {
+    return null
+  }
+  return { start, end: Math.min(end, size - 1) }
+}
+
 // Navigation hardening: deny any top-level navigation away from the app's own
 // origin (file:// in prod, the dev-server URL, or our self-built data: pages),
 // and deny window.open from non-control windows. The app never navigates
@@ -771,23 +807,74 @@ function isAllowedNavigation(url: string): boolean {
 }
 
 app.whenReady().then(() => {
+  initDiagnosticLog()
+  diagnosticLog('display', JSON.stringify(screen.getAllDisplays().map((d) => ({
+    id: d.id,
+    bounds: d.bounds,
+    size: d.size,
+    scaleFactor: d.scaleFactor,
+    rotation: d.rotation,
+    internal: d.internal
+  }))))
   // Serve local media for webSecurity:true renderers. The renderer references
   // files as pdm-media://file/<encodeURIComponent(absPath)>; we decode, gate by
-  // media extension, and stream the file via net.fetch(file://) (handles range
-  // requests + content-type so <video> seeking works).
+  // media extension, and serve it with explicit byte-range support. Forwarding
+  // to a fresh file:// net.fetch dropped the original Request.Range header:
+  // small MP4s happened to buffer fully, but interrupted large MP4s failed on
+  // A→B→A reopen with MEDIA_ERR_SRC_NOT_SUPPORTED.
   protocol.handle('pdm-media', async (request) => {
     try {
       const filePath = decodeURIComponent(new URL(request.url).pathname.replace(/^\//, ''))
       const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase()
-      if (!MEDIA_EXTENSIONS.has(ext)) return new Response('forbidden', { status: 403 })
+      if (!MEDIA_EXTENSIONS.has(ext)) {
+        diagnosticLog('media', `blocked request url=${request.url} ext=${ext}`)
+        return new Response('forbidden', { status: 403 })
+      }
       // Paths (including UNC network shares) are served as-is — the app must open
       // media from network drives. Residual SSRF/arbitrary-read risk is ACCEPTED:
       // the renderer loads only local bundled code under a strict CSP (no
       // remote-content / XSS vector to forge a pdm-media request), and the
       // read-file IPC is already a broader arbitrary-read primitive. Tighten via
       // library-root confinement if that threat model changes.
-      return await net.fetch(pathToFileURL(filePath).toString())
-    } catch {
+      const fileStats = await stat(filePath)
+      if (!fileStats.isFile()) return new Response('not found', { status: 404 })
+      const size = fileStats.size
+      const rangeHeader = request.headers.get('range')
+      const range = rangeHeader ? parseByteRange(rangeHeader, size) : null
+      if (rangeHeader && !range) {
+        diagnosticLog('media', `invalid range=${rangeHeader} size=${size} file=${filePath}`)
+        return new Response(null, {
+          status: 416,
+          headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes' }
+        })
+      }
+
+      const start = range?.start ?? 0
+      const end = range?.end ?? Math.max(0, size - 1)
+      const contentLength = size === 0 ? 0 : end - start + 1
+      const headers: Record<string, string> = {
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(contentLength),
+        'Content-Type': MEDIA_MIME_TYPES[ext] || 'application/octet-stream',
+        'Cache-Control': 'no-store'
+      }
+      if (range) headers['Content-Range'] = `bytes ${start}-${end}/${size}`
+
+      if (VIDEO_EXTENSIONS.has(ext)) {
+        diagnosticLog('media', `serve method=${request.method} status=${range ? 206 : 200} range=${rangeHeader || '-'} bytes=${start}-${end}/${size} file=${filePath}`)
+      }
+      if (request.method === 'HEAD' || size === 0) {
+        return new Response(null, { status: range ? 206 : 200, headers })
+      }
+
+      const fileStream = createReadStream(filePath, { start, end })
+      const abortStream = (): void => fileStream.destroy()
+      request.signal.addEventListener('abort', abortStream, { once: true })
+      fileStream.once('close', () => request.signal.removeEventListener('abort', abortStream))
+      const body = Readable.toWeb(fileStream) as unknown as BodyInit
+      return new Response(body, { status: range ? 206 : 200, headers })
+    } catch (error) {
+      diagnosticLog('media', `request failed url=${request.url} ${formatDiagnosticError(error)}`)
       return new Response('not found', { status: 404 })
     }
   })

@@ -34,12 +34,25 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
-  const [tab, setTab] = useState<'audio' | 'display' | 'help'>('audio')
+  const [tab, setTab] = useState<'audio' | 'display' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
   const [displays, setDisplays] = useState<DisplayInfoFull[]>([])
   const [displaysLoading, setDisplaysLoading] = useState(false)
   const [applyingMode, setApplyingMode] = useState<DisplayMultiMode | null>(null)
+  const [diagnosticStatus, setDiagnosticStatus] = useState('')
+
+  const openDiagnosticLogs = async (): Promise<void> => {
+    setDiagnosticStatus('Открываю папку...')
+    try {
+      const result = await window.api.openDiagnosticLogFolder()
+      setDiagnosticStatus(result.success
+        ? `Папка открыта: ${result.path}`
+        : `Не удалось открыть папку: ${result.error || result.path}`)
+    } catch (error) {
+      setDiagnosticStatus(`Не удалось открыть папку: ${String(error)}`)
+    }
+  }
 
   const loadDisplays = async (): Promise<void> => {
     setDisplaysLoading(true)
@@ -127,6 +140,14 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               }`}
             >
               Дисплеи
+            </button>
+            <button
+              onClick={() => setTab('diagnostics')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                tab === 'diagnostics' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
+              }`}
+            >
+              Диагностика
             </button>
             <button
               onClick={() => setTab('help')}
@@ -267,6 +288,36 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
             </div>
           )}
 
+          {tab === 'diagnostics' && (
+            <div className="space-y-4 text-xs text-gray-300 leading-relaxed">
+              <section className="rounded-md border border-accent/40 bg-surface-300 p-4">
+                <h3 className="text-sm font-semibold text-white mb-2">Диагностика PPTX</h3>
+                <p className="text-gray-400 mb-3">
+                  Сначала воспроизведите проблему с превью, затем откройте папку и передайте разработчику файл <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">pdm-diagnostic.log</code>.
+                </p>
+                <button
+                  onClick={openDiagnosticLogs}
+                  className="rounded bg-accent px-4 py-2 text-xs font-medium text-white hover:bg-accent/80 transition-colors"
+                >
+                  Открыть папку логов
+                </button>
+                {diagnosticStatus && (
+                  <p className="mt-3 break-all text-[10px] text-gray-400">{diagnosticStatus}</p>
+                )}
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">Что записывается</h4>
+                <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li>версия Windows, приложения, PowerPoint и Office;</li>
+                  <li>параметры мониторов и масштаб Windows;</li>
+                  <li>запуск PowerPoint и COM-ошибки;</li>
+                  <li>экспорт превью каждого слайда и ошибки загрузки PNG.</li>
+                </ul>
+              </section>
+            </div>
+          )}
+
           {tab === 'help' && (
             <div className="space-y-5 text-xs text-gray-300 leading-relaxed">
               <section>
@@ -306,7 +357,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">3. Подложка (Фон) и выход из эфира</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖼 Подложка (Фон)</code> — выбор фонового изображения для внешнего дисплея</li>
-                  <li>Подложка отображается когда нет активного контента</li>
+                  <li>Подложка отображается когда нет активного контента и действует только до закрытия программы; новая сессия всегда начинается без фона</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⏹ Выйти из эфира</code> — закрывает активный контент (PPTX/PDF/видео) и показывает подложку. Если подложка не настроена — просто чёрный экран</li>
                 </ul>
               </section>

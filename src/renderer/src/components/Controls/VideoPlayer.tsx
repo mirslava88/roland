@@ -118,12 +118,13 @@ export function VideoPlayer(): JSX.Element {
       const data = args[0] as { playing: boolean; duration: number; currentTime: number }
       setCurrentTime(data.currentTime)
       if (data.duration && !isNaN(data.duration)) setDuration(data.duration)
+      setIsPlayingStore(data.playing)
     })
     return () => {
       unsubTime()
       unsubState()
     }
-  }, [])
+  }, [setIsPlayingStore])
 
   // Reset seek when track changes
   useEffect(() => {

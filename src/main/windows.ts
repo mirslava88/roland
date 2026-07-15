@@ -271,6 +271,16 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
         }
         display.style.display = 'block';
         display.textContent = formatTime(data.remaining);
+        const textColor = data.remaining < 0
+          ? (data.overtimeTextColor || '#ef4444')
+          : data.remaining <= 60 && data.remaining >= 0 && data.running
+            ? (data.warningTextColor || '#facc15')
+            : (data.textColor || '#ffffff');
+        const textAlpha = Math.round(Math.max(0.1, Math.min(1, data.textOpacity ?? 1)) * 255)
+          .toString(16).padStart(2, '0');
+        display.style.color = /^#[0-9a-f]{6}$/i.test(textColor)
+          ? textColor + textAlpha
+          : textColor;
 
         display.className = '';
         if (data.remaining < 0) {

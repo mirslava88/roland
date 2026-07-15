@@ -22,6 +22,8 @@ public static extern uint TimeBeginPeriod(uint uPeriod);
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SetThreadDpiAwarenessContext(System.IntPtr dpiContext);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
 public static extern int GetClassName(System.IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
@@ -83,6 +85,15 @@ public static bool SnapshotWindowToPng(long hwnd, string outPath) {
 '@
 }
 
+# SetWindowPos must consume the physical-pixel bounds sent by Electron without
+# Windows applying another 125/150/175% DPI virtualization pass. PowerShell is
+# otherwise commonly system-DPI-aware, which makes a slideshow larger than a
+# scaled secondary monitor and clips its right/bottom edges.
+try {
+    # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+    [PptDaemon.Native]::SetThreadDpiAwarenessContext([System.IntPtr](-4)) | Out-Null
+} catch {}
+
 # Force 1ms system-timer resolution. Windows default is ~15.6ms, which makes
 # Start-Sleep -Milliseconds 2 round up to a full tick — leaving a gap larger
 # than a DWM frame (16.67ms) between poller iterations. With 1ms granularity
@@ -98,6 +109,26 @@ function Set-NotTopmost([long]$hwnd) {
             [System.IntPtr]$hwnd,
             [System.IntPtr]-2,
             0, 0, 0, 0, 0x13
+        ) | Out-Null
+    } catch {}
+}
+
+function Set-SlideShowBounds([long]$hwnd, $targetRect) {
+    if ($hwnd -eq 0) { return }
+    if ($null -eq $targetRect -or $targetRect.Count -ne 4) {
+        Set-NotTopmost $hwnd
+        return
+    }
+
+    # HWND_NOTOPMOST=-2; SWP_NOACTIVATE=0x10. Move and size the borderless
+    # slideshow to the exact physical-pixel bounds supplied by Electron.
+    try {
+        [PptDaemon.Native]::SetWindowPos(
+            [System.IntPtr]$hwnd,
+            [System.IntPtr]-2,
+            [int]$targetRect[0], [int]$targetRect[1],
+            [int]$targetRect[2], [int]$targetRect[3],
+            0x10
         ) | Out-Null
     } catch {}
 }
@@ -131,6 +162,7 @@ function Log($msg) {
 }
 
 # Signal ready — main process reads this line before sending commands
+Log "host ready languageMode=$($ExecutionContext.SessionState.LanguageMode) ps=$($PSVersionTable.PSVersion) process64=$([Environment]::Is64BitProcess) os64=$([Environment]::Is64BitOperatingSystem)"
 Reply @{ id = 0; ok = $true; event = 'ready' }
 
 while ($true) {
@@ -146,13 +178,27 @@ while ($true) {
 
         switch ($cmd) {
             'open' {
+                $targetRect = $null
+                try {
+                    if ($null -ne $req.bounds) {
+                        $bx = [int]$req.bounds.x
+                        $by = [int]$req.bounds.y
+                        $bw = [int]$req.bounds.width
+                        $bh = [int]$req.bounds.height
+                        if ($bw -gt 0 -and $bh -gt 0) {
+                            $targetRect = @($bx, $by, $bw, $bh)
+                            Log "open: target display bounds x=$bx y=$by w=$bw h=$bh"
+                        }
+                    }
+                } catch { Log "open: invalid target bounds: $($_.Exception.Message)" }
+
                 $ppt = Get-PPT
                 if (-not $ppt) { $ppt = New-Object -ComObject PowerPoint.Application }
                 # Hint PP to create its editor window already minimized, BEFORE
                 # making it visible. The pair `WindowState=2 → Visible=1` gives
                 # PP the chance to skip the "show at normal size" stage.
                 try { $ppt.WindowState = 2 } catch {}  # ppWindowMinimized
-                $ppt.Visible = 1
+                $ppt.Visible = -1  # Microsoft.Office.Core.MsoTriState.msoTrue
                 # IMMEDIATELY hide editor HWND via Win32 SW_HIDE. Without this,
                 # the editor window stays visible on the external display for
                 # the entire duration of Presentations.Open + Run() (200-700ms),
@@ -223,6 +269,9 @@ while ($true) {
                 } else {
                     $s = $pres.SlideShowSettings
                     $s.ShowType = 1  # ppShowTypeSpeaker
+                    # Never let PowerPoint open Presenter View fullscreen on the
+                    # operator's primary monitor. The control app must stay there.
+                    try { $s.ShowPresenterView = $false } catch {}
                     # Force manual advance — some PPTX files have slides set
                     # to auto-advance on a timer (SlideShowTransition.AdvanceOnTime).
                     # Left as-is, PowerPoint would march through slides on its
@@ -293,7 +342,14 @@ while ($true) {
                     try {
                         $poller = [powershell]::Create()
                         $null = $poller.AddScript({
-                            param($oldHwnds, $shared)
+                            param($oldHwnds, $shared, $targetRect)
+                            # Runspaces use another OS thread, so DPI awareness
+                            # must be set here as well as on the daemon thread.
+                            try {
+                                [PptDaemon.Native]::SetThreadDpiAwarenessContext(
+                                    [System.IntPtr](-4)
+                                ) | Out-Null
+                            } catch {}
                             $deadline = [DateTime]::UtcNow.AddMilliseconds(1500)
                             while (-not $shared.stop -and [DateTime]::UtcNow -lt $deadline) {
                                 try {
@@ -306,11 +362,20 @@ while ($true) {
                                                 $shared.exStyleBefore =
                                                     [PptDaemon.Native]::GetWindowLong([System.IntPtr]$h, -20)
                                             } catch {}
-                                            # HWND_NOTOPMOST=-2;
-                                            # SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE=0x13
-                                            [PptDaemon.Native]::SetWindowPos(
-                                                [System.IntPtr]$h, [System.IntPtr]-2,
-                                                0, 0, 0, 0, 0x13) | Out-Null
+                                            if ($null -ne $targetRect -and $targetRect.Count -eq 4) {
+                                                # HWND_NOTOPMOST=-2; SWP_NOACTIVATE=0x10.
+                                                # Place the window before DWM paints its first frame.
+                                                [PptDaemon.Native]::SetWindowPos(
+                                                    [System.IntPtr]$h, [System.IntPtr]-2,
+                                                    [int]$targetRect[0], [int]$targetRect[1],
+                                                    [int]$targetRect[2], [int]$targetRect[3],
+                                                    0x10) | Out-Null
+                                            } else {
+                                                # Fallback when no display bounds were supplied.
+                                                [PptDaemon.Native]::SetWindowPos(
+                                                    [System.IntPtr]$h, [System.IntPtr]-2,
+                                                    0, 0, 0, 0, 0x13) | Out-Null
+                                            }
                                             $shared.foundHwnd = $h
                                             $shared.caughtTicks = [DateTime]::UtcNow.Ticks
                                             return
@@ -319,7 +384,7 @@ while ($true) {
                                 } catch { $shared.err = $_.Exception.Message }
                                 Start-Sleep -Milliseconds 2
                             }
-                        }).AddArgument($oldSlideHwnds).AddArgument($shared)
+                        }).AddArgument($oldSlideHwnds).AddArgument($shared).AddArgument($targetRect)
                         $pollerHandle = $poller.BeginInvoke()
                     } catch { Log "poller start failed: $($_.Exception.Message)" }
 
@@ -378,7 +443,10 @@ while ($true) {
                 # the end and the new slide is revealed in its painted state.
                 $newHwnd = 0
                 if ($newSW) { try { $newHwnd = [long]$newSW.HWND } catch {} }
-                if ($newHwnd -ne 0) { Log "Set-NotTopmost on new HWND=$newHwnd"; Set-NotTopmost $newHwnd }
+                if ($newHwnd -ne 0) {
+                    Log "place slideshow HWND=$newHwnd targetRect=$($targetRect -join ',')"
+                    Set-SlideShowBounds $newHwnd $targetRect
+                }
 
                 # Tear down the previous slideshow windows + presentations.
                 # The overlay covers everything, so this is invisible.
@@ -403,7 +471,7 @@ while ($true) {
                 if ($newHwnd -ne 0) {
                     for ($t = 0; $t -lt 8; $t++) {
                         Start-Sleep -Milliseconds 15
-                        Set-NotTopmost $newHwnd
+                        Set-SlideShowBounds $newHwnd $targetRect
                         Hide-PPEditor $ppt
                     }
                 }
@@ -574,6 +642,114 @@ while ($true) {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }
             }
+            'export' {
+                # Preview export intentionally runs through this already-running
+                # daemon instead of launching powerpoint-control.ps1 with
+                # `powershell.exe -File`. On WDAC/AppLocker-managed PCs a
+                # trusted Program Files script can have a different language
+                # mode from the PowerShell host; -File then fails before line 1
+                # with DotSourceNotSupported. The daemon itself is known to run
+                # on those PCs and already owns the PowerPoint COM apartment.
+                $exportPath = [string]$req.path
+                $outputDir = [string]$req.outputDir
+                $exportWidth = [int]$req.width
+                $exportHeight = [int]$req.height
+                if ([string]::IsNullOrWhiteSpace($exportPath) -or -not (Test-Path -LiteralPath $exportPath -PathType Leaf)) {
+                    throw "PPTX export source does not exist: $exportPath"
+                }
+                if ([string]::IsNullOrWhiteSpace($outputDir)) { throw 'PPTX export output directory is empty' }
+                if ($exportWidth -le 0 -or $exportHeight -le 0) { throw "Invalid PPTX export size: ${exportWidth}x${exportHeight}" }
+
+                $exportStarted = [DateTime]::UtcNow
+                Log "export: BEGIN file='$exportPath' size=${exportWidth}x${exportHeight} dir='$outputDir'"
+                if (Test-Path -LiteralPath $outputDir) {
+                    Remove-Item -LiteralPath $outputDir -Recurse -Force -ErrorAction Stop
+                }
+                New-Item -ItemType Directory -Path $outputDir -Force -ErrorAction Stop | Out-Null
+
+                $ppt = Get-PPT
+                if (-not $ppt) { $ppt = New-Object -ComObject PowerPoint.Application }
+                try { $ppt.WindowState = 2 } catch {}
+                $ppt.Visible = -1
+                Hide-PPEditor $ppt
+
+                $exportPres = $null
+                $openedForExport = $false
+                try {
+                    # Reuse a presentation already owned by the live slideshow.
+                    # This avoids trying to open the same file twice in one
+                    # PowerPoint instance and never closes an on-air deck.
+                    for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
+                        $candidate = $ppt.Presentations($i)
+                        try {
+                            if ($candidate.FullName -ieq $exportPath) {
+                                $exportPres = $candidate
+                                break
+                            }
+                        } catch {}
+                    }
+                    if (-not $exportPres) {
+                        try {
+                            # ReadOnly=true, Untitled=false, WithWindow=false.
+                            $exportPres = $ppt.Presentations.Open($exportPath, -1, 0, 0)
+                        } catch {
+                            Log "export: hidden open failed, retrying windowed: $($_.Exception.Message)"
+                            $exportPres = $ppt.Presentations.Open($exportPath)
+                            Hide-PPEditor $ppt
+                        }
+                        $openedForExport = $true
+                    }
+
+                    $exportCount = [int]$exportPres.Slides.Count
+                    if ($exportCount -lt 1) { throw 'Presentation contains no slides' }
+                    $individualError = ''
+                    try {
+                        for ($i = 1; $i -le $exportCount; $i++) {
+                            $imagePath = Join-Path $outputDir "slide_$i.png"
+                            $exportPres.Slides.Item($i).Export($imagePath, 'PNG', $exportWidth, $exportHeight)
+                            if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) {
+                                throw "PowerPoint did not export slide $i"
+                            }
+                        }
+                        Log "export: Slide.Export succeeded count=$exportCount"
+                    } catch {
+                        $individualError = $_.Exception.Message
+                        Log "export: Slide.Export failed, trying Presentation.Export: $individualError"
+                        for ($i = 1; $i -le $exportCount; $i++) {
+                            $partial = Join-Path $outputDir "slide_$i.png"
+                            if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+                        }
+                        $bulkDir = Join-Path $outputDir 'bulk-export'
+                        New-Item -ItemType Directory -Path $bulkDir -Force -ErrorAction Stop | Out-Null
+                        try {
+                            $exportPres.Export($bulkDir, 'PNG', $exportWidth, $exportHeight)
+                            $bulkFiles = @(Get-ChildItem -LiteralPath $bulkDir -File | Where-Object {
+                                $_.Extension -ieq '.png'
+                            } | Sort-Object {
+                                if ($_.BaseName -match '(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue }
+                            })
+                            if ($bulkFiles.Count -ne $exportCount) {
+                                throw "Presentation.Export returned $($bulkFiles.Count) PNG files; expected $exportCount. Slide.Export error: $individualError"
+                            }
+                            for ($i = 1; $i -le $exportCount; $i++) {
+                                Move-Item -LiteralPath $bulkFiles[$i - 1].FullName -Destination (Join-Path $outputDir "slide_$i.png") -Force
+                            }
+                            Log "export: Presentation.Export succeeded count=$exportCount"
+                        } finally {
+                            if (Test-Path -LiteralPath $bulkDir) { Remove-Item -LiteralPath $bulkDir -Recurse -Force }
+                        }
+                    }
+                    [System.IO.File]::WriteAllText((Join-Path $outputDir 'complete.txt'), [string]$exportCount)
+                } finally {
+                    if ($exportPres -and $openedForExport) {
+                        try { $exportPres.Close() } catch {}
+                    }
+                    try { if ($ppt.SlideShowWindows.Count -eq 0) { $ppt.Visible = 0 } } catch {}
+                }
+                $exportMs = [int]([DateTime]::UtcNow - $exportStarted).TotalMilliseconds
+                Log "export: END count=$exportCount dur=${exportMs}ms"
+                Reply @{ id = $id; ok = $true; slideCount = $exportCount; path = $outputDir }
+            }
             'snapshot' {
                 # Захватить пиксели активного screenClass-окна PP напрямую
                 # через PrintWindow(PW_RENDERFULLCONTENT). Обходит DWM-композит,
@@ -593,6 +769,7 @@ while ($true) {
                     # слайда ≥ 40KB. Ретраим до 8x с 60ms паузой, пока файл не
                     # превысит 20KB — значит в bitmap есть содержимое.
                     $ok = $false
+                    $hasContent = $false
                     $attempts = 0
                     for ($t = 0; $t -lt 8; $t++) {
                         $attempts++
@@ -602,16 +779,20 @@ while ($true) {
                         }
                         if ($ok -and (Test-Path $outPath)) {
                             $sz = (Get-Item $outPath).Length
-                            if ($sz -gt 20480) { break }
+                            if ($sz -gt 20480) {
+                                $hasContent = $true
+                                break
+                            }
                         }
                         Start-Sleep -Milliseconds 60
                     }
-                    if ($ok -and (Test-Path $outPath)) {
+                    if ($ok -and $hasContent -and (Test-Path $outPath)) {
                         Log ("snapshot ok attempts={0} size={1}" -f $attempts, (Get-Item $outPath).Length)
                         Reply @{ id = $id; ok = $true; path = $outPath }
                     } else {
-                        Log "snapshot failed attempts=$attempts"
-                        Reply @{ id = $id; ok = $false; error = 'PrintWindow failed' }
+                        $lastSize = if (Test-Path $outPath) { (Get-Item $outPath).Length } else { 0 }
+                        Log "snapshot failed/blank attempts=$attempts size=$lastSize"
+                        Reply @{ id = $id; ok = $false; error = 'PrintWindow returned no painted frame' }
                     }
                 }
             }
@@ -624,6 +805,7 @@ while ($true) {
             }
         }
     } catch {
+        Log "cmd '$cmd' failed: $($_.Exception.Message)"
         Reply @{ id = $id; ok = $false; error = $_.Exception.Message }
     }
 }

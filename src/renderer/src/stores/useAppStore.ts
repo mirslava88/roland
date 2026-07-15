@@ -118,6 +118,12 @@ export interface SubfolderEntry {
   path: string
 }
 
+export interface VideoPlaybackState {
+  currentTime: number
+  duration: number
+  playing: boolean
+}
+
 interface AppState {
   folderPath: string | null
   rootFolderPath: string | null
@@ -190,11 +196,13 @@ interface AppState {
   videoIsPlaying: boolean
   videoLoopTrack: boolean
   videoLoopPlaylist: boolean
+  videoPlayback: Record<string, VideoPlaybackState>
   setVideoPlaylist: (files: string[]) => void
   setVideoCurrentIndex: (idx: number) => void
   setVideoIsPlaying: (playing: boolean) => void
   setVideoLoopTrack: (v: boolean) => void
   setVideoLoopPlaylist: (v: boolean) => void
+  setVideoPlayback: (path: string, state: Partial<VideoPlaybackState>) => void
 
   // Timer
   timerDuration: number // total seconds set
@@ -204,6 +212,10 @@ interface AppState {
   timerSoundWarning: string | null
   timerOverlayPosition: { x: number; y: number } // percent from top-left
   timerOverlayScale: number
+  timerTextColor: string
+  timerWarningTextColor: string
+  timerOvertimeTextColor: string
+  timerTextOpacity: number
   setTimerDuration: (seconds: number) => void
   setTimerRemaining: (seconds: number) => void
   setTimerRunning: (running: boolean) => void
@@ -213,6 +225,10 @@ interface AppState {
   setTimerSoundWarning: (path: string | null) => void
   setTimerOverlayPosition: (pos: { x: number; y: number }) => void
   setTimerOverlayScale: (scale: number) => void
+  setTimerTextColor: (color: string) => void
+  setTimerWarningTextColor: (color: string) => void
+  setTimerOvertimeTextColor: (color: string) => void
+  setTimerTextOpacity: (opacity: number) => void
 }
 
 export const useAppStore = create<AppState>()(persist(
@@ -455,11 +471,24 @@ export const useAppStore = create<AppState>()(persist(
   videoIsPlaying: false,
   videoLoopTrack: false,
   videoLoopPlaylist: true,
+  videoPlayback: {},
   setVideoPlaylist: (files) => set({ videoPlaylist: files }),
   setVideoCurrentIndex: (idx) => set({ videoCurrentIndex: idx }),
   setVideoIsPlaying: (playing) => set({ videoIsPlaying: playing }),
   setVideoLoopTrack: (v) => set({ videoLoopTrack: v }),
   setVideoLoopPlaylist: (v) => set({ videoLoopPlaylist: v }),
+  setVideoPlayback: (path, state) => set((current) => ({
+    videoPlayback: {
+      ...current.videoPlayback,
+      [path]: {
+        currentTime: 0,
+        duration: 0,
+        playing: true,
+        ...current.videoPlayback[path],
+        ...state
+      }
+    }
+  })),
 
   // Timer
   timerDuration: 0,
@@ -469,6 +498,10 @@ export const useAppStore = create<AppState>()(persist(
   timerSoundWarning: null,
   timerOverlayPosition: { x: 90, y: 90 },
   timerOverlayScale: 1,
+  timerTextColor: '#ffffff',
+  timerWarningTextColor: '#facc15',
+  timerOvertimeTextColor: '#ef4444',
+  timerTextOpacity: 1,
   setTimerDuration: (seconds) => set({ timerDuration: seconds, timerRemaining: seconds }),
   setTimerRemaining: (seconds) => set({ timerRemaining: seconds }),
   setTimerRunning: (running) => set({ timerRunning: running }),
@@ -486,38 +519,53 @@ export const useAppStore = create<AppState>()(persist(
   setTimerSoundEnd: (path) => set({ timerSoundEnd: path }),
   setTimerSoundWarning: (path) => set({ timerSoundWarning: path }),
   setTimerOverlayPosition: (pos) => set({ timerOverlayPosition: pos }),
-  setTimerOverlayScale: (scale) => set({ timerOverlayScale: scale })
+  setTimerOverlayScale: (scale) => set({ timerOverlayScale: scale }),
+  setTimerTextColor: (color) => set({ timerTextColor: color }),
+  setTimerWarningTextColor: (color) => set({ timerWarningTextColor: color }),
+  setTimerOvertimeTextColor: (color) => set({ timerOvertimeTextColor: color }),
+  setTimerTextOpacity: (opacity) => set({ timerTextOpacity: Math.max(0.1, Math.min(1, opacity)) })
   }
   },
   {
     // Сохраняем в localStorage только user-preferences (не runtime state).
     // Файлы/слайды/live-channel начинаются заново на каждый запуск.
     //
-    // NOT persist-ится: timerSoundEnd/Warning — юзер явно не хочет чтобы
-    // звуки подтягивались автоматом. Каждая сессия начинается с null,
-    // нужно выбирать звук через настройки таймера.
+    // NOT persist-ится:
+    // - backdropImage — подложка относится только к текущему эфиру. Каждая
+    //   новая сессия начинается без фона, пока оператор не выберет его снова;
+    // - timerSoundEnd/Warning — юзер явно не хочет чтобы звуки подтягивались
+    //   автоматом. Каждая сессия начинается с null.
     //
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 2,
+    version: 3,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
-      // v1 → v2: дропаем timerSoundEnd/Warning из уже сохранённого state.
-      if (version < 2 && persistedState && typeof persistedState === 'object') {
-        const { timerSoundEnd: _a, timerSoundWarning: _b, ...rest } = persistedState as Record<string, unknown>
-        void _a; void _b
-        return rest
+      if (!persistedState || typeof persistedState !== 'object') return persistedState
+      const migrated = { ...(persistedState as Record<string, unknown>) }
+      // v1 → v2: timer sounds became session-only.
+      if (version < 2) {
+        delete migrated.timerSoundEnd
+        delete migrated.timerSoundWarning
       }
-      return persistedState
+      // v2 → v3: backdrop became session-only. This also clears the stale
+      // path already saved by previous releases on the first v3 launch.
+      if (version < 3) {
+        delete migrated.backdropImage
+      }
+      return migrated
     },
     partialize: (state) => ({
       selectedDisplayId: state.selectedDisplayId,
-      backdropImage: state.backdropImage,
       folderPath: state.folderPath,
       rootFolderPath: state.rootFolderPath,
       globalHookEnabled: state.globalHookEnabled,
       timerOverlayPosition: state.timerOverlayPosition,
       timerOverlayScale: state.timerOverlayScale,
+      timerTextColor: state.timerTextColor,
+      timerWarningTextColor: state.timerWarningTextColor,
+      timerOvertimeTextColor: state.timerOvertimeTextColor,
+      timerTextOpacity: state.timerTextOpacity,
     }),
   }
 ))

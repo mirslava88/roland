@@ -17,6 +17,9 @@ $ErrorActionPreference = "Stop"
 # UTF-8 stdout чтобы JSON с Cyrillic-путями не ломался при чтении в main.ts.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::Error.WriteLine(
+    "PPTX_DIAG start action=$Action file='$FilePath' ps=$($PSVersionTable.PSVersion) process64=$([Environment]::Is64BitProcess) os64=$([Environment]::Is64BitOperatingSystem) user='$([Environment]::UserName)'"
+)
 
 # Win32 ShowWindow — используем чтобы СРАЗУ спрятать редактор PP после Visible=1.
 # $ppt.WindowState=2 (ppWindowMinimized) — COM-свойство, обрабатывается PP асинхронно:
@@ -36,12 +39,19 @@ function Hide-PPEditorWindow {
     # SW_HIDE = 0. `Application.Visible = $true` (COM-свойство) остаётся true —
     # Slide.Export рендерит через внутренний GDI+ пайплайн, экранная
     # видимость окна редактора ему не нужна.
-    try {
-        $hwnd = [long]$Ppt.HWND
-        if ($hwnd -ne 0) {
-            [PptCtrl.Native]::ShowWindow([System.IntPtr]$hwnd, 0) | Out-Null
-        }
-    } catch {}
+    # On a cold Office start HWND can appear a little after Visible becomes
+    # true. Poll briefly so a slow PC cannot leave the editor covering the
+    # operator's monitor during preview export.
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $hwnd = [long]$Ppt.HWND
+            if ($hwnd -ne 0) {
+                [PptCtrl.Native]::ShowWindow([System.IntPtr]$hwnd, 0) | Out-Null
+                return
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 10
+    }
 }
 
 function Get-PowerPointInstance {
@@ -52,6 +62,21 @@ function Get-PowerPointInstance {
     }
 }
 
+function Write-PowerPointDiagnostics {
+    param([System.Object]$Ppt, [string]$Operation)
+    try {
+        $version = [string]$Ppt.Version
+        $build = [string]$Ppt.Build
+        $productCode = ''
+        try { $productCode = [string]$Ppt.ProductCode } catch {}
+        [Console]::Error.WriteLine(
+            "PPTX_DIAG operation=$Operation officeVersion=$version officeBuild=$build productCode='$productCode' presentations=$($Ppt.Presentations.Count) slideshows=$($Ppt.SlideShowWindows.Count)"
+        )
+    } catch {
+        [Console]::Error.WriteLine("PPTX_DIAG unable to query PowerPoint details: $($_.Exception.Message)")
+    }
+}
+
 function Open-Presentation {
     param([string]$Path)
 
@@ -59,7 +84,7 @@ function Open-Presentation {
     if (-not $ppt) {
         $ppt = New-Object -ComObject PowerPoint.Application
     }
-    $ppt.Visible = 1  # msoTrue
+    $ppt.Visible = -1  # Microsoft.Office.Core.MsoTriState.msoTrue
 
     # If a slideshow is already running, exit it quickly
     try {
@@ -85,6 +110,7 @@ function Open-Presentation {
 
     $settings = $presentation.SlideShowSettings
     $settings.ShowType = 1  # ppShowTypeSpeaker
+    try { $settings.ShowPresenterView = $false } catch {}
 
     $null = $settings.Run()
 
@@ -179,16 +205,139 @@ function Get-OrOpenPresentation {
         for ($i = 1; $i -le $Ppt.Presentations.Count; $i++) {
             $p = $Ppt.Presentations($i)
             if ($p.FullName -ieq $Path) {
+                [Console]::Error.WriteLine("PPTX_DIAG reusing already-open presentation '$Path'")
                 return @{ Presentation = $p; AlreadyOpen = $true }
             }
         }
     } catch {}
-    $p = $Ppt.Presentations.Open($Path, $true, $false, $false)
+    # ReadOnly / Untitled / WithWindow are Microsoft.Office.Core.MsoTriState,
+    # not Boolean. Some Office/PowerShell combinations coerce $true/$false,
+    # while others throw InvalidCastException and produce no previews.
+    try {
+        $p = $Ppt.Presentations.Open($Path, -1, 0, 0)  # msoTrue, msoFalse, msoFalse
+        [Console]::Error.WriteLine("PPTX_DIAG hidden Presentations.Open succeeded")
+    } catch {
+        [Console]::Error.WriteLine("Hidden Presentations.Open failed, retrying with a document window: $($_.Exception.Message)")
+        $p = $Ppt.Presentations.Open($Path)
+        Hide-PPEditorWindow -Ppt $Ppt
+        [Console]::Error.WriteLine("PPTX_DIAG windowed Presentations.Open fallback succeeded")
+    }
     return @{ Presentation = $p; AlreadyOpen = $false }
+}
+
+function Export-SlideImages {
+    param(
+        [System.Object]$Presentation,
+        [string]$Directory,
+        [int]$SlideCount,
+        [int]$W,
+        [int]$H
+    )
+
+    # Preferred path: explicit stable filenames expected by the renderer.
+    $individualError = $null
+    try {
+        for ($i = 1; $i -le $SlideCount; $i++) {
+            $outPath = Join-Path $Directory "slide_$i.png"
+            $Presentation.Slides.Item($i).Export($outPath, "PNG", $W, $H)
+            if (-not (Test-Path -LiteralPath $outPath -PathType Leaf)) {
+                throw "PowerPoint did not export slide $i"
+            }
+        }
+        [Console]::Error.WriteLine("PPTX_DIAG Slide.Export succeeded count=$SlideCount size=${W}x${H}")
+        return
+    } catch {
+        $individualError = $_.Exception.Message
+        [Console]::Error.WriteLine("Slide.Export failed, trying Presentation.Export: $individualError")
+    }
+
+    # Compatibility fallback for Office builds where Slide.Export fails but
+    # Presentation.Export succeeds. PowerPoint chooses localized filenames
+    # (Slide1 / Слайд1 / ...), so normalize them back to slide_N.png.
+    for ($i = 1; $i -le $SlideCount; $i++) {
+        $partialPath = Join-Path $Directory "slide_$i.png"
+        if (Test-Path -LiteralPath $partialPath) {
+            Remove-Item -LiteralPath $partialPath -Force
+        }
+    }
+
+    $bulkDir = Join-Path $Directory "bulk-export"
+    if (Test-Path -LiteralPath $bulkDir) {
+        Remove-Item -LiteralPath $bulkDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $bulkDir -Force | Out-Null
+
+    try {
+        $Presentation.Export($bulkDir, "PNG", $W, $H)
+        $bulkFiles = @(Get-ChildItem -LiteralPath $bulkDir -File | Where-Object {
+            $_.Extension -ieq '.png'
+        } | Sort-Object {
+            if ($_.BaseName -match '(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue }
+        })
+        if ($bulkFiles.Count -ne $SlideCount) {
+            throw "Presentation.Export returned $($bulkFiles.Count) PNG files; expected $SlideCount. Slide.Export error: $individualError"
+        }
+        for ($i = 1; $i -le $SlideCount; $i++) {
+            Move-Item -LiteralPath $bulkFiles[$i - 1].FullName -Destination (Join-Path $Directory "slide_$i.png") -Force
+        }
+        [Console]::Error.WriteLine("PPTX_DIAG Presentation.Export fallback succeeded count=$SlideCount size=${W}x${H}")
+    } finally {
+        if (Test-Path -LiteralPath $bulkDir) {
+            Remove-Item -LiteralPath $bulkDir -Recurse -Force
+        }
+    }
+}
+
+function Get-FileVersionHash {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path
+    $identity = "$($item.FullName)|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)"
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    try {
+        return [System.BitConverter]::ToString(
+            $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($identity))
+        ).Replace("-", "").Substring(0, 16)
+    } finally {
+        $md5.Dispose()
+    }
+}
+
+function Get-CompleteCacheCount {
+    param([string]$Directory)
+    $marker = Join-Path $Directory "complete.txt"
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return 0 }
+    try {
+        $count = [int][System.IO.File]::ReadAllText($marker)
+        if ($count -le 0) { return 0 }
+        for ($i = 1; $i -le $count; $i++) {
+            if (-not (Test-Path -LiteralPath (Join-Path $Directory "slide_$i.png") -PathType Leaf)) {
+                return 0
+            }
+        }
+        return $count
+    } catch {
+        return 0
+    }
 }
 
 function Export-Thumbnails {
     param([string]$Path)
+
+    $hash = Get-FileVersionHash -Path $Path
+    $tempDir = Join-Path $env:TEMP "pdm-thumbs-$hash"
+    $cachedCount = Get-CompleteCacheCount -Directory $tempDir
+    if ($cachedCount -gt 0) {
+        [Console]::Error.WriteLine("PPTX_DIAG thumbnail cache hit dir='$tempDir' count=$cachedCount")
+        Write-Output (@{
+            Status = "ok"
+            SlideCount = $cachedCount
+            ThumbnailDir = $tempDir
+        } | ConvertTo-Json -Compress)
+        return
+    }
+
+    if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
     # PP's Presentations.Open(..., WithWindow=False) + Slide.Export require
     # Application.Visible=True на многих версиях PP — без Visible=1 Export
@@ -200,31 +349,27 @@ function Export-Thumbnails {
     if (-not $ppt) {
         $ppt = New-Object -ComObject PowerPoint.Application
     }
+    Write-PowerPointDiagnostics -Ppt $ppt -Operation 'thumbnails'
     try { $ppt.WindowState = 2 } catch {}  # ppWindowMinimized
-    try { $ppt.Visible = 1 } catch {}
+    try { $ppt.Visible = -1 } catch {}  # msoTrue
     Hide-PPEditorWindow -Ppt $ppt
 
-    $opened = Get-OrOpenPresentation -Ppt $ppt -Path $Path
-    $presentation = $opened.Presentation
-    $slideCount = $presentation.Slides.Count
-
-    $hash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Path))).Replace("-","").Substring(0,12)
-    $tempDir = Join-Path $env:TEMP "pdm-thumbs-$hash"
-    if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-
-    for ($i = 1; $i -le $slideCount; $i++) {
-        $outPath = Join-Path $tempDir "slide_$i.png"
-        $presentation.Slides.Item($i).Export($outPath, "PNG", 320, 240)
-    }
-
-    if (-not $opened.AlreadyOpen) { $presentation.Close() }
-
-    # Гасим Visible только если нет активного слайдшоу — daemon держит
-    # Visible=1 пока идёт презентация; снимем Visible ему — сломаем показ.
+    $opened = $null
+    $presentation = $null
     try {
-        if ($ppt.SlideShowWindows.Count -eq 0) { $ppt.Visible = 0 }
-    } catch {}
+        $opened = Get-OrOpenPresentation -Ppt $ppt -Path $Path
+        $presentation = $opened.Presentation
+        $slideCount = [int]$presentation.Slides.Count
+
+        Export-SlideImages -Presentation $presentation -Directory $tempDir -SlideCount $slideCount -W 320 -H 240
+        [System.IO.File]::WriteAllText((Join-Path $tempDir "complete.txt"), [string]$slideCount)
+    } finally {
+        if ($presentation -and $opened -and -not $opened.AlreadyOpen) {
+            try { $presentation.Close() } catch {}
+        }
+        # Do not hide the application while the daemon owns a live slideshow.
+        try { if ($ppt.SlideShowWindows.Count -eq 0) { $ppt.Visible = 0 } } catch {}  # msoFalse
+    }
 
     $result = @{
         Status = "ok"
@@ -240,6 +385,22 @@ function Export-Slides {
     if ($W -le 0) { $W = 1920 }
     if ($H -le 0) { $H = 1080 }
 
+    $hash = Get-FileVersionHash -Path $Path
+    $tempDir = Join-Path $env:TEMP "pdm-slides-$hash-${W}x${H}"
+    $cachedCount = Get-CompleteCacheCount -Directory $tempDir
+    if ($cachedCount -gt 0) {
+        [Console]::Error.WriteLine("PPTX_DIAG full-slide cache hit dir='$tempDir' count=$cachedCount size=${W}x${H}")
+        Write-Output (@{
+            Status = "ok"
+            SlideCount = $cachedCount
+            SlidesDir = $tempDir
+        } | ConvertTo-Json -Compress)
+        return
+    }
+
+    if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force }
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
     # См. Export-Thumbnails: Visible=1 обязателен для Slide.Export.
     # WindowState=2 ДО Visible=1 + SW_HIDE сразу после — синхронно прячет
     # окно редактора, никакой вспышки на дисплее.
@@ -247,32 +408,26 @@ function Export-Slides {
     if (-not $ppt) {
         $ppt = New-Object -ComObject PowerPoint.Application
     }
+    Write-PowerPointDiagnostics -Ppt $ppt -Operation 'renderslides'
     try { $ppt.WindowState = 2 } catch {}  # ppWindowMinimized
-    try { $ppt.Visible = 1 } catch {}
+    try { $ppt.Visible = -1 } catch {}  # msoTrue
     Hide-PPEditorWindow -Ppt $ppt
 
-    $opened = Get-OrOpenPresentation -Ppt $ppt -Path $Path
-    $presentation = $opened.Presentation
-    $slideCount = $presentation.Slides.Count
-
-    $hash = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Path))).Replace("-","").Substring(0,12)
-    $tempDir = Join-Path $env:TEMP "pdm-slides-$hash-${W}x${H}"
-    if (-not (Test-Path $tempDir)) {
-        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    }
-
-    for ($i = 1; $i -le $slideCount; $i++) {
-        $outPath = Join-Path $tempDir "slide_$i.png"
-        if (-not (Test-Path $outPath)) {
-            $presentation.Slides.Item($i).Export($outPath, "PNG", $W, $H)
-        }
-    }
-
-    if (-not $opened.AlreadyOpen) { $presentation.Close() }
-
+    $opened = $null
+    $presentation = $null
     try {
-        if ($ppt.SlideShowWindows.Count -eq 0) { $ppt.Visible = 0 }
-    } catch {}
+        $opened = Get-OrOpenPresentation -Ppt $ppt -Path $Path
+        $presentation = $opened.Presentation
+        $slideCount = [int]$presentation.Slides.Count
+
+        Export-SlideImages -Presentation $presentation -Directory $tempDir -SlideCount $slideCount -W $W -H $H
+        [System.IO.File]::WriteAllText((Join-Path $tempDir "complete.txt"), [string]$slideCount)
+    } finally {
+        if ($presentation -and $opened -and -not $opened.AlreadyOpen) {
+            try { $presentation.Close() } catch {}
+        }
+        try { if ($ppt.SlideShowWindows.Count -eq 0) { $ppt.Visible = 0 } } catch {}  # msoFalse
+    }
 
     $result = @{
         Status = "ok"

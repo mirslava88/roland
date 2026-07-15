@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'child_process'
 import { createInterface, Interface } from 'readline'
 import { scriptPath } from './paths'
+import { diagnosticLog, formatDiagnosticError } from './diagnostic-log'
 
 type PendingRequest = {
   resolve: (value: DaemonResponse) => void
@@ -30,6 +31,7 @@ class PowerPointDaemon {
 
     this.ready = new Promise<void>((resolve, reject) => {
       const script = scriptPath('powerpoint-daemon.ps1')
+      diagnosticLog('ppt-daemon', `spawn script=${script}`)
       this.proc = spawn(
         'powershell.exe',
         ['-ExecutionPolicy', 'Bypass', '-NoLogo', '-NoProfile', '-File', script],
@@ -44,7 +46,6 @@ class PowerPointDaemon {
       if (this.proc.stderr) {
         this.proc.stderr.setEncoding('utf8')
         let buf = ''
-        const dbgLogFile = require('path').join(require('os').tmpdir(), 'roland-dbg.log')
         this.proc.stderr.on('data', (chunk: string) => {
           buf += chunk
           let idx: number
@@ -53,14 +54,18 @@ class PowerPointDaemon {
             buf = buf.slice(idx + 1)
             if (line.length > 0) {
               console.log(line)
-              try { require('fs').appendFileSync(dbgLogFile, `[DAEMON] ${line}\n`) } catch {}
+              diagnosticLog('ppt-daemon', line)
             }
           }
         })
       }
 
-      this.proc.on('exit', () => this.cleanup())
+      this.proc.on('exit', (code, signal) => {
+        diagnosticLog('ppt-daemon', `exit code=${code ?? '-'} signal=${signal ?? '-'}`)
+        this.cleanup()
+      })
       this.proc.on('error', (err) => {
+        diagnosticLog('ppt-daemon', `process error: ${formatDiagnosticError(err)}`)
         clearTimeout(readyTimer)
         reject(err)
         this.cleanup()

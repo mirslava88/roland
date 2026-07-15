@@ -179,21 +179,42 @@ public class TimerOverlay
             text.Text = time;
 
             bool running = line.Contains("\"running\":true");
+            string colorKey;
+            string defaultTextColor;
             if (remaining < 0)
             {
-                text.Foreground = new SolidColorBrush(Color.FromRgb(239, 68, 68));
                 border.Background = new SolidColorBrush(Color.FromArgb(180, 60, 0, 0));
+                colorKey = "overtimeTextColor";
+                defaultTextColor = "#EF4444";
             }
             else if (remaining <= 60 && remaining >= 0 && running)
             {
-                text.Foreground = new SolidColorBrush(Color.FromRgb(250, 204, 21));
                 border.Background = new SolidColorBrush(Color.FromArgb(160, 60, 20, 0));
+                colorKey = "warningTextColor";
+                defaultTextColor = "#FACC15";
             }
             else
             {
-                text.Foreground = Brushes.White;
                 border.Background = new SolidColorBrush(Color.FromArgb(128, 0, 0, 0));
+                colorKey = "textColor";
+                defaultTextColor = "#FFFFFF";
             }
+
+            // Appearance is controlled by the operator and arrives in the
+            // same JSON payload as the time, so changes also apply while paused.
+            string textColor = GetJsonString(line, colorKey);
+            try
+            {
+                if (string.IsNullOrWhiteSpace(textColor)) textColor = defaultTextColor;
+                text.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(textColor));
+            }
+            catch
+            {
+                text.Foreground = Brushes.White;
+            }
+
+            double textOpacity = GetJsonDouble(line, "textOpacity", 1.0);
+            text.Opacity = Math.Max(0.1, Math.Min(1.0, textOpacity));
 
             if (window.Visibility != Visibility.Visible)
                 window.Show();
@@ -221,6 +242,47 @@ public class TimerOverlay
         int val = 0;
         int.TryParse(num, out val);
         return neg ? -val : val;
+    }
+
+    private static string GetJsonString(string json, string key)
+    {
+        string search = "\"" + key + "\":";
+        int idx = json.IndexOf(search);
+        if (idx < 0) return "";
+        idx += search.Length;
+        while (idx < json.Length && char.IsWhiteSpace(json[idx])) idx++;
+        if (idx >= json.Length || json[idx] != '"') return "";
+        idx++;
+        int end = json.IndexOf('"', idx);
+        return end >= idx ? json.Substring(idx, end - idx) : "";
+    }
+
+    private static double GetJsonDouble(string json, string key, double fallback)
+    {
+        string search = "\"" + key + "\":";
+        int idx = json.IndexOf(search);
+        if (idx < 0) return fallback;
+        idx += search.Length;
+        string num = "";
+        while (idx < json.Length)
+        {
+            char c = json[idx];
+            // JSON always uses a dot as the decimal separator. A comma
+            // terminates the value and must not become part of the number.
+            if ((c >= '0' && c <= '9') || c == '-' || c == '.')
+            {
+                num += c;
+                idx++;
+                continue;
+            }
+            if (char.IsWhiteSpace(c)) { idx++; continue; }
+            if (num.Length > 0) break;
+            idx++;
+        }
+        double value;
+        if (double.TryParse(num, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out value)) return value;
+        return fallback;
     }
 }
 "@

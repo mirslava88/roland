@@ -4,6 +4,10 @@ interface TimerData {
   remaining: number
   running: boolean
   duration: number
+  textColor?: string
+  warningTextColor?: string
+  overtimeTextColor?: string
+  textOpacity?: number
 }
 
 function formatTime(totalSeconds: number): string {
@@ -97,7 +101,12 @@ export function TimerOverlay(): JSX.Element {
   if (!timer || timer.duration === 0) return <></>
 
   const isOvertime = remaining < 0
-  const isWarning = remaining <= 60 && remaining > 0 && running
+  const isWarning = remaining <= 60 && remaining >= 0 && running
+  const currentTextColor = isOvertime
+    ? timer.overtimeTextColor || '#ef4444'
+    : isWarning
+      ? timer.warningTextColor || '#facc15'
+      : timer.textColor || '#ffffff'
 
   return (
     <div
@@ -119,9 +128,16 @@ export function TimerOverlay(): JSX.Element {
               ? 'text-yellow-400 bg-yellow-950/60 border border-yellow-500/30'
               : 'text-white bg-black/60 border border-white/10'
         }`}
-        style={{ textShadow: '0 2px 8px rgba(0,0,0,0.8)' }}
       >
-        {formatTime(remaining)}
+        <span
+          style={{
+            color: currentTextColor,
+            opacity: timer.textOpacity ?? 1,
+            textShadow: '0 2px 8px rgba(0,0,0,0.8)'
+          }}
+        >
+          {formatTime(remaining)}
+        </span>
       </div>
     </div>
   )

@@ -8,11 +8,14 @@ interface ContentPayload {
   path: string
   name: string
   startSlide?: number
+  startTime?: number
+  autoplay?: boolean
   isImage?: boolean
 }
 
 export function PresentationApp(): JSX.Element {
   const [content, setContent] = useState<ContentPayload | null>(null)
+  const [contentRevision, setContentRevision] = useState(0)
   const contentRef = useRef<ContentPayload | null>(null)
 
   // Keep ref in sync with state
@@ -27,6 +30,9 @@ export function PresentationApp(): JSX.Element {
   const loadContent = useCallback((payload: ContentPayload) => {
     window.api.dbgLog(`PresApp: setContent type=${payload.type} path=${payload.path.split(/[\\\\/]/).pop()} startSlide=${payload.startSlide ?? '-'}`)
     setContent(payload)
+    // Every take gets a fresh media element. This also makes taking the same
+    // video again restart it instead of reusing a paused/ended decoder.
+    setContentRevision((revision) => revision + 1)
   }, [])
 
   useEffect(() => {
@@ -76,7 +82,14 @@ export function PresentationApp(): JSX.Element {
       )}
 
       {content?.type === 'pdf' && <PdfViewer filePath={content.path} startSlide={content.startSlide} />}
-      {content?.type === 'video' && <VideoViewer filePath={content.path} />}
+      {content?.type === 'video' && (
+        <VideoViewer
+          key={`video-${contentRevision}`}
+          filePath={content.path}
+          startTime={content.startTime}
+          autoplay={content.autoplay}
+        />
+      )}
       {content?.type === 'backdrop' && (
         <img
           src={mediaUrl(content.path)}

@@ -42,6 +42,10 @@ export function Timer(): JSX.Element {
     timerRunning,
     timerSoundEnd,
     timerSoundWarning,
+    timerTextColor,
+    timerWarningTextColor,
+    timerOvertimeTextColor,
+    timerTextOpacity,
     setTimerDuration,
     setTimerRemaining,
     setTimerRunning,
@@ -49,6 +53,10 @@ export function Timer(): JSX.Element {
     resetTimer,
     setTimerSoundEnd,
     setTimerSoundWarning,
+    setTimerTextColor,
+    setTimerWarningTextColor,
+    setTimerOvertimeTextColor,
+    setTimerTextOpacity,
     isPresentationWindowOpen
   } = useAppStore()
 
@@ -73,7 +81,11 @@ export function Timer(): JSX.Element {
     const data = {
       remaining,
       running,
-      duration: state.timerDuration
+      duration: state.timerDuration,
+      textColor: state.timerTextColor,
+      warningTextColor: state.timerWarningTextColor,
+      overtimeTextColor: state.timerOvertimeTextColor,
+      textOpacity: state.timerTextOpacity
     }
 
     if (isPresentationWindowOpen) {
@@ -88,6 +100,12 @@ export function Timer(): JSX.Element {
       scale: 1
     })
   }, [isPresentationWindowOpen])
+
+  // Apply appearance changes immediately, including while the timer is paused.
+  useEffect(() => {
+    const state = useAppStore.getState()
+    syncTimer(state.timerRemaining, state.timerRunning)
+  }, [timerTextColor, timerWarningTextColor, timerOvertimeTextColor, timerTextOpacity, syncTimer])
 
   // Timer tick
   useEffect(() => {
@@ -236,7 +254,13 @@ export function Timer(): JSX.Element {
   }
 
   const isOvertime = timerRemaining < 0
-  const timerColor = isOvertime ? 'text-red-500' : timerRemaining <= 60 && timerRemaining >= 0 && timerRunning ? 'text-yellow-400' : 'text-green-400'
+  const isWarning = timerRemaining <= 60 && timerRemaining >= 0 && timerRunning
+  const timerColor = isOvertime ? 'text-red-500' : isWarning ? 'text-yellow-400' : 'text-green-400'
+  const currentTimerTextColor = isOvertime
+    ? timerOvertimeTextColor
+    : isWarning
+      ? timerWarningTextColor
+      : timerTextColor
 
   return (
     <>
@@ -250,7 +274,13 @@ export function Timer(): JSX.Element {
           }`}
           title="Таймер доклада"
         >
-          ⏱ <span className="inline-block min-w-[4.5em] text-right">{timerDuration > 0 || timerRunning ? formatTime(timerRemaining) : '--:--'}</span>
+          ⏱{' '}
+          <span
+            className="inline-block min-w-[4.5em] text-right"
+            style={{ color: currentTimerTextColor, opacity: timerTextOpacity }}
+          >
+            {timerDuration > 0 || timerRunning ? formatTime(timerRemaining) : '--:--'}
+          </span>
         </button>
 
         {/* Quick controls when timer is set */}
@@ -345,6 +375,73 @@ export function Timer(): JSX.Element {
               placeholder="мин"
             />
             <button onClick={handleCustomSub} className="text-[10px] px-2 py-1 rounded-sm bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">-</button>
+          </div>
+
+          {/* Appearance settings */}
+          <div className="border-t border-gray-700 pt-2 mt-2 mb-2 space-y-2">
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-gray-400 shrink-0 w-40">Цвет основного таймера:</label>
+              <input
+                type="color"
+                value={timerTextColor}
+                onChange={(e) => setTimerTextColor(e.target.value)}
+                className="h-7 w-12 cursor-pointer rounded-sm border border-gray-600 bg-gray-800 p-0.5"
+                title="Цвет основного таймера"
+              />
+              <span className="text-[10px] font-mono text-gray-400 uppercase">{timerTextColor}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-gray-400 shrink-0 w-40">Цвет за 1 мин до конца:</label>
+              <input
+                type="color"
+                value={timerWarningTextColor}
+                onChange={(e) => setTimerWarningTextColor(e.target.value)}
+                className="h-7 w-12 cursor-pointer rounded-sm border border-gray-600 bg-gray-800 p-0.5"
+                title="Цвет таймера за одну минуту до окончания"
+              />
+              <span className="text-[10px] font-mono text-gray-400 uppercase">{timerWarningTextColor}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-gray-400 shrink-0 w-40">Цвет перелимита времени:</label>
+              <input
+                type="color"
+                value={timerOvertimeTextColor}
+                onChange={(e) => setTimerOvertimeTextColor(e.target.value)}
+                className="h-7 w-12 cursor-pointer rounded-sm border border-gray-600 bg-gray-800 p-0.5"
+                title="Цвет таймера после окончания времени"
+              />
+              <span className="text-[10px] font-mono text-gray-400 uppercase">{timerOvertimeTextColor}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] text-gray-400 shrink-0 w-40">Прозрачность шрифта:</label>
+              <input
+                type="range"
+                min={10}
+                max={100}
+                step={5}
+                value={Math.round(timerTextOpacity * 100)}
+                onChange={(e) => setTimerTextOpacity(Number(e.target.value) / 100)}
+                className="h-1 flex-1 cursor-pointer accent-blue-500"
+              />
+              <span className="w-9 text-right text-[10px] tabular-nums text-gray-300">
+                {Math.round(timerTextOpacity * 100)}%
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-1 rounded-sm bg-black/60 px-2 py-1.5 text-center font-mono text-lg font-bold">
+              <span style={{ color: timerTextColor, opacity: timerTextOpacity }}>15:00</span>
+              <span style={{ color: timerWarningTextColor, opacity: timerTextOpacity }}>00:59</span>
+              <span style={{ color: timerOvertimeTextColor, opacity: timerTextOpacity }}>-00:01</span>
+            </div>
+            <button
+              onClick={() => {
+                setTimerTextColor('#ffffff')
+                setTimerWarningTextColor('#facc15')
+                setTimerOvertimeTextColor('#ef4444')
+              }}
+              className="text-[10px] text-gray-500 hover:text-white transition-colors"
+            >
+              Сбросить цвета
+            </button>
           </div>
 
           {/* Sound settings */}

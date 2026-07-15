@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('list', 'set', 'get-default')]
+    [ValidateSet('list', 'list-base64', 'set', 'get-default', 'get-default-base64')]
     [string]$Action = 'list',
     [string]$DeviceId = ''
 )
@@ -140,11 +140,24 @@ namespace AudioControl {
 }
 '@
 
+function ConvertTo-Utf8Base64 {
+    param([string]$Text)
+    # Base64 contains ASCII only, so redirected Windows PowerShell stdout can
+    # no longer corrupt Cyrillic device names through an OEM/ANSI code page.
+    return [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Text))
+}
+
 if ($Action -eq 'list') {
     [AudioControl.AudioManager]::ListDevices()
 }
+elseif ($Action -eq 'list-base64') {
+    ConvertTo-Utf8Base64 ([AudioControl.AudioManager]::ListDevices())
+}
 elseif ($Action -eq 'get-default') {
     [AudioControl.AudioManager]::GetDefault()
+}
+elseif ($Action -eq 'get-default-base64') {
+    ConvertTo-Utf8Base64 ([AudioControl.AudioManager]::GetDefault())
 }
 elseif ($Action -eq 'set') {
     if ($DeviceId -eq '') {

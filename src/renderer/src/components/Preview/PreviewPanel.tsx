@@ -299,7 +299,7 @@ export function PreviewPanel(): JSX.Element {
     }
 
     if (!isSameFilePptx) {
-      await window.api.showOverlay(undefined, freezeFrame || undefined)
+      await window.api.showOverlay(freshState.selectedDisplayId ?? undefined, freezeFrame || undefined)
       log('overlay opaque (showOverlay returned)')
     } else {
       log('same-file PPTX: skipping overlay (PP GotoSlide is instant)')
@@ -339,8 +339,26 @@ export function PreviewPanel(): JSX.Element {
       // Run()'s starting slide, не учитывает queued goto's выполненные daemon
       // после Run → откат UI назад к 1 при PP уже на 2 = off-by-N рассинхрон).
       const slideBeforeLaunch = useAppStore.getState().currentSlide
-      const result = await window.api.launchPowerPoint(channel.file.path, undefined, targetSlide)
-      log(`launchPowerPoint: END success=${result.success}`)
+      const result = await window.api.launchPowerPoint(
+        channel.file.path,
+        freshState.selectedDisplayId ?? undefined,
+        targetSlide
+      )
+      log(`launchPowerPoint: END success=${result.success} error=${result.error ?? '-'}`)
+
+      // A cold PowerPoint COM start can fail before Run() creates a slideshow.
+      // Never continue into close-presentation-window + pinned overlay in that
+      // state: it replaces the existing backdrop with a permanent black screen.
+      if (!result.success) {
+        log('launchPowerPoint failed: revealing previous output and aborting take')
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        useAppStore.setState({
+          activeFile: prevActiveFile,
+          liveChannel: freshState.liveChannel
+        })
+        return
+      }
 
       // КРИТИЧНО: ждём пока goto-chain (от user-кликов кликером во время
       // launch) полностью отработает daemon. Иначе snapshotSlideshow
@@ -419,10 +437,21 @@ export function PreviewPanel(): JSX.Element {
         log(`snapshotSlideshow: END path=${snapPath ? 'ok' : 'null'}`)
         if (snapPath) {
           await window.api.swapOverlayImage(snapPath)
-          log('swap overlay → live PP snapshot (overlay remains pinned)')
+          log('swap overlay → live PP snapshot')
         }
-        setOverlayState({ kind: 'pinned-pptx', pptxPath: channel.file.path })
-        log('overlay pinned for pptxPath')
+
+        // Keeping the snapshot pinned is only needed while switching between
+        // two different PPTX files. On a first/non-PPTX → PPTX take, reveal the
+        // live slideshow immediately. Most importantly, never pin a black
+        // overlay when PrintWindow could not obtain a valid cold-start frame.
+        if (isPptxToPptx && snapPath) {
+          setOverlayState({ kind: 'pinned-pptx', pptxPath: channel.file.path })
+          log('overlay pinned for pptx→pptx switch')
+        } else {
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+          log(`overlay hidden after PPTX take (pptxToPptx=${isPptxToPptx} snapshot=${snapPath ? 'ok' : 'null'})`)
+        }
       }
       // Генерим превью/слайды ПОСЛЕ hideOverlay. Эти вызовы спавнят отдельный
       // powerpoint-control.ps1 процесс, который делает $ppt.WindowState=2 +
@@ -530,26 +559,41 @@ export function PreviewPanel(): JSX.Element {
 
     // Subscribe BEFORE sending load-content so we can't miss the signal.
     // PdfViewer emits 'presentation-content-ready' after its first drawImage;
-    // <img> elements (backdrop / other-image) emit it from onLoad. Video
-    // currently has no emitter, so the timeout fallback catches it.
+    // <img> elements emit it after onLoad; VideoViewer emits it after the
+    // first decoded frame is submitted for composition.
     const contentReady = new Promise<void>((resolve) => {
-      const unsub = window.api.on('presentation-content-ready', () => {
-        log('content-ready received')
+      let settled = false
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      let unsub = (): void => {}
+      const finish = (reason: 'received' | 'timeout'): void => {
+        if (settled) return
+        settled = true
+        if (timeout) clearTimeout(timeout)
         unsub()
+        log(reason === 'received' ? 'content-ready received' : 'content-ready TIMEOUT (5000ms)')
         resolve()
-      })
-      setTimeout(() => {
-        log('content-ready TIMEOUT (2000ms)')
-        unsub()
-        resolve()
-      }, 2000)
+      }
+      unsub = window.api.on('presentation-content-ready', () => finish('received'))
+      // Slow machines and high-bitrate local videos can need more than two
+      // seconds to initialize a decoder. Do not capture the window while it
+      // is still black unless the renderer genuinely failed to become ready.
+      timeout = setTimeout(() => finish('timeout'), 5000)
     })
+
+    const savedVideo = channel.file.type === 'video'
+      ? useAppStore.getState().videoPlayback[channel.file.path]
+      : undefined
+    if (savedVideo) {
+      log(`video restore: time=${savedVideo.currentTime.toFixed(3)} autoplay=${savedVideo.playing}`)
+    }
 
     window.api.sendToPresentation('load-content', {
       type: channel.file.type,
       path: channel.file.path,
       name: channel.file.name,
       startSlide: channel.slide,
+      startTime: savedVideo?.currentTime,
+      autoplay: savedVideo?.playing ?? true,
       isImage: channel.file.isImage
     })
 

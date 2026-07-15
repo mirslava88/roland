@@ -44,6 +44,7 @@ interface Api {
   loadFolder(folderPath: string): Promise<{ files: FileEntry[]; subfolders: { name: string; path: string }[] }>
   watchFolder(folderPath: string | null): Promise<void>
   getDisplays(): Promise<DisplayInfo[]>
+  openDiagnosticLogFolder(): Promise<{ success: boolean; path: string; error?: string }>
   openDisplaySettings(): Promise<void>
   setDisplayMode(mode: 'internal' | 'clone' | 'extend' | 'external'): Promise<{ success: boolean; error?: string }>
   getDisplayModes(): Promise<Array<{
@@ -57,7 +58,7 @@ interface Api {
   openPresentationWindow(displayId?: number): Promise<void>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
-  launchPowerPoint(filePath: string, monitorIndex?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
+  launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
   powerpointCommand(command: string, arg?: number): Promise<{ success: boolean; output?: string; error?: string }>
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
@@ -95,6 +96,10 @@ interface Api {
     posX: number
     posY: number
     scale: number
+    textColor: string
+    warningTextColor: string
+    overtimeTextColor: string
+    textOpacity: number
   }): void
   playTimerSound(type: string, filePath: string): void
   moveTimerOverlay(dx: number, dy: number): void

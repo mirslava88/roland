@@ -10,6 +10,9 @@ const api = {
 
   getDisplays: () => ipcRenderer.invoke('get-displays'),
 
+  openDiagnosticLogFolder: (): Promise<{ success: boolean; path: string; error?: string }> =>
+    ipcRenderer.invoke('open-diagnostic-log-folder'),
+
   openDisplaySettings: () => ipcRenderer.invoke('open-display-settings'),
 
   setDisplayMode: (mode: 'internal' | 'clone' | 'extend' | 'external') =>
@@ -27,8 +30,8 @@ const api = {
 
   checkPowerPoint: (): Promise<boolean> => ipcRenderer.invoke('check-powerpoint'),
 
-  launchPowerPoint: (filePath: string, monitorIndex?: number, startSlide?: number) =>
-    ipcRenderer.invoke('launch-powerpoint', filePath, monitorIndex, startSlide),
+  launchPowerPoint: (filePath: string, displayId?: number, startSlide?: number) =>
+    ipcRenderer.invoke('launch-powerpoint', filePath, displayId, startSlide),
 
   powerpointCommand: (command: string, arg?: number) =>
     ipcRenderer.invoke('powerpoint-command', command, arg),
@@ -120,6 +123,10 @@ const api = {
     posX: number
     posY: number
     scale: number
+    textColor: string
+    warningTextColor: string
+    overtimeTextColor: string
+    textOpacity: number
   }): void => {
     ipcRenderer.send('timer-overlay-update', data)
   },
