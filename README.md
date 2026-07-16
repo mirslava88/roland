@@ -30,7 +30,7 @@
 Presentation Display Manager — Windows-приложение для конференций, докладов, трансляций и мероприятий с двумя экранами. Главное окно остаётся у оператора, а PowerPoint, PDF, видео, изображения и таймер выводятся на выбранный проектор или дополнительный монитор.
 
 ```text
-Библиотека файлов → каналы A / B / C / D → «В эфир» → внешний дисплей
+Библиотека файлов → каналы 1 / 2 / 3 / 4 → «В эфир» → внешний дисплей
        операторское окно                         экран зрителей
 ```
 
@@ -38,7 +38,7 @@ Presentation Display Manager — Windows-приложение для конфе�
 
 ## Основные возможности
 
-- **Каналы A / B / C / D и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
+- **Каналы 1 / 2 / 3 / 4 и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
 - **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint.
 - **PDF и офисные документы** — показ PDF, а также предпросмотр Word и Excel через установленный Microsoft Office.
 - **Видео без потери позиции** — play/pause, seek, громкость и продолжение с сохранённого момента после переключения между каналами в текущей сессии.
@@ -85,7 +85,7 @@ PDF, изображения, видео, музыка и таймер не тр�
 ## Как работать
 
 1. Выберите папку с материалами в левой панели.
-2. Перетащите файлы в каналы A, B, C или D. Кнопка `+` добавляет ещё одну страницу из четырёх каналов.
+2. Перетащите файлы в каналы 1, 2, 3 или 4. Кнопка `+` добавляет ещё одну страницу из четырёх каналов.
 3. При необходимости заранее выберите слайд или поставьте видео на нужную позицию.
 4. Нажмите **«В эфир»** или дважды щёлкните по каналу.
 5. Кнопка **«Выйти из эфира»** закрывает текущий материал. Если в этой сессии выбрана подложка, появится она; иначе внешний экран станет чёрным.
@@ -185,7 +185,7 @@ compliance/   документы по безопасности и сетевом
 
 Presentation Display Manager is a Windows desktop application for driving a projector or secondary display during conferences, talks, streams, and live events. The operator keeps the library, channel grid, and playback controls on the primary monitor while the audience sees only the selected content.
 
-Key features include multi-page A/B/C/D channels, native PowerPoint control and slide previews, PDF and Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
+Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), native PowerPoint control and slide previews, PDF and Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
 
 Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 

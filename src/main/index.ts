@@ -595,8 +595,26 @@ function createWindows(): void {
       id: d.id,
       label: `${d.size.width}x${d.size.height}`,
       isPrimary: d.id === primary.id,
-      bounds: d.bounds
+      bounds: d.bounds,
+      scaleFactor: d.scaleFactor
     }))
+  })
+
+  // window.devicePixelRatio can briefly report the primary monitor's scale
+  // when a hidden BrowserWindow is created directly on a secondary display.
+  // Canvas renderers need the scale of the display that actually contains the
+  // presentation window, otherwise a 4K/150% output gets a 2560px buffer and
+  // Windows stretches it to 3840px. Resolve it in the main process where
+  // Electron exposes authoritative per-monitor metrics.
+  ipcMain.handle('get-window-display-scale-factor', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) return 1
+    const display = screen.getDisplayMatching(win.getBounds())
+    diagnosticLog(
+      'display',
+      `window scale window=${win.getTitle() || '-'} display=${display.id} scale=${display.scaleFactor} bounds=${JSON.stringify(display.bounds)}`
+    )
+    return display.scaleFactor || 1
   })
 
   const sendDisplays = (): void => {
@@ -607,7 +625,8 @@ function createWindows(): void {
         id: d.id,
         label: `${d.size.width}x${d.size.height}`,
         isPrimary: d.id === primary.id,
-        bounds: d.bounds
+        bounds: d.bounds,
+        scaleFactor: d.scaleFactor
       })))
     }
   }

@@ -16,6 +16,7 @@ interface DisplayInfo {
   label: string
   isPrimary: boolean
   bounds: { x: number; y: number; width: number; height: number }
+  scaleFactor: number
 }
 
 interface MusicState {
@@ -44,6 +45,7 @@ interface Api {
   loadFolder(folderPath: string): Promise<{ files: FileEntry[]; subfolders: { name: string; path: string }[] }>
   watchFolder(folderPath: string | null): Promise<void>
   getDisplays(): Promise<DisplayInfo[]>
+  getWindowDisplayScaleFactor(): Promise<number>
   openDiagnosticLogFolder(): Promise<{ success: boolean; path: string; error?: string }>
   openDisplaySettings(): Promise<void>
   setDisplayMode(mode: 'internal' | 'clone' | 'extend' | 'external'): Promise<{ success: boolean; error?: string }>

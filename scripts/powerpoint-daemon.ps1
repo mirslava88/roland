@@ -145,6 +145,148 @@ function Hide-PPEditor($ppt) {
     } catch {}
 }
 
+# PowerPoint treats a video configured as "When Clicked On" as an interactive
+# shape trigger, not as the next item in the slide's normal click sequence.
+# SlideShowView.Next() therefore skips straight to the next slide instead of
+# activating that trigger. A hardware presenter only sends PageDown/Right, so
+# bridge the first click to the official SlideShowView.Player(shapeId).Play()
+# API. Once that video has been started, the next click is allowed through to
+# normal slideshow navigation.
+$script:startedSlideVideos = @{}
+
+function Reset-SlideVideoClickState {
+    $script:startedSlideVideos.Clear()
+}
+
+function Get-SlideVideoPlayers($view) {
+    $items = @()
+    try {
+        $slide = $view.Slide
+        for ($i = 1; $i -le $slide.Shapes.Count; $i++) {
+            $shape = $slide.Shapes.Item($i)
+            $shapeType = -1
+            try { $shapeType = [int]$shape.Type } catch {}
+            if ($shapeType -ne 16) { continue } # msoMedia
+
+            # ppMediaTypeMovie=3. If an older Office build cannot expose
+            # MediaType, keep the msoMedia shape as a candidate and let
+            # SlideShowView.Player decide whether it is controllable.
+            $mediaType = -1
+            try { $mediaType = [int]$shape.MediaType } catch {}
+            if ($mediaType -ne -1 -and $mediaType -ne 3) { continue }
+
+            $player = $null
+            try { $player = $view.Player([int]$shape.Id) } catch {}
+            $state = -1
+            $position = -1L
+            if ($null -ne $player) {
+                try { $state = [int]$player.State } catch {}
+                try { $position = [long]$player.CurrentPosition } catch {}
+            }
+            $playOnEntry = $false
+            try { $playOnEntry = [bool]$shape.AnimationSettings.PlaySettings.PlayOnEntry } catch {}
+
+            $items += [PSCustomObject]@{
+                ShapeId = [int]$shape.Id
+                Name = [string]$shape.Name
+                Player = $player
+                State = $state
+                Position = $position
+                PlayOnEntry = $playOnEntry
+            }
+        }
+    } catch {
+        Log "video scan failed: $($_.Exception.Message)"
+    }
+    return @($items)
+}
+
+function Invoke-SlideVideoClick($view) {
+    $videos = @(Get-SlideVideoPlayers $view)
+    if ($videos.Count -eq 0) {
+        return [PSCustomObject]@{ HasVideo = $false; Handled = $false; Detail = 'none' }
+    }
+
+    # If a movie is already playing, the click belongs to the normal slideshow
+    # flow (usually advance to the next slide). Never start a second movie over
+    # one that is currently running.
+    foreach ($video in $videos) {
+        if ($video.State -eq 0) { # ppPlaying
+            return [PSCustomObject]@{ HasVideo = $true; Handled = $false; Detail = "playing:$($video.ShapeId)" }
+        }
+    }
+
+    $slideIndex = -1
+    $presentationPath = ''
+    try { $slideIndex = [int]$view.Slide.SlideIndex } catch {}
+    try { $presentationPath = [string]$view.Slide.Parent.FullName } catch {}
+
+    # A paused movie should resume on the presenter click.
+    foreach ($video in $videos) {
+        if ($video.State -ne 1 -or $null -eq $video.Player) { continue } # ppPaused
+        $key = "$($presentationPath.ToLowerInvariant())|$slideIndex|$($video.ShapeId)"
+        try {
+            $video.Player.Play()
+            $script:startedSlideVideos[$key] = $true
+            Log "video click: resumed slide=$slideIndex shape=$($video.ShapeId) name='$($video.Name)'"
+            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "resumed:$($video.ShapeId)" }
+        } catch {
+            Log "video click: resume failed slide=$slideIndex shape=$($video.ShapeId): $($_.Exception.Message)"
+        }
+    }
+
+    # Start the first not-yet-started click video. Auto-play media is left to
+    # PowerPoint; if it has already ended, the next presenter click should move
+    # on instead of replaying it unexpectedly.
+    foreach ($video in $videos) {
+        if ($video.PlayOnEntry -or $null -eq $video.Player) { continue }
+        $key = "$($presentationPath.ToLowerInvariant())|$slideIndex|$($video.ShapeId)"
+        if ($script:startedSlideVideos.ContainsKey($key)) { continue }
+
+        # Media can report ppNotReady for a few frames immediately after slide
+        # entry. Give PowerPoint a short chance to initialise its decoder before
+        # Play(); this click remains consumed even on failure so it can never
+        # accidentally skip the video slide. Leave the item unmarked on failure
+        # so the next presenter click retries instead of advancing the slide.
+        if ($video.State -eq 3) { # ppNotReady
+            for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                Start-Sleep -Milliseconds 40
+                try { $video.State = [int]$video.Player.State } catch {}
+                if ($video.State -ne 3) { break }
+            }
+        }
+        if ($video.State -eq 3) {
+            Log "video click: player not ready slide=$slideIndex shape=$($video.ShapeId); will retry"
+            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "not-ready:$($video.ShapeId)" }
+        }
+
+        try {
+            # Returning to this slide can leave the player parked at its old
+            # endpoint. A fresh visit must start from the beginning.
+            try { $video.Player.CurrentPosition = 0 } catch {}
+            $video.Player.Play()
+            $stateAfter = -1
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                Start-Sleep -Milliseconds 25
+                try { $stateAfter = [int]$video.Player.State } catch {}
+                if ($stateAfter -eq 0) { break } # ppPlaying
+            }
+            if ($stateAfter -eq 0) {
+                $script:startedSlideVideos[$key] = $true
+                Log "video click: play slide=$slideIndex shape=$($video.ShapeId) name='$($video.Name)' state=$($video.State)->$stateAfter"
+                return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "played:$($video.ShapeId)" }
+            }
+            Log "video click: play not confirmed slide=$slideIndex shape=$($video.ShapeId) state=$($video.State)->$stateAfter; will retry"
+            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "play-pending:$($video.ShapeId)" }
+        } catch {
+            Log "video click: play failed slide=$slideIndex shape=$($video.ShapeId): $($_.Exception.Message)"
+            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "play-failed:$($video.ShapeId)" }
+        }
+    }
+
+    return [PSCustomObject]@{ HasVideo = $true; Handled = $false; Detail = 'already-handled' }
+}
+
 function Get-PPT {
     try { return [System.Runtime.InteropServices.Marshal]::GetActiveObject('PowerPoint.Application') }
     catch { return $null }
@@ -178,6 +320,7 @@ while ($true) {
 
         switch ($cmd) {
             'open' {
+                Reset-SlideVideoClickState
                 $targetRect = $null
                 try {
                     if ($null -ne $req.bounds) {
@@ -529,6 +672,7 @@ while ($true) {
                 Reply @{ id = $id; ok = $true; slideCount = $count; slide = $startSlide }
             }
             'close' {
+                Reset-SlideVideoClickState
                 $ppt = Get-PPT
                 if ($ppt) {
                     try { if ($ppt.SlideShowWindows.Count -gt 0) { $ppt.SlideShowWindows(1).View.Exit() } } catch {}
@@ -561,12 +705,16 @@ while ($true) {
                     $cBefore = -1
                     try { $cBefore = [int]$view.GetClickIndex() } catch {}
                     $t0 = [DateTime]::UtcNow.Ticks
-                    $view.Next()
+                    $mediaClick = Invoke-SlideVideoClick $view
+                    if (-not $mediaClick.Handled) {
+                        $view.Next()
+                    }
                     $sMid = [int]$view.Slide.SlideIndex
                     $cMid = -1
                     try { $cMid = [int]$view.GetClickIndex() } catch {}
                     $retried = 0
-                    if ($sMid -eq $sBefore -and $cMid -eq $cBefore -and $sBefore -lt $total) {
+                    if (-not $mediaClick.Handled -and `
+                        $sMid -eq $sBefore -and $cMid -eq $cBefore -and $sBefore -lt $total) {
                         $view.Next()
                         $retried = 1
                     }
@@ -574,8 +722,9 @@ while ($true) {
                     $sAfter = [int]$view.Slide.SlideIndex
                     $cAfter = -1
                     try { $cAfter = [int]$view.GetClickIndex() } catch {}
-                    Log ("next: slide {0}->{1} click {2}->{3} retry={4} dur={5}ms" -f `
-                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, [int](($t1-$t0)/10000))
+                    if ($sAfter -ne $sBefore) { Reset-SlideVideoClickState }
+                    Log ("next: slide {0}->{1} click {2}->{3} retry={4} media={5} dur={6}ms" -f `
+                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, $mediaClick.Detail, [int](($t1-$t0)/10000))
                     Reply @{ id = $id; ok = $true; slide = $sAfter }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
@@ -590,6 +739,7 @@ while ($true) {
                     $sBefore = [int]$view.Slide.SlideIndex
                     $cBefore = -1
                     try { $cBefore = [int]$view.GetClickIndex() } catch {}
+                    $hasVideo = (@(Get-SlideVideoPlayers $view).Count -gt 0)
                     $t0 = [DateTime]::UtcNow.Ticks
                     $view.Previous()
                     $sMid = [int]$view.Slide.SlideIndex
@@ -604,8 +754,9 @@ while ($true) {
                     $sAfter = [int]$view.Slide.SlideIndex
                     $cAfter = -1
                     try { $cAfter = [int]$view.GetClickIndex() } catch {}
-                    Log ("prev: slide {0}->{1} click {2}->{3} retry={4} dur={5}ms" -f `
-                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, [int](($t1-$t0)/10000))
+                    if ($sAfter -ne $sBefore) { Reset-SlideVideoClickState }
+                    Log ("prev: slide {0}->{1} click {2}->{3} retry={4} media={5} dur={6}ms" -f `
+                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, $hasVideo, [int](($t1-$t0)/10000))
                     Reply @{ id = $id; ok = $true; slide = $sAfter }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
@@ -617,7 +768,10 @@ while ($true) {
                     $view = $ppt.SlideShowWindows(1).View
                     $n = [int]$req.slide
                     $threw = $false
-                    try { $view.GotoSlide($n) } catch {
+                    try {
+                        $view.GotoSlide($n)
+                        Reset-SlideVideoClickState
+                    } catch {
                         $threw = $true
                         Log "goto($n) threw: $($_.Exception.Message)"
                     }

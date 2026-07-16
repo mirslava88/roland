@@ -10,6 +10,9 @@ const api = {
 
   getDisplays: () => ipcRenderer.invoke('get-displays'),
 
+  getWindowDisplayScaleFactor: (): Promise<number> =>
+    ipcRenderer.invoke('get-window-display-scale-factor'),
+
   openDiagnosticLogFolder: (): Promise<{ success: boolean; path: string; error?: string }> =>
     ipcRenderer.invoke('open-diagnostic-log-folder'),
 

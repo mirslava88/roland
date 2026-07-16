@@ -82,16 +82,9 @@ export type OverlayState =
 
 export const CHANNELS_PER_PAGE = 4
 
-// 0 -> 'A' ... 25 -> 'Z' ... 26 -> 'AA' ... 27 -> 'AB'
+// 0 -> '1', 1 -> '2', 2 -> '3', ...
 export function channelIdFromIndex(i: number): ChannelId {
-  let n = i
-  let result = ''
-  while (true) {
-    result = String.fromCharCode(65 + (n % 26)) + result
-    n = Math.floor(n / 26) - 1
-    if (n < 0) break
-  }
-  return result
+  return String(i + 1)
 }
 
 export interface ChannelState {
@@ -332,18 +325,29 @@ export const useAppStore = create<AppState>()(persist(
     if (hasFiles) return
     // Don't orphan live/selected channel
     if (liveChannel && pageIds.includes(liveChannel)) return
-    const newIds = [...channelIds.slice(0, start), ...channelIds.slice(start + CHANNELS_PER_PAGE)]
-    const newChannels = { ...channels }
-    for (const id of pageIds) delete newChannels[id]
+    const remainingIds = [...channelIds.slice(0, start), ...channelIds.slice(start + CHANNELS_PER_PAGE)]
+    const idMap = new Map<ChannelId, ChannelId>()
+    const newIds = remainingIds.map((oldId, index) => {
+      const newId = channelIdFromIndex(index)
+      idMap.set(oldId, newId)
+      return newId
+    })
+    const newChannels: Record<ChannelId, ChannelState> = {}
+    for (const oldId of remainingIds) {
+      newChannels[idMap.get(oldId)!] = channels[oldId]
+    }
     let newPage = currentChannelPage
+    if (page < currentChannelPage) newPage--
     if (newPage >= Math.ceil(newIds.length / CHANNELS_PER_PAGE)) {
       newPage = Math.max(0, Math.ceil(newIds.length / CHANNELS_PER_PAGE) - 1)
     }
-    const newSelected = selectedChannel && pageIds.includes(selectedChannel) ? null : selectedChannel
+    const newLive = liveChannel ? idMap.get(liveChannel) ?? null : null
+    const newSelected = selectedChannel ? idMap.get(selectedChannel) ?? null : null
     set({
       channels: newChannels,
       channelIds: newIds,
       currentChannelPage: newPage,
+      liveChannel: newLive,
       selectedChannel: newSelected
     })
   },

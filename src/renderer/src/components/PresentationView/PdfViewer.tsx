@@ -94,9 +94,19 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
   const renderPage = useCallback(
     async (pageNum: number, cw: number, ch: number) => {
       if (!pdf || !canvasRef.current || cw === 0 || ch === 0) return
-      const dpr = window.devicePixelRatio || 1
+      const token = ++renderTokenRef.current
+      const rendererDpr = window.devicePixelRatio || 1
+      let displayScaleFactor = rendererDpr
+      try {
+        displayScaleFactor = await window.api.getWindowDisplayScaleFactor()
+      } catch { /* renderer DPR remains a safe fallback */ }
+      if (token !== renderTokenRef.current) return
+      // Prefer the larger value: a stale DPR from the primary display must not
+      // undersample a high-DPI output. Oversampling in the opposite direction
+      // costs a little memory but preserves quality.
+      const dpr = Math.max(1, rendererDpr, displayScaleFactor || 1)
       window.api.dbgLog(
-        `PdfViewer: renderPage BEGIN page=${pageNum} container=${cw}x${ch} dpr=${dpr} winInner=${window.innerWidth}x${window.innerHeight}`
+        `PdfViewer: renderPage BEGIN page=${pageNum} container=${cw}x${ch} rendererDpr=${rendererDpr} displayScale=${displayScaleFactor} effectiveDpr=${dpr} winInner=${window.innerWidth}x${window.innerHeight}`
       )
 
       // Reassigning canvas.width/height clears the canvas to transparent —
@@ -105,7 +115,6 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
       // on first touch, cached afterwards). Render to an offscreen canvas
       // first, keeping the visible canvas showing the PREVIOUS page the
       // whole time, then swap dimensions+content in one synchronous step.
-      const token = ++renderTokenRef.current
       const page = await pdf.getPage(pageNum)
       if (token !== renderTokenRef.current) {
         window.api.dbgLog(`PdfViewer: renderPage STALE token post-getPage page=${pageNum}`)
@@ -171,19 +180,28 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
           `PdfViewer: drawImage NATIVE done page=${pageNum} src=${nativeImg.naturalWidth}x${nativeImg.naturalHeight} dst=${targetBufW}x${targetBufH}`
         )
       } else {
-        // Fallback: pdf.js на native scale + upscale (низкое качество, но
-        // обходит TilingPattern bug). Срабатывает если native engine не
-        // отработал (не-Win платформа, ошибка PS, и т.д.).
+        // HiDPI fallback for machines where Windows.Data.Pdf is unavailable.
+        // Keep viewport.scale=1 to avoid the pdf.js TilingPattern regression,
+        // but apply the standard output transform so vectors/text are painted
+        // directly into the full-resolution display buffer. The old fallback
+        // rendered a small base-size bitmap and stretched it, causing visibly
+        // blurry text on the affected computer.
         const off = document.createElement('canvas')
-        off.width = Math.round(baseViewport.width)
-        off.height = Math.round(baseViewport.height)
+        off.width = targetBufW
+        off.height = targetBufH
         const offCtx = off.getContext('2d')
         if (!offCtx) return
-        await page.render({ canvasContext: offCtx, viewport: baseViewport }).promise
+        const outputScaleX = targetBufW / baseViewport.width
+        const outputScaleY = targetBufH / baseViewport.height
+        await page.render({
+          canvasContext: offCtx,
+          viewport: baseViewport,
+          transform: [outputScaleX, 0, 0, outputScaleY, 0, 0]
+        }).promise
         if (token !== renderTokenRef.current) return
-        ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, targetBufW, targetBufH)
+        ctx.drawImage(off, 0, 0)
         window.api.dbgLog(
-          `PdfViewer: drawImage FALLBACK pdf.js page=${pageNum} src=${off.width}x${off.height} dst=${targetBufW}x${targetBufH}`
+          `PdfViewer: drawImage FALLBACK_HIDPI pdf.js page=${pageNum} buffer=${off.width}x${off.height} outputScale=${outputScaleX.toFixed(3)}x${outputScaleY.toFixed(3)}`
         )
       }
       requestAnimationFrame(() => {

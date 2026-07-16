@@ -291,9 +291,9 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
           {tab === 'diagnostics' && (
             <div className="space-y-4 text-xs text-gray-300 leading-relaxed">
               <section className="rounded-md border border-accent/40 bg-surface-300 p-4">
-                <h3 className="text-sm font-semibold text-white mb-2">Диагностика PPTX</h3>
+                <h3 className="text-sm font-semibold text-white mb-2">Диагностика PPTX и PDF</h3>
                 <p className="text-gray-400 mb-3">
-                  Сначала воспроизведите проблему с превью, затем откройте папку и передайте разработчику файл <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">pdm-diagnostic.log</code>.
+                  Сначала воспроизведите проблему с превью или качеством PDF, затем откройте папку и передайте разработчику файл <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">pdm-diagnostic.log</code>.
                 </p>
                 <button
                   onClick={openDiagnosticLogs}
@@ -313,6 +313,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>параметры мониторов и масштаб Windows;</li>
                   <li>запуск PowerPoint и COM-ошибки;</li>
                   <li>экспорт превью каждого слайда и ошибки загрузки PNG.</li>
+                  <li>размер PDF-кадра и причина переключения на запасной рендер.</li>
                 </ul>
               </section>
             </div>
@@ -340,10 +341,10 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы (A / B / C / D и более)</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы (1 / 2 / 3 / 4 и более)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Каналы в сетке 2×2, сгруппированы по страницам — можно заранее подготовить много файлов</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> в центре — добавить новую страницу из 4 каналов (A/B/C/D, E/F/G/H, …)</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> в центре — добавить новую страницу из 4 каналов (1/2/3/4, 5/6/7/8, …)</li>
                   <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
                   <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> справа от пагинации</li>
                   <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или двойной клик по каналу</li>

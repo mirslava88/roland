@@ -35,16 +35,9 @@ async function renderPdfPageToDataUrl(
     const safePage = Math.max(1, Math.min(pageNum || 1, doc.numPages))
     const page = await doc.getPage(safePage)
     const baseViewport = page.getViewport({ scale: 1 })
-    // Render at NATIVE pdf size — pdf.js имеет баг с TilingPattern при scale>1
-    // (PDF с tiling-pattern фоном рендерится с обрезкой справа). Native render
-    // не триггерит bug; затем drawImage upscale до display target size.
-    const off = document.createElement('canvas')
-    off.width = baseViewport.width
-    off.height = baseViewport.height
-    const offCtx = off.getContext('2d')
-    if (!offCtx) return null
-    await page.render({ canvasContext: offCtx, viewport: baseViewport }).promise
-
+    // Keep viewport scale at 1 to avoid the TilingPattern regression, while
+    // using pdf.js' output transform to paint vectors/text directly at the
+    // target display resolution instead of stretching a low-res bitmap.
     const scale = Math.min(displayWidth / baseViewport.width, displayHeight / baseViewport.height)
     const dstW = Math.round(baseViewport.width * scale)
     const dstH = Math.round(baseViewport.height * scale)
@@ -53,9 +46,11 @@ async function renderPdfPageToDataUrl(
     canvas.height = dstH
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
-    ctx.imageSmoothingEnabled = true
-    ctx.imageSmoothingQuality = 'high'
-    ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, dstW, dstH)
+    await page.render({
+      canvasContext: ctx,
+      viewport: baseViewport,
+      transform: [scale, 0, 0, scale, 0, 0]
+    }).promise
     return canvas.toDataURL('image/png')
   } catch {
     return null
@@ -266,8 +261,9 @@ export function PreviewPanel(): JSX.Element {
       const targetDisplay = displays.find((d) => d.id === selectedDisplayId)
         || displays.find((d) => !d.isPrimary)
         || displays[0]
-      const dispW = targetDisplay?.bounds.width ?? 1920
-      const dispH = targetDisplay?.bounds.height ?? 1080
+      const displayScale = targetDisplay?.scaleFactor || 1
+      const dispW = Math.round((targetDisplay?.bounds.width ?? 1920) * displayScale)
+      const dispH = Math.round((targetDisplay?.bounds.height ?? 1080) * displayScale)
 
       try {
         if (channel.file.type === 'pdf') {

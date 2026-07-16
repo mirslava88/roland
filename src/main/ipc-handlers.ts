@@ -421,24 +421,41 @@ export function registerIpcHandlers(
   // hash to keep navigation snappy.
   ipcMain.handle('render-pdf-page', async (_event, filePath: string, pageIndex: number, width: number): Promise<string | null> => {
     if (process.platform !== 'win32') return null
+    const started = Date.now()
     try {
+      const renderWidth = Math.max(64, Math.min(16384, Math.round(width)))
       const st = await stat(filePath)
-      const key = createHash('md5').update(`${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${width}`).digest('hex')
+      const key = createHash('md5').update(`${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${renderWidth}`).digest('hex')
       const outPath = join(tmpdir(), `pdm-pdfpage-${key}.png`)
-      if (existsSync(outPath)) return outPath
+      if (existsSync(outPath)) {
+        diagnosticLog('pdf-render', `cache hit page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
+        return outPath
+      }
       const script = resolveScript('render-pdf-page.ps1')
-      await execFileAsync('powershell.exe', [
+      diagnosticLog('pdf-render', `native start page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
+      const { stdout, stderr } = await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-NoProfile',
         '-File', script,
         '-PdfPath', filePath,
         '-PageIndex', String(pageIndex),
         '-OutPath', outPath,
-        '-Width', String(width)
-      ], { timeout: 15000 })
-      return existsSync(outPath) ? outPath : null
+        '-Width', String(renderWidth)
+      ], { timeout: 15000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
+      if (!existsSync(outPath)) {
+        diagnosticLog(
+          'pdf-render',
+          `native missing output page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms stdout=${String(stdout).trim()} stderr=${String(stderr).trim()}`
+        )
+        return null
+      }
+      diagnosticLog(
+        'pdf-render',
+        `native success page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms output=${String(stdout).trim()}`
+      )
+      return outPath
     } catch (e) {
-      console.error('[IPC] render-pdf-page error:', e)
+      diagnosticLog('pdf-render', `native failed page=${pageIndex + 1} width=${width} dur=${Date.now() - started}ms ${formatDiagnosticError(e)}`)
       return null
     }
   })
