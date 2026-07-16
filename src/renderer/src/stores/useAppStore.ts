@@ -171,6 +171,7 @@ interface AppState {
   setCurrentSlide: (slide: number) => void
   setTotalSlides: (total: number) => void
   saveSlidePosition: () => void
+  clearSlidePosition: (filePath: string) => void
   setDisplays: (displays: DisplayInfo[]) => void
   setSelectedDisplayId: (id: number | null) => void
   setBackdropImage: (path: string | null) => void
@@ -426,6 +427,14 @@ export const useAppStore = create<AppState>()(persist(
     if (activeFile) {
       set({ slidePositions: { ...slidePositions, [activeFile.path]: currentSlide } })
     }
+  },
+
+  clearSlidePosition: (filePath) => {
+    const { slidePositions } = get()
+    if (!(filePath in slidePositions)) return
+    const nextPositions = { ...slidePositions }
+    delete nextPositions[filePath]
+    set({ slidePositions: nextPositions })
   },
 
   setDisplays: (displays) => set({ displays }),

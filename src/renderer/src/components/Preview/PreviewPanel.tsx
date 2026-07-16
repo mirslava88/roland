@@ -108,6 +108,7 @@ export function PreviewPanel(): JSX.Element {
     setChannelFile, setChannelSlide, setChannelTotalSlides,
     isPresentationWindowOpen, setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
+    clearSlidePosition,
     addChannelPage, removeChannelPage, setCurrentChannelPage,
     pptxThumbnailsMap, setOverlayState
   } = useAppStore()
@@ -123,13 +124,7 @@ export function PreviewPanel(): JSX.Element {
   const handleClear = async (ch: ChannelId): Promise<void> => {
     const channel = channels[ch]
     if (!channel) return
-    // Reset saved slide position so next open starts from slide 1
-    if (channel.file) {
-      const { slidePositions } = useAppStore.getState()
-      const newPositions = { ...slidePositions }
-      delete newPositions[channel.file.path]
-      useAppStore.setState({ slidePositions: newPositions })
-    }
+    const clearedFilePath = channel.file?.path
     // If this channel is live, close the presentation
     if (liveChannel === ch && channel.file) {
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
@@ -194,6 +189,9 @@ export function PreviewPanel(): JSX.Element {
       useAppStore.setState({ liveChannel: null })
     }
     setChannelFile(ch, null)
+    // setActiveFile(null) intentionally saves the outgoing position for normal
+    // channel switches. An explicit X means unload, so forget it afterwards.
+    if (clearedFilePath) clearSlidePosition(clearedFilePath)
   }
 
   const handleTake = async (ch: ChannelId): Promise<void> => {
