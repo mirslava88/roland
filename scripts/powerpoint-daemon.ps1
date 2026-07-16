@@ -37,8 +37,26 @@ public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr 
 
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
 public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct POINT { public int X; public int Y; }
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool GetWindowRect(System.IntPtr hWnd, out RECT lpRect);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool GetClientRect(System.IntPtr hWnd, out RECT lpRect);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ClientToScreen(System.IntPtr hWnd, ref POINT lpPoint);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool GetCursorPos(out POINT lpPoint);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetCursorPos(int X, int Y);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr GetForegroundWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetForegroundWindow(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsWindow(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, System.UIntPtr dwExtraInfo);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool PrintWindow(System.IntPtr hWnd, System.IntPtr hdcBlt, uint nFlags);
 
@@ -149,16 +167,32 @@ function Hide-PPEditor($ppt) {
 # shape trigger, not as the next item in the slide's normal click sequence.
 # SlideShowView.Next() therefore skips straight to the next slide instead of
 # activating that trigger. A hardware presenter only sends PageDown/Right, so
-# bridge the first click to the official SlideShowView.Player(shapeId).Play()
-# API. Once that video has been started, the next click is allowed through to
-# normal slideshow navigation.
+# bridge the first presenter click to a real click on the media shape. Calling
+# SlideShowView.Player(shapeId).Play() is unsafe for some built-in PowerPoint
+# templates: while State=ppNotReady the COM call can block for minutes and even
+# crash POWERPNT.EXE. A real shape click follows PowerPoint's own interactive
+# trigger path and returns immediately.
 $script:startedSlideVideos = @{}
+$script:activeSlideShowHwnd = 0
+$script:mediaReturnForegroundHwnd = 0
+
+function Restore-MediaForeground {
+    $hwnd = [long]$script:mediaReturnForegroundHwnd
+    $script:mediaReturnForegroundHwnd = 0
+    if ($hwnd -eq 0) { return }
+    try {
+        if ([PptDaemon.Native]::IsWindow([System.IntPtr]$hwnd)) {
+            [PptDaemon.Native]::SetForegroundWindow([System.IntPtr]$hwnd) | Out-Null
+        }
+    } catch {}
+}
 
 function Reset-SlideVideoClickState {
     $script:startedSlideVideos.Clear()
+    Restore-MediaForeground
 }
 
-function Get-SlideVideoPlayers($view) {
+function Get-SlideVideoShapes($view) {
     $items = @()
     try {
         $slide = $view.Slide
@@ -169,29 +203,21 @@ function Get-SlideVideoPlayers($view) {
             if ($shapeType -ne 16) { continue } # msoMedia
 
             # ppMediaTypeMovie=3. If an older Office build cannot expose
-            # MediaType, keep the msoMedia shape as a candidate and let
-            # SlideShowView.Player decide whether it is controllable.
+            # MediaType, keep the msoMedia shape as a candidate.
             $mediaType = -1
             try { $mediaType = [int]$shape.MediaType } catch {}
             if ($mediaType -ne -1 -and $mediaType -ne 3) { continue }
 
-            $player = $null
-            try { $player = $view.Player([int]$shape.Id) } catch {}
-            $state = -1
-            $position = -1L
-            if ($null -ne $player) {
-                try { $state = [int]$player.State } catch {}
-                try { $position = [long]$player.CurrentPosition } catch {}
-            }
             $playOnEntry = $false
             try { $playOnEntry = [bool]$shape.AnimationSettings.PlaySettings.PlayOnEntry } catch {}
 
             $items += [PSCustomObject]@{
                 ShapeId = [int]$shape.Id
                 Name = [string]$shape.Name
-                Player = $player
-                State = $state
-                Position = $position
+                Left = [double]$shape.Left
+                Top = [double]$shape.Top
+                Width = [double]$shape.Width
+                Height = [double]$shape.Height
                 PlayOnEntry = $playOnEntry
             }
         }
@@ -201,19 +227,103 @@ function Get-SlideVideoPlayers($view) {
     return @($items)
 }
 
-function Invoke-SlideVideoClick($view) {
-    $videos = @(Get-SlideVideoPlayers $view)
-    if ($videos.Count -eq 0) {
-        return [PSCustomObject]@{ HasVideo = $false; Handled = $false; Detail = 'none' }
+function Resolve-SlideShowHwnd {
+    $hwnd = [long]$script:activeSlideShowHwnd
+    try {
+        if ($hwnd -ne 0 -and [PptDaemon.Native]::IsWindow([System.IntPtr]$hwnd)) {
+            return $hwnd
+        }
+    } catch {}
+
+    # SlideShowWindow.HWND is missing on some Office builds. The open poller
+    # normally records the exact handle; this is a safe fallback for a single
+    # visible slideshow.
+    try {
+        $handles = @([PptDaemon.Native]::FindSlideShowHwnds())
+        if ($handles.Count -gt 0) {
+            $hwnd = [long]$handles[$handles.Count - 1]
+            $script:activeSlideShowHwnd = $hwnd
+            return $hwnd
+        }
+    } catch {}
+    return 0
+}
+
+function Invoke-SlideShowShapeClick($view, $video) {
+    $hwnd = Resolve-SlideShowHwnd
+    if ($hwnd -eq 0) {
+        Log "video click: slideshow HWND unavailable shape=$($video.ShapeId)"
+        return $false
     }
 
-    # If a movie is already playing, the click belongs to the normal slideshow
-    # flow (usually advance to the next slide). Never start a second movie over
-    # one that is currently running.
-    foreach ($video in $videos) {
-        if ($video.State -eq 0) { # ppPlaying
-            return [PSCustomObject]@{ HasVideo = $true; Handled = $false; Detail = "playing:$($video.ShapeId)" }
+    try {
+        $client = New-Object PptDaemon.Native+RECT
+        if (-not [PptDaemon.Native]::GetClientRect([System.IntPtr]$hwnd, [ref]$client)) {
+            throw 'GetClientRect failed'
         }
+        $clientWidth = $client.Right - $client.Left
+        $clientHeight = $client.Bottom - $client.Top
+        $presentation = $view.Slide.Parent
+        $slideWidth = [double]$presentation.PageSetup.SlideWidth
+        $slideHeight = [double]$presentation.PageSetup.SlideHeight
+        if ($clientWidth -le 0 -or $clientHeight -le 0 -or $slideWidth -le 0 -or $slideHeight -le 0) {
+            throw "invalid geometry client=${clientWidth}x${clientHeight} slide=${slideWidth}x${slideHeight}"
+        }
+
+        # PowerPoint letterboxes the slide while preserving its aspect ratio.
+        # Convert the media shape's point coordinates into physical client
+        # pixels, then into the virtual desktop coordinates used by SetCursorPos.
+        $scale = [Math]::Min($clientWidth / $slideWidth, $clientHeight / $slideHeight)
+        $offsetX = ($clientWidth - $slideWidth * $scale) / 2
+        $offsetY = ($clientHeight - $slideHeight * $scale) / 2
+        $x = [int][Math]::Round($offsetX + ($video.Left + $video.Width / 2) * $scale)
+        $y = [int][Math]::Round($offsetY + ($video.Top + $video.Height / 2) * $scale)
+        $x = [Math]::Max(1, [Math]::Min($clientWidth - 2, $x))
+        $y = [Math]::Max(1, [Math]::Min($clientHeight - 2, $y))
+
+        $origin = New-Object PptDaemon.Native+POINT
+        $origin.X = 0
+        $origin.Y = 0
+        if (-not [PptDaemon.Native]::ClientToScreen([System.IntPtr]$hwnd, [ref]$origin)) {
+            throw 'ClientToScreen failed'
+        }
+        $oldCursor = New-Object PptDaemon.Native+POINT
+        [PptDaemon.Native]::GetCursorPos([ref]$oldCursor) | Out-Null
+        $oldForeground = [PptDaemon.Native]::GetForegroundWindow()
+
+        try {
+            [PptDaemon.Native]::SetCursorPos($origin.X + $x, $origin.Y + $y) | Out-Null
+            [PptDaemon.Native]::SetForegroundWindow([System.IntPtr]$hwnd) | Out-Null
+            Start-Sleep -Milliseconds 80
+            # MOUSEEVENTF_LEFTDOWN / MOUSEEVENTF_LEFTUP. Unlike Player.Play(),
+            # this follows the slide's native onClick/togglePause trigger and
+            # cannot block the daemon on a ppNotReady COM call.
+            [PptDaemon.Native]::mouse_event(0x0002, 0, 0, 0, [System.UIntPtr]::Zero)
+            [PptDaemon.Native]::mouse_event(0x0004, 0, 0, 0, [System.UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 120
+        } finally {
+            [PptDaemon.Native]::SetCursorPos($oldCursor.X, $oldCursor.Y) | Out-Null
+        }
+
+        # PowerPoint pauses this class of interactive video as soon as its
+        # slideshow loses focus. Keep it foreground while the movie plays; the
+        # global presenter shortcuts still reach Electron. Restore the operator
+        # window as soon as navigation leaves this slide.
+        if ($oldForeground -ne [System.IntPtr]::Zero -and $oldForeground.ToInt64() -ne $hwnd) {
+            $script:mediaReturnForegroundHwnd = $oldForeground.ToInt64()
+        }
+        Log "video click: native shape click hwnd=$hwnd shape=$($video.ShapeId) client=$x,$y"
+        return $true
+    } catch {
+        Log "video click: native shape click failed shape=$($video.ShapeId): $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-SlideVideoClick($view) {
+    $videos = @(Get-SlideVideoShapes $view)
+    if ($videos.Count -eq 0) {
+        return [PSCustomObject]@{ HasVideo = $false; Handled = $false; ForceAdvance = $false; Detail = 'none' }
     }
 
     $slideIndex = -1
@@ -221,70 +331,26 @@ function Invoke-SlideVideoClick($view) {
     try { $slideIndex = [int]$view.Slide.SlideIndex } catch {}
     try { $presentationPath = [string]$view.Slide.Parent.FullName } catch {}
 
-    # A paused movie should resume on the presenter click.
+    # Start each click-triggered movie at most once per visit to this slide.
+    # Record even a failed native click: the following presenter click must
+    # always fail open to navigation instead of trapping the show forever.
+    $hasClickVideo = $false
     foreach ($video in $videos) {
-        if ($video.State -ne 1 -or $null -eq $video.Player) { continue } # ppPaused
-        $key = "$($presentationPath.ToLowerInvariant())|$slideIndex|$($video.ShapeId)"
-        try {
-            $video.Player.Play()
-            $script:startedSlideVideos[$key] = $true
-            Log "video click: resumed slide=$slideIndex shape=$($video.ShapeId) name='$($video.Name)'"
-            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "resumed:$($video.ShapeId)" }
-        } catch {
-            Log "video click: resume failed slide=$slideIndex shape=$($video.ShapeId): $($_.Exception.Message)"
-        }
-    }
-
-    # Start the first not-yet-started click video. Auto-play media is left to
-    # PowerPoint; if it has already ended, the next presenter click should move
-    # on instead of replaying it unexpectedly.
-    foreach ($video in $videos) {
-        if ($video.PlayOnEntry -or $null -eq $video.Player) { continue }
+        if ($video.PlayOnEntry) { continue }
+        $hasClickVideo = $true
         $key = "$($presentationPath.ToLowerInvariant())|$slideIndex|$($video.ShapeId)"
         if ($script:startedSlideVideos.ContainsKey($key)) { continue }
 
-        # Media can report ppNotReady for a few frames immediately after slide
-        # entry. Give PowerPoint a short chance to initialise its decoder before
-        # Play(); this click remains consumed even on failure so it can never
-        # accidentally skip the video slide. Leave the item unmarked on failure
-        # so the next presenter click retries instead of advancing the slide.
-        if ($video.State -eq 3) { # ppNotReady
-            for ($attempt = 0; $attempt -lt 10; $attempt++) {
-                Start-Sleep -Milliseconds 40
-                try { $video.State = [int]$video.Player.State } catch {}
-                if ($video.State -ne 3) { break }
-            }
-        }
-        if ($video.State -eq 3) {
-            Log "video click: player not ready slide=$slideIndex shape=$($video.ShapeId); will retry"
-            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "not-ready:$($video.ShapeId)" }
-        }
-
-        try {
-            # Returning to this slide can leave the player parked at its old
-            # endpoint. A fresh visit must start from the beginning.
-            try { $video.Player.CurrentPosition = 0 } catch {}
-            $video.Player.Play()
-            $stateAfter = -1
-            for ($attempt = 0; $attempt -lt 20; $attempt++) {
-                Start-Sleep -Milliseconds 25
-                try { $stateAfter = [int]$video.Player.State } catch {}
-                if ($stateAfter -eq 0) { break } # ppPlaying
-            }
-            if ($stateAfter -eq 0) {
-                $script:startedSlideVideos[$key] = $true
-                Log "video click: play slide=$slideIndex shape=$($video.ShapeId) name='$($video.Name)' state=$($video.State)->$stateAfter"
-                return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "played:$($video.ShapeId)" }
-            }
-            Log "video click: play not confirmed slide=$slideIndex shape=$($video.ShapeId) state=$($video.State)->$stateAfter; will retry"
-            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "play-pending:$($video.ShapeId)" }
-        } catch {
-            Log "video click: play failed slide=$slideIndex shape=$($video.ShapeId): $($_.Exception.Message)"
-            return [PSCustomObject]@{ HasVideo = $true; Handled = $true; Detail = "play-failed:$($video.ShapeId)" }
-        }
+        $clicked = Invoke-SlideShowShapeClick $view $video
+        $script:startedSlideVideos[$key] = $true
+        $detail = if ($clicked) { "clicked:$($video.ShapeId)" } else { "click-failed:$($video.ShapeId)" }
+        return [PSCustomObject]@{ HasVideo = $true; Handled = $true; ForceAdvance = $false; Detail = $detail }
     }
 
-    return [PSCustomObject]@{ HasVideo = $true; Handled = $false; Detail = 'already-handled' }
+    if ($hasClickVideo) {
+        return [PSCustomObject]@{ HasVideo = $true; Handled = $false; ForceAdvance = $true; Detail = 'video-complete' }
+    }
+    return [PSCustomObject]@{ HasVideo = $true; Handled = $false; ForceAdvance = $false; Detail = 'auto-play' }
 }
 
 function Get-PPT {
@@ -321,6 +387,7 @@ while ($true) {
         switch ($cmd) {
             'open' {
                 Reset-SlideVideoClickState
+                $script:activeSlideShowHwnd = 0
                 $targetRect = $null
                 try {
                     if ($null -ne $req.bounds) {
@@ -586,6 +653,18 @@ while ($true) {
                 # the end and the new slide is revealed in its painted state.
                 $newHwnd = 0
                 if ($newSW) { try { $newHwnd = [long]$newSW.HWND } catch {} }
+                if ($newHwnd -eq 0) {
+                    try { $newHwnd = [long]$shared.foundHwnd } catch {}
+                }
+                if ($newHwnd -eq 0) {
+                    try {
+                        $visibleSlideShows = @([PptDaemon.Native]::FindSlideShowHwnds())
+                        if ($visibleSlideShows.Count -gt 0) {
+                            $newHwnd = [long]$visibleSlideShows[$visibleSlideShows.Count - 1]
+                        }
+                    } catch {}
+                }
+                $script:activeSlideShowHwnd = $newHwnd
                 if ($newHwnd -ne 0) {
                     Log "place slideshow HWND=$newHwnd targetRect=$($targetRect -join ',')"
                     Set-SlideShowBounds $newHwnd $targetRect
@@ -673,6 +752,7 @@ while ($true) {
             }
             'close' {
                 Reset-SlideVideoClickState
+                $script:activeSlideShowHwnd = 0
                 $ppt = Get-PPT
                 if ($ppt) {
                     try { if ($ppt.SlideShowWindows.Count -gt 0) { $ppt.SlideShowWindows(1).View.Exit() } } catch {}
@@ -707,7 +787,11 @@ while ($true) {
                     $t0 = [DateTime]::UtcNow.Ticks
                     $mediaClick = Invoke-SlideVideoClick $view
                     if (-not $mediaClick.Handled) {
-                        $view.Next()
+                        if ($mediaClick.ForceAdvance -and $sBefore -lt $total) {
+                            $view.GotoSlide($sBefore + 1)
+                        } else {
+                            $view.Next()
+                        }
                     }
                     $sMid = [int]$view.Slide.SlideIndex
                     $cMid = -1
@@ -715,7 +799,11 @@ while ($true) {
                     $retried = 0
                     if (-not $mediaClick.Handled -and `
                         $sMid -eq $sBefore -and $cMid -eq $cBefore -and $sBefore -lt $total) {
-                        $view.Next()
+                        if ($mediaClick.ForceAdvance) {
+                            $view.GotoSlide($sBefore + 1)
+                        } else {
+                            $view.Next()
+                        }
                         $retried = 1
                     }
                     $t1 = [DateTime]::UtcNow.Ticks
@@ -739,7 +827,7 @@ while ($true) {
                     $sBefore = [int]$view.Slide.SlideIndex
                     $cBefore = -1
                     try { $cBefore = [int]$view.GetClickIndex() } catch {}
-                    $hasVideo = (@(Get-SlideVideoPlayers $view).Count -gt 0)
+                    $hasVideo = (@(Get-SlideVideoShapes $view).Count -gt 0)
                     $t0 = [DateTime]::UtcNow.Ticks
                     $view.Previous()
                     $sMid = [int]$view.Slide.SlideIndex
