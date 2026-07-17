@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
+import {
+  queueAbsoluteNavigationDuringTransition,
+  queueNavigationDuringTransition
+} from '../../navigation-transition'
 
 export function ControlBar(): JSX.Element {
   const {
@@ -61,6 +65,7 @@ export function ControlBar(): JSX.Element {
   }
 
   const handlePrev = (): void => {
+    if (queueNavigationDuringTransition('prev')) return
     const { currentSlide } = useAppStore.getState()
     // Для PPTX НЕ блокируем prev на первом слайде — Previous() откатывает
     // click-анимацию назад (clickIndex уменьшается, slide index не меняется).
@@ -70,13 +75,13 @@ export function ControlBar(): JSX.Element {
     if (activeFile.type === 'presentation') {
       handlePptxNav('prev')
     } else if (activeFile.type === 'pdf') {
-      const newSlide = currentSlide - 1
-      setCurrentSlide(newSlide)
-      window.api.sendToPresentation('navigate-slide', newSlide)
+      useAppStore.getState().releasePinnedPdfOverlay()
+      window.api.sendToPresentation('navigate-pdf', 'prev')
     }
   }
 
   const handleNext = (): void => {
+    if (queueNavigationDuringTransition('next')) return
     const { currentSlide, totalSlides } = useAppStore.getState()
     // Для PPTX НЕ блокируем по slide index — анимации внутри слайда не
     // меняют slide index, guard «съедал» бы анимационные клики на последнем
@@ -87,15 +92,18 @@ export function ControlBar(): JSX.Element {
     if (activeFile.type === 'presentation') {
       handlePptxNav('next')
     } else if (activeFile.type === 'pdf') {
-      const newSlide = currentSlide + 1
-      setCurrentSlide(newSlide)
-      window.api.sendToPresentation('navigate-slide', newSlide)
+      useAppStore.getState().releasePinnedPdfOverlay()
+      window.api.sendToPresentation('navigate-pdf', 'next')
     }
   }
 
   const handleGoToSlide = (): void => {
     const num = parseInt(goToSlide)
     if (num < 1 || (totalSlides > 0 && num > totalSlides)) return
+    if (queueAbsoluteNavigationDuringTransition(num)) {
+      setGoToSlide('')
+      return
+    }
 
     if (activeFile.type === 'presentation') {
       setCurrentSlide(num)
@@ -114,6 +122,7 @@ export function ControlBar(): JSX.Element {
       }).catch(() => { pendingNavCount.current-- })
     } else if (activeFile.type === 'pdf') {
       setCurrentSlide(num)
+      useAppStore.getState().releasePinnedPdfOverlay()
       window.api.sendToPresentation('navigate-slide', num)
     }
     setGoToSlide('')
@@ -212,11 +221,13 @@ export function ControlBar(): JSX.Element {
 
           <button
             onClick={() => {
+              if (queueAbsoluteNavigationDuringTransition(1)) return
               if (activeFile.type === 'presentation') {
                 setCurrentSlide(1)
                 navigatePptx('goto', 1)
               } else if (activeFile.type === 'pdf') {
                 setCurrentSlide(1)
+                useAppStore.getState().releasePinnedPdfOverlay()
                 window.api.sendToPresentation('navigate-slide', 1)
               }
             }}

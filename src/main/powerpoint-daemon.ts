@@ -7,6 +7,7 @@ type PendingRequest = {
   resolve: (value: DaemonResponse) => void
   reject: (err: Error) => void
   timer: NodeJS.Timeout
+  onEvent?: (event: DaemonResponse) => void
 }
 
 export interface DaemonResponse {
@@ -93,6 +94,14 @@ class PowerPointDaemon {
     }
     if (typeof msg.id === 'number' && this.pending.has(msg.id)) {
       const p = this.pending.get(msg.id)!
+      if (msg.event) {
+        try {
+          p.onEvent?.(msg)
+        } catch (err) {
+          diagnosticLog('ppt-daemon', `progress callback failed: ${formatDiagnosticError(err)}`)
+        }
+        return
+      }
       clearTimeout(p.timer)
       this.pending.delete(msg.id)
       p.resolve(msg)
@@ -119,7 +128,20 @@ class PowerPointDaemon {
     return this.spawn()
   }
 
-  async send(cmd: string, args: Record<string, unknown> = {}, timeoutMs = 20000): Promise<DaemonResponse> {
+  warmup(): void {
+    // PowerShell + Add-Type initialization takes several seconds on some
+    // machines. Start it with the app so the first TAKE does not pay that cost.
+    void this.ensureReady()
+      .then(() => diagnosticLog('ppt-daemon', 'warmup ready'))
+      .catch((err) => diagnosticLog('ppt-daemon', `warmup failed: ${formatDiagnosticError(err)}`))
+  }
+
+  async send(
+    cmd: string,
+    args: Record<string, unknown> = {},
+    timeoutMs = 20000,
+    onEvent?: (event: DaemonResponse) => void
+  ): Promise<DaemonResponse> {
     await this.ensureReady()
     const id = this.nextId++
     const req = { id, cmd, ...args }
@@ -128,7 +150,7 @@ class PowerPointDaemon {
         this.pending.delete(id)
         reject(new Error(`daemon cmd '${cmd}' timed out`))
       }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
+      this.pending.set(id, { resolve, reject, timer, onEvent })
       try {
         this.proc!.stdin!.write(JSON.stringify(req) + '\n', (err) => {
           if (err) {

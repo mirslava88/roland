@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
+import { queueAbsoluteNavigationDuringTransition } from '../../navigation-transition'
 import { mediaUrl } from '../../media'
 import * as pdfjsLib from 'pdfjs-dist'
 
@@ -106,10 +107,12 @@ export function SlideNavigator(): JSX.Element {
   }, [activeFile?.path, activeFile?.type, loadPdfThumbnails, loadPptxThumbnails])
 
   const handleClick = (index: number): void => {
+    if (queueAbsoluteNavigationDuringTransition(index)) return
     setCurrentSlide(index)
     if (activeFile?.type === 'presentation') {
       useAppStore.getState().navigatePptx('goto', index)
     } else if (activeFile?.type === 'pdf') {
+      useAppStore.getState().releasePinnedPdfOverlay()
       window.api.sendToPresentation('navigate-slide', index)
     }
   }

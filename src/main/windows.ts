@@ -69,7 +69,11 @@ export function createPresentationWindow(display: Display): BrowserWindow {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: true
+      webSecurity: true,
+      // The window stays hidden underneath PowerPoint so PDF/video can be
+      // prepared before the atomic reveal without Chromium pausing timers,
+      // requestAnimationFrame or media decoding.
+      backgroundThrottling: false
     }
   })
 

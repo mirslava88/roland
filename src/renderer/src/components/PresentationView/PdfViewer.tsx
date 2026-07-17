@@ -10,20 +10,42 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 interface PdfViewerProps {
   filePath: string
   startSlide?: number
+  requestId: number
+  onReady?: () => void
 }
 
-export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element {
+export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewerProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [totalPages, setTotalPages] = useState(0)
   const renderTokenRef = useRef(0)
+  const currentPageRef = useRef(1)
+  const totalPagesRef = useRef(0)
+  const pendingNavigationRef = useRef<number | null>(null)
+  const pendingRelativeNavigationRef = useRef(0)
+  const appliedStartSlideRef = useRef<number | undefined>(undefined)
+  const loadedFilePathRef = useRef<string | null>(null)
+  const lastPaintedRef = useRef<{ filePath: string; page: number } | null>(null)
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
+  const notifyContentReady = useCallback((): void => {
+    if (onReadyRef.current) onReadyRef.current()
+    else window.api.sendToControl('presentation-content-ready')
+  }, [])
 
   useEffect(() => {
     let cancelled = false
     const fname = filePath.split(/[\\\\/]/).pop() || filePath
     window.api.dbgLog(`PdfViewer: useEffect[filePath] fired file=${fname}, clearing pdf state`)
+    totalPagesRef.current = 0
+    pendingNavigationRef.current = null
+    pendingRelativeNavigationRef.current = 0
+    appliedStartSlideRef.current = startSlide
+    // Cancel any page render belonging to the previous file while preserving
+    // its already-painted canvas until the replacement is ready.
+    renderTokenRef.current += 1
 
     // КРИТИЧНО: сбрасываем pdf в null СИНХРОННО при смене filePath.
     // Иначе startSlide-effect (reacts to startSlide prop change в тот же
@@ -49,11 +71,25 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
           window.api.dbgLog('PdfViewer: loadPdf cancelled post-getDocument')
           return
         }
+        loadedFilePathRef.current = filePath
         setPdf(doc)
         setTotalPages(doc.numPages)
-        const initial = startSlide && startSlide >= 1 && startSlide <= doc.numPages ? startSlide : 1
+        totalPagesRef.current = doc.numPages
+        const queuedPage = pendingNavigationRef.current
+        const baseInitial = queuedPage && queuedPage >= 1 && queuedPage <= doc.numPages
+          ? queuedPage
+          : startSlide && startSlide >= 1 && startSlide <= doc.numPages
+            ? startSlide
+            : 1
+        const queuedDelta = pendingRelativeNavigationRef.current
+        const initial = Math.max(1, Math.min(doc.numPages, baseInitial + queuedDelta))
+        pendingNavigationRef.current = null
+        pendingRelativeNavigationRef.current = 0
+        currentPageRef.current = initial
         setCurrentPage(initial)
-        window.api.dbgLog(`PdfViewer: setPdf+setCurrentPage(${initial}) done`)
+        window.api.dbgLog(
+          `PdfViewer: setPdf+setCurrentPage(${initial}) done queued=${queuedPage ?? 'none'} delta=${queuedDelta}`
+        )
         window.api.sendToControl('slide-info', { current: initial, total: doc.numPages })
       } catch (err) {
         console.error('Failed to load PDF:', err)
@@ -93,7 +129,13 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
 
   const renderPage = useCallback(
     async (pageNum: number, cw: number, ch: number) => {
-      if (!pdf || !canvasRef.current || cw === 0 || ch === 0) return
+      if (
+        !pdf ||
+        loadedFilePathRef.current !== filePath ||
+        !canvasRef.current ||
+        cw === 0 ||
+        ch === 0
+      ) return
       const token = ++renderTokenRef.current
       const rendererDpr = window.devicePixelRatio || 1
       let displayScaleFactor = rendererDpr
@@ -204,14 +246,43 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
           `PdfViewer: drawImage FALLBACK_HIDPI pdf.js page=${pageNum} buffer=${off.width}x${off.height} outputScale=${outputScaleX.toFixed(3)}x${outputScaleY.toFixed(3)}`
         )
       }
+
+      // This is the only trustworthy readiness marker: React state and
+      // currentPageRef can already point at the requested page while the
+      // visible canvas still contains the previous frame.
+      lastPaintedRef.current = { filePath, page: pageNum }
+
+      // Warm the pages the presenter is most likely to visit next. Native
+      // Windows.Data.Pdf keeps the final quality, while navigation becomes a
+      // disk-cache hit instead of paying PowerShell/WinRT startup each time.
+      // The main process deduplicates this with an immediate user request.
+      if (nativePath) {
+        const nearbyPages = [pageNum + 1, pageNum + 2, pageNum - 1]
+          .filter((candidate, index, pages) => (
+            candidate >= 1 && candidate <= pdf.numPages && pages.indexOf(candidate) === index
+          ))
+        void (async () => {
+          for (const nearbyPage of nearbyPages) {
+            if (token !== renderTokenRef.current) return
+            try {
+              window.api.dbgLog(`PdfViewer: prefetch BEGIN page=${nearbyPage} width=${targetBufW}`)
+              const prefetched = await window.api.renderPdfPage(filePath, nearbyPage - 1, targetBufW)
+              window.api.dbgLog(`PdfViewer: prefetch END page=${nearbyPage} cached=${Boolean(prefetched)}`)
+            } catch (error) {
+              window.api.dbgLog(`PdfViewer: prefetch ERROR page=${nearbyPage} ${String(error)}`)
+            }
+          }
+        })()
+      }
+
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           window.api.dbgLog(`PdfViewer: sendToControl(presentation-content-ready) page=${pageNum}`)
-          window.api.sendToControl('presentation-content-ready')
+          notifyContentReady()
         })
       })
     },
-    [pdf]
+    [pdf, filePath, notifyContentReady]
   )
 
   useEffect(() => {
@@ -226,25 +297,114 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
   // и того же пути.
   useEffect(() => {
     if (!pdf || !startSlide) return
+    if (appliedStartSlideRef.current === startSlide) return
     if (startSlide < 1 || startSlide > totalPages) return
+    appliedStartSlideRef.current = startSlide
     if (startSlide === currentPage) return
+    currentPageRef.current = startSlide
     setCurrentPage(startSlide)
     window.api.sendToControl('slide-info', { current: startSlide, total: totalPages })
   }, [startSlide, pdf, totalPages])
 
   useEffect(() => {
+    // Taking a PDF that is already loaded behind PowerPoint may require no
+    // repaint at all. A repaint-driven ready signal would never arrive and
+    // the TAKE waited for the full five-second timeout. Each load-content has
+    // a new requestId, so acknowledge an already-painted target explicitly;
+    // if another page is requested, trigger its normal render instead.
+    if (!pdf || loadedFilePathRef.current !== filePath) return
+    const requestedPage = Math.max(1, Math.min(totalPagesRef.current, startSlide || 1))
+    appliedStartSlideRef.current = requestedPage
+
+    if (requestedPage !== currentPageRef.current || requestedPage !== currentPage) {
+      currentPageRef.current = requestedPage
+      setCurrentPage(requestedPage)
+      window.api.sendToControl('slide-info', { current: requestedPage, total: totalPagesRef.current })
+      return
+    }
+
+    const painted = lastPaintedRef.current
+    if (!painted || painted.filePath !== filePath || painted.page !== requestedPage) {
+      // A render can be pending even though both page state values already
+      // equal the target. Start (or replace) it explicitly and let the real
+      // drawImage path emit presentation-content-ready.
+      if (containerSize.w > 0 && containerSize.h > 0) {
+        window.api.dbgLog(
+          `PdfViewer: requested page not painted yet page=${requestedPage} request=${requestId}; forcing render`
+        )
+        void renderPage(requestedPage, containerSize.w, containerSize.h)
+      }
+      return
+    }
+
+    let frame1 = 0
+    let frame2 = 0
+    frame1 = requestAnimationFrame(() => {
+      frame2 = requestAnimationFrame(() => {
+        window.api.dbgLog(`PdfViewer: reuse painted page=${requestedPage} request=${requestId}`)
+        notifyContentReady()
+      })
+    })
+    return () => {
+      cancelAnimationFrame(frame1)
+      cancelAnimationFrame(frame2)
+    }
+  }, [requestId])
+
+  useEffect(() => {
     const unsubNavigate = window.api.on('navigate-slide', (...args: unknown[]) => {
       const pageNum = args[0] as number
-      if (pageNum >= 1 && pageNum <= totalPages) {
-        setCurrentPage(pageNum)
-        window.api.sendToControl('slide-info', { current: pageNum, total: totalPages })
+      if (!Number.isInteger(pageNum) || pageNum < 1) return
+
+      const knownTotal = totalPagesRef.current
+      if (knownTotal === 0) {
+        // A presenter click can arrive while pdf.js is still loading the file.
+        // Remember the latest target instead of silently dropping the click.
+        pendingNavigationRef.current = pageNum
+        window.api.dbgLog(`PdfViewer: navigate queued page=${pageNum} while loading`)
+        return
       }
+
+      if (pageNum > knownTotal) return
+      pendingNavigationRef.current = null
+      currentPageRef.current = pageNum
+      setCurrentPage(pageNum)
+      // The control window already updates its page optimistically before
+      // sending this command. Echoing the page back here can arrive after a
+      // newer click and roll its store backwards, making the next click look
+      // swallowed. Only local output-window key events need slide-info echoes.
+      window.api.dbgLog(`PdfViewer: navigate applied page=${pageNum}`)
+      window.api.sendToControl('slide-info', { current: pageNum, total: knownTotal })
+    })
+
+    const unsubRelativeNavigate = window.api.on('navigate-pdf', (...args: unknown[]) => {
+      const direction = args[0] as 'next' | 'prev'
+      if (direction !== 'next' && direction !== 'prev') return
+      const delta = direction === 'next' ? 1 : -1
+      const knownTotal = totalPagesRef.current
+
+      if (knownTotal === 0) {
+        pendingRelativeNavigationRef.current += delta
+        window.api.dbgLog(
+          `PdfViewer: relative navigate queued direction=${direction} delta=${pendingRelativeNavigationRef.current}`
+        )
+        return
+      }
+
+      const from = currentPageRef.current
+      const target = Math.max(1, Math.min(knownTotal, from + delta))
+      window.api.dbgLog(`PdfViewer: relative navigate ${direction} ${from}->${target}/${knownTotal}`)
+      if (target === from) return
+      currentPageRef.current = target
+      setCurrentPage(target)
+      window.api.sendToControl('slide-info', { current: target, total: knownTotal })
     })
 
     return () => {
       unsubNavigate()
+      unsubRelativeNavigate()
     }
-  }, [totalPages])
+  }, [])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
@@ -252,6 +412,7 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
         e.preventDefault()
         if (currentPage < totalPages) {
           const newPage = currentPage + 1
+          currentPageRef.current = newPage
           setCurrentPage(newPage)
           window.api.sendToControl('slide-info', { current: newPage, total: totalPages })
         }
@@ -259,6 +420,7 @@ export function PdfViewer({ filePath, startSlide }: PdfViewerProps): JSX.Element
         e.preventDefault()
         if (currentPage > 1) {
           const newPage = currentPage - 1
+          currentPageRef.current = newPage
           setCurrentPage(newPage)
           window.api.sendToControl('slide-info', { current: newPage, total: totalPages })
         }

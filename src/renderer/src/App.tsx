@@ -6,6 +6,8 @@ import { ControlBar } from './components/Controls/ControlBar'
 import { Toolbar } from './components/Controls/Toolbar'
 import { NowPlaying } from './components/Controls/NowPlaying'
 import { SlideNavigator } from './components/SlideNavigator/SlideNavigator'
+import { queueNavigationDuringTransition } from './navigation-transition'
+import type { NavigationRequest } from './navigation-transition'
 
 export default function App(): JSX.Element {
   const {
@@ -72,6 +74,8 @@ export default function App(): JSX.Element {
     })
 
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
+      if (queueNavigationDuringTransition(direction)) return
+
       const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
       if (!activeFile) return
 
@@ -100,14 +104,17 @@ export default function App(): JSX.Element {
           } catch { /* ignore */ }
         }
       } else if (activeFile.type === 'pdf') {
-        const isNext = direction === 'next'
-        const newSlide = isNext
-          ? Math.min(currentSlide + 1, totalSlides || currentSlide + 1)
-          : Math.max(currentSlide - 1, 1)
-        if (newSlide !== currentSlide) {
-          useAppStore.getState().setCurrentSlide(newSlide)
-          window.api.sendToPresentation('navigate-slide', newSlide)
-        }
+        // Let the output window advance from the page it has actually drawn.
+        // An absolute, optimistic page number can race with PDF initialization:
+        // the control store moves to page 2, then the late page-1 ready signal
+        // overwrites it, so the next physical click only repeats page 2. The
+        // output is the source of truth and acknowledges the applied page via
+        // slide-info immediately.
+        window.api.dbgLog(
+          `App: PDF navigate direction=${direction} control=${currentSlide}/${totalSlides} file=${activeFile.path}`
+        )
+        useAppStore.getState().releasePinnedPdfOverlay()
+        window.api.sendToPresentation('navigate-pdf', direction)
       }
     }
 
@@ -115,16 +122,42 @@ export default function App(): JSX.Element {
       const isNext = e.key === 'PageDown' || e.key === 'ArrowRight' || e.key === 'ArrowDown'
       const isPrev = e.key === 'PageUp' || e.key === 'ArrowLeft' || e.key === 'ArrowUp'
       if (!isNext && !isPrev) return
+      window.api.dbgLog(
+        `App: local keydown key=${e.key} code=${e.code} repeat=${e.repeat} next=${isNext}`
+      )
       e.preventDefault()
       navigateSlide(isNext ? 'next' : 'prev')
     }
 
     const unsubGlobalKey = window.api.on('global-key', (...args: unknown[]) => {
       const direction = args[0] as 'next' | 'prev'
+      window.api.dbgLog(`App: global-key received direction=${direction}`)
       navigateSlide(direction)
     })
 
+    const flushQueuedNavigation = (event: Event): void => {
+      const requests = (event as CustomEvent<NavigationRequest[]>).detail || []
+      void (async () => {
+        window.api.dbgLog(`App: flushing queued navigation count=${requests.length}`)
+        for (const request of requests) {
+          if (request.kind === 'relative') {
+            await navigateSlide(request.direction)
+            continue
+          }
+
+          const { activeFile } = useAppStore.getState()
+          if (activeFile?.type === 'presentation') {
+            await useAppStore.getState().navigatePptx('goto', request.slide)
+          } else if (activeFile?.type === 'pdf') {
+            useAppStore.getState().releasePinnedPdfOverlay()
+            window.api.sendToPresentation('navigate-slide', request.slide)
+          }
+        }
+      })()
+    }
+
     window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('flush-take-navigation', flushQueuedNavigation)
 
     return () => {
       unsubClose()
@@ -134,6 +167,7 @@ export default function App(): JSX.Element {
       unsubVideoTime()
       unsubGlobalKey()
       window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('flush-take-navigation', flushQueuedNavigation)
     }
   }, [])
 

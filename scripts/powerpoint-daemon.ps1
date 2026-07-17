@@ -19,6 +19,8 @@ if (-not ('PptDaemon.Native' -as [type])) {
     Add-Type -ReferencedAssemblies System.Drawing -Name Native -Namespace PptDaemon -UsingNamespace System.Text,System.Collections.Generic -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
 public static extern uint TimeBeginPeriod(uint uPeriod);
+[System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+public static extern int DwmFlush();
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -75,6 +77,90 @@ public static System.Collections.Generic.List<long> FindSlideShowHwnds() {
         return true;
     }, System.IntPtr.Zero);
     return result;
+}
+
+// A dedicated CLR thread starts synchronously before the blocking COM Run().
+// PowerShell runspaces can be scheduled too late (observed iterations=0),
+// allowing PowerPoint's new topmost HWND to reach DWM for one frame. This
+// guard is already running before Run(), hides the new screenClass immediately,
+// then drops topmost and positions it. PowerShell reveals it only after setup.
+private static volatile bool _slideGuardStop = true;
+private static volatile bool _slideGuardStarted = false;
+private static System.Threading.Thread _slideGuardThread;
+public static long SlideGuardFoundHwnd = 0;
+public static long SlideGuardCaughtTicks = 0;
+public static int SlideGuardIterations = 0;
+public static int SlideGuardExStyleBefore = 0;
+public static string SlideGuardError = "";
+
+public static void StartSlideShowGuard(long[] oldHwnds, int x, int y, int width, int height) {
+    StopSlideShowGuard();
+    var oldWindows = new System.Collections.Generic.HashSet<long>(oldHwnds ?? new long[0]);
+    SlideGuardFoundHwnd = 0;
+    SlideGuardCaughtTicks = 0;
+    SlideGuardIterations = 0;
+    SlideGuardExStyleBefore = 0;
+    SlideGuardError = "";
+    _slideGuardStop = false;
+    _slideGuardStarted = false;
+    _slideGuardThread = new System.Threading.Thread(() => {
+        _slideGuardStarted = true;
+        try { SetThreadDpiAwarenessContext((System.IntPtr)(-4)); } catch {}
+        var deadline = System.DateTime.UtcNow.AddSeconds(10);
+        while (!_slideGuardStop && System.DateTime.UtcNow < deadline) {
+            try {
+                SlideGuardIterations++;
+                foreach (var hwnd in FindSlideShowHwnds()) {
+                    if (oldWindows.Contains(hwnd)) continue;
+                    var h = (System.IntPtr)hwnd;
+                    try { SlideGuardExStyleBefore = GetWindowLong(h, -20); } catch {}
+                    // SW_HIDE synchronously prevents the first slideshow frame.
+                    ShowWindow(h, 0);
+                    if (width > 0 && height > 0) {
+                        SetWindowPos(h, (System.IntPtr)(-2), x, y, width, height, 0x10);
+                    } else {
+                        SetWindowPos(h, (System.IntPtr)(-2), 0, 0, 0, 0, 0x13);
+                    }
+                    SlideGuardFoundHwnd = hwnd;
+                    SlideGuardCaughtTicks = System.DateTime.UtcNow.Ticks;
+                    // PowerPoint may call ShowWindow again near the end of
+                    // Run(). Keep suppressing that same HWND until PowerShell
+                    // explicitly stops the guard and performs the final reveal.
+                    while (!_slideGuardStop && System.DateTime.UtcNow < deadline) {
+                        try {
+                            if (IsWindowVisible(h)) ShowWindow(h, 0);
+                            if (width > 0 && height > 0) {
+                                SetWindowPos(h, (System.IntPtr)(-2), x, y, width, height, 0x10);
+                            }
+                        } catch {}
+                        System.Threading.Thread.Sleep(1);
+                    }
+                    return;
+                }
+            } catch (System.Exception ex) {
+                SlideGuardError = ex.Message;
+            }
+            System.Threading.Thread.Sleep(1);
+        }
+    });
+    _slideGuardThread.IsBackground = true;
+    _slideGuardThread.Priority = System.Threading.ThreadPriority.Highest;
+    _slideGuardThread.Start();
+
+    // Yield until the polling thread is definitely running before COM Run().
+    var startWait = System.Diagnostics.Stopwatch.StartNew();
+    while (!_slideGuardStarted && startWait.ElapsedMilliseconds < 250) {
+        System.Threading.Thread.Sleep(0);
+    }
+}
+
+public static void StopSlideShowGuard() {
+    _slideGuardStop = true;
+    var thread = _slideGuardThread;
+    if (thread != null && thread != System.Threading.Thread.CurrentThread && thread.IsAlive) {
+        try { thread.Join(100); } catch {}
+    }
+    _slideGuardThread = null;
 }
 
 // Capture a WINDOW's pixels directly via PrintWindow, bypassing the DWM
@@ -151,6 +237,66 @@ function Set-SlideShowBounds([long]$hwnd, $targetRect) {
     } catch {}
 }
 
+function Raise-SlideShow([long]$hwnd, $targetRect) {
+    if ($hwnd -eq 0) { return }
+    # HWND_TOP=0 keeps the slideshow non-topmost (the screen-saver overlay
+    # still covers it) but places it above the warm fullscreen Electron PDF
+    # window. Without this, PDF remained visible after a successful PP Run().
+    try {
+        if ($null -ne $targetRect -and $targetRect.Count -eq 4) {
+            [PptDaemon.Native]::SetWindowPos(
+                [System.IntPtr]$hwnd,
+                [System.IntPtr]0,
+                [int]$targetRect[0], [int]$targetRect[1],
+                [int]$targetRect[2], [int]$targetRect[3],
+                0x10
+            ) | Out-Null
+        } else {
+            [PptDaemon.Native]::SetWindowPos(
+                [System.IntPtr]$hwnd,
+                [System.IntPtr]0,
+                0, 0, 0, 0, 0x13
+            ) | Out-Null
+        }
+    } catch {}
+}
+
+function Lower-Window([long]$hwnd) {
+    if ($hwnd -eq 0) { return }
+    # HWND_BOTTOM=1. The persistent Electron output must stay alive while the
+    # PowerPoint surface warms up, but once the surface is ready it must sit
+    # below that surface. Some GPU/Windows combinations keep Electron above a
+    # later HWND_TOP promotion, so explicitly order both sides of the swap.
+    try {
+        [PptDaemon.Native]::SetWindowPos(
+            [System.IntPtr]$hwnd,
+            [System.IntPtr]1,
+            0, 0, 0, 0, 0x13
+        ) | Out-Null
+    } catch {}
+}
+
+function Place-SlideShowBehind([long]$hwnd, [long]$coverHwnd, $targetRect) {
+    if ($hwnd -eq 0 -or $coverHwnd -eq 0 -or $hwnd -eq $coverHwnd) { return }
+    try {
+        if ($null -ne $targetRect -and $targetRect.Count -eq 4) {
+            [PptDaemon.Native]::SetWindowPos(
+                [System.IntPtr]$hwnd,
+                [System.IntPtr]$coverHwnd,
+                [int]$targetRect[0], [int]$targetRect[1],
+                [int]$targetRect[2], [int]$targetRect[3],
+                0x10
+            ) | Out-Null
+        } else {
+            [PptDaemon.Native]::SetWindowPos(
+                [System.IntPtr]$hwnd,
+                [System.IntPtr]$coverHwnd,
+                0, 0, 0, 0, 0x13
+            ) | Out-Null
+        }
+    } catch {}
+}
+
 function Hide-PPEditor($ppt) {
     # SW_HIDE = 0. Application.Visible COM property stays true — Run() /
     # Presentations.Open / Slide.Export all work via internal PP pipelines
@@ -174,6 +320,9 @@ function Hide-PPEditor($ppt) {
 # trigger path and returns immediately.
 $script:startedSlideVideos = @{}
 $script:activeSlideShowHwnd = 0
+$script:activeSlideShowWindow = $null
+$script:activePresentation = $null
+$script:activePresentationPath = ''
 $script:mediaReturnForegroundHwnd = 0
 
 function Restore-MediaForeground {
@@ -358,6 +507,43 @@ function Get-PPT {
     catch { return $null }
 }
 
+function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
+    # PowerPoint can temporarily report SlideShowWindows.Count = 0 for several
+    # seconds after closing the previous presentation, even though the COM
+    # SlideShowWindow returned by Run() is alive and fully navigable. Keep and
+    # validate that direct object instead of making every command depend on the
+    # eventually-consistent collection.
+    $cached = $script:activeSlideShowWindow
+    if ($cached) {
+        try {
+            $cachedPath = [string]$cached.Presentation.FullName
+            $null = [int]$cached.View.Slide.SlideIndex
+            if ([string]::IsNullOrEmpty($expectedPath) -or $cachedPath -ieq $expectedPath) {
+                return $cached
+            }
+        } catch {
+            $script:activeSlideShowWindow = $null
+        }
+    }
+
+    if ($ppt) {
+        try {
+            for ($i = 1; $i -le $ppt.SlideShowWindows.Count; $i++) {
+                $candidate = $ppt.SlideShowWindows($i)
+                $candidatePath = [string]$candidate.Presentation.FullName
+                if ([string]::IsNullOrEmpty($expectedPath) -or $candidatePath -ieq $expectedPath) {
+                    $script:activeSlideShowWindow = $candidate
+                    $script:activePresentation = $candidate.Presentation
+                    $script:activePresentationPath = $candidatePath
+                    try { $script:activeSlideShowHwnd = [long]$candidate.HWND } catch {}
+                    return $candidate
+                }
+            }
+        } catch {}
+    }
+    return $null
+}
+
 function Reply($h) {
     [Console]::Out.WriteLine(($h | ConvertTo-Json -Compress))
     [Console]::Out.Flush()
@@ -401,6 +587,13 @@ while ($true) {
                         }
                     }
                 } catch { Log "open: invalid target bounds: $($_.Exception.Message)" }
+                $underlayHwnd = 0
+                try {
+                    if ($null -ne $req.underlayHwnd) {
+                        $underlayHwnd = [long]$req.underlayHwnd
+                    }
+                } catch {}
+                if ($underlayHwnd -ne 0) { Log "open: persistent output HWND=$underlayHwnd" }
 
                 $ppt = Get-PPT
                 if (-not $ppt) { $ppt = New-Object -ComObject PowerPoint.Application }
@@ -429,12 +622,46 @@ while ($true) {
                         $null = $oldSW.Add($ppt.SlideShowWindows($i))
                     }
                 } catch {}
+                # The collection may be transiently empty after the previous
+                # switch. The direct cached COM reference is still the real old
+                # slideshow and must be included in teardown/reuse decisions.
+                $cachedOldSW = Resolve-ActiveSlideShowWindow $ppt
+                if ($cachedOldSW) {
+                    $cachedOldPath = ''
+                    try { $cachedOldPath = [string]$cachedOldSW.Presentation.FullName } catch {}
+                    $alreadyListed = $false
+                    foreach ($candidateSW in $oldSW) {
+                        try {
+                            if ($candidateSW.Presentation.FullName -ieq $cachedOldPath) {
+                                $alreadyListed = $true
+                                break
+                            }
+                        } catch {}
+                    }
+                    if (-not $alreadyListed) { $null = $oldSW.Add($cachedOldSW) }
+                }
                 $oldPres = New-Object System.Collections.ArrayList
                 try {
                     for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
                         $null = $oldPres.Add($ppt.Presentations($i))
                     }
                 } catch {}
+                if ($script:activePresentation) {
+                    $cachedPresPath = ''
+                    try { $cachedPresPath = [string]$script:activePresentation.FullName } catch {}
+                    $alreadyListed = $false
+                    foreach ($candidatePres in $oldPres) {
+                        try {
+                            if ($candidatePres.FullName -ieq $cachedPresPath) {
+                                $alreadyListed = $true
+                                break
+                            }
+                        } catch {}
+                    }
+                    if (-not $alreadyListed -and -not [string]::IsNullOrEmpty($cachedPresPath)) {
+                        $null = $oldPres.Add($script:activePresentation)
+                    }
+                }
 
                 # Same-file re-open: Presentations.Open returns the existing
                 # Presentation object — don't try to close it afterward.
@@ -471,12 +698,17 @@ while ($true) {
                         if ($sw.Presentation.FullName -ieq $pres.FullName) { $existingSW = $sw; break }
                     }
                 } catch {}
+                if (-not $existingSW) {
+                    $existingSW = Resolve-ActiveSlideShowWindow $ppt ([string]$pres.FullName)
+                }
 
                 $newSW = $null
+                $createdNewSlideShow = $false
                 if ($existingSW) {
                     $newSW = $existingSW
                     try { if ([int]$newSW.View.Slide.SlideIndex -ne $startSlide) { $newSW.View.GotoSlide($startSlide) } } catch {}
                 } else {
+                    $createdNewSlideShow = $true
                     $s = $pres.SlideShowSettings
                     $s.ShowType = 1  # ppShowTypeSpeaker
                     # Never let PowerPoint open Presenter View fullscreen on the
@@ -520,6 +752,20 @@ while ($true) {
                     # parallel poller below diffs against this to find the
                     # newly-created slideshow HWND.
                     $oldSlideHwnds = [PptDaemon.Native]::FindSlideShowHwnds()
+
+                    # Start a native polling thread synchronously. Unlike a
+                    # PowerShell runspace it is guaranteed to be running before
+                    # the blocking COM Run() begins.
+                    try {
+                        $guardX = 0; $guardY = 0; $guardW = 0; $guardH = 0
+                        if ($null -ne $targetRect -and $targetRect.Count -eq 4) {
+                            $guardX = [int]$targetRect[0]; $guardY = [int]$targetRect[1]
+                            $guardW = [int]$targetRect[2]; $guardH = [int]$targetRect[3]
+                        }
+                        [PptDaemon.Native]::StartSlideShowGuard(
+                            [long[]]$oldSlideHwnds, $guardX, $guardY, $guardW, $guardH
+                        )
+                    } catch { Log "native slideshow guard start failed: $($_.Exception.Message)" }
 
                     # PARALLEL POLLER — the core of the flicker fix.
                     # Problem: Run() is a blocking COM call (~92ms). Inside it,
@@ -610,6 +856,30 @@ while ($true) {
                     $runEndTicks = [DateTime]::UtcNow.Ticks
                     Log "Run() END dur=$([int](($runEndTicks - $runStartTicks)/10000))ms"
 
+                    # PowerPoint can publish the visible screenClass shortly
+                    # after Run() returns. Keep the native guard alive through
+                    # that asynchronous tail instead of stopping it too early.
+                    $nativeGuardWait = [System.Diagnostics.Stopwatch]::StartNew()
+                    while (
+                        [PptDaemon.Native]::SlideGuardFoundHwnd -eq 0 -and
+                        $nativeGuardWait.ElapsedMilliseconds -lt 750
+                    ) {
+                        Start-Sleep -Milliseconds 1
+                    }
+                    if ([PptDaemon.Native]::SlideGuardFoundHwnd -ne 0) {
+                        Start-Sleep -Milliseconds 50
+                    }
+                    try { [PptDaemon.Native]::StopSlideShowGuard() } catch {}
+                    $nativeCaughtRel = if ([PptDaemon.Native]::SlideGuardCaughtTicks -gt 0) {
+                        [int](([PptDaemon.Native]::SlideGuardCaughtTicks - $runStartTicks)/10000)
+                    } else { -1 }
+                    Log ("native guard iter={0} foundHwnd={1} caughtAtMs={2} exStyle=0x{3:x8} err='{4}'" -f `
+                        [PptDaemon.Native]::SlideGuardIterations,
+                        [PptDaemon.Native]::SlideGuardFoundHwnd,
+                        $nativeCaughtRel,
+                        [PptDaemon.Native]::SlideGuardExStyleBefore,
+                        [PptDaemon.Native]::SlideGuardError)
+
                     # Signal poller and clean up. If it already caught the
                     # window, BeginInvoke has completed and EndInvoke returns
                     # immediately. If it's still waiting, stop flag terminates
@@ -654,6 +924,12 @@ while ($true) {
                 $newHwnd = 0
                 if ($newSW) { try { $newHwnd = [long]$newSW.HWND } catch {} }
                 if ($newHwnd -eq 0) {
+                    # A slideshow hidden by the native pre-paint guard can
+                    # temporarily report HWND=0 through COM. The guard already
+                    # owns the real native handle, so use it for the final show.
+                    try { $newHwnd = [long][PptDaemon.Native]::SlideGuardFoundHwnd } catch {}
+                }
+                if ($newHwnd -eq 0) {
                     try { $newHwnd = [long]$shared.foundHwnd } catch {}
                 }
                 if ($newHwnd -eq 0) {
@@ -665,13 +941,57 @@ while ($true) {
                     } catch {}
                 }
                 $script:activeSlideShowHwnd = $newHwnd
+                $script:activeSlideShowWindow = $newSW
+                $script:activePresentation = $pres
+                $script:activePresentationPath = [string]$pres.FullName
+                $stagingCoverHwnd = $underlayHwnd
+                foreach ($candidateSW in $oldSW) {
+                    try {
+                        if ($candidateSW.Presentation.FullName -ine $pres.FullName) {
+                            $candidateHwnd = [long]$candidateSW.HWND
+                            if ($candidateHwnd -ne 0) { $stagingCoverHwnd = $candidateHwnd }
+                        }
+                    } catch {}
+                }
                 if ($newHwnd -ne 0) {
                     Log "place slideshow HWND=$newHwnd targetRect=$($targetRect -join ',')"
                     Set-SlideShowBounds $newHwnd $targetRect
                 }
 
-                # Tear down the previous slideshow windows + presentations.
-                # The overlay covers everything, so this is invisible.
+                # Warm the new slideshow while the actual old output remains
+                # above it. A hidden HWND gets no stable DWM surface, so simply
+                # ShowWindow + DwmFlush used to expose a blank/partial first
+                # frame. Showing it behind the old PDF/PPTX lets PowerPoint paint
+                # normally; only the already-composed HWND is then raised once.
+                if ($newHwnd -ne 0) {
+                    for ($t = 0; $t -lt 3; $t++) {
+                        Start-Sleep -Milliseconds 15
+                        Set-SlideShowBounds $newHwnd $targetRect
+                        Hide-PPEditor $ppt
+                    }
+                    if ($createdNewSlideShow -and $stagingCoverHwnd -ne 0) {
+                        Place-SlideShowBehind $newHwnd $stagingCoverHwnd $targetRect
+                    }
+                    [PptDaemon.Native]::ShowWindow([System.IntPtr]$newHwnd, 4) | Out-Null
+                    if ($createdNewSlideShow -and $stagingCoverHwnd -ne 0) {
+                        Place-SlideShowBehind $newHwnd $stagingCoverHwnd $targetRect
+                    }
+                    try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                    Start-Sleep -Milliseconds 50
+                    try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                    Log "warmed slideshow behind HWND=$stagingCoverHwnd"
+                    if ($underlayHwnd -ne 0 -and $underlayHwnd -ne $newHwnd) {
+                        Lower-Window $underlayHwnd
+                        Log "lowered persistent output HWND=$underlayHwnd before slideshow promotion"
+                    }
+                    Raise-SlideShow $newHwnd $targetRect
+                    try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                    Log "promoted warmed slideshow HWND=$newHwnd"
+                }
+
+                # The new target now covers the real old output. Tear the old
+                # PowerPoint objects down underneath it so their editor/refocus
+                # events can no longer create a visible gap.
                 Log "teardown OLD: BEGIN"
                 foreach ($sw in $oldSW) {
                     try { if ($sw.Presentation.FullName -ine $pres.FullName) { $sw.View.Exit() } } catch {}
@@ -679,23 +999,26 @@ while ($true) {
                 foreach ($p in $oldPres) {
                     try { if ($p.FullName -ine $pres.FullName) { $p.Close() } } catch {}
                 }
+                Hide-PPEditor $ppt
                 Log "teardown OLD: END"
 
-                # Teardown can re-activate the editor window (focus returns to
-                # PP's main frame when the old slideshow exits). SW_HIDE again
-                # so the editor stays invisible when the overlay fades.
-                Hide-PPEditor $ppt
-
-                # PP sometimes re-asserts WS_EX_TOPMOST on the slideshow a few
-                # ms after activation (e.g. when editor loses focus). Hammer
-                # NOTOPMOST for ~120ms to outlive any re-assertion. Also re-hide
-                # the editor — teardown can re-activate it mid-loop.
-                if ($newHwnd -ne 0) {
-                    for ($t = 0; $t -lt 8; $t++) {
-                        Start-Sleep -Milliseconds 15
-                        Set-SlideShowBounds $newHwnd $targetRect
-                        Hide-PPEditor $ppt
+                # The Win32 slideshow is already created, positioned and stable.
+                # Notify the control UI now; the COM collection verification below
+                # may legitimately need several more seconds on some Office builds.
+                # Every check is deliberate: a false negative merely keeps the
+                # message a little longer, while a false positive would hide it
+                # before the slide has actually appeared.
+                $visibleSlide = 0
+                try {
+                    if (($null -ne $newSW) -and ($newHwnd -ne 0) -and
+                        [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$newHwnd) -and
+                        ($newSW.Presentation.FullName -ieq [string]$req.path)) {
+                        $visibleSlide = [int]$newSW.View.Slide.SlideIndex
                     }
+                } catch {}
+                if ($visibleSlide -gt 0) {
+                    Log "open: slideshow-visible hwnd=$newHwnd slide=$visibleSlide"
+                    Reply @{ id = $id; ok = $true; event = 'slideshow-visible'; slide = $visibleSlide }
                 }
 
                 # Wait for PP COM to reflect the new slideshow in
@@ -708,7 +1031,18 @@ while ($true) {
                 # until COM auto-recovers ~3sec later.
                 $verifyStart = [DateTime]::UtcNow
                 $verifyOk = $false
-                while ((([DateTime]::UtcNow - $verifyStart).TotalMilliseconds) -lt 4000) {
+                # Run() already gave us a validated direct SlideShowWindow.
+                # That object works while SlideShowWindows.Count temporarily
+                # lies about being zero, so do not stall every PPTX->PPTX take
+                # for four seconds waiting for the collection to catch up.
+                try {
+                    if ($newSW -and
+                        $newSW.Presentation.FullName -ieq $pres.FullName -and
+                        [int]$newSW.View.Slide.SlideIndex -gt 0) {
+                        $verifyOk = $true
+                    }
+                } catch {}
+                while (-not $verifyOk -and (([DateTime]::UtcNow - $verifyStart).TotalMilliseconds) -lt 4000) {
                     try {
                         $cnt = [int]$ppt.SlideShowWindows.Count
                         if ($cnt -gt 0) {
@@ -752,11 +1086,17 @@ while ($true) {
             }
             'close' {
                 Reset-SlideVideoClickState
-                $script:activeSlideShowHwnd = 0
                 $ppt = Get-PPT
                 if ($ppt) {
-                    try { if ($ppt.SlideShowWindows.Count -gt 0) { $ppt.SlideShowWindows(1).View.Exit() } } catch {}
-                    try { $ppt.ActivePresentation.Close() } catch {}
+                    $sw = Resolve-ActiveSlideShowWindow $ppt
+                    try { if ($sw) { $sw.View.Exit() } } catch {}
+                    try {
+                        if ($script:activePresentation) {
+                            $script:activePresentation.Close()
+                        } elseif ($ppt.ActivePresentation) {
+                            $ppt.ActivePresentation.Close()
+                        }
+                    } catch {}
                     # Visible=1 был выставлен в 'open' для Run() слайдшоу. После
                     # закрытия презентации остаётся пустой PP editor-фрейм,
                     # который виден на доп. дисплее, когда сверху ничего не
@@ -765,12 +1105,16 @@ while ($true) {
                     # Следующий 'open' сам восстановит Visible=1 для Run().
                     try { $ppt.Visible = 0 } catch {}
                 }
+                $script:activeSlideShowHwnd = 0
+                $script:activeSlideShowWindow = $null
+                $script:activePresentation = $null
+                $script:activePresentationPath = ''
                 Reply @{ id = $id; ok = $true }
             }
             'next' {
                 $ppt = Get-PPT
-                if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
-                    $sw = $ppt.SlideShowWindows(1)
+                $sw = Resolve-ActiveSlideShowWindow $ppt
+                if ($ppt -and $sw) {
                     $view = $sw.View
                     $total = 0
                     try { $total = [int]$sw.Presentation.Slides.Count } catch {}
@@ -820,8 +1164,9 @@ while ($true) {
             }
             'prev' {
                 $ppt = Get-PPT
-                if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
-                    $view = $ppt.SlideShowWindows(1).View
+                $sw = Resolve-ActiveSlideShowWindow $ppt
+                if ($ppt -and $sw) {
+                    $view = $sw.View
                     # См. комментарий к 'next'. Guard $sBefore > 1 — со слайда 1
                     # повтор не делаем.
                     $sBefore = [int]$view.Slide.SlideIndex
@@ -852,8 +1197,9 @@ while ($true) {
             }
             'goto' {
                 $ppt = Get-PPT
-                if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
-                    $view = $ppt.SlideShowWindows(1).View
+                $sw = Resolve-ActiveSlideShowWindow $ppt
+                if ($ppt -and $sw) {
+                    $view = $sw.View
                     $n = [int]$req.slide
                     $threw = $false
                     try {
@@ -878,8 +1224,9 @@ while ($true) {
             }
             'current' {
                 $ppt = Get-PPT
-                if ($ppt -and $ppt.SlideShowWindows.Count -gt 0) {
-                    Reply @{ id = $id; ok = $true; slide = [int]$ppt.SlideShowWindows(1).View.Slide.SlideIndex }
+                $sw = Resolve-ActiveSlideShowWindow $ppt
+                if ($ppt -and $sw) {
+                    Reply @{ id = $id; ok = $true; slide = [int]$sw.View.Slide.SlideIndex }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }
@@ -986,7 +1333,12 @@ while ($true) {
                     if ($exportPres -and $openedForExport) {
                         try { $exportPres.Close() } catch {}
                     }
-                    try { if ($ppt.SlideShowWindows.Count -eq 0) { $ppt.Visible = 0 } } catch {}
+                    try {
+                        # The collection can say zero during a live slideshow;
+                        # hiding PowerPoint then makes a rapid channel switch
+                        # appear black. Trust the cached direct window first.
+                        if (-not (Resolve-ActiveSlideShowWindow $ppt)) { $ppt.Visible = 0 }
+                    } catch {}
                 }
                 $exportMs = [int]([DateTime]::UtcNow - $exportStarted).TotalMilliseconds
                 Log "export: END count=$exportCount dur=${exportMs}ms"

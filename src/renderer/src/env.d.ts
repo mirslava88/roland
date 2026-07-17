@@ -57,7 +57,7 @@ interface Api {
     modes: Array<{ width: number; height: number; frequency: number }>
   }>>
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
-  openPresentationWindow(displayId?: number): Promise<void>
+  openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
   launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
@@ -65,13 +65,20 @@ interface Api {
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>
-  showOverlay(displayId?: number, freezeImageDataUrl?: string, imagePath?: string): Promise<void>
+  showOverlay(
+    displayId?: number,
+    freezeImageDataUrl?: string,
+    imagePath?: string,
+    placement?: 'cover' | 'underlay'
+  ): Promise<void>
   swapOverlayImage(imagePath: string): Promise<void>
+  pinOverlay(): Promise<void>
   snapshotSlideshow(): Promise<string | null>
   renderPdfPage(filePath: string, pageIndex: number, width: number): Promise<string | null>
   hideOverlay(): Promise<void>
-  captureAndSwapOverlay(): Promise<void>
+  captureAndSwapOverlay(): Promise<boolean>
   captureDisplay(displayId?: number): Promise<string | null>
+  capturePresentationFrame(): Promise<string | null>
   selectBackdropImage(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
   setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>

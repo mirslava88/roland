@@ -5,10 +5,13 @@ interface VideoViewerProps {
   filePath: string
   startTime?: number
   autoplay?: boolean
+  onReady?: () => void
 }
 
-export function VideoViewer({ filePath, startTime = 0, autoplay = true }: VideoViewerProps): JSX.Element {
+export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady }: VideoViewerProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
   const [isPlaying, setIsPlaying] = useState(false)
 
   useEffect(() => {
@@ -27,7 +30,10 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true }: VideoV
       const notifyAfterPaint = (): void => {
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
-            if (!disposed) window.api.sendToControl('presentation-content-ready')
+            if (!disposed) {
+              if (onReadyRef.current) onReadyRef.current()
+              else window.api.sendToControl('presentation-content-ready')
+            }
           })
         })
       }

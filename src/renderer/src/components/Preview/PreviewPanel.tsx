@@ -1,6 +1,12 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
+import {
+  beginNavigationTransition,
+  drainNavigationTransition,
+  pendingNavigationCount,
+  finishNavigationTransition
+} from '../../navigation-transition'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -18,44 +24,6 @@ const EXT_TYPE_MAP: Record<string, FileEntry['type']> = {}
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg'])
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'])
-
-// Render a single PDF page to a base64 PNG dataUrl, sized to fit display.
-// Used in handleTake to compute overlay freeze-frame matching what the
-// presentation window will render after load-content. Pixel-match between
-// freeze and actual rendered PDF makes the captureAndSwap+hide invisible.
-async function renderPdfPageToDataUrl(
-  filePath: string,
-  pageNum: number,
-  displayWidth: number,
-  displayHeight: number
-): Promise<string | null> {
-  try {
-    const ab = await window.api.readFile(filePath)
-    const doc = await pdfjsLib.getDocument({ data: ab }).promise
-    const safePage = Math.max(1, Math.min(pageNum || 1, doc.numPages))
-    const page = await doc.getPage(safePage)
-    const baseViewport = page.getViewport({ scale: 1 })
-    // Keep viewport scale at 1 to avoid the TilingPattern regression, while
-    // using pdf.js' output transform to paint vectors/text directly at the
-    // target display resolution instead of stretching a low-res bitmap.
-    const scale = Math.min(displayWidth / baseViewport.width, displayHeight / baseViewport.height)
-    const dstW = Math.round(baseViewport.width * scale)
-    const dstH = Math.round(baseViewport.height * scale)
-    const canvas = document.createElement('canvas')
-    canvas.width = dstW
-    canvas.height = dstH
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return null
-    await page.render({
-      canvasContext: ctx,
-      viewport: baseViewport,
-      transform: [scale, 0, 0, scale, 0, 0]
-    }).promise
-    return canvas.toDataURL('image/png')
-  } catch {
-    return null
-  }
-}
 
 // Read an image file (PNG/JPEG) from disk via main process and convert to
 // base64 dataUrl for embedding into overlay. Used for PPTX freeze-frame
@@ -106,12 +74,20 @@ export function PreviewPanel(): JSX.Element {
     channels, channelIds, currentChannelPage,
     liveChannel, selectedChannel, setSelectedChannel,
     setChannelFile, setChannelSlide, setChannelTotalSlides,
-    isPresentationWindowOpen, setPresentationWindowOpen,
+    setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
     clearSlidePosition,
     addChannelPage, removeChannelPage, setCurrentChannelPage,
     pptxThumbnailsMap, setOverlayState
   } = useAppStore()
+
+  const takeInFlightRef = useRef<ChannelId | null>(null)
+  const queuedTakeRef = useRef<ChannelId | null>(null)
+  const hasPowerPointStartedRef = useRef(false)
+  const [takeProgress, setTakeProgress] = useState<{
+    channelId: ChannelId
+    message: string | null
+  } | null>(null)
 
   const totalPages = Math.max(1, Math.ceil(channelIds.length / CHANNELS_PER_PAGE))
   const pageStart = currentChannelPage * CHANNELS_PER_PAGE
@@ -137,7 +113,8 @@ export function PreviewPanel(): JSX.Element {
       // external display. We use the screen-saver-level overlay (same one
       // handleTake uses for channel switches) to reliably hide everything
       // underneath while we tear down external content.
-      const needsCover = isPptx || isExternalDoc
+      const hasPinnedOverlay = useAppStore.getState().overlayState.kind !== 'hidden'
+      const needsCover = isPptx || isExternalDoc || hasPinnedOverlay
 
       if (needsCover) {
         await window.api.showOverlay(selectedDisplayId ?? undefined)
@@ -164,7 +141,6 @@ export function PreviewPanel(): JSX.Element {
         if (!useAppStore.getState().isPresentationWindowOpen) {
           await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
           setPresentationWindowOpen(true)
-          await new Promise((r) => setTimeout(r, 300))
         }
         window.api.sendToPresentation('load-content', {
           type: 'backdrop',
@@ -195,6 +171,41 @@ export function PreviewPanel(): JSX.Element {
   }
 
   const handleTake = async (ch: ChannelId): Promise<void> => {
+    const freshState = useAppStore.getState()
+    const file = freshState.channels[ch]?.file
+    if (!file) return
+    if (takeInFlightRef.current) {
+      // Keep TAKE pipelines sequential (they share PowerPoint and the output
+      // overlay), but never lose the operator's latest channel selection.
+      queuedTakeRef.current = takeInFlightRef.current === ch ? null : ch
+      return
+    }
+
+    const isSameFilePptx =
+      file.type === 'presentation' &&
+      freshState.activeFile?.type === 'presentation' &&
+      freshState.activeFile.path === file.path
+    if (freshState.activeFile?.type === 'presentation') {
+      hasPowerPointStartedRef.current = true
+    }
+    const isFirstPowerPointStart =
+      file.type === 'presentation' &&
+      !isSameFilePptx &&
+      !hasPowerPointStartedRef.current
+    const message = isFirstPowerPointStart
+      ? 'Ожидайте, презентация открывается...'
+      : file.type === 'video'
+        ? 'Ожидайте, видеоролик открывается...'
+        : null
+
+    // Close the same-tick double-click gap before React renders disabled UI.
+    // Concurrent TAKE pipelines race over PowerPoint, overlay and live state.
+    takeInFlightRef.current = ch
+    beginNavigationTransition()
+    if (message) {
+      setTakeProgress({ channelId: ch, message })
+    }
+
     // Top-level safety net: если handleTake бросит (daemon crash,
     // launchPowerPoint reject, capturePage fail), overlay оставался бы
     // opacity=1 чёрным НАВСЕГДА — юзер видит зависший чёрный экран без
@@ -205,6 +216,22 @@ export function PreviewPanel(): JSX.Element {
       console.error('[TAKE] unhandled error, forcing overlay hide:', err)
       try { await window.api.hideOverlay() } catch { /* last resort */ }
       setOverlayState({ kind: 'hidden' })
+    } finally {
+      const queuedNavigation = finishNavigationTransition()
+      if (takeInFlightRef.current === ch) {
+        takeInFlightRef.current = null
+        setTakeProgress((current) => current?.channelId === ch ? null : current)
+      }
+
+      const queued = queuedTakeRef.current
+      queuedTakeRef.current = null
+      if (queued && useAppStore.getState().channels[queued]?.file) {
+        void handleTake(queued)
+      } else if (queuedNavigation.length > 0) {
+        window.dispatchEvent(new CustomEvent('flush-take-navigation', {
+          detail: queuedNavigation
+        }))
+      }
     }
   }
 
@@ -227,6 +254,73 @@ export function PreviewPanel(): JSX.Element {
     }
     log(`BEGIN prev=${prevActiveFile?.type} next=${channel.file.type} slide=${channel.slide}`)
 
+    const FINAL_NAVIGATION_QUIET_MS = 70
+    const MAX_MATCHED_FRAME_PASSES = 6
+
+    const waitForLateNavigation = async (): Promise<boolean> => {
+      // capturePage/PrintWindow resolves just before Windows delivers some
+      // global-shortcut callbacks. Give those callbacks one short turn to join
+      // the protected queue before revealing the live output.
+      await new Promise((resolve) => setTimeout(resolve, FINAL_NAVIGATION_QUIET_MS))
+      return pendingNavigationCount() > 0
+    }
+
+    const applyQueuedNavigationUnderOverlay = async (
+      contentType: FileEntry['type']
+    ): Promise<number> => {
+      const requests = drainNavigationTransition()
+      if (requests.length === 0) return 0
+
+      const description = requests.map((request) => (
+        request.kind === 'relative' ? request.direction : `goto:${request.slide}`
+      )).join(',')
+      log(`applying queued navigation under overlay: type=${contentType} requests=${description}`)
+      if (contentType === 'pdf') {
+        for (const request of requests) {
+          // PdfViewer emits content-ready only after drawImage + two animation
+          // frames. Subscribe first so the fast native-cache path cannot beat
+          // the listener. Boundary clicks may not repaint, hence the timeout.
+          const painted = new Promise<void>((resolve) => {
+            let settled = false
+            let timer: ReturnType<typeof setTimeout> | undefined
+            let unsub = (): void => {}
+            const done = (): void => {
+              if (settled) return
+              settled = true
+              if (timer) clearTimeout(timer)
+              unsub()
+              resolve()
+            }
+            unsub = window.api.on('presentation-content-ready', done)
+            timer = setTimeout(done, 500)
+          })
+          if (request.kind === 'relative') {
+            window.api.sendToPresentation('navigate-pdf', request.direction)
+          } else {
+            window.api.sendToPresentation('navigate-slide', request.slide)
+          }
+          await painted
+        }
+      } else if (contentType === 'presentation') {
+        for (const request of requests) {
+          const result = request.kind === 'relative'
+            ? await useAppStore.getState().navigatePptx(request.direction === 'next' ? 'next' : 'prev')
+            : await useAppStore.getState().navigatePptx('goto', request.slide)
+          if (result.success && result.output) {
+            try {
+              const data = JSON.parse(result.output)
+              if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+                useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+              }
+            } catch { /* ignore malformed diagnostics */ }
+          }
+        }
+      }
+
+      log(`queued navigation applied under overlay: count=${requests.length}`)
+      return requests.length
+    }
+
     const isPptxToPptx =
       prevActiveFile?.type === 'presentation' && channel.file.type === 'presentation'
     // Same-file PPTX→PPTX: PowerPoint handles this as an instant GotoSlide on
@@ -239,64 +333,118 @@ export function PreviewPanel(): JSX.Element {
       prevActiveFile?.type === 'presentation' &&
       channel.file.type === 'presentation' &&
       prevActiveFile.path === channel.file.path
-    // Архитектурный фикс after-navigation flicker:
-    // Freeze-кадр для overlay = pre-render TARGET'a (того, куда переключаемся),
-    // а НЕ captureDisplay PREV-стейта. Это убирает видимую границу «overlay
-    // OLD freeze → overlay NEW capture» внутри opaque overlay при swap, потому
-    // что freeze И финальный captureAndSwap показывают одну и ту же страницу
-    // NEW. Юзер видит ОДНУ видимую транзицию: PREV live → overlay с NEW
-    // thumbnail (это семантически «начался свитч»). Дальше всё pixel-match
-    // и invisible.
-    //
-    // Источник thumbnail:
-    // - PPTX: pptxSlidesMap[path][slide-1] (pre-rendered через generatePptxSlides
-    //   при drag-drop в канал).
-    // - PDF: рендерим страницу через pdfjsLib в control-окне.
-    // - Else (video/image/other): fallback на captureDisplay PREV state.
-    let freezeFrame: string | null = null
-    if (!isSameFilePptx) {
-      const { selectedDisplayId, displays } = freshState
-      const targetDisplay = displays.find((d) => d.id === selectedDisplayId)
-        || displays.find((d) => !d.isPrimary)
-        || displays[0]
-      const displayScale = targetDisplay?.scaleFactor || 1
-      const dispW = Math.round((targetDisplay?.bounds.width ?? 1920) * displayScale)
-      const dispH = Math.round((targetDisplay?.bounds.height ?? 1080) * displayScale)
+    const hadPinnedOverlay = freshState.overlayState.kind !== 'hidden'
+    // PdfViewer keeps its existing canvas while loading and renders the new
+    // page offscreen before one synchronous draw. PDF→PDF therefore needs no
+    // separate HWND overlay or screenshot at all.
+    const canSwapPdfInPlace =
+      prevActiveFile?.type === 'pdf' &&
+      channel.file.type === 'pdf' &&
+      freshState.isPresentationWindowOpen
+    const useLiveLayerSwitch =
+      !isSameFilePptx &&
+      (
+        (prevActiveFile?.type === 'presentation' &&
+          (channel.file.type === 'presentation' || channel.file.type === 'pdf' || channel.file.type === 'video')) ||
+        ((prevActiveFile?.type === 'pdf' || prevActiveFile?.type === 'video') &&
+          channel.file.type === 'presentation')
+      )
+    const useBufferedElectronSwitch =
+      (prevActiveFile?.type === 'pdf' || prevActiveFile?.type === 'video') &&
+      (channel.file.type === 'pdf' || channel.file.type === 'video') &&
+      (prevActiveFile?.type === 'video' || channel.file.type === 'video')
+    const useSeamlessLayerSwitch = useLiveLayerSwitch || useBufferedElectronSwitch
 
+    if (useSeamlessLayerSwitch && hadPinnedOverlay) {
+      await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
+      log('live-layer switch: released stale pinned bitmap')
+    }
+
+    if (canSwapPdfInPlace && hadPinnedOverlay) {
+      // The pinned PDF bitmap and the underlying warm PDF window contain the
+      // same pixels. Remove the redundant layer before using the proven
+      // in-place PDF->PDF canvas swap, so that fast path stays unchanged.
+      await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
+      log('PDF-to-PDF: released matched pinned frame before in-place swap')
+    }
+    // Freeze exactly the OLD output and keep it until the NEW output is fully
+    // painted. Rendering the target PDF here used a different raster pipeline
+    // from the presentation window; the later capture swap therefore changed
+    // brightness/antialiasing a second time and looked like a flash.
+    let freezeFrame: string | null = null
+    let freezeImagePath: string | null = null
+    if (!useSeamlessLayerSwitch && !isSameFilePptx && !canSwapPdfInPlace && !hadPinnedOverlay) {
       try {
-        if (channel.file.type === 'pdf') {
-          log('freezeFrame: rendering PDF target page via pdfjs')
-          freezeFrame = await renderPdfPageToDataUrl(channel.file.path, channel.slide, dispW, dispH)
-          log(`freezeFrame: PDF render returned ${freezeFrame ? 'image' : 'null'}`)
-        } else if (channel.file.type === 'presentation') {
-          // НЕ используем pptxSlidesMap как freezeFrame — это pre-rendered
-          // thumbnail в ФИНАЛЬНОМ состоянии слайда (со всеми анимированными
-          // элементами visible). На слайдах с click-анимациями PP стартует
-          // в INITIAL state (элементы скрыты, ждут click). Overlay тогда
-          // показывал бы full→empty swap = "анимации в обратку". Лучше
-          // показать чёрный (или captureDisplay fallback) → snapshot.
-          log('freezeFrame: skipping pptxSlidesMap (would show final state on animated slides)')
+        if (freshState.isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
+          // PDF/video/image/backdrop all live in the same Chromium output
+          // window. capturePage gives an exact old frame without desktop
+          // thumbnail scaling or cursor/timer duplication.
+          log('freezeFrame: capture current presentation window BEGIN')
+          freezeFrame = await window.api.capturePresentationFrame()
+          log(`freezeFrame: current presentation window ${freezeFrame ? 'ok' : 'null'}`)
         }
       } catch (e) {
-        log(`freezeFrame: target render error ${String(e)}`)
+        log(`freezeFrame: presentation capture error ${String(e)}`)
       }
 
-      // Fallback на captureDisplay если target render не удался ИЛИ нет prev
-      // (для перехода без prev контент freeze не нужен — overlay появится
-      // чёрным).
-      if (!freezeFrame && prevActiveFile) {
+      // Capture PowerPoint directly through PrintWindow. desktopCapturer
+      // touches the live display pipeline and was itself taking 0.3–1.2s on
+      // the affected 4K PC, sometimes producing the visible blink.
+      if (!freezeFrame && prevActiveFile?.type === 'presentation') {
         try {
-          freezeFrame = await window.api.captureDisplay(selectedDisplayId ?? undefined)
-          log(`freezeFrame: captureDisplay fallback returned ${freezeFrame ? 'image' : 'null'}`)
+          log('freezeFrame: snapshot current PowerPoint BEGIN')
+          freezeImagePath = await window.api.snapshotSlideshow()
+          log(`freezeFrame: current PowerPoint ${freezeImagePath ? 'ok' : 'null'}`)
+        } catch { /* use display fallback below */ }
+      }
+
+      // External Office windows live outside Chromium. Also use this as a
+      // fallback if capturePage/PrintWindow was unavailable.
+      if (!freezeFrame && !freezeImagePath && (prevActiveFile || freshState.isPresentationWindowOpen)) {
+        try {
+          freezeFrame = await window.api.captureDisplay(freshState.selectedDisplayId ?? undefined)
+          log(`freezeFrame: current display fallback ${freezeFrame ? 'ok' : 'null'}`)
         } catch { /* fall back to black overlay */ }
       }
     }
 
-    if (!isSameFilePptx) {
-      await window.api.showOverlay(freshState.selectedDisplayId ?? undefined, freezeFrame || undefined)
-      log('overlay opaque (showOverlay returned)')
-    } else {
+    if (!useSeamlessLayerSwitch && !isSameFilePptx && !canSwapPdfInPlace) {
+      if (hadPinnedOverlay) {
+        // The overlay already contains the exact visible PowerPoint frame.
+        // Reassert its z-order without replacing the bitmap. Otherwise closing
+        // the foreground PowerPoint window can briefly expose Explorer/Start.
+        await window.api.showOverlay(
+          freshState.selectedDisplayId ?? undefined,
+          undefined,
+          undefined,
+          'cover'
+        )
+        log('existing frame retained as transition cover')
+      } else {
+        await window.api.showOverlay(
+          freshState.selectedDisplayId ?? undefined,
+          freezeFrame || undefined,
+          freezeImagePath || undefined,
+          'cover'
+        )
+        log('old frame armed as transition cover')
+      }
+      // While TAKE is protected, queued PowerPoint navigation must not treat
+      // the physical overlay as a user-facing pinned frame and hide it early.
+      setOverlayState({ kind: 'hidden' })
+    } else if (useSeamlessLayerSwitch) {
+      log(useLiveLayerSwitch
+        ? 'live-layer switch: no screenshot window; old live output remains visible'
+        : 'buffered Electron switch: old DOM layer remains visible until target paint')
+    } else if (isSameFilePptx) {
       log('same-file PPTX: skipping overlay (PP GotoSlide is instant)')
+      if (hadPinnedOverlay) {
+        setOverlayState({ kind: 'hidden' })
+      }
+    } else {
+      log('PDF-to-PDF: skipping overlay, persistent canvas owns atomic swap')
     }
 
     setActiveFile(channel.file)
@@ -333,12 +481,35 @@ export function PreviewPanel(): JSX.Element {
       // Run()'s starting slide, не учитывает queued goto's выполненные daemon
       // после Run → откат UI назад к 1 при PP уже на 2 = off-by-N рассинхрон).
       const slideBeforeLaunch = useAppStore.getState().currentSlide
-      const result = await window.api.launchPowerPoint(
-        channel.file.path,
-        freshState.selectedDisplayId ?? undefined,
-        targetSlide
+      const pptxPath = channel.file.path
+      const stopListeningForVisible = window.api.on(
+        'powerpoint-slideshow-visible',
+        (visiblePath) => {
+          if (
+            typeof visiblePath === 'string' &&
+            visiblePath.toLowerCase() === pptxPath.toLowerCase() &&
+            takeInFlightRef.current === ch
+          ) {
+            hasPowerPointStartedRef.current = true
+            setTakeProgress((current) => current?.channelId === ch ? null : current)
+          }
+        }
       )
+      let result: Awaited<ReturnType<typeof window.api.launchPowerPoint>>
+      try {
+        result = await window.api.launchPowerPoint(
+          pptxPath,
+          freshState.selectedDisplayId ?? undefined,
+          targetSlide
+        )
+      } finally {
+        stopListeningForVisible()
+      }
       log(`launchPowerPoint: END success=${result.success} error=${result.error ?? '-'}`)
+      if (result.success) {
+        hasPowerPointStartedRef.current = true
+        setTakeProgress((current) => current?.channelId === ch ? null : current)
+      }
 
       // A cold PowerPoint COM start can fail before Run() creates a slideshow.
       // Never continue into close-presentation-window + pinned overlay in that
@@ -364,6 +535,11 @@ export function PreviewPanel(): JSX.Element {
       await awaitPptxGotoChainIdle()
       log('awaitPptxGotoChainIdle: END')
 
+      // The slideshow is ready but still covered. Apply clicks made while it
+      // was opening now, so the first revealed frame is already the requested
+      // slide instead of briefly exposing the launch slide.
+      await applyQueuedNavigationUnderOverlay('presentation')
+
       // Скрываем Shell_SecondaryTrayWnd на внешнем дисплее. PP slideshow
       // идёт HWND_TOPMOST, но во время GotoSlide/Next transition-гонок
       // таскбар иногда проскакивает поверх — юзер видит его на слайде.
@@ -383,11 +559,16 @@ export function PreviewPanel(): JSX.Element {
       // не синхрон с реальностью — например после PDF→PPTX без переоткрытия,
       // window мог остаться. Не закрытый window перекрывает PP slideshow белым
       // фоном на target дисплее → юзер видит белое, anim играют невидимо.
-      log(`closing presentation window: flag=${isPresentationWindowOpen} prevType=${prevActiveFile?.type}`)
-      if (prevActiveFile?.type !== 'presentation') {
+      // A fullscreen Electron window stays above PowerPoint on this Windows
+      // build even after SetWindowPos(HWND_TOP) raises the slideshow. Park the
+      // Electron window with native opacity=0 only after PowerPoint is fully
+      // composed and while the transition overlay is still opaque. Unlike
+      // BrowserWindow.hide(), this keeps its renderer/GPU surface warm, so the
+      // next PPTX→PDF reveal remains fast.
+      if (useAppStore.getState().isPresentationWindowOpen && !useLiveLayerSwitch) {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
-        log('presentation window closed')
+        log('presentation output parked at opacity=0 under ready PowerPoint')
       }
       if (result.success && result.output) {
         try {
@@ -403,49 +584,40 @@ export function PreviewPanel(): JSX.Element {
           }
         } catch { /* ignore */ }
       }
-      // Same-file goto: если оверлей уже в pinned-pptx (висит с предыдущего
-      // переключения), обновить его snapshot на новый слайд. PP уже выполнил
-      // GotoSlide внутри launchPowerPoint (daemon handles same-file как goto
-      // без teardown). Без этого оверлей оставался бы со старым кадром.
-      if (isSameFilePptx) {
-        const cur = useAppStore.getState().overlayState
-        if (cur.kind === 'pinned-pptx') {
-          log('same-file PPTX + pinned overlay: refreshing snapshot')
-          const snapPath = await window.api.snapshotSlideshow()
-          if (snapPath) {
-            await window.api.swapOverlayImage(snapPath)
-            setOverlayState({ kind: 'pinned-pptx', pptxPath: channel.file.path })
-          }
-        }
+      // PowerPoint has already reported a positioned, visible slideshow and
+      // the daemon flushed DWM before replying. Reveal that live window
+      // directly. A target PrintWindow snapshot added 1–2.6 seconds and then
+      // introduced another bitmap-to-live composition boundary (the flash).
+      for (let pass = 1; pass <= MAX_MATCHED_FRAME_PASSES; pass++) {
+        await applyQueuedNavigationUnderOverlay('presentation')
+        if (!(await waitForLateNavigation())) break
+        log('navigation arrived before PowerPoint reveal; applying under old frame')
       }
-      if (!isSameFilePptx) {
-        // Persistent overlay: снимок живого slideshow PP через PrintWindow.
-        // Подменяем последний кадр оверлея на этот снимок, НО оверлей НЕ
-        // скрываем — остаётся висеть pixel-perfect поверх живого PP. PP
-        // работает под ним невидимо. Оверлей скроется только когда юзер
-        // нажмёт next/prev/goto — в этот момент PP начнёт играть свой
-        // slide-transition, и DWM-гонка на hide попадёт внутрь анимации
-        // (200–500мс) → визуально неразличима.
-        log('snapshotSlideshow: BEGIN')
-        const snapPath = await window.api.snapshotSlideshow()
-        log(`snapshotSlideshow: END path=${snapPath ? 'ok' : 'null'}`)
-        if (snapPath) {
-          await window.api.swapOverlayImage(snapPath)
-          log('swap overlay → live PP snapshot')
-        }
-
-        // Keeping the snapshot pinned is only needed while switching between
-        // two different PPTX files. On a first/non-PPTX → PPTX take, reveal the
-        // live slideshow immediately. Most importantly, never pin a black
-        // overlay when PrintWindow could not obtain a valid cold-start frame.
-        if (isPptxToPptx && snapPath) {
-          setOverlayState({ kind: 'pinned-pptx', pptxPath: channel.file.path })
-          log('overlay pinned for pptx→pptx switch')
+      const shouldPinPowerPointTarget =
+        !useSeamlessLayerSwitch &&
+        (prevActiveFile?.type === 'pdf' ||
+          prevActiveFile?.type === 'video' ||
+          (isPptxToPptx && (!isSameFilePptx || hadPinnedOverlay)))
+      if (shouldPinPowerPointTarget) {
+        log('target snapshot: PowerPoint BEGIN')
+        const targetSnapshot = await window.api.snapshotSlideshow()
+        log(`target snapshot: PowerPoint END path=${targetSnapshot ? 'ok' : 'null'}`)
+        if (targetSnapshot) {
+          await window.api.swapOverlayImage(targetSnapshot)
+          await window.api.pinOverlay()
+          setOverlayState({ kind: 'pinned-pptx', pptxPath })
+          log('atomic target swap complete: PowerPoint frame pinned until navigation')
         } else {
           await window.api.hideOverlay()
           setOverlayState({ kind: 'hidden' })
-          log(`overlay hidden after PPTX take (pptxToPptx=${isPptxToPptx} snapshot=${snapPath ? 'ok' : 'null'})`)
+          log('target snapshot unavailable: live PowerPoint revealed')
         }
+      } else {
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        log(useLiveLayerSwitch
+          ? 'live-layer switch complete: warmed PowerPoint promoted once'
+          : 'direct reveal: live PowerPoint ready')
       }
       // Генерим превью/слайды ПОСЛЕ hideOverlay. Эти вызовы спавнят отдельный
       // powerpoint-control.ps1 процесс, который делает $ppt.WindowState=2 +
@@ -459,7 +631,6 @@ export function PreviewPanel(): JSX.Element {
           useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file!.path]: thumbResult.thumbnails } })
         }
       })
-      const pptxPath = channel.file.path
       const { pptxSlidesMap: existingSlides } = useAppStore.getState()
       if (!existingSlides[pptxPath]) {
         window.api.generatePptxSlides(pptxPath).then((slidesResult) => {
@@ -475,9 +646,16 @@ export function PreviewPanel(): JSX.Element {
     // PDF / Video / Other — close PowerPoint and switch audio in parallel
     const parallelTasks2: Promise<unknown>[] = []
     if (prevActiveFile?.type !== channel.file.type) {
-      parallelTasks2.push(window.api.switchAudioToExternal())
+      // Audio-device enumeration can block for 5–6 seconds on this machine.
+      // It is independent from video output, so never hold the visual TAKE on
+      // it; the device switch completes in parallel after the new frame shows.
+      void window.api.switchAudioToExternal()
     }
-    if (prevActiveFile?.type === 'presentation') {
+    const deferPowerPointCloseUntilTargetReady =
+      prevActiveFile?.type === 'presentation' &&
+      (channel.file.type === 'pdf' || channel.file.type === 'video') &&
+      useLiveLayerSwitch
+    if (prevActiveFile?.type === 'presentation' && !deferPowerPointCloseUntilTargetReady) {
       parallelTasks2.push(window.api.powerpointCommand('close'))
     }
     if (parallelTasks2.length > 0) await Promise.all(parallelTasks2)
@@ -485,18 +663,18 @@ export function PreviewPanel(): JSX.Element {
     // Audio files — play in built-in music player + show backdrop
     if (channel.file.type === 'other' && channel.file.isAudio) {
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
       if (backdropImage) {
-        if (!isPresentationWindowOpen) {
+        if (!outputWindowOpen) {
           await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
           setPresentationWindowOpen(true)
-          await new Promise((r) => setTimeout(r, 300))
         }
         window.api.sendToPresentation('load-content', {
           type: 'backdrop',
           path: backdropImage,
           name: 'Backdrop'
         })
-      } else if (isPresentationWindowOpen) {
+      } else if (outputWindowOpen) {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
       }
@@ -512,18 +690,18 @@ export function PreviewPanel(): JSX.Element {
     if (channel.file.type === 'other' && !channel.file.isImage) {
       // Show backdrop on presentation window so it's visible when Word/Excel is minimized
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
+      const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
       if (backdropImage) {
-        if (!isPresentationWindowOpen) {
+        if (!outputWindowOpen) {
           await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
           setPresentationWindowOpen(true)
-          await new Promise((r) => setTimeout(r, 300))
         }
         window.api.sendToPresentation('load-content', {
           type: 'backdrop',
           path: backdropImage,
           name: 'Backdrop'
         })
-      } else if (isPresentationWindowOpen) {
+      } else if (outputWindowOpen) {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
       }
@@ -545,10 +723,12 @@ export function PreviewPanel(): JSX.Element {
       return
     }
 
-    if (!isPresentationWindowOpen) {
-      await window.api.openPresentationWindow()
+    const outputWindowWasOpen = useAppStore.getState().isPresentationWindowOpen
+    const revealWarmOutputAfterPaint =
+      !outputWindowWasOpen && prevActiveFile?.type === 'presentation'
+    if (!outputWindowWasOpen && !revealWarmOutputAfterPaint) {
+      await window.api.openPresentationWindow(useAppStore.getState().selectedDisplayId ?? undefined)
       setPresentationWindowOpen(true)
-      await new Promise((r) => setTimeout(r, 300))
     }
 
     // Subscribe BEFORE sending load-content so we can't miss the signal.
@@ -578,7 +758,7 @@ export function PreviewPanel(): JSX.Element {
       ? useAppStore.getState().videoPlayback[channel.file.path]
       : undefined
     if (savedVideo) {
-      log(`video restore: time=${savedVideo.currentTime.toFixed(3)} autoplay=${savedVideo.playing}`)
+      log(`video restore: time=${savedVideo.currentTime.toFixed(3)} savedPlaying=${savedVideo.playing} startPaused=true`)
     }
 
     window.api.sendToPresentation('load-content', {
@@ -587,21 +767,60 @@ export function PreviewPanel(): JSX.Element {
       name: channel.file.name,
       startSlide: channel.slide,
       startTime: savedVideo?.currentTime,
-      autoplay: savedVideo?.playing ?? true,
+      autoplay: channel.file.type === 'video' ? false : undefined,
       isImage: channel.file.isImage
     })
 
     await contentReady
-    // capture-and-swap перед hide: снимок presentation window через
-    // capturePage → swap overlay image в него. Теперь overlay pixels
-    // pixel-match с underlying window pixels. hide-overlay превращается
-    // в removal идентичного слоя → DWM compositor race невидим для
-    // зрителя. Для first-takes (OLD freeze ≈ NEW content) — бесшовно.
-    // Для after-navigation takes (OLD ≠ NEW) — swap сам визуально
-    // заметен на opaque overlay, это отдельная нерешённая проблема.
-    log('capture-and-swap-overlay: BEGIN')
-    await window.api.captureAndSwapOverlay()
-    log('capture-and-swap-overlay: END')
+    // The target is already painted in the persistent output window underneath
+    // the old freeze frame. Reveal it directly: capturePage→PNG→base64→decode
+    // added 300–2600ms and created a second visible image boundary of its own.
+    if (channel.file.type === 'pdf') {
+      // Apply clicks accumulated during PDF startup while the old frame still
+      // covers the output. The short quiet window catches a key delivered at
+      // the same DWM boundary without taking another 4K screenshot.
+      for (let pass = 1; pass <= MAX_MATCHED_FRAME_PASSES; pass++) {
+        await applyQueuedNavigationUnderOverlay('pdf')
+        if (!(await waitForLateNavigation())) break
+        log('navigation arrived before PDF reveal; applying under old frame')
+      }
+    }
+    if (revealWarmOutputAfterPaint) {
+      // Keep the fullscreen Electron HWND transparent while its new PDF/video
+      // is rendered. Promoting it before content-ready caused PDF→PPTX→PDF
+      // flashes above the old-frame overlay. The active z-order guard masks
+      // this single final opacity promotion.
+      await window.api.openPresentationWindow(
+        useAppStore.getState().selectedDisplayId ?? undefined,
+        deferPowerPointCloseUntilTargetReady
+      )
+      setPresentationWindowOpen(true)
+      log(deferPowerPointCloseUntilTargetReady
+        ? 'painted Electron target revealed behind live PowerPoint'
+        : 'warm output revealed only after target paint')
+    }
+    if (deferPowerPointCloseUntilTargetReady) {
+      await window.api.powerpointCommand('close')
+      log('live PowerPoint closed only after Electron target was ready underneath')
+    }
+    const shouldPinPdfTarget =
+      !useSeamlessLayerSwitch &&
+      channel.file.type === 'pdf' &&
+      (prevActiveFile?.type === 'presentation' || prevActiveFile?.type === 'video')
+    if (shouldPinPdfTarget) {
+      log('target capture: PDF BEGIN')
+      const targetSwapped = await window.api.captureAndSwapOverlay()
+      log(`target capture: PDF END swapped=${targetSwapped}`)
+      if (targetSwapped) {
+        await window.api.pinOverlay()
+        setOverlayState({ kind: 'pinned-pdf', pdfPath: channel.file.path })
+        log('atomic target swap complete: PDF frame pinned until navigation')
+        return
+      }
+    }
+    log(useSeamlessLayerSwitch
+      ? 'seamless layer switch complete: prepared target exposed once'
+      : 'direct reveal: target output ready')
     await window.api.hideOverlay()
     setOverlayState({ kind: 'hidden' })
   }
@@ -628,6 +847,8 @@ export function PreviewPanel(): JSX.Element {
               channel={channel}
               isLive={liveChannel === id}
               isSelected={selectedChannel === id}
+              isTaking={takeProgress?.channelId === id}
+              openingMessage={takeProgress?.channelId === id ? takeProgress.message : null}
               onDrop={(file) => setChannelFile(id, file)}
               onSlideChange={(s) => setChannelSlide(id, s)}
               onSetTotalSlides={(t) => setChannelTotalSlides(id, t)}
@@ -747,6 +968,8 @@ interface ChannelPanelProps {
   channel: ChannelState
   isLive: boolean
   isSelected: boolean
+  isTaking: boolean
+  openingMessage: string | null
   onDrop: (file: FileEntry) => void
   onSlideChange: (slide: number) => void
   onSetTotalSlides: (total: number) => void
@@ -757,7 +980,8 @@ interface ChannelPanelProps {
 }
 
 function ChannelPanel({
-  label, channel, isLive, isSelected, onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, onClear, pptxThumbnails
+  label, channel, isLive, isSelected, isTaking, openingMessage,
+  onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, onClear, pptxThumbnails
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [slideInput, setSlideInput] = useState('')
@@ -770,6 +994,10 @@ function ChannelPanel({
 
   const handleDragOver = (e: React.DragEvent): void => {
     e.preventDefault()
+    if (isTaking) {
+      e.dataTransfer.dropEffect = 'none'
+      return
+    }
     e.dataTransfer.dropEffect = 'copy'
     setDragOver(true)
   }
@@ -780,6 +1008,7 @@ function ChannelPanel({
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
+    if (isTaking) return
 
     let file: FileEntry | null = null
 
@@ -844,7 +1073,8 @@ function ChannelPanel({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onClick={onSelect}
-      onDoubleClick={onTake}
+      onDoubleClick={isTaking ? undefined : onTake}
+      aria-busy={isTaking}
     >
       {/* Header. min-w-0 на flex-контейнере + shrink-0 на фиксированных
           элементах (dot, label, ✕). Имя файла с flex-1 + min-w-0 + truncate
@@ -861,7 +1091,8 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onClear() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded-sm hover:bg-white/10 transition-colors"
+            disabled={isTaking}
+            className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded-sm hover:bg-white/10 transition-colors disabled:opacity-30 disabled:hover:text-gray-500 disabled:hover:bg-transparent"
             title="Убрать файл"
           >
             ✕
@@ -870,7 +1101,7 @@ function ChannelPanel({
       </div>
 
       {/* Preview area */}
-      <div className="flex-1 flex items-center justify-center overflow-hidden bg-black/40">
+      <div className="relative flex-1 flex items-center justify-center overflow-hidden bg-black/40">
         {channel.file ? (
           <SlideRenderer
             file={channel.file}
@@ -882,6 +1113,18 @@ function ChannelPanel({
           <div className="text-gray-600 text-xs text-center select-none p-4">
             <div className="text-2xl mb-2 opacity-30">📥</div>
             Перетащите файл сюда
+          </div>
+        )}
+        {isTaking && openingMessage && (
+          <div
+            className="absolute inset-0 z-10 pointer-events-none flex flex-col items-center justify-center gap-3 bg-black/75 px-4"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="h-6 w-6 rounded-full border-2 border-gray-500 border-t-white animate-spin" />
+            <span className="text-xs font-medium text-gray-100 text-center">
+              {openingMessage}
+            </span>
           </div>
         )}
       </div>
@@ -896,7 +1139,7 @@ function ChannelPanel({
             onClick={(e) => { e.stopPropagation(); if (channel.slide > 1) onSlideChange(channel.slide - 1) }}
             onDoubleClick={(e) => e.stopPropagation()}
             className="btn-icon text-[10px]"
-            disabled={channel.slide <= 1}
+            disabled={isTaking || channel.slide <= 1}
           >
             ◀
           </button>
@@ -906,6 +1149,7 @@ function ChannelPanel({
               min={1}
               max={channel.totalSlides || undefined}
               value={slideInput}
+              disabled={isTaking}
               onClick={(e) => { e.stopPropagation(); (e.target as HTMLInputElement).select() }}
               onFocus={(e) => { setSlideFocused(true); e.target.select() }}
               onDoubleClick={(e) => e.stopPropagation()}
@@ -938,7 +1182,7 @@ function ChannelPanel({
             onClick={(e) => { e.stopPropagation(); if (channel.totalSlides === 0 || channel.slide < channel.totalSlides) onSlideChange(channel.slide + 1) }}
             onDoubleClick={(e) => e.stopPropagation()}
             className="btn-icon text-[10px]"
-            disabled={channel.totalSlides > 0 && channel.slide >= channel.totalSlides}
+            disabled={isTaking || (channel.totalSlides > 0 && channel.slide >= channel.totalSlides)}
           >
             ▶
           </button>
@@ -946,7 +1190,7 @@ function ChannelPanel({
             onClick={(e) => { e.stopPropagation(); if (channel.slide > 1) onSlideChange(1) }}
             onDoubleClick={(e) => e.stopPropagation()}
             className="btn-icon text-[10px]"
-            disabled={channel.slide <= 1}
+            disabled={isTaking || channel.slide <= 1}
             title="К первому слайду"
           >
             ⏮
@@ -954,7 +1198,8 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors"
+            disabled={isTaking}
+            className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600"
           >
             В эфир
           </button>
@@ -969,7 +1214,8 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors"
+            disabled={isTaking}
+            className="bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600"
           >
             В эфир
           </button>

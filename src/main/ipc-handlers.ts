@@ -1,5 +1,5 @@
-import { BrowserWindow, ipcMain, dialog, shell, screen } from 'electron'
-import { readdir, stat, readFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
+import { app, BrowserWindow, ipcMain, dialog, shell, screen } from 'electron'
+import { readdir, stat, readFile, writeFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -21,6 +21,24 @@ const execFileAsync = promisify(execFile)
 // slide navigator); concurrent exporters race over PowerPoint and temp files.
 const pptxExportInflight = new Map<string, Promise<unknown>>()
 let pptxExportQueue: Promise<void> = Promise.resolve()
+
+// Native PDF rendering starts PowerShell + WinRT and reopens the document. On
+// slower machines that can take more than a second, so adjacent-page prefetch
+// and an interactive navigation request must share the same render job.
+const pdfPageRenderInflight = new Map<string, Promise<string | null>>()
+let nativePdfRendererDisabledReason: string | null = null
+
+function isNativePdfRendererPolicyFailure(error: unknown): boolean {
+  const details = error instanceof Error
+    ? [
+        error.message,
+        String((error as Error & { stderr?: unknown }).stderr ?? ''),
+        String((error as Error & { stdout?: unknown }).stdout ?? '')
+      ].join('\n')
+    : String(error)
+
+  return /DotSourceNotSupported/i.test(details)
+}
 
 function enqueuePptxExport<T>(key: string, work: () => Promise<T>): Promise<T> {
   const existing = pptxExportInflight.get(key) as Promise<T> | undefined
@@ -72,7 +90,71 @@ async function readPptxExportCache(directory: string): Promise<string[] | null> 
 }
 
 let originalAudioDeviceId: string | null = null
-let preferredAudioDeviceId: string | null = null // set by user in Settings
+let preferredAudioDeviceId: string | null = null
+let audioPreferenceLoaded = false
+let audioPreferenceLoadPromise: Promise<void> | null = null
+let audioMutationQueue: Promise<void> = Promise.resolve()
+let audioOperationId = 0
+
+function audioSettingsPath(): string {
+  return join(app.getPath('userData'), 'audio-settings.json')
+}
+
+async function ensureAudioPreferenceLoaded(): Promise<void> {
+  if (audioPreferenceLoaded) return
+  if (audioPreferenceLoadPromise) return audioPreferenceLoadPromise
+  audioPreferenceLoadPromise = (async () => {
+    try {
+      const raw = await readFile(audioSettingsPath(), 'utf8')
+      const parsed = JSON.parse(raw) as { preferredDeviceId?: unknown }
+      preferredAudioDeviceId = typeof parsed.preferredDeviceId === 'string' && parsed.preferredDeviceId
+        ? parsed.preferredDeviceId
+        : null
+      diagnosticLog('audio', `preference loaded configured=${Boolean(preferredAudioDeviceId)}`)
+    } catch {
+      preferredAudioDeviceId = null
+      diagnosticLog('audio', 'preference not found; current Windows default will be adopted')
+    } finally {
+      audioPreferenceLoaded = true
+      audioPreferenceLoadPromise = null
+    }
+  })()
+  return audioPreferenceLoadPromise
+}
+
+async function saveAudioPreference(): Promise<void> {
+  const path = audioSettingsPath()
+  await mkdir(app.getPath('userData'), { recursive: true })
+  await writeFile(path, JSON.stringify({ preferredDeviceId: preferredAudioDeviceId }, null, 2), 'utf8')
+}
+
+function enqueueAudioMutation<T>(label: string, work: () => Promise<T>): Promise<T> {
+  const operationId = ++audioOperationId
+  const job = audioMutationQueue.then(async () => {
+    diagnosticLog('audio', `operation=${operationId} ${label} begin`)
+    try {
+      const result = await work()
+      diagnosticLog('audio', `operation=${operationId} ${label} complete`)
+      return result
+    } catch (error) {
+      diagnosticLog('audio', `operation=${operationId} ${label} failed ${formatDiagnosticError(error)}`)
+      throw error
+    }
+  })
+  audioMutationQueue = job.then(() => undefined, () => undefined)
+  return job
+}
+
+async function setDefaultAudioDevice(deviceId: string): Promise<void> {
+  const scriptPath = resolveScript('audio-control.ps1')
+  await execFileAsync('powershell.exe', [
+    '-ExecutionPolicy', 'Bypass',
+    '-NoProfile',
+    '-File', scriptPath,
+    '-Action', 'set',
+    '-DeviceId', deviceId
+  ])
+}
 
 async function runAudioControlJson<T>(action: 'list' | 'get-default'): Promise<T> {
   const audioScriptPath = resolveScript('audio-control.ps1')
@@ -349,7 +431,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle(
     'launch-powerpoint',
-    async (_event, filePath: string, displayId?: number, startSlide?: number) => {
+    async (event, filePath: string, displayId?: number, startSlide?: number) => {
       if (process.platform === 'win32') {
         try {
           const args: Record<string, unknown> = { path: filePath }
@@ -362,13 +444,24 @@ export function registerIpcHandlers(
 
           // Electron bounds are DIP while SetWindowPos expects physical pixels.
           args.bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+          const presentationWindow = getPresentationWindow()
+          if (presentationWindow && !presentationWindow.isDestroyed()) {
+            const nativeHandle = presentationWindow.getNativeWindowHandle()
+            args.underlayHwnd = nativeHandle.length >= 8
+              ? Number(nativeHandle.readBigUInt64LE(0))
+              : nativeHandle.readUInt32LE(0)
+          }
           if (typeof startSlide === 'number' && startSlide > 1) {
             args.slide = startSlide
           }
           let res: Awaited<ReturnType<typeof pptDaemon.send>> = { id: 0, ok: false, error: 'not attempted' }
           for (let attempt = 1; attempt <= 3; attempt++) {
             console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') BEGIN attempt=${attempt} slide=${startSlide ?? 1} display=${targetDisplay.id} bounds=${JSON.stringify(args.bounds)}`)
-            res = await pptDaemon.send('open', args, 60000)
+            res = await pptDaemon.send('open', args, 60000, (progress) => {
+              if (progress.event === 'slideshow-visible' && !event.sender.isDestroyed()) {
+                event.sender.send('powerpoint-slideshow-visible', filePath)
+              }
+            })
             console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') END attempt=${attempt} ok=${res.ok} error=${res.error ?? '-'}`)
             if (res.ok) break
             if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 750))
@@ -421,40 +514,71 @@ export function registerIpcHandlers(
   // hash to keep navigation snappy.
   ipcMain.handle('render-pdf-page', async (_event, filePath: string, pageIndex: number, width: number): Promise<string | null> => {
     if (process.platform !== 'win32') return null
+    if (nativePdfRendererDisabledReason) {
+      diagnosticLog(
+        'pdf-render',
+        `native skipped page=${pageIndex + 1} reason=${nativePdfRendererDisabledReason}`
+      )
+      return null
+    }
     const started = Date.now()
     try {
       const renderWidth = Math.max(64, Math.min(16384, Math.round(width)))
       const st = await stat(filePath)
       const key = createHash('md5').update(`${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${renderWidth}`).digest('hex')
       const outPath = join(tmpdir(), `pdm-pdfpage-${key}.png`)
+
+      const existing = pdfPageRenderInflight.get(key)
+      if (existing) {
+        diagnosticLog('pdf-render', `join inflight page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
+        return await existing
+      }
+
       if (existsSync(outPath)) {
         diagnosticLog('pdf-render', `cache hit page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
         return outPath
       }
-      const script = resolveScript('render-pdf-page.ps1')
-      diagnosticLog('pdf-render', `native start page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
-      const { stdout, stderr } = await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', script,
-        '-PdfPath', filePath,
-        '-PageIndex', String(pageIndex),
-        '-OutPath', outPath,
-        '-Width', String(renderWidth)
-      ], { timeout: 15000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
-      if (!existsSync(outPath)) {
+
+      const job = (async (): Promise<string | null> => {
+        const script = resolveScript('render-pdf-page.ps1')
+        diagnosticLog('pdf-render', `native start page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
+        const { stdout, stderr } = await execFileAsync('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
+          '-File', script,
+          '-PdfPath', filePath,
+          '-PageIndex', String(pageIndex),
+          '-OutPath', outPath,
+          '-Width', String(renderWidth)
+        ], { timeout: 15000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
+        if (!existsSync(outPath)) {
+          diagnosticLog(
+            'pdf-render',
+            `native missing output page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms stdout=${String(stdout).trim()} stderr=${String(stderr).trim()}`
+          )
+          return null
+        }
         diagnosticLog(
           'pdf-render',
-          `native missing output page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms stdout=${String(stdout).trim()} stderr=${String(stderr).trim()}`
+          `native success page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms output=${String(stdout).trim()}`
         )
-        return null
+        return outPath
+      })()
+
+      pdfPageRenderInflight.set(key, job)
+      try {
+        return await job
+      } finally {
+        if (pdfPageRenderInflight.get(key) === job) pdfPageRenderInflight.delete(key)
       }
-      diagnosticLog(
-        'pdf-render',
-        `native success page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms output=${String(stdout).trim()}`
-      )
-      return outPath
     } catch (e) {
+      if (isNativePdfRendererPolicyFailure(e)) {
+        nativePdfRendererDisabledReason = 'PowerShell policy: DotSourceNotSupported'
+        diagnosticLog(
+          'pdf-render',
+          `native disabled for session after policy failure page=${pageIndex + 1}`
+        )
+      }
       diagnosticLog('pdf-render', `native failed page=${pageIndex + 1} width=${width} dur=${Date.now() - started}ms ${formatDiagnosticError(e)}`)
       return null
     }
@@ -468,6 +592,14 @@ export function registerIpcHandlers(
       const res = command === 'goto' && typeof arg === 'number'
         ? await pptDaemon.send('goto', { slide: arg })
         : await pptDaemon.send(command)
+      if (command === 'close' && !controlWindow.isDestroyed()) {
+        // PowerPoint owns the foreground while its slideshow is running. When
+        // that HWND is destroyed Windows can promote Explorer/Start unless a
+        // real operator window explicitly takes focus.
+        if (controlWindow.isMinimized()) controlWindow.restore()
+        controlWindow.focus()
+        diagnosticLog('window', 'control focused after PowerPoint close')
+      }
       console.log(`[IPC ${Date.now()}] powerpoint-command: END command=${command} ok=${res.ok} slide=${res.slide} dur=${Date.now() - t0}ms`)
       const output = JSON.stringify({
         Status: res.ok ? 'ok' : 'error',
@@ -581,15 +713,13 @@ export function registerIpcHandlers(
   ipcMain.handle('set-audio-device', async (_event, deviceId: string) => {
     if (process.platform !== 'win32') return { success: false }
     try {
-      const scriptPath = resolveScript('audio-control.ps1')
-      await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'set',
-        '-DeviceId', deviceId
-      ])
-      preferredAudioDeviceId = deviceId
+      await enqueueAudioMutation('set-preferred', async () => {
+        await ensureAudioPreferenceLoaded()
+        await setDefaultAudioDevice(deviceId)
+        preferredAudioDeviceId = deviceId
+        await saveAudioPreference()
+        diagnosticLog('audio', `preferred device saved id=${JSON.stringify(deviceId)}`)
+      })
       return { success: true }
     } catch (error: unknown) {
       return { success: false, error: String(error) }
@@ -599,46 +729,41 @@ export function registerIpcHandlers(
   ipcMain.handle('switch-audio-to-external', async () => {
     if (process.platform !== 'win32') return { success: false }
     try {
-      const scriptPath = resolveScript('audio-control.ps1')
-
-      // If user chose a preferred device in Settings, use it
-      if (preferredAudioDeviceId) {
-        // Save current default so we can restore later
+      return await enqueueAudioMutation('ensure-preferred', async () => {
+        await ensureAudioPreferenceLoaded()
         const current = await runAudioControlJson<{ id: string; name: string }>('get-default')
-        if (!originalAudioDeviceId) originalAudioDeviceId = current.id
 
-        // Already set to preferred? Skip
-        if (current.id === preferredAudioDeviceId) {
+        // First-run migration: never guess an "external" device by taking the
+        // first non-default endpoint. That made two endpoints alternate on
+        // every channel switch. Adopt and persist the user's current Windows
+        // default until they explicitly choose another output in Settings.
+        if (!preferredAudioDeviceId) {
+          preferredAudioDeviceId = current.id
+          await saveAudioPreference()
+          diagnosticLog(
+            'audio',
+            `adopted current Windows default as preferred name=${JSON.stringify(current.name)}`
+          )
           return { success: true, device: current.name }
         }
 
-        await execFileAsync('powershell.exe', [
-          '-ExecutionPolicy', 'Bypass',
-          '-NoProfile',
-          '-File', scriptPath,
-          '-Action', 'set',
-          '-DeviceId', preferredAudioDeviceId
-        ])
-        return { success: true, device: preferredAudioDeviceId }
-      }
+        if (current.id === preferredAudioDeviceId) {
+          diagnosticLog('audio', `preferred device already active name=${JSON.stringify(current.name)}`)
+          return { success: true, device: current.name }
+        }
 
-      // Auto-detect: get current default before switching
-      const current = await runAudioControlJson<{ id: string; name: string }>('get-default')
-      originalAudioDeviceId = current.id
+        const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
+        const preferred = devices.find((device) => device.id === preferredAudioDeviceId)
+        if (!preferred) {
+          diagnosticLog('audio', 'saved preferred device is disconnected; leaving Windows default unchanged')
+          return { success: false, error: 'Preferred audio device is unavailable' }
+        }
 
-      // Get all devices and find a non-default one (external)
-      const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
-      const external = devices.find((d) => !d.isDefault)
-      if (!external) return { success: false, error: 'No external audio device found' }
-
-      await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'set',
-        '-DeviceId', external.id
-      ])
-      return { success: true, device: external.name }
+        if (!originalAudioDeviceId) originalAudioDeviceId = current.id
+        await setDefaultAudioDevice(preferredAudioDeviceId)
+        diagnosticLog('audio', `switched to preferred name=${JSON.stringify(preferred.name)}`)
+        return { success: true, device: preferred.name }
+      })
     } catch (error: unknown) {
       return { success: false, error: String(error) }
     }
@@ -647,14 +772,12 @@ export function registerIpcHandlers(
   ipcMain.handle('restore-audio-device', async () => {
     if (process.platform !== 'win32' || !originalAudioDeviceId) return
     try {
-      const scriptPath = resolveScript('audio-control.ps1')
-      await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'set',
-        '-DeviceId', originalAudioDeviceId
-      ])
+      await enqueueAudioMutation('restore-original', async () => {
+        if (!originalAudioDeviceId) return
+        const restoreId = originalAudioDeviceId
+        await setDefaultAudioDevice(restoreId)
+        originalAudioDeviceId = null
+      })
     } catch { /* ignore */ }
   })
 

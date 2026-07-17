@@ -4,7 +4,5 @@ import { PresentationApp } from './PresentationApp'
 import './assets/index.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <PresentationApp />
-  </React.StrictMode>
+  <PresentationApp />
 )

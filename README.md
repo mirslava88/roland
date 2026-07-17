@@ -39,6 +39,7 @@ Presentation Display Manager — Windows-приложение для конфе�
 ## Основные возможности
 
 - **Каналы 1 / 2 / 3 / 4 и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
+- **Бесшовное переключение эфира** — PDF, PowerPoint и видео сменяют друг друга без чёрного кадра, рабочего стола и мерцания; предыдущий кадр остаётся видимым до полной готовности следующего.
 - **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint.
 - **PDF и офисные документы** — показ PDF, а также предпросмотр Word и Excel через установленный Microsoft Office.
 - **Видео без потери позиции** — play/pause, seek, громкость и продолжение с сохранённого момента после переключения между каналами в текущей сессии.
@@ -141,13 +142,16 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 
 | Слой | Реализация |
 |---|---|
-| Desktop runtime | Electron 43 |
-| Интерфейс | React 19, TypeScript 7, Tailwind CSS 4 |
-| Состояние | Zustand 5 |
-| Сборка | electron-vite 5, Vite 7, electron-builder 26, NSIS |
+| Версия приложения | 1.1.3 |
+| Desktop runtime | Electron 43.1.1 |
+| Интерфейс | React 19.2.7, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
+| Состояние | Zustand 5.0.14 |
+| Сборка | electron-vite 5.0.0, Vite 7.3.6, electron-builder 26.15.3, NSIS |
 | PowerPoint | PowerShell, COM Automation, постоянный JSON-демон |
-| PDF | pdfjs-dist и нативный Windows.Data.Pdf |
+| PDF | pdfjs-dist 6.1.200 и нативный Windows.Data.Pdf |
 | Таймер | WPF-оверлей через PowerShell |
+
+Архитектура бесшовного эфира и обязательные правила против регрессий описаны в [`docs/SEAMLESS_SWITCHING.md`](docs/SEAMLESS_SWITCHING.md).
 
 ## Безопасность и приватность
 
@@ -170,6 +174,7 @@ src/
 scripts/      PowerShell: Office COM, таймер, аудио и дисплеи
 build/        иконка, NSIS-настройки, Electron Fuses и подпись
 compliance/   документы по безопасности и сетевому поведению
+docs/         архитектурные заметки и правила против регрессий
 ```
 
 ## Лицензия
@@ -185,7 +190,7 @@ compliance/   документы по безопасности и сетевом
 
 Presentation Display Manager is a Windows desktop application for driving a projector or secondary display during conferences, talks, streams, and live events. The operator keeps the library, channel grid, and playback controls on the primary monitor while the audience sees only the selected content.
 
-Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), native PowerPoint control and slide previews, PDF and Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
+Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), seamless flicker-free switching between PDF, PowerPoint and video, native PowerPoint control and slide previews, PDF and Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
 
 Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 

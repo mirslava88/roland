@@ -26,8 +26,8 @@ const api = {
   setDisplayResolution: (deviceName: string, width: number, height: number, frequency?: number) =>
     ipcRenderer.invoke('set-display-resolution', deviceName, width, height, frequency),
 
-  openPresentationWindow: (displayId?: number) =>
-    ipcRenderer.invoke('open-presentation-window', displayId),
+  openPresentationWindow: (displayId?: number, behindPowerPoint?: boolean) =>
+    ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
 
   closePresentationWindow: () => ipcRenderer.invoke('close-presentation-window'),
 
@@ -48,11 +48,17 @@ const api = {
   readFile: (filePath: string): Promise<ArrayBuffer> =>
     ipcRenderer.invoke('read-file', filePath),
 
-  showOverlay: (displayId?: number, freezeImageDataUrl?: string, imagePath?: string) =>
-    ipcRenderer.invoke('show-overlay', displayId, freezeImageDataUrl, imagePath),
+  showOverlay: (
+    displayId?: number,
+    freezeImageDataUrl?: string,
+    imagePath?: string,
+    placement?: 'cover' | 'underlay'
+  ) => ipcRenderer.invoke('show-overlay', displayId, freezeImageDataUrl, imagePath, placement),
 
   swapOverlayImage: (imagePath: string): Promise<void> =>
     ipcRenderer.invoke('swap-overlay-image', imagePath),
+
+  pinOverlay: (): Promise<void> => ipcRenderer.invoke('pin-overlay'),
 
   snapshotSlideshow: (): Promise<string | null> =>
     ipcRenderer.invoke('snapshot-slideshow'),
@@ -62,10 +68,13 @@ const api = {
 
   hideOverlay: () => ipcRenderer.invoke('hide-overlay'),
 
-  captureAndSwapOverlay: (): Promise<void> => ipcRenderer.invoke('capture-and-swap-overlay'),
+  captureAndSwapOverlay: (): Promise<boolean> => ipcRenderer.invoke('capture-and-swap-overlay'),
 
   captureDisplay: (displayId?: number): Promise<string | null> =>
     ipcRenderer.invoke('capture-display', displayId),
+
+  capturePresentationFrame: (): Promise<string | null> =>
+    ipcRenderer.invoke('capture-presentation-frame'),
 
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
 

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol } from 'electron'
+import type { Display } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync, existsSync, createReadStream } from 'fs'
@@ -19,6 +20,103 @@ const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
 let musicPlayerWindow: BrowserWindow | null = null
 let activeContentType: string | null = null // tracks what's on the external display
 let timerActive = false // whether timer overlay is currently shown
+let presentationWindowReady = false
+let presentationWindowRequestedVisible = false
+const presentationReadyWaiters = new Set<() => void>()
+let overlayZOrderGuard: NodeJS.Timeout | null = null
+let overlayPlacement: 'cover' | 'underlay' = 'cover'
+
+function stopOverlayZOrderGuard(): void {
+  if (!overlayZOrderGuard) return
+  clearInterval(overlayZOrderGuard)
+  overlayZOrderGuard = null
+  diagnosticLog('window', 'overlay z-order guard stopped')
+}
+
+function startOverlayZOrderGuard(): void {
+  stopOverlayZOrderGuard()
+  if (!overlayWindow || overlayWindow.isDestroyed()) return
+  try {
+    // One native raise is enough now that the PowerPoint daemon catches every
+    // newly-created slideshow HWND, hides it before first paint, and explicitly
+    // removes WS_EX_TOPMOST before revealing it. Repeating moveTop every 4ms
+    // continuously invalidated DWM z-order and produced intermittent flashes.
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+    overlayWindow.moveTop()
+    diagnosticLog('window', 'overlay z-order raised once (native PowerPoint guard active)')
+  } catch { /* window can be closing */ }
+}
+
+ipcMain.on('presentation-ready', (event) => {
+  if (
+    !presentationWindow ||
+    presentationWindow.isDestroyed() ||
+    event.sender.id !== presentationWindow.webContents.id
+  ) return
+
+  presentationWindowReady = true
+  console.log(`[MAIN ${Date.now()}] presentation-window: renderer ready`)
+  for (const resolve of presentationReadyWaiters) resolve()
+  presentationReadyWaiters.clear()
+})
+
+function waitForPresentationWindowReady(timeoutMs = 5000): Promise<void> {
+  if (presentationWindowReady) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      presentationReadyWaiters.delete(finish)
+      resolve()
+    }
+    const timeout = setTimeout(() => {
+      console.log(`[MAIN ${Date.now()}] presentation-window: ready timeout (${timeoutMs}ms)`)
+      finish()
+    }, timeoutMs)
+    presentationReadyWaiters.add(finish)
+  })
+}
+
+function createManagedPresentationWindow(display: Display): BrowserWindow {
+  presentationWindowReady = false
+  const win = createPresentationWindow(display)
+  // Keep the 4K native surface alive. On the affected PC a hidden window
+  // takes 5–6 seconds to reactivate even when its renderer is already loaded.
+  win.setOpacity(0)
+  win.on('closed', () => {
+    if (presentationWindow !== win) return
+    console.log(`[MAIN ${Date.now()}] presentation-window: closed`)
+    presentationWindow = null
+    presentationWindowReady = false
+    for (const resolve of presentationReadyWaiters) resolve()
+    presentationReadyWaiters.clear()
+    controlWindow?.webContents.send('presentation-window-closed')
+  })
+  return win
+}
+
+function prewarmPresentationWindow(): void {
+  if (presentationWindow && !presentationWindow.isDestroyed()) return
+  const displays = screen.getAllDisplays()
+  const primaryDisplay = screen.getPrimaryDisplay()
+  const targetDisplay = displays.find((display) => display.id !== primaryDisplay.id) || primaryDisplay
+  console.log(`[MAIN ${Date.now()}] presentation-window: prewarm BEGIN display=${targetDisplay.id}`)
+  presentationWindow = createManagedPresentationWindow(targetDisplay)
+  void waitForPresentationWindowReady().then(() => {
+    if (
+      presentationWindow &&
+      !presentationWindow.isDestroyed() &&
+      !presentationWindowRequestedVisible
+    ) {
+      presentationWindow.setOpacity(0)
+      presentationWindow.showInactive()
+    }
+    console.log(`[MAIN ${Date.now()}] presentation-window: prewarm END ready=${presentationWindowReady}`)
+    diagnosticLog('window', `presentation prewarm ready=${presentationWindowReady} visible=${presentationWindow?.isVisible() ?? false}`)
+  })
+}
 
 function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
   if (wpfTimerProcess && !wpfTimerProcess.killed) return
@@ -123,13 +221,12 @@ function createWindows(): void {
     diagnosticLog('renderer', msg)
   })
 
-  ipcMain.handle('open-presentation-window', async (_event, displayId?: number) => {
-    if (presentationWindow && !presentationWindow.isDestroyed()) {
-      console.log(`[MAIN ${Date.now()}] open-presentation-window: already open, focusing`)
-      presentationWindow.focus()
-      return
-    }
-
+  ipcMain.handle('open-presentation-window', async (
+    _event,
+    displayId?: number,
+    behindPowerPoint = false
+  ) => {
+    presentationWindowRequestedVisible = true
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
@@ -137,59 +234,81 @@ function createWindows(): void {
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
 
-    console.log(`[MAIN ${Date.now()}] open-presentation-window: createPresentationWindow BEGIN display=${targetDisplay!.id} bounds=${targetDisplay!.bounds.width}x${targetDisplay!.bounds.height}`)
-    presentationWindow = createPresentationWindow(targetDisplay!)
-    console.log(`[MAIN ${Date.now()}] open-presentation-window: createPresentationWindow END (show=false, hidden), waiting for presentation-ready`)
-
-    // Window создано скрытым (show:false в createPresentationWindow). Renderer
-    // process активен, React монтируется, signalReady() прилетит. Главное —
-    // paint surface окна ЕЩЁ не в DWM, оно не может всплыть поверх overlay.
     const raiseOverlay = (reason: string): void => {
-      if (overlayWindow && !overlayWindow.isDestroyed() && overlayWindow.isVisible()) {
+      if (
+        overlayPlacement === 'cover' &&
+        overlayWindow &&
+        !overlayWindow.isDestroyed() &&
+        overlayWindow.isVisible()
+      ) {
         overlayWindow.setAlwaysOnTop(true, 'screen-saver')
         overlayWindow.moveTop()
         console.log(`[MAIN ${Date.now()}] open-presentation-window: overlay re-asserted topmost (${reason})`)
       }
     }
 
-    // Wait for the renderer to fully load and React to mount
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        console.log(`[MAIN ${Date.now()}] open-presentation-window: TIMEOUT (5000ms) waiting for presentation-ready`)
-        resolve()
-      }, 5000)
-      ipcMain.once('presentation-ready', () => {
-        clearTimeout(timeout)
-        console.log(`[MAIN ${Date.now()}] open-presentation-window: presentation-ready received`)
-        resolve()
-      })
-    })
+    if (!presentationWindow || presentationWindow.isDestroyed()) {
+      console.log(`[MAIN ${Date.now()}] open-presentation-window: create BEGIN display=${targetDisplay!.id}`)
+      presentationWindow = createManagedPresentationWindow(targetDisplay!)
+    } else {
+      console.log(`[MAIN ${Date.now()}] open-presentation-window: reusing warm window`)
+      const currentBounds = presentationWindow.getBounds()
+      const nextBounds = targetDisplay!.bounds
+      if (
+        currentBounds.x !== nextBounds.x || currentBounds.y !== nextBounds.y ||
+        currentBounds.width !== nextBounds.width || currentBounds.height !== nextBounds.height
+      ) {
+        presentationWindow.setBounds(nextBounds)
+      }
+    }
+
+    // Usually already resolved by startup prewarm. This remains as a safe
+    // fallback when the first TAKE is pressed immediately after app launch.
+    await waitForPresentationWindowReady()
 
     // Critical sequence: raise overlay FIRST, THEN show presentation window.
     // SW_SHOW на скрытом fullscreen window может моментально promote его
     // выше overlay в DWM, поэтому overlay должен уже лежать поверх в этот
     // момент. После show() ещё раз re-assert на всякий случай.
-    raiseOverlay('before-show')
-    presentationWindow.showInactive()
-    console.log(`[MAIN ${Date.now()}] open-presentation-window: presentationWindow.showInactive() called`)
-    raiseOverlay('after-show')
+    if (!behindPowerPoint) raiseOverlay('before-show')
+    if (!presentationWindow.isVisible()) presentationWindow.showInactive()
+    presentationWindow.setAlwaysOnTop(false)
+    presentationWindow.setOpacity(1)
+    if (behindPowerPoint) {
+      diagnosticLog('window', 'presentation output revealed behind live PowerPoint')
+    } else if (overlayPlacement === 'underlay') {
+      // The old frame is a non-topmost safety layer. Promote the already
+      // painted target once; removing the underlay later cannot expose it.
+      presentationWindow.moveTop()
+      diagnosticLog('window', 'presentation output promoted above transition underlay')
+    }
+    console.log(`[MAIN ${Date.now()}] open-presentation-window: warm surface opacity=1`)
+    diagnosticLog('window', 'presentation output opacity=1 (warm reveal)')
+    if (!behindPowerPoint) raiseOverlay('after-show')
 
-    presentationWindow.on('closed', () => {
-      console.log(`[MAIN ${Date.now()}] presentation-window: closed`)
-      presentationWindow = null
-      controlWindow?.webContents.send('presentation-window-closed')
-    })
   })
 
   ipcMain.handle('close-presentation-window', () => {
+    presentationWindowRequestedVisible = false
     if (presentationWindow && !presentationWindow.isDestroyed()) {
-      presentationWindow.close()
-      presentationWindow = null
+      // Keep the renderer, PDF cache and GPU surface warm. Destroying this
+      // window made every PPTX→PDF switch pay a 5–8 second renderer startup
+      // and introduced a new fullscreen HWND into DWM on every TAKE.
+      presentationWindow.setOpacity(0)
+      console.log(`[MAIN ${Date.now()}] presentation-window: opacity=0 (kept warm)`)
+      diagnosticLog('window', 'presentation output opacity=0 (kept warm)')
     }
   })
 
-  ipcMain.handle('show-overlay', async (_event, displayId?: number, freezeImageDataUrl?: string, imagePath?: string) => {
-    console.log(`[MAIN ${Date.now()}] show-overlay: ENTER hasDataUrl=${!!freezeImageDataUrl} hasPath=${!!imagePath}`)
+  ipcMain.handle('show-overlay', async (
+    _event,
+    displayId?: number,
+    freezeImageDataUrl?: string,
+    imagePath?: string,
+    placement: 'cover' | 'underlay' = 'cover'
+  ) => {
+    overlayPlacement = placement
+    console.log(`[MAIN ${Date.now()}] show-overlay: ENTER placement=${placement} hasDataUrl=${!!freezeImageDataUrl} hasPath=${!!imagePath}`)
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
@@ -216,6 +335,8 @@ function createWindows(): void {
     const freshlyCreated = !overlayWindow || overlayWindow.isDestroyed()
     if (freshlyCreated) {
       console.log(`[MAIN ${Date.now()}] show-overlay: creating overlay window (first time)`)
+      // An owned BrowserWindow is forced above its owner by Windows and cannot
+      // act as a true underlay, so the transition window stays independent.
       overlayWindow = createOverlayWindow(targetDisplay!)
       await new Promise<void>((resolve) => {
         const w = overlayWindow!
@@ -227,7 +348,6 @@ function createWindows(): void {
           setTimeout(finish, 2000)
         }
       })
-      overlayWindow.setAlwaysOnTop(true, 'screen-saver')
       overlayWindow.setIgnoreMouseEvents(true)
       overlayWindow.setOpacity(0)
       overlayWindow.showInactive()
@@ -249,8 +369,16 @@ function createWindows(): void {
     // visible until NEW decoded, then one paint swap. Single boundary
     // (atomic jump) vs ghost-prone crossfade — атомарный swap выбран
     // как лучший из плохих вариантов для different-content transitions.
-    const imgJs = overlayImage
+    const retainExistingFrame = keepOpaque && !overlayImage && !imagePath
+    const imgJs = retainExistingFrame
       ? `(async () => {
+           var o=document.getElementById('o');
+           if (o) o.classList.remove('hide');
+           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+           return true;
+         })()`
+      : overlayImage
+        ? `(async () => {
            var o=document.getElementById('o');
            if (o) o.classList.remove('hide');
            var f=document.getElementById('f');
@@ -261,7 +389,7 @@ function createWindows(): void {
            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
            return true;
          })()`
-      : `(async () => {
+        : `(async () => {
            var o=document.getElementById('o');
            if (o) o.classList.remove('hide');
            var f=document.getElementById('f'); f.src=''; f.style.display='none';
@@ -274,14 +402,25 @@ function createWindows(): void {
       await overlayWindow.webContents.executeJavaScript(imgJs)
     } catch { /* ignore */ }
     console.log(`[MAIN ${Date.now()}] show-overlay: executeJavaScript END dur=${Date.now() - jsT0}ms`)
-    overlayWindow.setAlwaysOnTop(true, 'screen-saver')
-    overlayWindow.moveTop()
+    if (placement === 'underlay') {
+      stopOverlayZOrderGuard()
+      overlayWindow.setAlwaysOnTop(false)
+      // It may temporarily cover the old live HWND, but it contains that exact
+      // old frame. The prepared target is then promoted above this window once
+      // and the old bitmap can no longer flash back over the new content.
+      overlayWindow.moveTop()
+      diagnosticLog('window', 'transition underlay armed below next target')
+    } else {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+      overlayWindow.moveTop()
+    }
     if (!keepOpaque) {
       overlayWindow.setOpacity(1)
       console.log(`[MAIN ${Date.now()}] overlay opacity=1 (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
     } else {
-      console.log(`[MAIN ${Date.now()}] overlay stayed opaque, image swapped atomically (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
+      console.log(`[MAIN ${Date.now()}] overlay stayed opaque, frame=${retainExistingFrame ? 'retained' : 'swapped'} (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
     }
+    if (placement === 'cover') startOverlayZOrderGuard()
     // NB: No raise-timer. Poller data (2026-04-25 session) proved PP
     // slideshow has exStyle=0x0 — it's NOT topmost — so there is no
     // z-order race to fight. Electron's HWND_TOPMOST set once is enough.
@@ -310,6 +449,28 @@ function createWindows(): void {
       if (!source || source.thumbnail.isEmpty()) return null
       return source.thumbnail.toDataURL()
     } catch {
+      return null
+    }
+  })
+
+  // Capture the Electron output window itself, not a desktop thumbnail. This
+  // gives PDF→PDF transitions an exact freeze of the currently visible PDF
+  // using the same Chromium surface that capture-and-swap-overlay captures at
+  // the end of the switch. Keeping both boundary frames in the same pixel
+  // pipeline avoids the pdf.js-vs-Windows.Data.Pdf visual jump.
+  ipcMain.handle('capture-presentation-frame', async (): Promise<string | null> => {
+    if (!presentationWindow || presentationWindow.isDestroyed()) return null
+    const t0 = Date.now()
+    try {
+      const nativeImage = await presentationWindow.webContents.capturePage()
+      if (nativeImage.isEmpty()) return null
+      const buffer = nativeImage.toPNG()
+      console.log(
+        `[MAIN ${Date.now()}] capture-presentation-frame: done (${Date.now() - t0}ms, ${buffer.length} bytes)`
+      )
+      return `data:image/png;base64,${buffer.toString('base64')}`
+    } catch (error) {
+      console.log(`[MAIN ${Date.now()}] capture-presentation-frame: ERROR ${String(error)}`)
       return null
     }
   })
@@ -346,6 +507,19 @@ function createWindows(): void {
     } catch { /* ignore */ }
   })
 
+  // A pinned target frame is the actual visible output between a cross-window
+  // TAKE and the first navigation click. Stop the aggressive 4ms z-order
+  // guard once the target bitmap is installed; the window remains TOPMOST,
+  // while other intentional overlays (notably the timer) can still surface.
+  ipcMain.handle('pin-overlay', () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return
+    overlayPlacement = 'cover'
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver')
+    overlayWindow.moveTop()
+    stopOverlayZOrderGuard()
+    diagnosticLog('window', `overlay pinned opacity=${overlayWindow.getOpacity()}`)
+  })
+
   // Перед hide-overlay: захватываем именно то что СЕЙЧАС нарисовано в
   // presentation window (webContents.capturePage force-flush paint в DirectX
   // surface перед снятием), swap overlay image в этот кадр. После этого
@@ -353,14 +527,14 @@ function createWindows(): void {
   // hide-overlay превращается в «убрать идентичный слой поверх идентичного»,
   // любая DWM compositor гонка невидима. Паттерн зеркалит PPTX→PPTX где
   // snapshotSlideshow + swap даёт pixel-match и работает бесшовно.
-  ipcMain.handle('capture-and-swap-overlay', async () => {
+  ipcMain.handle('capture-and-swap-overlay', async (): Promise<boolean> => {
     if (!presentationWindow || presentationWindow.isDestroyed()) {
       console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: no presentation window, skip`)
-      return
+      return false
     }
     if (!overlayWindow || overlayWindow.isDestroyed()) {
       console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: no overlay window, skip`)
-      return
+      return false
     }
     const t0 = Date.now()
     try {
@@ -383,22 +557,34 @@ function createWindows(): void {
       })()`
       await overlayWindow.webContents.executeJavaScript(js)
       console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: swap done (total ${Date.now() - t0}ms)`)
+      return true
     } catch (e) {
       console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: ERROR ${String(e)}`)
+      return false
     }
   })
 
   ipcMain.handle('hide-overlay', async () => {
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      // Native setOpacity(0) с 33мс DWM grace. Мгновенное скрытие
-      // overlay — единственная transition boundary. Poliмат из
-      // captureAndSwap перед hide = overlay image совпадает с
-      // содержимым presentation window → hide невидим. Без
-      // captureAndSwap (first-take с prev-hidden) видна jump от
-      // overlay к window content.
+      // Give the prepared target one DWM frame, then remove the freeze frame
+      // over a very short native-opacity ramp. An instant 1 -> 0 jump exposed
+      // a compositor boundary as a visible flash on the slower machine.
       await new Promise<void>((resolve) => setTimeout(resolve, 33))
-      console.log(`[MAIN ${Date.now()}] hide-overlay: opacity=0 (stay native-visible, after 33ms DWM grace)`)
-      overlayWindow.setOpacity(0)
+      const startOpacity = overlayWindow.getOpacity()
+      if (startOpacity > 0.01) {
+        console.log(`[MAIN ${Date.now()}] hide-overlay: native crossfade begin opacity=${startOpacity}`)
+        for (const opacity of [0.82, 0.58, 0.32, 0.12, 0]) {
+          if (!overlayWindow || overlayWindow.isDestroyed()) break
+          overlayWindow.setOpacity(opacity)
+          if (opacity > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 14))
+          }
+        }
+        console.log(`[MAIN ${Date.now()}] hide-overlay: native crossfade complete opacity=0`)
+      } else {
+        overlayWindow.setOpacity(0)
+      }
+      stopOverlayZOrderGuard()
     }
   })
 
@@ -725,40 +911,50 @@ function createWindows(): void {
 
   let globalHookEnabled = true
 
+  const navigationShortcuts: Array<{
+    accelerator: string
+    direction: 'next' | 'prev'
+  }> = [
+    { accelerator: 'PageDown', direction: 'next' },
+    { accelerator: 'PageUp', direction: 'prev' },
+    { accelerator: 'Right', direction: 'next' },
+    { accelerator: 'Left', direction: 'prev' },
+    // Some presenter remotes identify as ArrowDown/ArrowUp rather than
+    // PageDown/PageUp. Local keydown only sees those while the control window
+    // owns focus; global registration keeps the first click after an output
+    // window/PowerPoint focus transition from disappearing.
+    { accelerator: 'Down', direction: 'next' },
+    { accelerator: 'Up', direction: 'prev' }
+  ]
+
+  const registerNavigationShortcuts = (): void => {
+    for (const { accelerator, direction } of navigationShortcuts) {
+      const registered = globalShortcut.register(accelerator, () => {
+        diagnosticLog(
+          'input',
+          `global shortcut=${accelerator} direction=${direction} activeContent=${activeContentType ?? 'none'}`
+        )
+        controlWindow?.webContents.send('global-key', direction)
+      })
+      diagnosticLog('input', `register shortcut=${accelerator} success=${registered}`)
+    }
+  }
+
+  const unregisterNavigationShortcuts = (): void => {
+    for (const { accelerator } of navigationShortcuts) {
+      globalShortcut.unregister(accelerator)
+    }
+  }
+
   // Register global shortcuts by default
-  globalShortcut.register('PageDown', () => {
-    controlWindow?.webContents.send('global-key', 'next')
-  })
-  globalShortcut.register('PageUp', () => {
-    controlWindow?.webContents.send('global-key', 'prev')
-  })
-  globalShortcut.register('Right', () => {
-    controlWindow?.webContents.send('global-key', 'next')
-  })
-  globalShortcut.register('Left', () => {
-    controlWindow?.webContents.send('global-key', 'prev')
-  })
+  registerNavigationShortcuts()
 
   ipcMain.handle('toggle-global-hook', (_event, enable: boolean) => {
     if (enable && !globalHookEnabled) {
-      globalShortcut.register('PageDown', () => {
-        controlWindow?.webContents.send('global-key', 'next')
-      })
-      globalShortcut.register('PageUp', () => {
-        controlWindow?.webContents.send('global-key', 'prev')
-      })
-      globalShortcut.register('Right', () => {
-        controlWindow?.webContents.send('global-key', 'next')
-      })
-      globalShortcut.register('Left', () => {
-        controlWindow?.webContents.send('global-key', 'prev')
-      })
+      registerNavigationShortcuts()
       globalHookEnabled = true
     } else if (!enable && globalHookEnabled) {
-      globalShortcut.unregister('PageDown')
-      globalShortcut.unregister('PageUp')
-      globalShortcut.unregister('Right')
-      globalShortcut.unregister('Left')
+      unregisterNavigationShortcuts()
       globalHookEnabled = false
     }
     return globalHookEnabled
@@ -919,6 +1115,8 @@ app.whenReady().then(() => {
   }
 
   createWindows()
+  prewarmPresentationWindow()
+  pptDaemon.warmup()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

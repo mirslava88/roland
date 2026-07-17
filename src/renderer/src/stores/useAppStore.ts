@@ -79,6 +79,7 @@ export type ChannelId = string
 export type OverlayState =
   | { kind: 'hidden' }
   | { kind: 'pinned-pptx'; pptxPath: string }
+  | { kind: 'pinned-pdf'; pdfPath: string }
 
 export const CHANNELS_PER_PAGE = 4
 
@@ -141,6 +142,7 @@ interface AppState {
 
   overlayState: OverlayState
   setOverlayState: (state: OverlayState) => void
+  releasePinnedPdfOverlay: () => void
   navigatePptx: (command: 'next' | 'prev' | 'goto', arg?: number) => Promise<{ success: boolean; output?: string; error?: string }>
 
   channels: Record<ChannelId, ChannelState>
@@ -444,6 +446,14 @@ export const useAppStore = create<AppState>()(persist(
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
 
   setOverlayState: (state) => set({ overlayState: state }),
+
+  releasePinnedPdfOverlay: () => {
+    const { overlayState } = get()
+    if (overlayState.kind !== 'pinned-pdf') return
+    window.api.dbgLog('releasePinnedPdfOverlay: hiding matched target frame before PDF navigation')
+    void window.api.hideOverlay()
+    set({ overlayState: { kind: 'hidden' } })
+  },
 
   // Navigate active PPTX. Если оверлей в pinned-pptx (висит после file-switch),
   // прячем его параллельно с PP-командой — DWM-гонка на hide попадает внутрь
