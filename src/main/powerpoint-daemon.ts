@@ -195,10 +195,14 @@ class PowerPointDaemon {
       /* ignore */
     }
     await new Promise<void>((resolve) => {
+      // The PowerShell daemon restores a user-owned editor or calls Quit() on
+      // a Roland-owned PowerPoint instance before exiting. Give COM enough
+      // time to finish; the previous 500 ms timeout orphaned hidden POWERPNT.
       const killTimer = setTimeout(() => {
+        diagnosticLog('ppt-daemon', 'shutdown cleanup timeout; terminating daemon host')
         try { proc.kill() } catch { /* ignore */ }
         resolve()
-      }, 500)
+      }, 6000)
       proc.once('exit', () => {
         clearTimeout(killTimer)
         resolve()

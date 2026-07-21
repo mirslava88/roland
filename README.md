@@ -40,7 +40,7 @@ Presentation Display Manager — Windows-приложение для конфе�
 
 - **Каналы 1 / 2 / 3 / 4 и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
 - **Бесшовное переключение эфира** — PDF, PowerPoint и видео сменяют друг друга без чёрного кадра, рабочего стола и мерцания; предыдущий кадр остаётся видимым до полной готовности следующего.
-- **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint.
+- **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint. При выходе Roland закрывает только созданный им экземпляр PowerPoint, а уже открытое пользовательское окно возвращает в исходное состояние.
 - **PDF и офисные документы** — показ PDF, а также предпросмотр Word и Excel через установленный Microsoft Office.
 - **Видео без потери позиции** — play/pause, seek, громкость и продолжение с сохранённого момента после переключения между каналами в текущей сессии.
 - **Изображения и подложка** — фон показывается только после явного выбора и не переносится в следующую сессию.
@@ -146,8 +146,8 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 | Desktop runtime | Electron 43.1.1 |
 | Интерфейс | React 19.2.7, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
 | Состояние | Zustand 5.0.14 |
-| Сборка | electron-vite 5.0.0, Vite 7.3.6, electron-builder 26.15.3, NSIS |
-| PowerPoint | PowerShell, COM Automation, постоянный JSON-демон |
+| Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.21, electron-builder 26.15.3, NSIS |
+| PowerPoint | PowerShell, COM Automation, постоянный JSON-демон с восстановлением состояния Office |
 | PDF | pdfjs-dist 6.1.200 и нативный Windows.Data.Pdf |
 | Таймер | WPF-оверлей через PowerShell |
 

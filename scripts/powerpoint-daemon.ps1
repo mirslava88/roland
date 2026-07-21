@@ -41,8 +41,19 @@ public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr 
 public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
 public struct POINT { public int X; public int Y; }
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct WINDOWPLACEMENT {
+    public int length;
+    public int flags;
+    public int showCmd;
+    public POINT ptMinPosition;
+    public POINT ptMaxPosition;
+    public RECT rcNormalPosition;
+}
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool GetWindowRect(System.IntPtr hWnd, out RECT lpRect);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool GetWindowPlacement(System.IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool GetClientRect(System.IntPtr hWnd, out RECT lpRect);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -74,6 +85,20 @@ public static System.Collections.Generic.List<long> FindSlideShowHwnds() {
         if (sb.ToString() == "screenClass" && IsWindowVisible(hWnd)) {
             result.Add(hWnd.ToInt64());
         }
+        return true;
+    }, System.IntPtr.Zero);
+    return result;
+}
+
+// Application.HWND is 0 on some 32-bit Office builds when automated from a
+// 64-bit PowerShell host. Enumerate the real editor frame as a fallback so its
+// visibility and placement can still be captured/restored reliably.
+public static System.Collections.Generic.List<long> FindPowerPointEditorHwnds() {
+    var result = new System.Collections.Generic.List<long>();
+    EnumWindows((hWnd, lParam) => {
+        var sb = new System.Text.StringBuilder(64);
+        GetClassName(hWnd, sb, sb.Capacity);
+        if (sb.ToString() == "PPTFrameClass") result.Add(hWnd.ToInt64());
         return true;
     }, System.IntPtr.Zero);
     return result;
@@ -297,12 +322,34 @@ function Place-SlideShowBehind([long]$hwnd, [long]$coverHwnd, $targetRect) {
     } catch {}
 }
 
+function Get-PPEditorHwnd($ppt) {
+    $hwnd = 0
+    try { $hwnd = [long]$ppt.HWND } catch {}
+    if ($hwnd -eq 0) {
+        try { $hwnd = [long]$ppt.ActiveWindow.HWND } catch {}
+    }
+    if ($hwnd -eq 0) {
+        try {
+            $candidates = @([PptDaemon.Native]::FindPowerPointEditorHwnds())
+            foreach ($candidate in $candidates) {
+                if ([PptDaemon.Native]::IsWindowVisible([System.IntPtr]$candidate)) {
+                    $hwnd = [long]$candidate
+                }
+            }
+            if ($hwnd -eq 0 -and $candidates.Count -gt 0) {
+                $hwnd = [long]$candidates[$candidates.Count - 1]
+            }
+        } catch {}
+    }
+    return $hwnd
+}
+
 function Hide-PPEditor($ppt) {
     # SW_HIDE = 0. Application.Visible COM property stays true — Run() /
     # Presentations.Open / Slide.Export all work via internal PP pipelines
     # that don't require the editor HWND to be on screen.
     try {
-        $hwnd = [long]$ppt.HWND
+        $hwnd = Get-PPEditorHwnd $ppt
         if ($hwnd -ne 0) {
             [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, 0) | Out-Null
         }
@@ -324,6 +371,16 @@ $script:activeSlideShowWindow = $null
 $script:activePresentation = $null
 $script:activePresentationPath = ''
 $script:mediaReturnForegroundHwnd = 0
+$script:pptApplication = $null
+$script:pptSessionInitialized = $false
+$script:pptOwnedByRoland = $false
+$script:pptOriginalVisible = 0
+$script:pptOriginalWindowState = 1
+$script:pptOriginalEditorHwnd = 0
+$script:pptOriginalEditorWasVisible = $false
+$script:pptOriginalEditorRect = $null
+$script:pptRegistryWindowSnapshot = $null
+$script:managedPresentationKeys = @{}
 
 function Restore-MediaForeground {
     $hwnd = [long]$script:mediaReturnForegroundHwnd
@@ -502,9 +559,263 @@ function Invoke-SlideVideoClick($view) {
     return [PSCustomObject]@{ HasVideo = $true; Handled = $false; ForceAdvance = $false; Detail = 'auto-play' }
 }
 
+function Capture-PowerPointRegistryWindowState {
+    if ($null -ne $script:pptRegistryWindowSnapshot) { return }
+    $path = 'HKCU:\Software\Microsoft\Office\16.0\PowerPoint\Options'
+    $snapshot = @{}
+    try {
+        $key = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+        foreach ($name in @('AppMaximized', 'Top', 'Left', 'Right', 'Bottom', 'UseMonMgr')) {
+            $present = $false
+            $value = $null
+            $kind = 'DWord'
+            if ($key) {
+                $present = @($key.GetValueNames()) -contains $name
+                if ($present) {
+                    $value = $key.GetValue($name, $null, 'DoNotExpandEnvironmentNames')
+                    $kind = [string]$key.GetValueKind($name)
+                }
+            }
+            $snapshot[$name] = [PSCustomObject]@{
+                Present = $present
+                Value = $value
+                Kind = $kind
+            }
+        }
+    } catch {
+        Log "PowerPoint registry snapshot failed: $($_.Exception.Message)"
+    }
+    $script:pptRegistryWindowSnapshot = $snapshot
+}
+
+function Restore-PowerPointRegistryWindowState {
+    $snapshot = $script:pptRegistryWindowSnapshot
+    if ($null -eq $snapshot) { return }
+    $path = 'HKCU:\Software\Microsoft\Office\16.0\PowerPoint\Options'
+    try {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -Path $path -Force | Out-Null
+        }
+        foreach ($name in $snapshot.Keys) {
+            $state = $snapshot[$name]
+            if ($state.Present) {
+                New-ItemProperty -LiteralPath $path -Name $name -Value $state.Value `
+                    -PropertyType $state.Kind -Force | Out-Null
+            } else {
+                Remove-ItemProperty -LiteralPath $path -Name $name -ErrorAction SilentlyContinue
+            }
+        }
+        Log 'PowerPoint registry window state restored'
+    } catch {
+        Log "PowerPoint registry restore failed: $($_.Exception.Message)"
+    }
+}
+
+function Get-PresentationKey($presentation) {
+    if (-not $presentation) { return '' }
+    $key = ''
+    try { $key = [string]$presentation.FullName } catch {}
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        try { $key = [string]$presentation.Name } catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($key)) { return '' }
+    return $key.ToLowerInvariant()
+}
+
+function Mark-ManagedPresentation($presentation) {
+    $key = Get-PresentationKey $presentation
+    if (-not [string]::IsNullOrEmpty($key)) {
+        $script:managedPresentationKeys[$key] = $true
+        Log "managed presentation registered '$key'"
+    }
+}
+
+function Test-ManagedPresentation($presentation) {
+    $key = Get-PresentationKey $presentation
+    return (-not [string]::IsNullOrEmpty($key)) -and $script:managedPresentationKeys.ContainsKey($key)
+}
+
+function Unmark-ManagedPresentation($presentation) {
+    $key = Get-PresentationKey $presentation
+    if (-not [string]::IsNullOrEmpty($key)) {
+        $script:managedPresentationKeys.Remove($key)
+    }
+}
+
+function Close-ManagedPresentation($presentation) {
+    if (-not $presentation) { return }
+    $key = Get-PresentationKey $presentation
+    try { $presentation.Saved = -1 } catch {}
+    try { $presentation.Close() } catch { Log "managed presentation close failed: $($_.Exception.Message)" }
+    if (-not [string]::IsNullOrEmpty($key)) { $script:managedPresentationKeys.Remove($key) }
+}
+
+function Reset-PowerPointSessionTracking {
+    $script:pptApplication = $null
+    $script:pptSessionInitialized = $false
+    $script:pptOwnedByRoland = $false
+    $script:pptOriginalVisible = 0
+    $script:pptOriginalWindowState = 1
+    $script:pptOriginalEditorHwnd = 0
+    $script:pptOriginalEditorWasVisible = $false
+    $script:pptOriginalEditorRect = $null
+    $script:pptRegistryWindowSnapshot = $null
+    $script:managedPresentationKeys = @{}
+}
+
+function Initialize-PowerPointSession($ppt, [bool]$ownedByRoland) {
+    if ($script:pptSessionInitialized) { return }
+    Capture-PowerPointRegistryWindowState
+    $script:pptApplication = $ppt
+    $script:pptSessionInitialized = $true
+    $script:pptOwnedByRoland = $ownedByRoland
+
+    if (-not $ownedByRoland) {
+        try { $script:pptOriginalVisible = [int]$ppt.Visible } catch {}
+        try { $script:pptOriginalWindowState = [int]$ppt.WindowState } catch {}
+        try { $script:pptOriginalEditorHwnd = Get-PPEditorHwnd $ppt } catch {}
+        $hwnd = [long]$script:pptOriginalEditorHwnd
+        if ($hwnd -ne 0) {
+            try {
+                $script:pptOriginalEditorWasVisible = [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$hwnd)
+                $placement = New-Object PptDaemon.Native+WINDOWPLACEMENT
+                $placement.length = [System.Runtime.InteropServices.Marshal]::SizeOf($placement)
+                if ([PptDaemon.Native]::GetWindowPlacement([System.IntPtr]$hwnd, [ref]$placement)) {
+                    $r = $placement.rcNormalPosition
+                    $left = [int]$r.Left; $top = [int]$r.Top
+                    $right = [int]$r.Right; $bottom = [int]$r.Bottom
+                    if ($right -gt $left -and $bottom -gt $top) {
+                        $script:pptOriginalEditorRect = @($left, $top, ($right - $left), ($bottom - $top))
+                    }
+                }
+                if ($null -eq $script:pptOriginalEditorRect) {
+                    $r = New-Object PptDaemon.Native+RECT
+                    if ([PptDaemon.Native]::GetWindowRect([System.IntPtr]$hwnd, [ref]$r) -and
+                        [int]$r.Right -gt [int]$r.Left -and [int]$r.Bottom -gt [int]$r.Top) {
+                        $left = [int]$r.Left; $top = [int]$r.Top
+                        $script:pptOriginalEditorRect = @(
+                            $left, $top, ([int]$r.Right - $left), ([int]$r.Bottom - $top)
+                        )
+                    }
+                }
+            } catch { Log "PowerPoint editor placement capture failed: $($_.Exception.Message)" }
+        }
+    }
+    $rectText = if ($null -ne $script:pptOriginalEditorRect) { $script:pptOriginalEditorRect -join ',' } else { '-' }
+    Log ("PowerPoint session initialized owned={0} visible={1} state={2} hwnd={3} rect={4}" -f `
+        $ownedByRoland, $script:pptOriginalVisible, $script:pptOriginalWindowState,
+        $script:pptOriginalEditorHwnd, $rectText)
+}
+
 function Get-PPT {
-    try { return [System.Runtime.InteropServices.Marshal]::GetActiveObject('PowerPoint.Application') }
-    catch { return $null }
+    if ($script:pptApplication) {
+        try {
+            $null = [int]$script:pptApplication.Presentations.Count
+            return $script:pptApplication
+        } catch {
+            Log 'cached PowerPoint COM object is no longer valid'
+            Restore-PowerPointRegistryWindowState
+            Reset-PowerPointSessionTracking
+        }
+    }
+    try {
+        $ppt = [System.Runtime.InteropServices.Marshal]::GetActiveObject('PowerPoint.Application')
+        Initialize-PowerPointSession $ppt $false
+        return $ppt
+    } catch { return $null }
+}
+
+function Get-OrCreatePPT {
+    $ppt = Get-PPT
+    if ($ppt) { return $ppt }
+    $ppt = New-Object -ComObject PowerPoint.Application
+    Initialize-PowerPointSession $ppt $true
+    return $ppt
+}
+
+function Restore-PowerPointSession {
+    if (-not $script:pptSessionInitialized) { return }
+    Log "PowerPoint session cleanup BEGIN owned=$($script:pptOwnedByRoland)"
+    Reset-SlideVideoClickState
+    $ppt = $script:pptApplication
+
+    try {
+        $sw = Resolve-ActiveSlideShowWindow $ppt
+        if ($sw) { try { $sw.View.Exit() } catch {} }
+    } catch {}
+    $script:activeSlideShowHwnd = 0
+    $script:activeSlideShowWindow = $null
+    $script:activePresentation = $null
+    $script:activePresentationPath = ''
+
+    if ($ppt) {
+        if ($script:pptOwnedByRoland) {
+            try {
+                for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
+                    $presentation = $ppt.Presentations($i)
+                    try { $presentation.Saved = -1 } catch {}
+                    try { $presentation.Close() } catch {}
+                }
+            } catch {}
+            # PowerPoint persists WindowState/placement during Quit(). Restore
+            # the registry snapshot immediately afterwards so the next normal
+            # user launch cannot inherit Roland's minimized/off-screen editor.
+            try { $ppt.Quit() } catch { Log "PowerPoint Quit failed: $($_.Exception.Message)" }
+            Start-Sleep -Milliseconds 150
+            Log 'Roland-owned PowerPoint instance quit'
+        } else {
+            try {
+                for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
+                    $presentation = $ppt.Presentations($i)
+                    if (Test-ManagedPresentation $presentation) {
+                        Close-ManagedPresentation $presentation
+                    }
+                }
+            } catch {}
+
+            $shouldBeVisible = ($script:pptOriginalVisible -ne 0) -or $script:pptOriginalEditorWasVisible
+            if ($shouldBeVisible) {
+                try { $ppt.Visible = -1 } catch {}
+                $hwnd = 0
+                try { $hwnd = Get-PPEditorHwnd $ppt } catch {}
+                if ($hwnd -eq 0) { $hwnd = [long]$script:pptOriginalEditorHwnd }
+                if ($hwnd -ne 0 -and $null -ne $script:pptOriginalEditorRect) {
+                    try { $ppt.WindowState = 1 } catch {}
+                    $r = $script:pptOriginalEditorRect
+                    try {
+                        [PptDaemon.Native]::SetWindowPos(
+                            [System.IntPtr]$hwnd, [System.IntPtr]-2,
+                            [int]$r[0], [int]$r[1], [int]$r[2], [int]$r[3], 0x10
+                        ) | Out-Null
+                    } catch {}
+                }
+                try { $ppt.WindowState = [int]$script:pptOriginalWindowState } catch {}
+                if ($hwnd -ne 0) {
+                    $showCommand = switch ([int]$script:pptOriginalWindowState) {
+                        2 { 2 } # SW_SHOWMINIMIZED
+                        3 { 3 } # SW_SHOWMAXIMIZED
+                        default { 4 } # SW_SHOWNOACTIVATE
+                    }
+                    try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, $showCommand) | Out-Null } catch {}
+                }
+            } else {
+                $hwnd = 0
+                try { $hwnd = Get-PPEditorHwnd $ppt } catch {}
+                if ($hwnd -ne 0) {
+                    try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, 0) | Out-Null } catch {}
+                }
+                try { $ppt.Visible = 0 } catch {}
+            }
+            Log 'user-owned PowerPoint editor state restored'
+        }
+    }
+
+    Restore-PowerPointRegistryWindowState
+    try {
+        if ($ppt) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) }
+    } catch {}
+    Reset-PowerPointSessionTracking
+    Log 'PowerPoint session cleanup END'
 }
 
 function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
@@ -595,8 +906,7 @@ while ($true) {
                 } catch {}
                 if ($underlayHwnd -ne 0) { Log "open: persistent output HWND=$underlayHwnd" }
 
-                $ppt = Get-PPT
-                if (-not $ppt) { $ppt = New-Object -ComObject PowerPoint.Application }
+                $ppt = Get-OrCreatePPT
                 # Hint PP to create its editor window already minimized, BEFORE
                 # making it visible. The pair `WindowState=2 → Visible=1` gives
                 # PP the chance to skip the "show at normal size" stage.
@@ -681,6 +991,7 @@ while ($true) {
                     } catch {
                         $pres = $ppt.Presentations.Open($req.path)
                     }
+                    Mark-ManagedPresentation $pres
                 }
 
                 $count = $pres.Slides.Count
@@ -997,7 +1308,11 @@ while ($true) {
                     try { if ($sw.Presentation.FullName -ine $pres.FullName) { $sw.View.Exit() } } catch {}
                 }
                 foreach ($p in $oldPres) {
-                    try { if ($p.FullName -ine $pres.FullName) { $p.Close() } } catch {}
+                    try {
+                        if ($p.FullName -ine $pres.FullName -and (Test-ManagedPresentation $p)) {
+                            Close-ManagedPresentation $p
+                        }
+                    } catch {}
                 }
                 Hide-PPEditor $ppt
                 Log "teardown OLD: END"
@@ -1092,9 +1407,11 @@ while ($true) {
                     try { if ($sw) { $sw.View.Exit() } } catch {}
                     try {
                         if ($script:activePresentation) {
-                            $script:activePresentation.Close()
-                        } elseif ($ppt.ActivePresentation) {
-                            $ppt.ActivePresentation.Close()
+                            if (Test-ManagedPresentation $script:activePresentation) {
+                                Close-ManagedPresentation $script:activePresentation
+                            }
+                        } elseif ($ppt.ActivePresentation -and (Test-ManagedPresentation $ppt.ActivePresentation)) {
+                            Close-ManagedPresentation $ppt.ActivePresentation
                         }
                     } catch {}
                     # Visible=1 был выставлен в 'open' для Run() слайдшоу. После
@@ -1256,8 +1573,7 @@ while ($true) {
                 }
                 New-Item -ItemType Directory -Path $outputDir -Force -ErrorAction Stop | Out-Null
 
-                $ppt = Get-PPT
-                if (-not $ppt) { $ppt = New-Object -ComObject PowerPoint.Application }
+                $ppt = Get-OrCreatePPT
                 try { $ppt.WindowState = 2 } catch {}
                 $ppt.Visible = -1
                 Hide-PPEditor $ppt
@@ -1391,6 +1707,7 @@ while ($true) {
                 }
             }
             'exit' {
+                try { Restore-PowerPointSession } catch { Log "PowerPoint exit cleanup failed: $($_.Exception.Message)" }
                 Reply @{ id = $id; ok = $true }
                 exit 0
             }
@@ -1403,3 +1720,8 @@ while ($true) {
         Reply @{ id = $id; ok = $false; error = $_.Exception.Message }
     }
 }
+
+# stdin can close without an explicit exit command when the Electron main
+# process is terminated during shutdown. Perform the same ownership-aware
+# cleanup on EOF so a hidden PowerPoint process is never orphaned.
+try { Restore-PowerPointSession } catch { Log "PowerPoint EOF cleanup failed: $($_.Exception.Message)" }

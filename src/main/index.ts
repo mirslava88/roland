@@ -25,6 +25,8 @@ let presentationWindowRequestedVisible = false
 const presentationReadyWaiters = new Set<() => void>()
 let overlayZOrderGuard: NodeJS.Timeout | null = null
 let overlayPlacement: 'cover' | 'underlay' = 'cover'
+let quitCleanupStarted = false
+let quitCleanupComplete = false
 
 function stopOverlayZOrderGuard(): void {
   if (!overlayZOrderGuard) return
@@ -1136,6 +1138,20 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (quitCleanupComplete) return
+  event.preventDefault()
+  if (quitCleanupStarted) return
+
+  quitCleanupStarted = true
+  diagnosticLog('shutdown', 'waiting for PowerPoint ownership cleanup')
   void pptDaemon.shutdown()
+    .catch((error) => {
+      diagnosticLog('shutdown', `PowerPoint cleanup failed: ${formatDiagnosticError(error)}`)
+    })
+    .finally(() => {
+      quitCleanupComplete = true
+      diagnosticLog('shutdown', 'PowerPoint ownership cleanup complete')
+      app.quit()
+    })
 })
