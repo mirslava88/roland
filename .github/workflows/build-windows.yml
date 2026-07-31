@@ -48,19 +48,19 @@ jobs:
       - name: Pack app directory (no installer yet)
         run: npx electron-builder --win --dir --publish never
 
-      # electron-builder 26 + Electron 43 force EnableEmbeddedAsarIntegrityValidation
-      # ON and embed a MISMATCHED hash -> FATAL "Integrity check failed" on launch.
-      # Disable it on the packed exe (sticks once electron-builder is done), then
-      # build the installer from the fixed dir via --prepackaged.
-      - name: Disable broken asar-integrity fuses
+      - name: Verify hardened Electron fuses
         shell: pwsh
         run: |
-          $exe = "dist/win-unpacked/Presentation Display Manager.exe"
-          npx --yes @electron/fuses write --app "$exe" EnableEmbeddedAsarIntegrityValidation=off OnlyLoadAppFromAsar=off
-          Write-Host "--- fuse state after flip ---"
-          npx --yes @electron/fuses read --app "$exe"
+          $fuses = npx --yes @electron/fuses read --app "dist/win-unpacked/Presentation Display Manager.exe" | Out-String
+          Write-Host $fuses
+          if (
+            $fuses -notmatch 'EnableEmbeddedAsarIntegrityValidation is Enabled' -or
+            $fuses -notmatch 'OnlyLoadAppFromAsar is Enabled'
+          ) {
+            throw "Required ASAR security fuses are not enabled"
+          }
 
-      - name: Build NSIS installer from fixed dir
+      - name: Build NSIS installer from prepackaged app
         run: npx electron-builder --win --prepackaged "dist/win-unpacked" --publish never
 
       - name: Upload installer as workflow artifact

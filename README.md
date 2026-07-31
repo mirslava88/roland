@@ -15,7 +15,7 @@
 [![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?label=загрузки&logo=github)](https://github.com/mirslava88/roland/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
-![Electron](https://img.shields.io/badge/Electron-43.1.1-47848f?logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-43.2.0-47848f?logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=111827)
 ![TypeScript](https://img.shields.io/badge/TypeScript-7-3178c6?logo=typescript&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-7-646cff?logo=vite&logoColor=white)
@@ -41,7 +41,7 @@ Presentation Display Manager — Windows-приложение для конфе�
 - **Каналы 1 / 2 / 3 / 4 и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
 - **Бесшовное переключение эфира** — PDF, PowerPoint и видео сменяют друг друга без чёрного кадра, рабочего стола и мерцания; предыдущий кадр остаётся видимым до полной готовности следующего.
 - **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint. При выходе Roland закрывает только созданный им экземпляр PowerPoint, а уже открытое пользовательское окно возвращает в исходное состояние.
-- **PDF и офисные документы** — показ PDF, а также предпросмотр Word и Excel через установленный Microsoft Office.
+- **PDF и офисные документы** — быстрый показ тяжёлых PDF, прогрессивная загрузка миниатюр и кэширование кадров; комбинированный рендер через Windows.Data.Pdf, PDFium и резервный pdf.js автоматически обходит проблемные страницы. Также доступен предпросмотр Word и Excel через установленный Microsoft Office.
 - **Видео без потери позиции** — play/pause, seek, громкость и продолжение с сохранённого момента после переключения между каналами в текущей сессии.
 - **Изображения и подложка** — фон показывается только после явного выбора и не переносится в следующую сессию.
 - **Таймер поверх эфира** — перетаскивание, масштабирование, прозрачность текста, звуковые сигналы и отдельные цвета для основного времени, последней минуты и перелимита.
@@ -98,7 +98,7 @@ PDF, изображения, видео, музыка и таймер не тр�
 Таймер открывается поверх контента на внешнем дисплее и не мешает управлению презентацией. Доступны:
 
 - длительность и быстрые поправки `±1`, `±5`, `±10` минут;
-- перетаскивание мышью и масштабирование колёсиком;
+- перетаскивание мышью и масштабирование колёсиком до 8×;
 - прозрачность текста;
 - **цвет основного таймера**;
 - **цвет за одну минуту до окончания**;
@@ -120,7 +120,7 @@ PDF, изображения, видео, музыка и таймер не тр�
 
 ## Разработка и сборка
 
-Понадобятся Node.js 22+ и Windows PowerShell.
+Понадобятся Node.js 22.13+ (или 24+) и Windows PowerShell.
 
 ```powershell
 npm ci
@@ -142,13 +142,13 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 
 | Слой | Реализация |
 |---|---|
-| Версия приложения | 1.1.3 |
-| Desktop runtime | Electron 43.1.1 |
-| Интерфейс | React 19.2.7, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
+| Версия приложения | 1.1.4 |
+| Desktop runtime | Electron 43.2.0 |
+| Интерфейс | React 19.2.8, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
 | Состояние | Zustand 5.0.14 |
-| Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.21, electron-builder 26.15.3, NSIS |
+| Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.25, electron-builder 26.15.3, NSIS |
 | PowerPoint | PowerShell, COM Automation, постоянный JSON-демон с восстановлением состояния Office |
-| PDF | pdfjs-dist 6.1.200 и нативный Windows.Data.Pdf |
+| PDF | PDFium WASM (@hyzyla/pdfium 2.1.13), pdfjs-dist 6.2.108 и Windows.Data.Pdf |
 | Таймер | WPF-оверлей через PowerShell |
 
 Архитектура бесшовного эфира и обязательные правила против регрессий описаны в [`docs/SEAMLESS_SWITCHING.md`](docs/SEAMLESS_SWITCHING.md).
@@ -158,11 +158,11 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 - renderer работает с `sandbox`, `contextIsolation`, `webSecurity` и Content Security Policy;
 - локальные файлы передаются через ограниченный протокол `pdm-media://`, а не открываются напрямую через `file://`;
 - переходы, разрешения и допустимые пути проверяются в main process;
-- Electron Fuses отключают `RunAsNode`, `NODE_OPTIONS` и CLI Inspector; шифрование cookies включено;
+- Electron Fuses отключают `RunAsNode`, `NODE_OPTIONS` и CLI Inspector; шифрование cookies, проверка целостности ASAR и загрузка приложения только из ASAR включены;
 - приложение не требует учётной записи и работает офлайн;
 - CI не хранит сертификаты подписи в репозитории.
 
-Технические материалы находятся в папке [`compliance/`](compliance/).
+Технические материалы находятся в папке [`compliance/`](compliance/), а уведомления о лицензиях встроенных компонентов — в [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Структура проекта
 
@@ -190,7 +190,7 @@ docs/         архитектурные заметки и правила про
 
 Presentation Display Manager is a Windows desktop application for driving a projector or secondary display during conferences, talks, streams, and live events. The operator keeps the library, channel grid, and playback controls on the primary monitor while the audience sees only the selected content.
 
-Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), seamless flicker-free switching between PDF, PowerPoint and video, native PowerPoint control and slide previews, PDF and Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
+Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), seamless flicker-free switching between PDF, PowerPoint and video, native PowerPoint control and slide previews, fast rendering and progressive thumbnails for complex PDFs, Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
 
 Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 

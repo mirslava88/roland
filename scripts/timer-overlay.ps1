@@ -98,7 +98,7 @@ public class TimerOverlay
         {
             scale += e.Delta > 0 ? 0.1 : -0.1;
             if (scale < 0.5) scale = 0.5;
-            if (scale > 4.0) scale = 4.0;
+            if (scale > 8.0) scale = 8.0;
             text.FontSize = Math.Round(48 * scale);
             border.Padding = new Thickness(
                 Math.Round(24 * scale), Math.Round(8 * scale),

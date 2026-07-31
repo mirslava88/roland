@@ -1106,6 +1106,7 @@ function ChannelPanel({
           <SlideRenderer
             file={channel.file}
             slideNum={channel.slide}
+            isLive={isLive}
             pptxThumbnails={pptxThumbnails}
             onTotalSlides={onSetTotalSlides}
           />
@@ -1225,25 +1226,28 @@ function ChannelPanel({
   )
 }
 
-function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
+function SlideRenderer({ file, slideNum, isLive, pptxThumbnails, onTotalSlides }: {
   file: FileEntry
   slideNum: number
+  isLive: boolean
   pptxThumbnails: string[]
   onTotalSlides: (total: number) => void
 }): JSX.Element {
-  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} />
+  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} isLive={isLive} onTotalSlides={onTotalSlides} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
   if (file.type === 'video') return <VideoPreview file={file} />
   if (file.type === 'other') return <OtherPreview file={file} />
   return <div className="text-gray-500 text-xs">Unsupported</div>
 }
 
-function PdfPreview({ file, currentSlide, onTotalSlides }: {
-  file: FileEntry; currentSlide: number; onTotalSlides: (t: number) => void
+function PdfPreview({ file, currentSlide, isLive, onTotalSlides }: {
+  file: FileEntry; currentSlide: number; isLive: boolean; onTotalSlides: (t: number) => void
 }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
+  const renderTaskRef = useRef<pdfjsLib.PDFRenderTask | null>(null)
+  const renderGenerationRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -1265,7 +1269,10 @@ function PdfPreview({ file, currentSlide, onTotalSlides }: {
 
   const renderPage = useCallback(async (pageNum: number) => {
     if (!pdf || !canvasRef.current || !containerRef.current) return
+    const generation = ++renderGenerationRef.current
+    renderTaskRef.current?.cancel()
     const page = await pdf.getPage(pageNum)
+    if (generation !== renderGenerationRef.current) return
     const canvas = canvasRef.current
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -1279,14 +1286,31 @@ function PdfPreview({ file, currentSlide, onTotalSlides }: {
     canvas.width = scaledViewport.width
     canvas.height = scaledViewport.height
 
-    await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+    const renderTask = page.render({ canvasContext: ctx, viewport: scaledViewport })
+    renderTaskRef.current = renderTask
+    try {
+      await renderTask.promise
+    } catch (error) {
+      if (generation === renderGenerationRef.current) throw error
+    } finally {
+      if (renderTaskRef.current === renderTask) renderTaskRef.current = null
+    }
   }, [pdf])
 
   useEffect(() => {
-    if (pdf && currentSlide >= 1 && currentSlide <= pdf.numPages) {
-      renderPage(currentSlide)
+    if (isLive) {
+      renderGenerationRef.current += 1
+      renderTaskRef.current?.cancel()
+      renderTaskRef.current = null
+      return
     }
-  }, [currentSlide, pdf, renderPage])
+    if (pdf && currentSlide >= 1 && currentSlide <= pdf.numPages) void renderPage(currentSlide)
+    return () => {
+      renderGenerationRef.current += 1
+      renderTaskRef.current?.cancel()
+      renderTaskRef.current = null
+    }
+  }, [currentSlide, isLive, pdf, renderPage])
 
   return (
     <div ref={containerRef} className="w-full h-full flex items-center justify-center">

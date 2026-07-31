@@ -1,15 +1,8 @@
-# Signed Windows build helper — TWO-PHASE.
+# Signed Windows build helper.
 #
-# Works around an electron-builder 26 + Electron 42 bug: electron-builder enables
-# the EnableEmbeddedAsarIntegrityValidation fuse and embeds a MISMATCHED asar
-# integrity hash, causing a FATAL "Integrity check failed for asar archive" crash
-# on launch of the packaged app. Neither electron-builder's `electronFuses` config
-# nor a custom afterPack can disable that fuse in a single-pass build (it gets
-# re-enabled during nsis/sign).
-#
-# So: (1) pack the app dir, (2) disable the asar fuses on the packed exe with
-# @electron/fuses (this sticks once electron-builder is done), (3) build the signed
-# NSIS installer from the already-fixed dir via --prepackaged.
+# The application is packed first so afterPack can harden Electron fuses before
+# electron-builder signs the executable. The NSIS installer is then created from
+# that verified prepackaged directory.
 #
 # PRODUCTION: point CSC_LINK at the corporate-CA .pfx instead of the dev placeholder.
 
@@ -31,24 +24,19 @@ if ($LASTEXITCODE -ne 0) { throw "electron-vite build failed" }
 npx --yes electron-builder --win --dir
 if ($LASTEXITCODE -ne 0) { throw "electron-builder --dir failed" }
 
-Write-Host "[2/3] disabling broken asar-integrity fuses on packed exe + re-signing" -ForegroundColor Cyan
+Write-Host "[2/3] verifying hardened Electron fuses" -ForegroundColor Cyan
 $exe = Join-Path $root 'dist\win-unpacked\Presentation Display Manager.exe'
-npx --yes @electron/fuses write --app "$exe" EnableEmbeddedAsarIntegrityValidation=off OnlyLoadAppFromAsar=off
-if ($LASTEXITCODE -ne 0) { throw "fuse flip failed" }
-# The fuse flip rewrites the binary and invalidates its Authenticode signature,
-# and --prepackaged (phase 3) does NOT re-sign the main exe — so re-sign it here.
-$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:CSC_KEY_PASSWORD)
-# Add an RFC-3161 timestamp so the signature outlives the cert; fall back to no
-# timestamp if the TSA is unreachable (don't fail the build on a flaky server).
-try {
-  $sig = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com' -ErrorAction Stop
-} catch {
-  Write-Host "      (timestamp server unreachable - signing without timestamp)" -ForegroundColor Yellow
-  $sig = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256
+$fuseState = npx --yes @electron/fuses read --app "$exe" | Out-String
+if ($LASTEXITCODE -ne 0) { throw "fuse verification failed" }
+Write-Host $fuseState
+if (
+  $fuseState -notmatch 'EnableEmbeddedAsarIntegrityValidation is Enabled' -or
+  $fuseState -notmatch 'OnlyLoadAppFromAsar is Enabled'
+) {
+  throw "Required ASAR security fuses are not enabled"
 }
-Write-Host ("      main exe re-signed: " + $sig.Status)
 
-Write-Host "[3/3] building signed NSIS installer from fixed dir (--prepackaged)" -ForegroundColor Cyan
+Write-Host "[3/3] building signed NSIS installer from verified app (--prepackaged)" -ForegroundColor Cyan
 npx --yes electron-builder --win --prepackaged "$root\dist\win-unpacked"
 if ($LASTEXITCODE -ne 0) { throw "electron-builder --prepackaged failed" }
 

@@ -1,6 +1,6 @@
 {
   "name": "presentation-display-manager",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "author": "Roland",
   "license": "MIT",
   "private": true,
@@ -15,7 +15,8 @@
     "package:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
-    "pdfjs-dist": "^6.1.200",
+    "@hyzyla/pdfium": "^2.1.13",
+    "pdfjs-dist": "^6.2.108",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
@@ -23,16 +24,16 @@
     "@electron-toolkit/utils": "^4.0.0",
     "@electron/fuses": "^2.1.2",
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^26.1.1",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^43.1.1",
+    "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
-    "postcss": "^8.5.21",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "postcss": "^8.5.25",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^7.3.6"
@@ -58,6 +59,14 @@
       {
         "from": "build/icon.ico",
         "to": "pdm-launcher-v1.ico"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "node_modules/@hyzyla/pdfium/LICENSE.md",
+        "to": "licenses/hyzyla-pdfium-LICENSE.md"
       }
     ],
     "afterPack": "./build/afterPack.js",

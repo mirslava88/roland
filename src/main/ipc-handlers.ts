@@ -525,8 +525,11 @@ export function registerIpcHandlers(
     try {
       const renderWidth = Math.max(64, Math.min(16384, Math.round(width)))
       const st = await stat(filePath)
-      const key = createHash('md5').update(`${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${renderWidth}`).digest('hex')
+      // v2 invalidates pre-fix cache entries: Windows.Data.Pdf used to cache
+      // visually uniform white frames as successful renders.
+      const key = createHash('md5').update(`native-pdf-v2|${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${renderWidth}`).digest('hex')
       const outPath = join(tmpdir(), `pdm-pdfpage-${key}.png`)
+      const rejectedPath = `${outPath}.rejected`
 
       const existing = pdfPageRenderInflight.get(key)
       if (existing) {
@@ -537,6 +540,15 @@ export function registerIpcHandlers(
       if (existsSync(outPath)) {
         diagnosticLog('pdf-render', `cache hit page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
         return outPath
+      }
+
+      // A marker is written only when Windows.Data.Pdf returned a valid but
+      // visually uniform frame. The cache key includes file metadata, page and
+      // width, so it is safe to skip the slow native attempt for this exact
+      // render and immediately use the reliable pdf.js fallback.
+      if (existsSync(rejectedPath)) {
+        diagnosticLog('pdf-render', `negative cache hit page=${pageIndex + 1} width=${renderWidth} file=${filePath}`)
+        return null
       }
 
       const job = (async (): Promise<string | null> => {
@@ -552,9 +564,10 @@ export function registerIpcHandlers(
           '-Width', String(renderWidth)
         ], { timeout: 15000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
         if (!existsSync(outPath)) {
+          const rejected = existsSync(rejectedPath)
           diagnosticLog(
             'pdf-render',
-            `native missing output page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms stdout=${String(stdout).trim()} stderr=${String(stderr).trim()}`
+            `${rejected ? 'native rejected' : 'native missing output'} page=${pageIndex + 1} width=${renderWidth} dur=${Date.now() - started}ms stdout=${String(stdout).trim()} stderr=${String(stderr).trim()}`
           )
           return null
         }

@@ -113,6 +113,7 @@ export default function App(): JSX.Element {
         window.api.dbgLog(
           `App: PDF navigate direction=${direction} control=${currentSlide}/${totalSlides} file=${activeFile.path}`
         )
+        window.dispatchEvent(new Event('pdf-navigation-priority'))
         useAppStore.getState().releasePinnedPdfOverlay()
         window.api.sendToPresentation('navigate-pdf', direction)
       }

@@ -249,7 +249,7 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
       // Scroll to scale + resize window
       document.addEventListener('wheel', (e) => {
         e.preventDefault();
-        scale = Math.max(0.5, Math.min(4, scale + (e.deltaY > 0 ? -0.1 : 0.1)));
+        scale = Math.max(0.5, Math.min(8, scale + (e.deltaY > 0 ? -0.1 : 0.1)));
         const w = Math.round(280 * scale);
         const h = Math.round(80 * scale);
         display.style.fontSize = Math.round(48 * scale) + 'px';

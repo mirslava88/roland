@@ -18,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$RejectedPath = "$OutPath.rejected"
 try {
     [void][System.Reflection.Assembly]::LoadWithPartialName('System.Runtime.WindowsRuntime')
     $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
@@ -57,7 +58,67 @@ try {
     $bytes = New-Object byte[] $stream.Size
     $reader.ReadBytes($bytes)
     [System.IO.File]::WriteAllBytes($OutPath, $bytes)
-    Write-Output "OK $($bytes.Length) $($page.Size.Width)x$($page.Size.Height)"
+
+    # Windows.Data.Pdf can return S_OK and a valid PNG while silently painting
+    # the whole page as one colour. This is reproducible with Figma PDFs that
+    # combine full-page transparency groups, soft masks and shading patterns.
+    # Treat a visually uniform native frame as untrustworthy: a genuinely
+    # blank/solid PDF page is harmlessly rendered again by pdf.js, while a
+    # broken native frame must never be announced as ready to the audience.
+    $uniform = $false
+    $spread = -1
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $bitmap = [System.Drawing.Bitmap]::FromFile($OutPath)
+        try {
+            $minR = 255; $minG = 255; $minB = 255; $minA = 255
+            $maxR = 0;   $maxG = 0;   $maxB = 0;   $maxA = 0
+            $sampleColumns = [Math]::Min(64, $bitmap.Width)
+            $sampleRows = [Math]::Min(36, $bitmap.Height)
+
+            for ($sampleY = 0; $sampleY -lt $sampleRows; $sampleY++) {
+                $pixelY = if ($sampleRows -le 1) { 0 } else {
+                    [Math]::Round($sampleY * ($bitmap.Height - 1) / ($sampleRows - 1))
+                }
+                for ($sampleX = 0; $sampleX -lt $sampleColumns; $sampleX++) {
+                    $pixelX = if ($sampleColumns -le 1) { 0 } else {
+                        [Math]::Round($sampleX * ($bitmap.Width - 1) / ($sampleColumns - 1))
+                    }
+                    $pixel = $bitmap.GetPixel([int]$pixelX, [int]$pixelY)
+                    $minR = [Math]::Min($minR, $pixel.R); $maxR = [Math]::Max($maxR, $pixel.R)
+                    $minG = [Math]::Min($minG, $pixel.G); $maxG = [Math]::Max($maxG, $pixel.G)
+                    $minB = [Math]::Min($minB, $pixel.B); $maxB = [Math]::Max($maxB, $pixel.B)
+                    $minA = [Math]::Min($minA, $pixel.A); $maxA = [Math]::Max($maxA, $pixel.A)
+                }
+            }
+
+            $spread = [Math]::Max(
+                [Math]::Max($maxR - $minR, $maxG - $minG),
+                [Math]::Max($maxB - $minB, $maxA - $minA)
+            )
+            $uniform = $spread -le 3
+        } finally {
+            $bitmap.Dispose()
+        }
+    } catch {
+        # Validation is an extra safety net. If GDI+ is unavailable on an
+        # unusual Windows installation, keep the existing native result and
+        # let the renderer continue rather than failing every PDF.
+        Write-Output "VALIDATION_UNAVAILABLE $($_.Exception.Message)"
+    }
+
+    if ($uniform) {
+        Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
+        [System.IO.File]::WriteAllText(
+            $RejectedPath,
+            "uniform-v1 bytes=$($bytes.Length) spread=$spread"
+        )
+        Write-Output "FALLBACK_UNIFORM $($bytes.Length) spread=$spread $($page.Size.Width)x$($page.Size.Height)"
+        exit 0
+    }
+
+    Remove-Item -LiteralPath $RejectedPath -Force -ErrorAction SilentlyContinue
+    Write-Output "OK $($bytes.Length) spread=$spread $($page.Size.Width)x$($page.Size.Height)"
     exit 0
 } catch {
     [Console]::Error.WriteLine("ERR: $($_.Exception.Message)")

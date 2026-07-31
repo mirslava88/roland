@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import { mediaUrl } from '../../media'
+import {
+  renderPdfiumPageToCanvas,
+  warmPdfiumDocument,
+  type PdfiumRenderLane
+} from '../../pdfium-renderer'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -13,6 +18,13 @@ interface PdfViewerProps {
   requestId: number
   onReady?: () => void
 }
+
+type RenderedPageFrame =
+  | { kind: 'native'; image: HTMLImageElement }
+  | { kind: 'pdfjs'; canvas: HTMLCanvasElement; cached: boolean }
+
+const NATIVE_FAST_PATH_MS = 150
+const MAX_PDFJS_FRAME_CACHE_PIXELS = 24_000_000
 
 export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewerProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -28,6 +40,12 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
   const appliedStartSlideRef = useRef<number | undefined>(undefined)
   const loadedFilePathRef = useRef<string | null>(null)
   const lastPaintedRef = useRef<{ filePath: string; page: number } | null>(null)
+  const pdfjsFrameCacheRef = useRef(new Map<string, HTMLCanvasElement>())
+  const pdfjsFrameInflightRef = useRef(new Map<string, Promise<HTMLCanvasElement | null>>())
+  const pdfjsFrameCachePixelsRef = useRef(0)
+  const pdfPageMetricsRef = useRef(new Map<number, { width: number; height: number }>())
+  const pdfPrewarmGenerationRef = useRef(0)
+  const pdfPrewarmStartedRef = useRef(false)
   const onReadyRef = useRef(onReady)
   onReadyRef.current = onReady
   const notifyContentReady = useCallback((): void => {
@@ -43,6 +61,12 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
     pendingNavigationRef.current = null
     pendingRelativeNavigationRef.current = 0
     appliedStartSlideRef.current = startSlide
+    pdfjsFrameCacheRef.current.clear()
+    pdfjsFrameInflightRef.current.clear()
+    pdfjsFrameCachePixelsRef.current = 0
+    pdfPageMetricsRef.current.clear()
+    pdfPrewarmGenerationRef.current += 1
+    pdfPrewarmStartedRef.current = false
     // Cancel any page render belonging to the previous file while preserving
     // its already-painted canvas until the replacement is ready.
     renderTokenRef.current += 1
@@ -65,6 +89,11 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
         window.api.dbgLog(`PdfViewer: readFile BEGIN ${fname}`)
         const data = await window.api.readFile(filePath)
         window.api.dbgLog(`PdfViewer: readFile END bytes=${data.byteLength}`)
+        // Start the fast PDFium worker while pdf.js reads document metadata.
+        // A private copy is required because both workers transfer their input.
+        void warmPdfiumDocument(filePath, 'interactive', data.slice(0)).catch((error) => {
+          window.api.dbgLog(`PdfViewer: PDFium warm ERROR ${String(error)}`)
+        })
         const doc = await pdfjsLib.getDocument({ data }).promise
         window.api.dbgLog(`PdfViewer: getDocument END pages=${doc.numPages}`)
         if (cancelled) {
@@ -127,6 +156,181 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
     }
   }, [])
 
+  const getPdfjsFrame = useCallback(async (
+    doc: pdfjsLib.PDFDocumentProxy,
+    generation: number,
+    pageNum: number,
+    targetBufW: number,
+    targetBufH: number,
+    pageHint?: pdfjsLib.PDFPageProxy,
+    lane: PdfiumRenderLane = 'interactive'
+  ): Promise<RenderedPageFrame | null> => {
+    const cacheKey = `${generation}|${pageNum}|${targetBufW}x${targetBufH}`
+    const cachedCanvas = pdfjsFrameCacheRef.current.get(cacheKey)
+    if (cachedCanvas) {
+      pdfjsFrameCacheRef.current.delete(cacheKey)
+      pdfjsFrameCacheRef.current.set(cacheKey, cachedCanvas)
+      window.api.dbgLog(`PdfViewer: raster frame cache HIT page=${pageNum} size=${targetBufW}x${targetBufH}`)
+      return { kind: 'pdfjs', canvas: cachedCanvas, cached: true }
+    }
+
+    const inflightKey = `${lane}|${cacheKey}`
+    const existing = pdfjsFrameInflightRef.current.get(inflightKey)
+    if (existing) {
+      window.api.dbgLog(`PdfViewer: raster frame JOIN lane=${lane} page=${pageNum} size=${targetBufW}x${targetBufH}`)
+      const canvas = await existing
+      return canvas ? { kind: 'pdfjs', canvas, cached: false } : null
+    }
+
+    let job: Promise<HTMLCanvasElement | null>
+    job = (async (): Promise<HTMLCanvasElement | null> => {
+      const page = pageHint ?? await doc.getPage(pageNum)
+      const baseViewport = page.getViewport({ scale: 1 })
+      if (generation !== pdfPrewarmGenerationRef.current) return null
+      pdfPageMetricsRef.current.set(pageNum, {
+        width: baseViewport.width,
+        height: baseViewport.height
+      })
+
+      const started = performance.now()
+      let fallbackCanvas: HTMLCanvasElement
+      let renderer = 'PDFium'
+      try {
+        const pdfiumFrame = await renderPdfiumPageToCanvas({
+          filePath,
+          pageNumber: pageNum,
+          targetWidth: targetBufW,
+          targetHeight: targetBufH,
+          lane
+        })
+        fallbackCanvas = pdfiumFrame.canvas
+      } catch (error) {
+        renderer = 'pdf.js'
+        window.api.dbgLog(
+          `PdfViewer: PDFium ERROR lane=${lane} page=${pageNum} error=${String(error)}; using pdf.js`
+        )
+        fallbackCanvas = document.createElement('canvas')
+        fallbackCanvas.width = targetBufW
+        fallbackCanvas.height = targetBufH
+        const offCtx = fallbackCanvas.getContext('2d')
+        if (!offCtx) return null
+        const outputScaleX = targetBufW / baseViewport.width
+        const outputScaleY = targetBufH / baseViewport.height
+        await page.render({
+          canvasContext: offCtx,
+          viewport: baseViewport,
+          transform: [outputScaleX, 0, 0, outputScaleY, 0, 0]
+        }).promise
+      }
+      if (generation !== pdfPrewarmGenerationRef.current) return null
+
+      const pixels = fallbackCanvas.width * fallbackCanvas.height
+      if (pixels <= MAX_PDFJS_FRAME_CACHE_PIXELS) {
+        while (
+          pdfjsFrameCacheRef.current.size > 0 &&
+          pdfjsFrameCachePixelsRef.current + pixels > MAX_PDFJS_FRAME_CACHE_PIXELS
+        ) {
+          const oldestKey = pdfjsFrameCacheRef.current.keys().next().value as string | undefined
+          if (!oldestKey) break
+          const oldest = pdfjsFrameCacheRef.current.get(oldestKey)
+          pdfjsFrameCacheRef.current.delete(oldestKey)
+          if (oldest) pdfjsFrameCachePixelsRef.current -= oldest.width * oldest.height
+        }
+        pdfjsFrameCacheRef.current.set(cacheKey, fallbackCanvas)
+        pdfjsFrameCachePixelsRef.current += pixels
+      }
+
+      window.api.dbgLog(
+        `PdfViewer: raster frame READY renderer=${renderer} lane=${lane} page=${pageNum} buffer=${fallbackCanvas.width}x${fallbackCanvas.height} dur=${Math.round(performance.now() - started)}ms`
+      )
+      return fallbackCanvas
+    })()
+
+    pdfjsFrameInflightRef.current.set(inflightKey, job)
+    try {
+      const canvas = await job
+      return canvas ? { kind: 'pdfjs', canvas, cached: false } : null
+    } finally {
+      if (pdfjsFrameInflightRef.current.get(inflightKey) === job) {
+        pdfjsFrameInflightRef.current.delete(inflightKey)
+      }
+    }
+  }, [filePath])
+
+  const startPdfPrewarm = useCallback((
+    doc: pdfjsLib.PDFDocumentProxy,
+    generation: number,
+    anchorPage: number,
+    containerWidth: number,
+    containerHeight: number,
+    dpr: number
+  ): void => {
+    if (pdfPrewarmStartedRef.current) return
+    pdfPrewarmStartedRef.current = true
+
+    const pageOrder: number[] = []
+    for (let distance = 1; pageOrder.length < doc.numPages - 1; distance++) {
+      const after = anchorPage + distance
+      const before = anchorPage - distance
+      if (after <= doc.numPages) pageOrder.push(after)
+      if (before >= 1) pageOrder.push(before)
+    }
+
+    void (async () => {
+      window.api.dbgLog(`PdfViewer: prewarm BEGIN anchor=${anchorPage} pages=${pageOrder.join(',')}`)
+      try {
+        for (const candidate of pageOrder) {
+          if (
+            generation !== pdfPrewarmGenerationRef.current ||
+            loadedFilePathRef.current !== filePath
+          ) return
+
+          const started = performance.now()
+          try {
+            const page = await doc.getPage(candidate)
+            const viewport = page.getViewport({ scale: 1 })
+            pdfPageMetricsRef.current.set(candidate, {
+              width: viewport.width,
+              height: viewport.height
+            })
+            const fitScale = Math.min(
+              containerWidth / viewport.width,
+              containerHeight / viewport.height
+            )
+            const targetWidth = Math.max(1, Math.round(viewport.width * fitScale * dpr))
+            const targetHeight = Math.max(1, Math.round(viewport.height * fitScale * dpr))
+
+            const nativePath = await window.api.renderPdfPage(
+              filePath,
+              candidate - 1,
+              targetWidth
+            )
+            if (!nativePath) {
+              await getPdfjsFrame(
+                doc,
+                generation,
+                candidate,
+                targetWidth,
+                targetHeight,
+                page,
+                'background'
+              )
+            }
+            window.api.dbgLog(
+              `PdfViewer: prewarm READY page=${candidate} renderer=${nativePath ? 'native' : 'pdf.js'} dur=${Math.round(performance.now() - started)}ms`
+            )
+          } catch (error) {
+            window.api.dbgLog(`PdfViewer: prewarm ERROR page=${candidate} error=${String(error)}`)
+          }
+
+          await new Promise<void>((resolve) => setTimeout(resolve, 0))
+        }
+      } finally {
+        window.api.dbgLog('PdfViewer: prewarm END')
+      }
+    })()
+  }, [filePath, getPdfjsFrame])
+
   const renderPage = useCallback(
     async (pageNum: number, cw: number, ch: number) => {
       if (
@@ -137,6 +341,7 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
         ch === 0
       ) return
       const token = ++renderTokenRef.current
+      const generation = pdfPrewarmGenerationRef.current
       const rendererDpr = window.devicePixelRatio || 1
       let displayScaleFactor = rendererDpr
       try {
@@ -157,16 +362,22 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
       // on first touch, cached afterwards). Render to an offscreen canvas
       // first, keeping the visible canvas showing the PREVIOUS page the
       // whole time, then swap dimensions+content in one synchronous step.
-      const page = await pdf.getPage(pageNum)
-      if (token !== renderTokenRef.current) {
-        window.api.dbgLog(`PdfViewer: renderPage STALE token post-getPage page=${pageNum}`)
-        return
+      let pageHint: pdfjsLib.PDFPageProxy | undefined
+      let pageMetrics = pdfPageMetricsRef.current.get(pageNum)
+      if (!pageMetrics) {
+        pageHint = await pdf.getPage(pageNum)
+        if (token !== renderTokenRef.current) {
+          window.api.dbgLog(`PdfViewer: renderPage STALE token post-getPage page=${pageNum}`)
+          return
+        }
+        const viewport = pageHint.getViewport({ scale: 1 })
+        pageMetrics = { width: viewport.width, height: viewport.height }
+        pdfPageMetricsRef.current.set(pageNum, pageMetrics)
       }
 
-      const baseViewport = page.getViewport({ scale: 1 })
-      const fitScale = Math.min(cw / baseViewport.width, ch / baseViewport.height)
-      const cssWidth = Math.round(baseViewport.width * fitScale)
-      const cssHeight = Math.round(baseViewport.height * fitScale)
+      const fitScale = Math.min(cw / pageMetrics.width, ch / pageMetrics.height)
+      const cssWidth = Math.round(pageMetrics.width * fitScale)
+      const cssHeight = Math.round(pageMetrics.height * fitScale)
       const targetBufW = Math.round(cssWidth * dpr)
       const targetBufH = Math.round(cssHeight * dpr)
 
@@ -176,19 +387,15 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
       // нативный Windows.Data.Pdf engine (без бага, pixel-perfect качество).
       // Native render возвращает путь к PNG; рисуем его на canvas через Image.
       window.api.dbgLog(
-        `PdfViewer: renderPage SCALE pdf=${baseViewport.width}x${baseViewport.height} fit=${fitScale.toFixed(3)} css=${cssWidth}x${cssHeight} bufTarget=${targetBufW}x${targetBufH}`
+        `PdfViewer: renderPage SCALE pdf=${pageMetrics.width}x${pageMetrics.height} fit=${fitScale.toFixed(3)} css=${cssWidth}x${cssHeight} bufTarget=${targetBufW}x${targetBufH}`
       )
 
-      const nativePath = await window.api.renderPdfPage(filePath, pageNum - 1, targetBufW)
-      if (token !== renderTokenRef.current) {
-        window.api.dbgLog(`PdfViewer: renderPage STALE token post-nativeRender page=${pageNum}`)
-        return
-      }
-
-      let nativeImg: HTMLImageElement | null = null
-      if (nativePath) {
+      const renderStarted = performance.now()
+      const nativeImagePromise = (async (): Promise<HTMLImageElement | null> => {
         try {
-          nativeImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const nativePath = await window.api.renderPdfPage(filePath, pageNum - 1, targetBufW)
+          if (!nativePath || token !== renderTokenRef.current) return null
+          return await new Promise<HTMLImageElement>((resolve, reject) => {
             const im = new Image()
             im.onload = () => resolve(im)
             im.onerror = () => reject(new Error('image load failed'))
@@ -196,14 +403,59 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
           })
         } catch (e) {
           window.api.dbgLog(`PdfViewer: native image load failed ${String(e)}, fallback to pdf.js`)
+          return null
         }
+      })()
+
+      const renderPdfjsFrame = (): Promise<RenderedPageFrame | null> => (
+        getPdfjsFrame(
+          pdf,
+          generation,
+          pageNum,
+          targetBufW,
+          targetBufH,
+          pageHint
+        ).catch((error) => {
+          window.api.dbgLog(
+            `PdfViewer: raster fallback failed for page ${pageNum}: ${String(error)}`
+          )
+          return null
+        })
+      )
+
+      // Cached native frames arrive almost immediately. If Windows must render
+      // from scratch, race it against pdf.js and commit only the first complete
+      // frame. The native result may finish into disk cache, but never replaces
+      // an already visible pdf.js frame, which preserves flicker-free output.
+      const quickNative = await Promise.race([
+        nativeImagePromise,
+        new Promise<undefined>((resolve) => setTimeout(resolve, NATIVE_FAST_PATH_MS))
+      ])
+      if (token !== renderTokenRef.current) return
+
+      let frame: RenderedPageFrame | null
+      if (quickNative) {
+        frame = { kind: 'native', image: quickNative }
+      } else {
+        const pdfjsFramePromise = renderPdfjsFrame()
+        const nativeFramePromise = nativeImagePromise.then<RenderedPageFrame | null>((image) => (
+          image ? { kind: 'native', image } : null
+        ))
+        frame = await Promise.race([
+          nativeFramePromise.then((result) => result ?? pdfjsFramePromise),
+          pdfjsFramePromise.then((result) => result ?? nativeFramePromise)
+        ])
       }
 
+      if (token !== renderTokenRef.current || !frame) return
       const canvas = canvasRef.current
       if (!canvas) return
       const ctx = canvas.getContext('2d')
       if (!ctx) return
 
+      // Commit only after either native decode or the complete pdf.js render.
+      // Resizing canvas clears it, so doing this before the fallback await
+      // would expose a white/black frame during navigation.
       if (canvas.width !== targetBufW || canvas.height !== targetBufH) {
         canvas.width = targetBufW
         canvas.height = targetBufH
@@ -213,37 +465,17 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
 
-      if (nativeImg) {
-        // Lossless native render — рисуем напрямую (native image может быть
-        // больше targetBuf если Windows.Data.Pdf применил свой DPI; canvas
-        // ужмёт его, всё равно качественно).
-        ctx.drawImage(nativeImg, 0, 0, nativeImg.naturalWidth, nativeImg.naturalHeight, 0, 0, targetBufW, targetBufH)
+      if (frame.kind === 'native') {
+        // Lossless native render — draw directly (native image can be larger
+        // than targetBuf when Windows.Data.Pdf applies its own DPI).
+        ctx.drawImage(frame.image, 0, 0, frame.image.naturalWidth, frame.image.naturalHeight, 0, 0, targetBufW, targetBufH)
         window.api.dbgLog(
-          `PdfViewer: drawImage NATIVE done page=${pageNum} src=${nativeImg.naturalWidth}x${nativeImg.naturalHeight} dst=${targetBufW}x${targetBufH}`
+          `PdfViewer: drawImage NATIVE done page=${pageNum} src=${frame.image.naturalWidth}x${frame.image.naturalHeight} dst=${targetBufW}x${targetBufH} total=${Math.round(performance.now() - renderStarted)}ms`
         )
       } else {
-        // HiDPI fallback for machines where Windows.Data.Pdf is unavailable.
-        // Keep viewport.scale=1 to avoid the pdf.js TilingPattern regression,
-        // but apply the standard output transform so vectors/text are painted
-        // directly into the full-resolution display buffer. The old fallback
-        // rendered a small base-size bitmap and stretched it, causing visibly
-        // blurry text on the affected computer.
-        const off = document.createElement('canvas')
-        off.width = targetBufW
-        off.height = targetBufH
-        const offCtx = off.getContext('2d')
-        if (!offCtx) return
-        const outputScaleX = targetBufW / baseViewport.width
-        const outputScaleY = targetBufH / baseViewport.height
-        await page.render({
-          canvasContext: offCtx,
-          viewport: baseViewport,
-          transform: [outputScaleX, 0, 0, outputScaleY, 0, 0]
-        }).promise
-        if (token !== renderTokenRef.current) return
-        ctx.drawImage(off, 0, 0)
+        ctx.drawImage(frame.canvas, 0, 0)
         window.api.dbgLog(
-          `PdfViewer: drawImage FALLBACK_HIDPI pdf.js page=${pageNum} buffer=${off.width}x${off.height} outputScale=${outputScaleX.toFixed(3)}x${outputScaleY.toFixed(3)}`
+          `PdfViewer: drawImage RASTER_RACE done page=${pageNum} buffer=${frame.canvas.width}x${frame.canvas.height} cached=${frame.cached} total=${Math.round(performance.now() - renderStarted)}ms`
         )
       }
 
@@ -252,28 +484,13 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
       // visible canvas still contains the previous frame.
       lastPaintedRef.current = { filePath, page: pageNum }
 
-      // Warm the pages the presenter is most likely to visit next. Native
-      // Windows.Data.Pdf keeps the final quality, while navigation becomes a
-      // disk-cache hit instead of paying PowerShell/WinRT startup each time.
-      // The main process deduplicates this with an immediate user request.
-      if (nativePath) {
-        const nearbyPages = [pageNum + 1, pageNum + 2, pageNum - 1]
-          .filter((candidate, index, pages) => (
-            candidate >= 1 && candidate <= pdf.numPages && pages.indexOf(candidate) === index
-          ))
-        void (async () => {
-          for (const nearbyPage of nearbyPages) {
-            if (token !== renderTokenRef.current) return
-            try {
-              window.api.dbgLog(`PdfViewer: prefetch BEGIN page=${nearbyPage} width=${targetBufW}`)
-              const prefetched = await window.api.renderPdfPage(filePath, nearbyPage - 1, targetBufW)
-              window.api.dbgLog(`PdfViewer: prefetch END page=${nearbyPage} cached=${Boolean(prefetched)}`)
-            } catch (error) {
-              window.api.dbgLog(`PdfViewer: prefetch ERROR page=${nearbyPage} ${String(error)}`)
-            }
-          }
-        })()
-      }
+      // Once the first visible frame is safe, prepare every remaining page in
+      // the background. Slow pdf.js pages share an in-flight job with a later
+      // click, so navigation never starts the same multi-second render twice.
+      void nativeImagePromise.then(() => {
+        if (generation !== pdfPrewarmGenerationRef.current) return
+        startPdfPrewarm(pdf, generation, pageNum, cw, ch, dpr)
+      })
 
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -282,7 +499,7 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
         })
       })
     },
-    [pdf, filePath, notifyContentReady]
+    [pdf, filePath, getPdfjsFrame, notifyContentReady, startPdfPrewarm]
   )
 
   useEffect(() => {
