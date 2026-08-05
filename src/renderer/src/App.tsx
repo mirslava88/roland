@@ -6,17 +6,32 @@ import { ControlBar } from './components/Controls/ControlBar'
 import { Toolbar } from './components/Controls/Toolbar'
 import { NowPlaying } from './components/Controls/NowPlaying'
 import { SlideNavigator } from './components/SlideNavigator/SlideNavigator'
+import { OperatorCursorGuard } from './components/Capture/OperatorCursorGuard'
 import { queueNavigationDuringTransition } from './navigation-transition'
 import type { NavigationRequest } from './navigation-transition'
 
 export default function App(): JSX.Element {
   const {
+    captureSources,
     setPresentationWindowOpen,
     setDisplays,
     setCurrentSlide,
     setTotalSlides,
     setIsPlaying
   } = useAppStore()
+
+  // Window-capture streams stay alive to feed operator thumbnails even while
+  // another channel is on air. Guarding only the live source therefore lets
+  // the native cursor leak into those background preview frames. Keep the
+  // guard active whenever at least one program-window source is registered;
+  // OperatorCursorGuard itself applies it only while PDM has focus.
+  const protectCapturedWindowFromOperatorCursor = captureSources.some((source) => (
+    source.capture?.captureKind === 'desktop' &&
+    (
+      source.capture.desktopSourceType === 'window' ||
+      (!source.capture.desktopSourceType && source.capture.desktopSourceId?.startsWith('window:'))
+    )
+  ))
 
   // Enable native file drops from Windows Explorer:
   // 1. dragover preventDefault — tells browser "this element accepts drops"
@@ -176,6 +191,7 @@ export default function App(): JSX.Element {
     <div className="h-screen flex flex-col overflow-hidden dark">
       <Toolbar />
       <NowPlaying />
+      <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="flex flex-1 overflow-hidden">
         <FileLibrary />
         <div className="flex-1 flex flex-col overflow-hidden">

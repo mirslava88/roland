@@ -29,8 +29,19 @@ export function Toolbar(): JSX.Element {
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
+      const cancelHandledByTake = !window.dispatchEvent(new CustomEvent('cancel-active-take', {
+        cancelable: true,
+        detail: { backdropImage, selectedDisplayId }
+      }))
+      if (cancelHandledByTake) return
+      if (activeFile?.type === 'capture') {
+        window.api.sendToPresentation('capture-audio-live', null)
+      }
+      if (activeFile?.type === 'other' && activeFile.isAudio) {
+        await window.api.musicStop()
+      }
       // Minimize external file (Word/Excel) if open — don't close it
-      if (activeFile?.type === 'other' && !activeFile.isImage) {
+      if (activeFile?.type === 'other' && !activeFile.isImage && !activeFile.isAudio) {
         await window.api.minimizeExternalFile(activeFile.path)
       }
       if (activeFile?.type === 'presentation' && backdropImage) {
@@ -66,9 +77,12 @@ export function Toolbar(): JSX.Element {
             name: 'Backdrop'
           })
           await new Promise((r) => setTimeout(r, 200))
-        } else if (isPresentationWindowOpen) {
-          await window.api.closePresentationWindow()
-          setPresentationWindowOpen(false)
+        } else {
+          window.api.sendToPresentation('clear-active-content')
+          if (isPresentationWindowOpen) {
+            await window.api.closePresentationWindow()
+            setPresentationWindowOpen(false)
+          }
         }
       }
       // КРИТИЧНО: всегда скрываем overlay при выходе из эфира. Если PPTX был
@@ -106,6 +120,22 @@ export function Toolbar(): JSX.Element {
   }
 
   const handleSelectBackdrop = async (): Promise<void> => {
+    if (backdropImage) {
+      // The same button is a real toggle. While material is on air, only
+      // remove its future fallback; do not interrupt the current TAKE.
+      setBackdropImage(null)
+      if (!activeFile) {
+        window.api.sendToPresentation('clear-active-content')
+        if (isPresentationWindowOpen) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+        }
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+      }
+      return
+    }
+
     const path = await window.api.selectBackdropImage()
     if (path) {
       setBackdropImage(path)
@@ -151,10 +181,10 @@ export function Toolbar(): JSX.Element {
             ? 'bg-purple-600/80 hover:bg-purple-600 text-white border-transparent'
             : 'bg-purple-900/50 text-purple-300 hover:bg-purple-800/50 border-purple-700/50'
         }`}
-        title={backdropImage || 'Выбрать подложку'}
+        title={backdropImage ? 'Отключить подложку' : 'Выбрать подложку'}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        🖼 Подложка (Фон)
+        {backdropImage ? '🖼 Отключить фон' : '🖼 Подложка (Фон)'}
       </button>
 
       <button

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useAppStore, FilterType, SubfolderEntry } from '../../stores/useAppStore'
 import { FileItem } from './FileItem'
 import { FileItemGrid } from './FileItemGrid'
+import { CaptureSourcesPanel } from '../Capture/CaptureSourcesPanel'
 
 const FILTERS: { label: string; value: FilterType }[] = [
   { label: 'Все', value: 'all' },
@@ -422,7 +423,7 @@ export function FileLibrary(): JSX.Element {
       <div className="w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
         <div className="p-3 border-b border-gray-800">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-bold text-gray-400 uppercase">Выбор презентаций</span>
+            <span className="text-xs font-bold text-gray-400 uppercase">Материалы</span>
             <button
               onClick={handleOpenFolder}
               className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
@@ -432,6 +433,7 @@ export function FileLibrary(): JSX.Element {
             </button>
           </div>
         </div>
+        <CaptureSourcesPanel />
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {drives.map((drive) => (
             <div
@@ -474,7 +476,7 @@ export function FileLibrary(): JSX.Element {
     <div className="w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
       <div className="p-3 border-b border-gray-800">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-bold text-gray-400 uppercase">Выбор презентаций</span>
+          <span className="text-xs font-bold text-gray-400 uppercase">Материалы</span>
           <button
             onClick={handleOpenFolder}
             className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
@@ -550,6 +552,8 @@ export function FileLibrary(): JSX.Element {
           </button>
         </div>
       </div>
+
+      <CaptureSourcesPanel />
 
       <div
         ref={listRef}

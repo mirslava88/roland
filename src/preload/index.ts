@@ -76,6 +76,15 @@ const api = {
   capturePresentationFrame: (): Promise<string | null> =>
     ipcRenderer.invoke('capture-presentation-frame'),
 
+  getDesktopCaptureSources: (
+    types?: Array<'window' | 'screen'>,
+    excludedDisplayId?: number
+  ) =>
+    ipcRenderer.invoke('get-desktop-capture-sources', types, excludedDisplayId),
+
+  prepareDesktopCaptureSource: (sourceId: string) =>
+    ipcRenderer.invoke('prepare-desktop-capture-source', sourceId),
+
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
 
   getAudioDevices: (): Promise<{ id: string; name: string; isDefault: boolean }[]> =>

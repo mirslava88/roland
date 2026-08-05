@@ -72,7 +72,7 @@ function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
   return chain
 }
 
-export type ContentType = 'presentation' | 'pdf' | 'video' | 'other' | null
+export type ContentType = 'presentation' | 'pdf' | 'video' | 'capture' | 'other' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
 export type ChannelId = string
 
@@ -150,6 +150,7 @@ interface AppState {
   currentChannelPage: number
   liveChannel: ChannelId | null
   selectedChannel: ChannelId | null
+  captureSources: FileEntry[]
 
   setSelectedChannel: (ch: ChannelId | null) => void
   setChannelFile: (ch: ChannelId, file: FileEntry | null) => void
@@ -159,6 +160,8 @@ interface AppState {
   addChannelPage: () => void
   removeChannelPage: (page: number) => void
   setCurrentChannelPage: (page: number) => void
+  addCaptureSource: (source: FileEntry) => void
+  removeCaptureSource: (sourceId: string) => void
 
   setPptxThumbnails: (thumbnails: string[]) => void
   setFolderPath: (path: string | null) => void
@@ -259,6 +262,7 @@ export const useAppStore = create<AppState>()(persist(
   currentChannelPage: 0,
   liveChannel: null,
   selectedChannel: null,
+  captureSources: [],
 
   setSelectedChannel: (ch) => set({ selectedChannel: ch }),
 
@@ -360,6 +364,28 @@ export const useAppStore = create<AppState>()(persist(
     const totalPages = Math.ceil(channelIds.length / CHANNELS_PER_PAGE)
     const clamped = Math.max(0, Math.min(page, totalPages - 1))
     set({ currentChannelPage: clamped })
+  },
+
+  addCaptureSource: (source) => {
+    const { captureSources } = get()
+    const sourceId = source.capture?.sourceId
+    if (!sourceId) return
+    const existingIndex = captureSources.findIndex((item) => item.capture?.sourceId === sourceId)
+    if (existingIndex >= 0) {
+      const next = [...captureSources]
+      next[existingIndex] = source
+      set({ captureSources: next })
+      return
+    }
+    set({ captureSources: [...captureSources, source] })
+  },
+
+  removeCaptureSource: (sourceId) => {
+    const { captureSources, selectedFile } = get()
+    set({
+      captureSources: captureSources.filter((item) => item.capture?.sourceId !== sourceId),
+      selectedFile: selectedFile?.capture?.sourceId === sourceId ? null : selectedFile
+    })
   },
 
   setPptxThumbnails: (thumbnails) => {

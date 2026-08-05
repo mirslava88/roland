@@ -1,5 +1,5 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol } from 'electron'
-import type { Display } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session } from 'electron'
+import type { DesktopCapturerSource, Display } from 'electron'
 import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
 import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync, existsSync, createReadStream } from 'fs'
@@ -8,9 +8,39 @@ import { Readable } from 'stream'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
+import {
+  hwndFromCaptureSourceId,
+  isSameNativeWindow,
+  nativeWindowDaemon
+} from './native-window-daemon'
+import type { NativeTopLevelWindow } from './native-window-daemon'
+
+interface DesktopCaptureSourceInfo {
+  id: string
+  captureId?: string
+  name: string
+  kind: 'window' | 'screen'
+  thumbnail: string
+  appIcon?: string
+  displayId?: string
+  processName?: string
+  isMinimized?: boolean
+  nativeHwnd?: string
+  nativePid?: number
+  availability?: 'ready' | 'minimized' | 'unavailable'
+}
+
+interface NativeDesktopSourceRegistryEntry {
+  hwnd: string
+  pid: number
+  title: string
+  processName: string
+  seenAt: number
+}
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
@@ -27,6 +57,14 @@ let overlayZOrderGuard: NodeJS.Timeout | null = null
 let overlayPlacement: 'cover' | 'underlay' = 'cover'
 let quitCleanupStarted = false
 let quitCleanupComplete = false
+const nativeDesktopSourceRegistry = new Map<string, NativeDesktopSourceRegistryEntry>()
+const nativeAppIconCache = new Map<string, Promise<string | undefined>>()
+let lastDesktopWindowInventorySignature = ''
+
+// Live capture sources must start rendering even though the prewarmed output
+// window never receives a mouse click of its own. This affects only media
+// playback policy; camera/microphone access is still guarded explicitly below.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 function stopOverlayZOrderGuard(): void {
   if (!overlayZOrderGuard) return
@@ -186,6 +224,101 @@ function restoreTaskbar(): void {
       '-Action', 'show-taskbar'
     ], { stdio: 'ignore', detached: true })
   } catch { /* ignore */ }
+}
+
+function nativeSourceKey(window: Pick<NativeTopLevelWindow, 'hwnd' | 'pid'>): string {
+  return `native-window:${window.hwnd}:${window.pid}`
+}
+
+function getOwnWindowHwnds(): Set<string> {
+  const handles = new Set<string>()
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue
+    try {
+      const handle = window.getNativeWindowHandle()
+      if (handle.length >= 8) handles.add(handle.readBigUInt64LE(0).toString(10))
+      else if (handle.length >= 4) handles.add(String(handle.readUInt32LE(0)))
+    } catch { /* window may be closing */ }
+    try {
+      const sourceHwnd = hwndFromCaptureSourceId(window.getMediaSourceId())
+      if (sourceHwnd) handles.add(sourceHwnd)
+    } catch { /* media id can be unavailable while a window is closing */ }
+  }
+  return handles
+}
+
+function electronDesktopSourceInfo(
+  source: DesktopCapturerSource,
+  kind: 'window' | 'screen',
+  id = source.id
+): DesktopCaptureSourceInfo {
+  return {
+    id,
+    captureId: source.id,
+    name: source.name,
+    kind,
+    thumbnail: source.thumbnail.isEmpty() ? '' : source.thumbnail.toDataURL(),
+    appIcon: source.appIcon && !source.appIcon.isEmpty() ? source.appIcon.toDataURL() : undefined,
+    displayId: source.display_id || undefined,
+    availability: 'ready'
+  }
+}
+
+function normalizedProcessName(processName: string): string {
+  return processName.trim().replace(/\.exe$/i, '').toLowerCase()
+}
+
+function processIconFallbackPath(processName: string): string | undefined {
+  const name = normalizedProcessName(processName)
+  if (!name) return undefined
+
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
+  const explicitPaths: Record<string, string> = {
+    explorer: join(systemRoot, 'explorer.exe'),
+    powershell: join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    pwsh: join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  }
+  const candidates = [
+    explicitPaths[name],
+    join(systemRoot, 'System32', `${name}.exe`)
+  ].filter((candidate): candidate is string => Boolean(candidate))
+  return candidates.find((candidate) => existsSync(candidate))
+}
+
+function cachedFileIcon(filePath: string): Promise<string | undefined> {
+  const cacheKey = `path:${filePath.toLowerCase()}`
+  const cached = nativeAppIconCache.get(cacheKey)
+  if (cached) return cached
+
+  const pending = app.getFileIcon(filePath, { size: 'normal' })
+    .then((icon) => icon.isEmpty() ? undefined : icon.toDataURL())
+    .catch(() => undefined)
+  nativeAppIconCache.set(cacheKey, pending)
+  return pending
+}
+
+async function nativeWindowAppIcon(window: NativeTopLevelWindow): Promise<string | undefined> {
+  const processPath = window.processPath?.trim()
+  if (processPath) {
+    const exactIcon = await cachedFileIcon(processPath)
+    if (exactIcon) return exactIcon
+  }
+
+  // Access to an executable path can be denied for protected/system windows.
+  // Cache the well-known process-name fallback too, so automatic picker polls
+  // never repeat filesystem/icon work.
+  const processName = normalizedProcessName(window.processName)
+  if (!processName) return undefined
+  const cacheKey = `process:${processName}`
+  const cached = nativeAppIconCache.get(cacheKey)
+  if (cached) return cached
+
+  const fallbackPath = processIconFallbackPath(processName)
+  const pending = fallbackPath
+    ? cachedFileIcon(fallbackPath)
+    : Promise.resolve(undefined)
+  nativeAppIconCache.set(cacheKey, pending)
+  return pending
 }
 
 function createWindows(): void {
@@ -452,6 +585,295 @@ function createWindows(): void {
       return source.thumbnail.toDataURL()
     } catch {
       return null
+    }
+  })
+
+  // Enumerate program windows and displays only for the trusted operator
+  // window. The selected source id is later opened by the already-sandboxed
+  // presentation renderer, which owns all long-lived live capture streams.
+  ipcMain.handle('get-desktop-capture-sources', async (
+    event,
+    requestedTypes?: Array<'window' | 'screen'>,
+    excludedDisplayId?: number
+  ) => {
+    if (
+      !controlWindow ||
+      controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id
+    ) {
+      diagnosticLog('capture', `desktop sources denied wc=${event.sender.id}`)
+      return []
+    }
+
+    const allowedTypes = new Set<'window' | 'screen'>(['window', 'screen'])
+    const types: Array<'window' | 'screen'> = Array.isArray(requestedTypes)
+      ? [...new Set(requestedTypes.filter((type): type is 'window' | 'screen' => allowedTypes.has(type)))]
+      : ['window', 'screen']
+    if (types.length === 0) return []
+
+    try {
+      const displays = screen.getAllDisplays()
+      const primaryDisplay = screen.getPrimaryDisplay()
+      const defaultOutputDisplay = displays.find((display) => display.id !== primaryDisplay.id) || primaryDisplay
+      const requestedOutputDisplay = Number.isFinite(excludedDisplayId)
+        ? displays.find((display) => display.id === excludedDisplayId)
+        : undefined
+      const currentPresentationDisplay = presentationWindow && !presentationWindow.isDestroyed()
+        ? screen.getDisplayMatching(presentationWindow.getBounds())
+        : undefined
+      const protectedDisplayId = String(
+        requestedOutputDisplay?.id ?? currentPresentationDisplay?.id ?? defaultOutputDisplay.id
+      )
+      const nativeWindowsPromise = types.includes('window')
+        ? nativeWindowDaemon.listWindows({ excludedPids: [process.pid] }).catch((error) => {
+            diagnosticLog('capture', `native window list failed ${formatDiagnosticError(error)}`)
+            return [] as NativeTopLevelWindow[]
+          })
+        : Promise.resolve([] as NativeTopLevelWindow[])
+      const [sources, nativeWindows] = await Promise.all([
+        desktopCapturer.getSources({
+          types,
+          thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: types.includes('window')
+        }),
+        nativeWindowsPromise
+      ])
+
+      const ownWindowHwnds = getOwnWindowHwnds()
+      const electronWindowsByHwnd = new Map<string, DesktopCapturerSource>()
+      for (const source of sources) {
+        if (!source.id.startsWith('window:')) continue
+        const hwnd = hwndFromCaptureSourceId(source.id)
+        if (!hwnd || ownWindowHwnds.has(hwnd)) continue
+        if (!electronWindowsByHwnd.has(hwnd)) electronWindowsByHwnd.set(hwnd, source)
+      }
+
+      const nativeAppIconsByHwnd = new Map<string, string>()
+      await Promise.all(nativeWindows.map(async (nativeWindow) => {
+        if (ownWindowHwnds.has(nativeWindow.hwnd)) return
+        const icon = await nativeWindowAppIcon(nativeWindow)
+        if (icon) nativeAppIconsByHwnd.set(nativeWindow.hwnd, icon)
+      }))
+
+      const now = Date.now()
+      const windowResults: DesktopCaptureSourceInfo[] = []
+      const mergedHwnds = new Set<string>()
+      for (const nativeWindow of nativeWindows) {
+        if (ownWindowHwnds.has(nativeWindow.hwnd)) continue
+        const key = nativeSourceKey(nativeWindow)
+        const electronSource = electronWindowsByHwnd.get(nativeWindow.hwnd)
+        nativeDesktopSourceRegistry.set(key, {
+          hwnd: nativeWindow.hwnd,
+          pid: nativeWindow.pid,
+          title: nativeWindow.title,
+          processName: nativeWindow.processName,
+          seenAt: now
+        })
+        mergedHwnds.add(nativeWindow.hwnd)
+        const electronInfo = electronSource
+          ? electronDesktopSourceInfo(electronSource, 'window', key)
+          : undefined
+        windowResults.push({
+          ...(electronInfo || {
+            id: key,
+            name: nativeWindow.title,
+            kind: 'window' as const,
+            thumbnail: ''
+          }),
+          name: nativeWindow.title,
+          appIcon: electronInfo?.appIcon || nativeAppIconsByHwnd.get(nativeWindow.hwnd),
+          processName: nativeWindow.processName || undefined,
+          isMinimized: nativeWindow.minimized,
+          nativeHwnd: nativeWindow.hwnd,
+          nativePid: nativeWindow.pid,
+          availability: electronSource
+            ? 'ready'
+            : nativeWindow.minimized
+              ? 'minimized'
+              : 'unavailable'
+        })
+      }
+
+      // Keep rare Chromium-only sources too (for example a capturable surface
+      // that Windows does not classify as a regular Alt-Tab application).
+      for (const [hwnd, source] of electronWindowsByHwnd) {
+        if (mergedHwnds.has(hwnd)) continue
+        windowResults.push(electronDesktopSourceInfo(source, 'window'))
+      }
+
+      windowResults.sort((left, right) => {
+        const appOrder = (left.processName || left.name).localeCompare(
+          right.processName || right.name,
+          'ru',
+          { sensitivity: 'base', numeric: true }
+        )
+        return appOrder || left.name.localeCompare(right.name, 'ru', { sensitivity: 'base', numeric: true })
+      })
+      const inventorySignature = windowResults
+        .map((source) => `${source.id}|${source.name}|${source.isMinimized ? 'min' : 'open'}`)
+        .join('\n')
+      if (inventorySignature !== lastDesktopWindowInventorySignature) {
+        lastDesktopWindowInventorySignature = inventorySignature
+        diagnosticLog(
+          'capture',
+          `window inventory changed: ${windowResults.map((source) => `${source.processName || '?'}:${source.name}${source.isMinimized ? '[min]' : ''}`).join(' | ')}`
+        )
+      }
+
+      for (const [key, entry] of nativeDesktopSourceRegistry) {
+        if (now - entry.seenAt > 15000) nativeDesktopSourceRegistry.delete(key)
+      }
+
+      const screenResults = sources
+        .filter((source) => (
+          source.id.startsWith('screen:') && source.display_id !== protectedDisplayId
+        ))
+        .map((source) => electronDesktopSourceInfo(source, 'screen'))
+      const result = [
+        ...(types.includes('window') ? windowResults : []),
+        ...(types.includes('screen') ? screenResults : [])
+      ]
+      const rawWindows = sources.filter((source) => source.id.startsWith('window:')).length
+      const rawScreens = sources.length - rawWindows
+      const listedWindows = result.filter((source) => source.kind === 'window').length
+      const listedScreens = result.length - listedWindows
+      const minimizedWindows = windowResults.filter((source) => source.isMinimized).length
+      diagnosticLog(
+        'capture',
+        `desktop sources listed types=${types.join(',')} windows=${listedWindows} electron=${rawWindows} native=${nativeWindows.length} minimized=${minimizedWindows} screens=${listedScreens}/${rawScreens} ownHwnd=${ownWindowHwnds.size} protectedDisplay=${protectedDisplayId}`
+      )
+      return result
+    } catch (error) {
+      diagnosticLog('capture', `desktop sources failed ${formatDiagnosticError(error)}`)
+      return []
+    }
+  })
+
+  ipcMain.handle('prepare-desktop-capture-source', async (
+    event,
+    sourceKey: string
+  ): Promise<{ success: boolean; source?: DesktopCaptureSourceInfo; error?: string }> => {
+    if (
+      !controlWindow ||
+      controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id ||
+      typeof sourceKey !== 'string' ||
+      sourceKey.length > 200
+    ) {
+      diagnosticLog('capture', `desktop source prepare denied wc=${event.sender.id}`)
+      return { success: false, error: 'Источник окна недоступен.' }
+    }
+
+    try {
+      const ownWindowHwnds = getOwnWindowHwnds()
+      const registryEntry = nativeDesktopSourceRegistry.get(sourceKey)
+      const nativeKey = /^native-window:(\d+):(\d+)$/.exec(sourceKey)
+      const directHwnd = hwndFromCaptureSourceId(sourceKey)
+      const nativeWindows = await nativeWindowDaemon.listWindows({ excludedPids: [process.pid] })
+      let targetWindow = nativeWindows.find((window) => (
+        nativeKey
+          ? window.hwnd === nativeKey[1] && window.pid === Number(nativeKey[2])
+          : registryEntry
+            ? window.hwnd === registryEntry.hwnd && window.pid === registryEntry.pid
+            : directHwnd
+              ? window.hwnd === directHwnd
+              : false
+      ))
+
+      // A channel can be taken long after the picker was closed. The picker
+      // registry is only a short-lived UI cache, so validate the stable
+      // HWND+PID key against a fresh EnumWindows snapshot on every TAKE.
+      if (nativeKey && !targetWindow) {
+        nativeDesktopSourceRegistry.delete(sourceKey)
+        return { success: false, error: 'Окно уже закрыто или больше недоступно.' }
+      }
+      if (targetWindow && ownWindowHwnds.has(targetWindow.hwnd)) {
+        targetWindow = undefined
+      }
+
+      const targetHwnd = targetWindow?.hwnd || hwndFromCaptureSourceId(sourceKey)
+      if (!targetHwnd || ownWindowHwnds.has(targetHwnd)) {
+        return { success: false, error: 'Это окно нельзя использовать как источник.' }
+      }
+
+      const findElectronSource = async (): Promise<DesktopCapturerSource | undefined> => {
+        const candidates = await desktopCapturer.getSources({
+          types: ['window'],
+          thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: true
+        })
+        return candidates.find((source) => isSameNativeWindow(source.id, targetHwnd))
+      }
+
+      let electronSource = await findElectronSource()
+      let targetWasActivated = false
+      // Restoring belongs exclusively to the explicit "В эфир" action. A
+      // stale Chromium source can still exist for an iconic window, so force
+      // a fresh lookup after requesting the native restore.
+      if (targetWindow?.minimized) {
+        // TAKE is the explicit hand-off point requested by the operator: make
+        // the selected application visible in front instead of restoring it
+        // behind PDM with SW_SHOWNOACTIVATE.
+        const restored = await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
+        targetWasActivated = true
+        diagnosticLog(
+          'capture',
+          `restore window hwnd=${targetWindow.hwnd} requested=${restored.requested} ` +
+          `minimized=${restored.minimized} activated=${restored.activated} foreground=${restored.foreground}`
+        )
+        electronSource = undefined
+      }
+      if (!electronSource && targetWindow) {
+        if (!targetWindow.minimized) {
+          await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
+          targetWasActivated = true
+        }
+
+        for (let attempt = 0; attempt < 24 && !electronSource; attempt++) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 100))
+          electronSource = await findElectronSource()
+          if (!electronSource && attempt === 8 && !targetWasActivated) {
+            await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
+            targetWasActivated = true
+          }
+        }
+      }
+
+      if (targetWasActivated) {
+        // Do not immediately focus PDM again: that would put Word/Excel back
+        // behind the control window and make a successful restore look like it
+        // never happened. The operator can return to PDM normally afterwards.
+        diagnosticLog('capture', `foreground handed to captured window hwnd=${targetHwnd}`)
+      }
+      if (!electronSource) {
+        return {
+          success: false,
+          error: 'Windows показала окно в списке, но не разрешила его захватить. Разверните окно и попробуйте ещё раз.'
+        }
+      }
+
+      const name = targetWindow?.title || electronSource.name
+      const electronInfo = electronDesktopSourceInfo(electronSource, 'window', sourceKey)
+      const prepared = {
+        ...electronInfo,
+        name,
+        appIcon: electronInfo.appIcon || (targetWindow
+          ? await nativeWindowAppIcon(targetWindow)
+          : undefined),
+        processName: targetWindow?.processName || undefined,
+        isMinimized: false,
+        nativeHwnd: targetWindow?.hwnd || targetHwnd,
+        nativePid: targetWindow?.pid,
+        availability: 'ready' as const
+      }
+      diagnosticLog(
+        'capture',
+        `desktop source prepared key=${sourceKey} captureId=${electronSource.id} label=${name}`
+      )
+      return { success: true, source: prepared }
+    } catch (error) {
+      diagnosticLog('capture', `desktop source prepare failed ${formatDiagnosticError(error)}`)
+      return { success: false, error: `Не удалось подготовить окно: ${formatDiagnosticError(error)}` }
     }
   })
 
@@ -1033,6 +1455,48 @@ app.whenReady().then(() => {
     rotation: d.rotation,
     internal: d.internal
   }))))
+
+  const isPresentationRendererUrl = (url: string): boolean => {
+    try {
+      const current = new URL(url)
+      const devUrl = process.env['ELECTRON_RENDERER_URL']
+      if (devUrl) {
+        const expected = new URL(`${devUrl.replace(/\/$/, '')}/presentation.html`)
+        return current.origin === expected.origin && current.pathname === expected.pathname
+      }
+      return current.href === pathToFileURL(join(__dirname, '../renderer/presentation.html')).href
+    } catch {
+      return false
+    }
+  }
+
+  const isTrustedMediaRequester = (contents: Electron.WebContents | null): boolean => {
+    if (!contents || contents.isDestroyed()) return false
+    return (
+      contents.id === presentationWindow?.webContents.id &&
+      isPresentationRendererUrl(contents.getURL())
+    )
+  }
+
+  // Default-deny remains in place for every permission except media requested
+  // by the exact local presentation renderer. It is the sole long-lived owner
+  // of UVC/USB capture devices; the control renderer never opens camera/mic.
+  session.defaultSession.setPermissionCheckHandler((contents, permission) => {
+    const allowed = permission === 'media' && isTrustedMediaRequester(contents)
+    diagnosticLog('capture', `permission check=${permission} allowed=${allowed} wc=${contents?.id ?? '-'}`)
+    return allowed
+  })
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const allowed = permission === 'media' && isTrustedMediaRequester(contents)
+    const mediaTypes = permission === 'media' && 'mediaTypes' in details
+      ? details.mediaTypes?.join(',') || '-'
+      : '-'
+    diagnosticLog(
+      'capture',
+      `permission request=${permission} mediaTypes=${mediaTypes} allowed=${allowed} wc=${contents?.id ?? '-'}`
+    )
+    callback(allowed)
+  })
   // Serve local media for webSecurity:true renderers. The renderer references
   // files as pdm-media://file/<encodeURIComponent(absPath)>; we decode, gate by
   // media extension, and serve it with explicit byte-range support. Forwarding
@@ -1102,10 +1566,8 @@ app.whenReady().then(() => {
     // Deny window.open by default. The control window installs its own handler
     // (with an http/https/mailto allow-list) that overrides this for itself.
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    // Deny all renderer permission requests (camera/mic/geo/notifications/midi/
-    // etc.). This is a local presentation tool that requests none — verified no
-    // requestFullscreen/getUserMedia/Notification usage in the renderer.
-    contents.session.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
+    // Permission policy is installed once on defaultSession above. It allows
+    // only media for the two trusted app renderers and denies everything else.
   })
 
   // Ensure extended display mode on startup if external monitor is connected
@@ -1119,6 +1581,7 @@ app.whenReady().then(() => {
   createWindows()
   prewarmPresentationWindow()
   pptDaemon.warmup()
+  nativeWindowDaemon.warmup()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1144,14 +1607,22 @@ app.on('before-quit', (event) => {
   if (quitCleanupStarted) return
 
   quitCleanupStarted = true
-  diagnosticLog('shutdown', 'waiting for PowerPoint ownership cleanup')
-  void pptDaemon.shutdown()
-    .catch((error) => {
-      diagnosticLog('shutdown', `PowerPoint cleanup failed: ${formatDiagnosticError(error)}`)
+  diagnosticLog('shutdown', 'waiting for PowerPoint and window-enumerator cleanup')
+  void Promise.allSettled([
+    pptDaemon.shutdown(),
+    nativeWindowDaemon.shutdown()
+  ])
+    .then((results) => {
+      if (results[0].status === 'rejected') {
+        diagnosticLog('shutdown', `PowerPoint cleanup failed: ${formatDiagnosticError(results[0].reason)}`)
+      }
+      if (results[1].status === 'rejected') {
+        diagnosticLog('shutdown', `Window enumerator cleanup failed: ${formatDiagnosticError(results[1].reason)}`)
+      }
     })
     .finally(() => {
       quitCleanupComplete = true
-      diagnosticLog('shutdown', 'PowerPoint ownership cleanup complete')
+      diagnosticLog('shutdown', 'helper cleanup complete')
       app.quit()
     })
 })

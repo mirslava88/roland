@@ -4,11 +4,68 @@ interface FileEntry {
   id: string
   name: string
   path: string
-  type: 'presentation' | 'pdf' | 'video' | 'other' | 'unknown'
+  type: 'presentation' | 'pdf' | 'video' | 'capture' | 'other' | 'unknown'
   extension: string
   size: number
   isImage?: boolean
   isAudio?: boolean
+  capture?: CaptureSourceConfig
+}
+
+interface CaptureSourceConfig {
+  sourceId: string
+  captureKind?: 'device' | 'desktop'
+  videoDeviceId?: string
+  videoLabel: string
+  videoGroupId?: string
+  desktopSourceId?: string
+  desktopSourceKey?: string
+  desktopSourceType?: 'window' | 'screen'
+  desktopDisplayId?: string
+  desktopAppIcon?: string
+  audioEnabled: boolean
+  audioDeviceId?: string
+  audioLabel?: string
+}
+
+interface CaptureDeviceDescriptor {
+  deviceId: string
+  groupId: string
+  kind: 'videoinput' | 'audioinput'
+  label: string
+}
+
+interface DesktopCaptureSourceDescriptor {
+  /** Stable picker identity. It is not necessarily a Chromium media source id. */
+  id: string
+  /** Verified chromeMediaSourceId, present only when Chromium can capture it now. */
+  captureId?: string
+  name: string
+  kind: 'window' | 'screen'
+  thumbnail: string
+  appIcon?: string
+  displayId?: string
+  processName?: string
+  isMinimized?: boolean
+  nativeHwnd?: string
+  nativePid?: number
+  availability?: 'ready' | 'minimized' | 'unavailable'
+}
+
+interface DesktopCapturePrepareResult {
+  success: boolean
+  source?: DesktopCaptureSourceDescriptor
+  error?: string
+}
+
+interface CaptureSourceState {
+  sourceId: string
+  status: 'connecting' | 'ready' | 'muted' | 'reconnecting' | 'error' | 'ended'
+  width?: number
+  height?: number
+  frameRate?: number
+  hasAudio?: boolean
+  message?: string
 }
 
 interface DisplayInfo {
@@ -79,6 +136,11 @@ interface Api {
   captureAndSwapOverlay(): Promise<boolean>
   captureDisplay(displayId?: number): Promise<string | null>
   capturePresentationFrame(): Promise<string | null>
+  getDesktopCaptureSources(
+    types?: Array<'window' | 'screen'>,
+    excludedDisplayId?: number
+  ): Promise<DesktopCaptureSourceDescriptor[]>
+  prepareDesktopCaptureSource(sourceId: string): Promise<DesktopCapturePrepareResult>
   selectBackdropImage(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
   setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>

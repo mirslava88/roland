@@ -85,3 +85,43 @@
 .animate-fade-out {
   animation: fade-out 0.4s ease-in-out forwards;
 }
+
+/*
+ * Keep the Windows cursor out of an external-window capture while PDM is the
+ * active app. The operator still sees the DOM proxy below; it cannot become
+ * part of the external window's captured pixels.
+ */
+html.pdm-window-cursor-guard,
+html.pdm-window-cursor-guard *,
+html.pdm-window-cursor-guard *::before,
+html.pdm-window-cursor-guard *::after {
+  cursor: none !important;
+}
+
+.pdm-operator-cursor-proxy {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2147483647;
+  display: none;
+  width: 48px;
+  height: 48px;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.pdm-operator-cursor-proxy[data-visible='true'] {
+  display: block;
+}
+
+.pdm-operator-cursor-proxy img {
+  display: none;
+  width: 100%;
+  height: 100%;
+}
+
+.pdm-operator-cursor-proxy[data-shape='arrow'] .pdm-proxy-arrow,
+.pdm-operator-cursor-proxy[data-shape='pointer'] .pdm-proxy-pointer,
+.pdm-operator-cursor-proxy[data-shape='text'] .pdm-proxy-text {
+  display: block;
+}

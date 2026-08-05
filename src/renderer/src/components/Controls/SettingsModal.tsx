@@ -325,14 +325,17 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h3 className="text-sm font-semibold text-white mb-2">Presentation Display Manager</h3>
                 <p className="text-gray-400 mb-3">
                   Приложение для управления контентом на внешнем дисплее или проекторе.
-                  Поддерживает презентации PowerPoint, PDF, видео, изображения, документы Word/Excel и музыку.
+                  Поддерживает презентации PowerPoint, PDF, видео, изображения, документы Word/Excel,
+                  музыку, USB-камеры, платы видеозахвата, открытые окна программ и экраны.
                 </p>
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">1. Выбор презентаций (левая панель)</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">1. Выбор материалов (левая панель)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Выберите диск или папку с файлами</li>
+                  <li>Для камеры или платы захвата нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">＋ Камера / плата</code>, выберите устройство и добавьте его</li>
+                  <li>Для показа браузера или другой открытой программы нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">＋ Окно / экран</code>. Не сворачивайте выбранное окно во время эфира</li>
                   <li>Фильтры вверху: Все, PPTX, PDF, Видео, Разное</li>
                   <li>Двойной клик на папку — войти внутрь, <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">..</code> — назад</li>
                   <li>Перетаскивание файлов между папками и из Проводника Windows</li>
@@ -343,11 +346,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы (1 / 2 / 3 / 4 и более)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Каналы в сетке 2×2, сгруппированы по страницам — можно заранее подготовить много файлов</li>
+                  <li>Каналы в сетке 2×2, сгруппированы по страницам — можно заранее подготовить много материалов</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> в центре — добавить новую страницу из 4 каналов (1/2/3/4, 5/6/7/8, …)</li>
                   <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
                   <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> справа от пагинации</li>
-                  <li>Перетащите файл в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или двойной клик по каналу</li>
+                  <li>Перетащите файл или внешний источник в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или двойной клик по каналу</li>
                   <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
                   <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
@@ -357,9 +360,9 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">3. Подложка (Фон) и выход из эфира</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖼 Подложка (Фон)</code> — выбор фонового изображения для внешнего дисплея</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖼 Подложка (Фон)</code> выбирает и включает фон; повторное нажатие той же кнопки отключает его</li>
                   <li>Подложка отображается когда нет активного контента и действует только до закрытия программы; новая сессия всегда начинается без фона</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⏹ Выйти из эфира</code> — закрывает активный контент (PPTX/PDF/видео) и показывает подложку. Если подложка не настроена — просто чёрный экран</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⏹ Выйти из эфира</code> — убирает любой активный материал, включая видеовход, и показывает подложку. Если подложка не настроена — внешний экран освобождается</li>
                 </ul>
               </section>
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
+import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import {
   beginNavigationTransition,
   drainNavigationTransition,
@@ -83,11 +84,41 @@ export function PreviewPanel(): JSX.Element {
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
   const queuedTakeRef = useRef<ChannelId | null>(null)
+  const takeGenerationRef = useRef(0)
+  const activeTakeIdRef = useRef<string | null>(null)
+  const cancelTakeCleanupRef = useRef<{ takeId: string; run: () => Promise<void> } | null>(null)
+  const cancelOutputIntentRef = useRef<{ backdropImage: string | null; selectedDisplayId: number | null }>({
+    backdropImage: null,
+    selectedDisplayId: null
+  })
   const hasPowerPointStartedRef = useRef(false)
   const [takeProgress, setTakeProgress] = useState<{
     channelId: ChannelId
     message: string | null
   } | null>(null)
+
+  useEffect(() => {
+    const cancelCurrentTake = (event: Event): void => {
+      if (!activeTakeIdRef.current) return
+      event.preventDefault()
+      const detail = (event as CustomEvent<{
+        backdropImage?: string | null
+        selectedDisplayId?: number | null
+      }>).detail
+      const state = useAppStore.getState()
+      cancelOutputIntentRef.current = {
+        backdropImage: detail?.backdropImage ?? state.backdropImage ?? null,
+        selectedDisplayId: detail?.selectedDisplayId ?? state.selectedDisplayId ?? null
+      }
+      takeGenerationRef.current += 1
+      queuedTakeRef.current = null
+      if (activeTakeIdRef.current) {
+        window.api.sendToPresentation('cancel-content-load', { takeId: activeTakeIdRef.current })
+      }
+    }
+    window.addEventListener('cancel-active-take', cancelCurrentTake)
+    return () => window.removeEventListener('cancel-active-take', cancelCurrentTake)
+  }, [])
 
   const totalPages = Math.max(1, Math.ceil(channelIds.length / CHANNELS_PER_PAGE))
   const pageStart = currentChannelPage * CHANNELS_PER_PAGE
@@ -103,6 +134,9 @@ export function PreviewPanel(): JSX.Element {
     const clearedFilePath = channel.file?.path
     // If this channel is live, close the presentation
     if (liveChannel === ch && channel.file) {
+      if (channel.file.type === 'capture') {
+        window.api.sendToPresentation('capture-audio-live', null)
+      }
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
       const isPptx = channel.file.type === 'presentation'
       const isExternalDoc = channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio
@@ -150,6 +184,7 @@ export function PreviewPanel(): JSX.Element {
         // Give the renderer a moment to paint the backdrop before dropping the overlay
         if (needsCover) await new Promise((r) => setTimeout(r, 150))
       } else {
+        window.api.sendToPresentation('clear-active-content')
         if (useAppStore.getState().isPresentationWindowOpen) {
           await window.api.closePresentationWindow()
           setPresentationWindowOpen(false)
@@ -174,6 +209,26 @@ export function PreviewPanel(): JSX.Element {
     const freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
     if (!file) return
+    if (
+      file.type === 'capture' &&
+      file.capture?.captureKind === 'desktop' &&
+      file.capture.desktopSourceType === 'screen' &&
+      file.capture.desktopDisplayId &&
+      freshState.selectedDisplayId !== null &&
+      file.capture.desktopDisplayId === String(freshState.selectedDisplayId)
+    ) {
+      setTakeProgress({
+        channelId: ch,
+        message: 'Этот экран выбран для эфира. Выберите другое окно или экран.'
+      })
+      window.api.dbgLog(
+        `TAKE blocked: captured screen is output display=${file.capture.desktopDisplayId}`
+      )
+      setTimeout(() => {
+        setTakeProgress((current) => current?.channelId === ch ? null : current)
+      }, 3500)
+      return
+    }
     if (takeInFlightRef.current) {
       // Keep TAKE pipelines sequential (they share PowerPoint and the output
       // overlay), but never lose the operator's latest channel selection.
@@ -196,32 +251,45 @@ export function PreviewPanel(): JSX.Element {
       ? 'Ожидайте, презентация открывается...'
       : file.type === 'video'
         ? 'Ожидайте, видеоролик открывается...'
+        : file.type === 'capture'
+          ? 'Ожидайте, внешний источник подключается...'
         : null
 
     // Close the same-tick double-click gap before React renders disabled UI.
     // Concurrent TAKE pipelines race over PowerPoint, overlay and live state.
     takeInFlightRef.current = ch
+    const takeId = crypto.randomUUID()
+    const takeGeneration = ++takeGenerationRef.current
+    activeTakeIdRef.current = takeId
     beginNavigationTransition()
-    if (message) {
-      setTakeProgress({ channelId: ch, message })
-    }
+    setTakeProgress({ channelId: ch, message })
 
     // Top-level safety net: если handleTake бросит (daemon crash,
     // launchPowerPoint reject, capturePage fail), overlay оставался бы
     // opacity=1 чёрным НАВСЕГДА — юзер видит зависший чёрный экран без
     // способа recovery (audit F-205). Ловим, логируем, force-hide overlay.
     try {
-      await doTake(ch)
+      await doTake(ch, takeId, takeGeneration)
     } catch (err) {
       console.error('[TAKE] unhandled error, forcing overlay hide:', err)
-      try { await window.api.hideOverlay() } catch { /* last resort */ }
-      setOverlayState({ kind: 'hidden' })
+      const cancelledCleanup = cancelTakeCleanupRef.current
+      if (
+        takeGenerationRef.current !== takeGeneration &&
+        cancelledCleanup?.takeId === takeId
+      ) {
+        try { await cancelledCleanup.run() } catch { /* cleanup best effort */ }
+      } else {
+        try { await window.api.hideOverlay() } catch { /* last resort */ }
+        setOverlayState({ kind: 'hidden' })
+      }
     } finally {
       const queuedNavigation = finishNavigationTransition()
       if (takeInFlightRef.current === ch) {
         takeInFlightRef.current = null
         setTakeProgress((current) => current?.channelId === ch ? null : current)
       }
+      if (activeTakeIdRef.current === takeId) activeTakeIdRef.current = null
+      if (cancelTakeCleanupRef.current?.takeId === takeId) cancelTakeCleanupRef.current = null
 
       const queued = queuedTakeRef.current
       queuedTakeRef.current = null
@@ -235,16 +303,17 @@ export function PreviewPanel(): JSX.Element {
     }
   }
 
-  const doTake = async (ch: ChannelId): Promise<void> => {
+  const doTake = async (ch: ChannelId, takeId: string, takeGeneration: number): Promise<void> => {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
-    const channel = freshState.channels[ch]
+    let channel = freshState.channels[ch]
     if (!channel?.file) return
 
     // Save previous active file before overwriting
     const prevActiveFile = freshState.activeFile
 
     const T0 = performance.now()
+    const isTakeCancelled = (): boolean => takeGenerationRef.current !== takeGeneration
     const log = (step: string): void => {
       const ms = (performance.now() - T0).toFixed(0)
       console.log(`[TAKE ${ms}ms] ${step}`)
@@ -252,7 +321,145 @@ export function PreviewPanel(): JSX.Element {
       // [MAIN], [DAEMON], [R] логами при диагностике мерцаний.
       window.api.dbgLog(`TAKE +${ms}ms: ${step}`)
     }
+    let cancelCleanupPromise: Promise<void> | null = null
+    const finishCancelledTake = (): Promise<void> => {
+      if (cancelCleanupPromise) return cancelCleanupPromise
+      cancelCleanupPromise = (async () => {
+        log('cancellation cleanup BEGIN')
+        window.api.sendToPresentation('cancel-content-load', { takeId })
+        window.api.sendToPresentation('capture-audio-live', null)
+        if (prevActiveFile?.type === 'presentation' || channel.file?.type === 'presentation') {
+          try { await window.api.powerpointCommand('close') } catch { /* already closed */ }
+          try { await window.api.showTaskbar() } catch { /* best effort */ }
+        }
+        try { await window.api.musicStop() } catch { /* already stopped */ }
+        if (channel.file?.type === 'other' && !channel.file.isImage && !channel.file.isAudio) {
+          try { await window.api.closeExternalFile(channel.file.path) } catch { /* not opened */ }
+        }
+
+        useAppStore.setState({ activeFile: null, liveChannel: null, isPlaying: false })
+        const intent = cancelOutputIntentRef.current
+        if (intent.backdropImage) {
+          if (!useAppStore.getState().isPresentationWindowOpen) {
+            await window.api.openPresentationWindow(intent.selectedDisplayId ?? undefined)
+            setPresentationWindowOpen(true)
+          }
+          window.api.sendToPresentation('load-content', {
+            type: 'backdrop',
+            path: intent.backdropImage,
+            name: 'Backdrop'
+          })
+          await new Promise((resolve) => setTimeout(resolve, 150))
+        } else {
+          window.api.sendToPresentation('clear-active-content')
+          if (useAppStore.getState().isPresentationWindowOpen) {
+            await window.api.closePresentationWindow()
+            setPresentationWindowOpen(false)
+          }
+        }
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        log('cancellation cleanup END')
+      })()
+      return cancelCleanupPromise
+    }
+    cancelTakeCleanupRef.current = { takeId, run: finishCancelledTake }
     log(`BEGIN prev=${prevActiveFile?.type} next=${channel.file.type} slide=${channel.slide}`)
+
+    // A minimized native window is intentionally added without touching it.
+    // Resolve and restore it only after the operator explicitly presses TAKE,
+    // before changing any visible output or overlay state.
+    const captureConfig = channel.file.type === 'capture' ? channel.file.capture : undefined
+    const isDeferredDesktopWindow = (
+      captureConfig?.captureKind === 'desktop' &&
+      (
+        captureConfig.desktopSourceType === 'window' ||
+        (!captureConfig.desktopSourceType && captureConfig.desktopSourceId?.startsWith('window:'))
+      )
+    )
+    if (captureConfig && isDeferredDesktopWindow) {
+      const sourceKey = captureConfig.desktopSourceKey || captureConfig.desktopSourceId
+      const captureSourceId = captureConfig.sourceId
+      if (!sourceKey) {
+        log('desktop window prepare aborted: stable source key is missing')
+        setTakeProgress({
+          channelId: ch,
+          message: 'Не удалось подключить окно: источник больше недоступен. Добавьте его заново.'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+        return
+      }
+
+      log(`desktop window prepare BEGIN key=${sourceKey}`)
+      const prepared = await window.api.prepareDesktopCaptureSource(sourceKey)
+      if (isTakeCancelled()) {
+        log('desktop window prepare cancelled before output changes')
+        return
+      }
+
+      // The channel may have been cleared or replaced while Windows was
+      // restoring/enumerating the native window. Never resurrect stale state.
+      const currentState = useAppStore.getState()
+      const currentChannel = currentState.channels[ch]
+      if (currentChannel?.file?.capture?.sourceId !== captureSourceId) {
+        log('desktop window prepare ignored: channel source changed')
+        return
+      }
+
+      const resolvedCaptureId = prepared.source?.captureId || (
+        prepared.source?.id.startsWith('window:') ? prepared.source.id : undefined
+      )
+      if (!prepared.success || !prepared.source || !resolvedCaptureId) {
+        const error = prepared.error || 'Windows не смогла подготовить выбранное окно.'
+        log(`desktop window prepare failed: ${error}`)
+        setTakeProgress({ channelId: ch, message: error })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
+        return
+      }
+
+      const resolvedCapture: CaptureSourceConfig = {
+        ...captureConfig,
+        desktopSourceId: resolvedCaptureId,
+        desktopSourceKey: captureConfig.desktopSourceKey || prepared.source.id,
+        desktopSourceType: 'window',
+        desktopAppIcon: prepared.source.appIcon || captureConfig.desktopAppIcon,
+        audioEnabled: false,
+        videoLabel: prepared.source.name || captureConfig.videoLabel
+      }
+      const resolvedEntry: FileEntry = {
+        ...currentChannel.file,
+        name: resolvedCapture.videoLabel,
+        capture: resolvedCapture
+      }
+      const sameCaptureSource = (file?: FileEntry | null): boolean => (
+        file?.capture?.sourceId === captureSourceId
+      )
+
+      // One FileEntry is referenced from the source library, one or more
+      // channels and sometimes selected/active state. Replace all copies in a
+      // single store transaction while preserving each channel's slide state.
+      useAppStore.setState((state) => {
+        const updatedChannels = Object.fromEntries(
+          Object.entries(state.channels).map(([channelId, stateChannel]) => [
+            channelId,
+            sameCaptureSource(stateChannel.file)
+              ? { ...stateChannel, file: resolvedEntry }
+              : stateChannel
+          ])
+        ) as Record<ChannelId, ChannelState>
+        const hasLibraryEntry = state.captureSources.some(sameCaptureSource)
+        return {
+          channels: updatedChannels,
+          captureSources: hasLibraryEntry
+            ? state.captureSources.map((source) => sameCaptureSource(source) ? resolvedEntry : source)
+            : [...state.captureSources, resolvedEntry],
+          selectedFile: sameCaptureSource(state.selectedFile) ? resolvedEntry : state.selectedFile,
+          activeFile: sameCaptureSource(state.activeFile) ? resolvedEntry : state.activeFile
+        }
+      })
+      channel = { ...currentChannel, file: resolvedEntry }
+      log(`desktop window prepare END captureId=${resolvedCaptureId}`)
+    }
 
     const FINAL_NAVIGATION_QUIET_MS = 70
     const MAX_MATCHED_FRAME_PASSES = 6
@@ -345,14 +552,19 @@ export function PreviewPanel(): JSX.Element {
       !isSameFilePptx &&
       (
         (prevActiveFile?.type === 'presentation' &&
-          (channel.file.type === 'presentation' || channel.file.type === 'pdf' || channel.file.type === 'video')) ||
-        ((prevActiveFile?.type === 'pdf' || prevActiveFile?.type === 'video') &&
+          (channel.file.type === 'presentation' || channel.file.type === 'pdf' || channel.file.type === 'video' || channel.file.type === 'capture')) ||
+        ((prevActiveFile?.type === 'pdf' || prevActiveFile?.type === 'video' || prevActiveFile?.type === 'capture') &&
           channel.file.type === 'presentation')
       )
     const useBufferedElectronSwitch =
-      (prevActiveFile?.type === 'pdf' || prevActiveFile?.type === 'video') &&
-      (channel.file.type === 'pdf' || channel.file.type === 'video') &&
-      (prevActiveFile?.type === 'video' || channel.file.type === 'video')
+      (prevActiveFile?.type === 'pdf' || prevActiveFile?.type === 'video' || prevActiveFile?.type === 'capture') &&
+      (channel.file.type === 'pdf' || channel.file.type === 'video' || channel.file.type === 'capture') &&
+      (
+        prevActiveFile?.type === 'video' ||
+        prevActiveFile?.type === 'capture' ||
+        channel.file.type === 'video' ||
+        channel.file.type === 'capture'
+      )
     const useSeamlessLayerSwitch = useLiveLayerSwitch || useBufferedElectronSwitch
 
     if (useSeamlessLayerSwitch && hadPinnedOverlay) {
@@ -447,11 +659,16 @@ export function PreviewPanel(): JSX.Element {
       log('PDF-to-PDF: skipping overlay, persistent canvas owns atomic swap')
     }
 
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
+
     setActiveFile(channel.file)
     setLiveChannel(ch)
 
     // Minimize previously opened external file (Word/Excel) when switching to other content
-    if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage) {
+    if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && !prevActiveFile.isAudio) {
       await window.api.minimizeExternalFile(prevActiveFile.path)
     }
 
@@ -492,6 +709,9 @@ export function PreviewPanel(): JSX.Element {
           ) {
             hasPowerPointStartedRef.current = true
             setTakeProgress((current) => current?.channelId === ch ? null : current)
+            if (prevActiveFile?.type === 'capture') {
+              window.api.sendToPresentation('capture-audio-live', null)
+            }
           }
         }
       )
@@ -506,9 +726,17 @@ export function PreviewPanel(): JSX.Element {
         stopListeningForVisible()
       }
       log(`launchPowerPoint: END success=${result.success} error=${result.error ?? '-'}`)
+      if (isTakeCancelled()) {
+        log('PowerPoint TAKE cancelled while launching')
+        await finishCancelledTake()
+        return
+      }
       if (result.success) {
         hasPowerPointStartedRef.current = true
         setTakeProgress((current) => current?.channelId === ch ? null : current)
+        if (prevActiveFile?.type === 'capture') {
+          window.api.sendToPresentation('capture-audio-live', null)
+        }
       }
 
       // A cold PowerPoint COM start can fail before Run() creates a slideshow.
@@ -534,11 +762,19 @@ export function PreviewPanel(): JSX.Element {
       log('awaitPptxGotoChainIdle: BEGIN')
       await awaitPptxGotoChainIdle()
       log('awaitPptxGotoChainIdle: END')
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
 
       // The slideshow is ready but still covered. Apply clicks made while it
       // was opening now, so the first revealed frame is already the requested
       // slide instead of briefly exposing the launch slide.
       await applyQueuedNavigationUnderOverlay('presentation')
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
 
       // Скрываем Shell_SecondaryTrayWnd на внешнем дисплее. PP slideshow
       // идёт HWND_TOPMOST, но во время GotoSlide/Next transition-гонок
@@ -593,6 +829,10 @@ export function PreviewPanel(): JSX.Element {
         if (!(await waitForLateNavigation())) break
         log('navigation arrived before PowerPoint reveal; applying under old frame')
       }
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       const shouldPinPowerPointTarget =
         !useSeamlessLayerSwitch &&
         (prevActiveFile?.type === 'pdf' ||
@@ -602,6 +842,10 @@ export function PreviewPanel(): JSX.Element {
         log('target snapshot: PowerPoint BEGIN')
         const targetSnapshot = await window.api.snapshotSlideshow()
         log(`target snapshot: PowerPoint END path=${targetSnapshot ? 'ok' : 'null'}`)
+        if (isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
         if (targetSnapshot) {
           await window.api.swapOverlayImage(targetSnapshot)
           await window.api.pinOverlay()
@@ -653,15 +897,22 @@ export function PreviewPanel(): JSX.Element {
     }
     const deferPowerPointCloseUntilTargetReady =
       prevActiveFile?.type === 'presentation' &&
-      (channel.file.type === 'pdf' || channel.file.type === 'video') &&
+      (channel.file.type === 'pdf' || channel.file.type === 'video' || channel.file.type === 'capture') &&
       useLiveLayerSwitch
     if (prevActiveFile?.type === 'presentation' && !deferPowerPointCloseUntilTargetReady) {
       parallelTasks2.push(window.api.powerpointCommand('close'))
     }
     if (parallelTasks2.length > 0) await Promise.all(parallelTasks2)
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
 
     // Audio files — play in built-in music player + show backdrop
     if (channel.file.type === 'other' && channel.file.isAudio) {
+      if (prevActiveFile?.type === 'capture') {
+        window.api.sendToPresentation('capture-audio-live', null)
+      }
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
       const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
       if (backdropImage) {
@@ -678,9 +929,21 @@ export function PreviewPanel(): JSX.Element {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
       }
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       useAppStore.getState().setMusicPlaylist([channel.file.path])
       await window.api.musicSetPlaylist([channel.file.path], 0)
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       await window.api.musicPlay()
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
       return
@@ -688,6 +951,9 @@ export function PreviewPanel(): JSX.Element {
 
     // For 'other' non-image files (Word, Excel, etc.), open/restore on external display
     if (channel.file.type === 'other' && !channel.file.isImage) {
+      if (prevActiveFile?.type === 'capture') {
+        window.api.sendToPresentation('capture-audio-live', null)
+      }
       // Show backdrop on presentation window so it's visible when Word/Excel is minimized
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
       const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
@@ -705,19 +971,35 @@ export function PreviewPanel(): JSX.Element {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
       }
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       const displays = await window.api.getDisplays()
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       const external = displays.find((d) => !d.isPrimary)
       // Minimize previous other file (different file) — don't close
-      if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && prevActiveFile.path !== channel.file.path) {
+      if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && !prevActiveFile.isAudio && prevActiveFile.path !== channel.file.path) {
         await window.api.minimizeExternalFile(prevActiveFile.path)
       }
       // Hide taskbar FIRST, wait for Windows to update work area, then position window
       if (external) {
         await window.api.hideTaskbar(external.bounds)
         await new Promise((r) => setTimeout(r, 500))
+        if (isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
       }
       // Try to restore; if not tracked yet, open fresh
       await window.api.restoreExternalFile(channel.file.path, external?.bounds)
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
       return
@@ -730,28 +1012,97 @@ export function PreviewPanel(): JSX.Element {
       await window.api.openPresentationWindow(useAppStore.getState().selectedDisplayId ?? undefined)
       setPresentationWindowOpen(true)
     }
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
 
     // Subscribe BEFORE sending load-content so we can't miss the signal.
     // PdfViewer emits 'presentation-content-ready' after its first drawImage;
     // <img> elements emit it after onLoad; VideoViewer emits it after the
     // first decoded frame is submitted for composition.
-    const contentReady = new Promise<void>((resolve) => {
+    const contentReady = new Promise<{ ready: boolean; error?: string; cancelled?: boolean }>((resolve) => {
       let settled = false
       let timeout: ReturnType<typeof setTimeout> | undefined
-      let unsub = (): void => {}
-      const finish = (reason: 'received' | 'timeout'): void => {
+      let unsubReady = (): void => {}
+      let unsubError = (): void => {}
+      let unsubPrepared = (): void => {}
+      let captureCommitSent = false
+      let handleTakeCancelled = (): void => {}
+      const finish = (
+        result: { ready: boolean; error?: string; cancelled?: boolean },
+        reason: 'received' | 'timeout' | 'error' | 'cancelled' | 'committed'
+      ): void => {
         if (settled) return
         settled = true
         if (timeout) clearTimeout(timeout)
-        unsub()
-        log(reason === 'received' ? 'content-ready received' : 'content-ready TIMEOUT (5000ms)')
-        resolve()
+        unsubReady()
+        unsubError()
+        unsubPrepared()
+        window.removeEventListener('cancel-active-take', handleTakeCancelled)
+        log(
+          reason === 'received'
+            ? 'content-ready received'
+            : reason === 'committed'
+              ? 'content-ready ACK timeout after capture commit; commit retained'
+            : reason === 'cancelled'
+              ? 'content-ready CANCELLED by operator'
+            : reason === 'error'
+              ? `content-ready ERROR ${result.error ?? '-'}`
+              : `content-ready TIMEOUT (${channel.file?.type === 'capture' ? 16000 : 5000}ms)`
+        )
+        resolve(result)
       }
-      unsub = window.api.on('presentation-content-ready', () => finish('received'))
+      handleTakeCancelled = (): void => finish(
+        { ready: false, cancelled: true, error: 'TAKE отменён оператором.' },
+        'cancelled'
+      )
+      unsubReady = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+        const ready = args[0] as { takeId?: string }
+        if (ready?.takeId !== takeId) return
+        finish({ ready: true }, 'received')
+      })
+      unsubPrepared = window.api.on('presentation-content-prepared', (...args: unknown[]) => {
+        const prepared = args[0] as { takeId?: string; type?: string; sourceId?: string }
+        if (
+          captureCommitSent ||
+          channel.file?.type !== 'capture' ||
+          prepared?.takeId !== takeId ||
+          prepared.type !== 'capture' ||
+          prepared.sourceId !== channel.file.capture?.sourceId
+        ) return
+        captureCommitSent = true
+        log(`capture prepared; committing take=${takeId}`)
+        window.api.sendToPresentation('commit-content-load', { takeId })
+      })
+      unsubError = window.api.on('presentation-content-error', (...args: unknown[]) => {
+        const error = args[0] as { takeId?: string; type?: string; sourceId?: string; message?: string }
+        if (channel.file?.type !== 'capture' || error?.type !== 'capture') return
+        if (error.takeId !== takeId) return
+        if (error.sourceId && error.sourceId !== channel.file.capture?.sourceId) return
+        finish({ ready: false, error: error.message || 'Внешний источник не готов.' }, 'error')
+      })
+      window.addEventListener('cancel-active-take', handleTakeCancelled)
       // Slow machines and high-bitrate local videos can need more than two
       // seconds to initialize a decoder. Do not capture the window while it
       // is still black unless the renderer genuinely failed to become ready.
-      timeout = setTimeout(() => finish('timeout'), 5000)
+      // CaptureHub allows a cold desktop stream up to 12 seconds for its first
+      // frame and its TAKE waiter up to 14 seconds. Keep the controller's
+      // outer timeout last in the chain so it cannot cancel a nearly-ready
+      // Word/Excel capture like the previous 7s/8s race did.
+      const timeoutMs = channel.file?.type === 'capture' ? 16000 : 5000
+      timeout = setTimeout(() => {
+        if (channel.file?.type === 'capture' && captureCommitSent) {
+          finish({ ready: true }, 'committed')
+          return
+        }
+        finish(
+          channel.file?.type === 'capture'
+            ? { ready: false, error: 'Видеосигнал не появился за 16 секунд.' }
+            : { ready: true },
+          'timeout'
+        )
+      }, timeoutMs)
     })
 
     const savedVideo = channel.file.type === 'video'
@@ -761,6 +1112,11 @@ export function PreviewPanel(): JSX.Element {
       log(`video restore: time=${savedVideo.currentTime.toFixed(3)} savedPlaying=${savedVideo.playing} startPaused=true`)
     }
 
+    if (channel.file.type === 'capture' && channel.file.capture) {
+      // Idempotent registration also recovers a source if the prewarmed output
+      // renderer was recreated after a display change.
+      window.api.sendToPresentation('capture-source-register', channel.file.capture)
+    }
     window.api.sendToPresentation('load-content', {
       type: channel.file.type,
       path: channel.file.path,
@@ -768,10 +1124,41 @@ export function PreviewPanel(): JSX.Element {
       startSlide: channel.slide,
       startTime: savedVideo?.currentTime,
       autoplay: channel.file.type === 'video' ? false : undefined,
-      isImage: channel.file.isImage
+      isImage: channel.file.isImage,
+      capture: channel.file.capture,
+      captureAudioOnCommit: channel.file.type === 'capture'
+        ? prevActiveFile?.type !== 'presentation'
+        : undefined,
+      takeId
     })
 
-    await contentReady
+    const readiness = await contentReady
+    if (readiness.cancelled || isTakeCancelled()) {
+      log('TAKE stopped after operator cancellation')
+      await finishCancelledTake()
+      return
+    }
+    if (!readiness.ready && channel.file.type === 'capture') {
+      window.api.sendToPresentation('cancel-content-load', { takeId })
+      log(`capture take aborted; previous output preserved error=${readiness.error ?? '-'}`)
+      useAppStore.setState({
+        activeFile: prevActiveFile,
+        liveChannel: freshState.liveChannel,
+        currentSlide: freshState.currentSlide,
+        totalSlides: freshState.totalSlides,
+        isPlaying: freshState.isPlaying
+      })
+      if (!prevActiveFile && !outputWindowWasOpen && useAppStore.getState().isPresentationWindowOpen) {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
+      await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
+      return
+    }
+    if (channel.file.type !== 'capture' && prevActiveFile?.type === 'capture') {
+      window.api.sendToPresentation('capture-audio-live', null)
+    }
     // The target is already painted in the persistent output window underneath
     // the old freeze frame. Reveal it directly: capturePage→PNG→base64→decode
     // added 300–2600ms and created a second visible image boundary of its own.
@@ -784,6 +1171,10 @@ export function PreviewPanel(): JSX.Element {
         if (!(await waitForLateNavigation())) break
         log('navigation arrived before PDF reveal; applying under old frame')
       }
+    }
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
     }
     if (revealWarmOutputAfterPaint) {
       // Keep the fullscreen Electron HWND transparent while its new PDF/video
@@ -799,9 +1190,20 @@ export function PreviewPanel(): JSX.Element {
         ? 'painted Electron target revealed behind live PowerPoint'
         : 'warm output revealed only after target paint')
     }
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
     if (deferPowerPointCloseUntilTargetReady) {
       await window.api.powerpointCommand('close')
       log('live PowerPoint closed only after Electron target was ready underneath')
+    }
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
+    if (channel.file.type === 'capture') {
+      window.api.sendToPresentation('capture-audio-live', channel.file.capture?.sourceId ?? null)
     }
     const shouldPinPdfTarget =
       !useSeamlessLayerSwitch &&
@@ -811,6 +1213,10 @@ export function PreviewPanel(): JSX.Element {
       log('target capture: PDF BEGIN')
       const targetSwapped = await window.api.captureAndSwapOverlay()
       log(`target capture: PDF END swapped=${targetSwapped}`)
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
       if (targetSwapped) {
         await window.api.pinOverlay()
         setOverlayState({ kind: 'pinned-pdf', pdfPath: channel.file.path })
@@ -821,6 +1227,10 @@ export function PreviewPanel(): JSX.Element {
     log(useSeamlessLayerSwitch
       ? 'seamless layer switch complete: prepared target exposed once'
       : 'direct reveal: target output ready')
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
     await window.api.hideOverlay()
     setOverlayState({ kind: 'hidden' })
   }
@@ -944,7 +1354,7 @@ export function PreviewPanel(): JSX.Element {
               onClick={() => {
                 if (!currentPageIsEmpty) {
                   const ok = window.confirm(
-                    'На странице есть файлы в каналах. Удалить страницу со всем содержимым?'
+                    'На странице есть материалы в каналах. Удалить страницу со всем содержимым?'
                   )
                   if (!ok) return
                   pageIds.forEach((id) => setChannelFile(id, null))
@@ -1093,7 +1503,7 @@ function ChannelPanel({
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={isTaking}
             className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded-sm hover:bg-white/10 transition-colors disabled:opacity-30 disabled:hover:text-gray-500 disabled:hover:bg-transparent"
-            title="Убрать файл"
+            title="Убрать материал"
           >
             ✕
           </button>
@@ -1113,7 +1523,7 @@ function ChannelPanel({
         ) : (
           <div className="text-gray-600 text-xs text-center select-none p-4">
             <div className="text-2xl mb-2 opacity-30">📥</div>
-            Перетащите файл сюда
+            Перетащите материал сюда
           </div>
         )}
         {isTaking && openingMessage && (
@@ -1206,8 +1616,8 @@ function ChannelPanel({
           </button>
         </div>
       )}
-      {/* Take button for video/other in non-live channel */}
-      {!isLive && channel.file && (channel.file.type === 'video' || channel.file.type === 'other') && (
+      {/* Take button for video/capture/other in non-live channel */}
+      {!isLive && channel.file && (channel.file.type === 'video' || channel.file.type === 'capture' || channel.file.type === 'other') && (
         <div
           className="flex items-center justify-end py-1.5 px-2 bg-surface-200 border-t border-gray-800"
           onDoubleClick={(e) => e.stopPropagation()}
@@ -1236,6 +1646,11 @@ function SlideRenderer({ file, slideNum, isLive, pptxThumbnails, onTotalSlides }
   if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} isLive={isLive} onTotalSlides={onTotalSlides} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
   if (file.type === 'video') return <VideoPreview file={file} />
+  if (file.type === 'capture') {
+    return file.capture
+      ? <CaptureThumbnail config={file.capture} className="w-full h-full" />
+      : <div className="text-red-400 text-xs">Параметры видеовхода отсутствуют</div>
+  }
   if (file.type === 'other') return <OtherPreview file={file} />
   return <div className="text-gray-500 text-xs">Unsupported</div>
 }

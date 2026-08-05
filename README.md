@@ -27,11 +27,11 @@
 
 ## Что это
 
-Presentation Display Manager — Windows-приложение для конференций, докладов, трансляций и мероприятий с двумя экранами. Главное окно остаётся у оператора, а PowerPoint, PDF, видео, изображения и таймер выводятся на выбранный проектор или дополнительный монитор.
+Presentation Display Manager — Windows-приложение для конференций, докладов, трансляций и мероприятий с двумя экранами. Главное окно остаётся у оператора, а PowerPoint, PDF, видео, изображения, камеры, платы видеозахвата, окна программ и таймер выводятся на выбранный проектор или дополнительный монитор.
 
 ```text
-Библиотека файлов → каналы 1 / 2 / 3 / 4 → «В эфир» → внешний дисплей
-       операторское окно                         экран зрителей
+Файлы и внешние источники → каналы 1 / 2 / 3 / 4 → «В эфир» → внешний дисплей
+           операторское окно                               экран зрителей
 ```
 
 Приложение рассчитано на быстрые переключения: следующий материал можно подготовить в отдельном канале, не меняя текущую картинку в эфире.
@@ -39,10 +39,13 @@ Presentation Display Manager — Windows-приложение для конфе�
 ## Основные возможности
 
 - **Каналы 1 / 2 / 3 / 4 и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
-- **Бесшовное переключение эфира** — PDF, PowerPoint и видео сменяют друг друга без чёрного кадра, рабочего стола и мерцания; предыдущий кадр остаётся видимым до полной готовности следующего.
+- **Бесшовное переключение эфира** — PDF, PowerPoint, видео и внешние источники сменяют друг друга без чёрного кадра, рабочего стола и мерцания; предыдущий кадр остаётся видимым до полной готовности следующего.
 - **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint. При выходе Roland закрывает только созданный им экземпляр PowerPoint, а уже открытое пользовательское окно возвращает в исходное состояние.
 - **PDF и офисные документы** — быстрый показ тяжёлых PDF, прогрессивная загрузка миниатюр и кэширование кадров; комбинированный рендер через Windows.Data.Pdf, PDFium и резервный pdf.js автоматически обходит проблемные страницы. Также доступен предпросмотр Word и Excel через установленный Microsoft Office.
 - **Видео без потери позиции** — play/pause, seek, громкость и продолжение с сохранённого момента после переключения между каналами в текущей сессии.
+- **Камеры и платы видеозахвата** — добавление веб-камер, USB-камер и HDMI/USB-плат для показа камеры, Apple TV и других внешних источников. Для устройств видеозахвата можно отдельно выбрать связанный аудиовход.
+- **Окна программ и экраны** — автоматический список открытых окон, показ браузера, Word, Excel, Проводника, командной строки или целого экрана. Свёрнутое окно можно добавить по значку приложения: оно развернётся только после нажатия **«В эфир»**.
+- **Курсор при показе окна** — когда оператор работает в PDM, курсор не попадает в миниатюру и эфир захваченного окна; при переходе в демонстрируемую программу используется привычный системный курсор Windows. Звук выбранной программы не захватывается.
 - **Изображения и подложка** — фон показывается только после явного выбора и не переносится в следующую сессию.
 - **Таймер поверх эфира** — перетаскивание, масштабирование, прозрачность текста, звуковые сигналы и отдельные цвета для основного времени, последней минуты и перелимита.
 - **Музыкальный плеер** — плейлист, громкость, переход между треками и режимы повтора.
@@ -61,6 +64,7 @@ Presentation Display Manager — Windows-приложение для конфе�
 | Видео | `.mp4`, `.mov`, `.avi`, `.webm`, `.mkv` |
 | Изображения | `.jpg`, `.jpeg`, `.png`, `.gif`, `.bmp`, `.webp`, `.tiff`, `.tif`, `.svg` |
 | Аудио | `.mp3`, `.wav`, `.ogg`, `.aac`, `.m4a`, `.flac`, `.wma` |
+| Внешние источники | камеры и USB/HDMI-платы видеозахвата, окна программ, экраны |
 
 > Фактическое воспроизведение конкретного видео- или аудиокодека зависит от поддержки Chromium и Windows, а не только от расширения файла.
 
@@ -85,10 +89,10 @@ PDF, изображения, видео, музыка и таймер не тр�
 
 ## Как работать
 
-1. Выберите папку с материалами в левой панели.
-2. Перетащите файлы в каналы 1, 2, 3 или 4. Кнопка `+` добавляет ещё одну страницу из четырёх каналов.
+1. Выберите папку с материалами в левой панели либо добавьте камеру, плату видеозахвата, окно программы или экран в разделе **«Внешние источники»**.
+2. Перетащите материал или внешний источник в канал 1, 2, 3 или 4. Кнопка `+` добавляет ещё одну страницу из четырёх каналов.
 3. При необходимости заранее выберите слайд или поставьте видео на нужную позицию.
-4. Нажмите **«В эфир»** или дважды щёлкните по каналу.
+4. Нажмите **«В эфир»** или дважды щёлкните по каналу. Свёрнутое окно программы развернётся только на этом шаге.
 5. Кнопка **«Выйти из эфира»** закрывает текущий материал. Если в этой сессии выбрана подложка, появится она; иначе внешний экран станет чёрным.
 
 Для PPTX и PDF доступны стрелки и прямой ввод номера слайда. Позиции слайдов сохраняются отдельно для каждого файла. При переключении с поставленного на паузу видео на другой канал его позиция сохраняется до закрытия приложения.
@@ -149,6 +153,7 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 | Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.25, electron-builder 26.15.3, NSIS |
 | PowerPoint | PowerShell, COM Automation, постоянный JSON-демон с восстановлением состояния Office |
 | PDF | PDFium WASM (@hyzyla/pdfium 2.1.13), pdfjs-dist 6.2.108 и Windows.Data.Pdf |
+| Внешние источники | Electron Desktop Capture, MediaDevices, постоянные видеопотоки и нативное перечисление окон Windows |
 | Таймер | WPF-оверлей через PowerShell |
 
 Архитектура бесшовного эфира и обязательные правила против регрессий описаны в [`docs/SEAMLESS_SWITCHING.md`](docs/SEAMLESS_SWITCHING.md).
@@ -168,7 +173,7 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 
 ```text
 src/
-  main/       окна, IPC, диагностика, PowerPoint-демон, pdm-media
+  main/       окна, IPC, диагностика, PowerPoint-демон, захват окон, pdm-media
   preload/    изолированный API между renderer и main process
   renderer/   React-интерфейс оператора и эфирного окна
 scripts/      PowerShell: Office COM, таймер, аудио и дисплеи
@@ -190,7 +195,7 @@ docs/         архитектурные заметки и правила про
 
 Presentation Display Manager is a Windows desktop application for driving a projector or secondary display during conferences, talks, streams, and live events. The operator keeps the library, channel grid, and playback controls on the primary monitor while the audience sees only the selected content.
 
-Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), seamless flicker-free switching between PDF, PowerPoint and video, native PowerPoint control and slide previews, fast rendering and progressive thumbnails for complex PDFs, Office document previews, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging.
+Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), seamless flicker-free switching between PDF, PowerPoint, video and live sources, native PowerPoint control and slide previews, fast rendering and progressive thumbnails for complex PDFs, Office document previews, cameras and USB/HDMI capture devices, program-window and screen capture, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging. Minimized program windows are restored only when taken on air, and the operator cursor is kept out of captured-window previews while PDM has focus. Program-window audio is not captured.
 
 Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 
