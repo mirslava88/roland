@@ -303,7 +303,7 @@ export function CaptureSourcesPanel(): JSX.Element {
             className="rounded-sm bg-blue-600/80 hover:bg-blue-500 px-2 py-1 text-[10px] font-semibold text-white transition-colors"
             title="Добавить плату видеозахвата, USB-камеру или веб-камеру"
           >
-            ＋ Камера / плата
+            Внешний источник
           </button>
           <button
             onClick={() => setDesktopPickerOpen(true)}

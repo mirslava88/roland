@@ -334,7 +334,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">1. Выбор материалов (левая панель)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Выберите диск или папку с файлами</li>
-                  <li>Для камеры или платы захвата нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">＋ Камера / плата</code>, выберите устройство и добавьте его</li>
+                  <li>Для камеры или платы захвата нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Внешний источник</code>, выберите устройство и добавьте его</li>
                   <li>Для показа браузера или другой открытой программы нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">＋ Окно / экран</code>. Не сворачивайте выбранное окно во время эфира</li>
                   <li>Фильтры вверху: Все, PPTX, PDF, Видео, Разное</li>
                   <li>Двойной клик на папку — войти внутрь, <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">..</code> — назад</li>
