@@ -118,7 +118,10 @@ interface Api {
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
   launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
-  powerpointCommand(command: string, arg?: number): Promise<{ success: boolean; output?: string; error?: string }>
+  powerpointCommand(
+    command: string,
+    arg?: number | { stopAtBoundary?: boolean }
+  ): Promise<{ success: boolean; output?: string; error?: string }>
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>

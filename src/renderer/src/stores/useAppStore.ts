@@ -139,11 +139,16 @@ interface AppState {
   selectedDisplayId: number | null
   backdropImage: string | null
   globalHookEnabled: boolean
+  channelBoundaryNavigationEnabled: boolean
 
   overlayState: OverlayState
   setOverlayState: (state: OverlayState) => void
   releasePinnedPdfOverlay: () => void
-  navigatePptx: (command: 'next' | 'prev' | 'goto', arg?: number) => Promise<{ success: boolean; output?: string; error?: string }>
+  navigatePptx: (
+    command: 'next' | 'prev' | 'goto',
+    arg?: number,
+    stopAtBoundary?: boolean
+  ) => Promise<{ success: boolean; output?: string; error?: string }>
 
   channels: Record<ChannelId, ChannelState>
   channelIds: ChannelId[]
@@ -181,6 +186,7 @@ interface AppState {
   setSelectedDisplayId: (id: number | null) => void
   setBackdropImage: (path: string | null) => void
   setGlobalHookEnabled: (enabled: boolean) => void
+  setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
 
   // Doc previews (Word/Excel -> temp PDF path)
   docPreviewsMap: Record<string, string>
@@ -254,6 +260,7 @@ export const useAppStore = create<AppState>()(persist(
   selectedDisplayId: null,
   backdropImage: null,
   globalHookEnabled: true,
+  channelBoundaryNavigationEnabled: false,
 
   overlayState: { kind: 'hidden' } as OverlayState,
 
@@ -470,6 +477,7 @@ export const useAppStore = create<AppState>()(persist(
   setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
   setBackdropImage: (path) => set({ backdropImage: path }),
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
+  setChannelBoundaryNavigationEnabled: (enabled) => set({ channelBoundaryNavigationEnabled: enabled }),
 
   setOverlayState: (state) => set({ overlayState: state }),
 
@@ -492,8 +500,11 @@ export const useAppStore = create<AppState>()(persist(
   // setCurrentSlide уходит вперёд, а PP не успевает (PP transitions ~200-500мс
   // каждый, retry-on-stuck может пропустить click). После collapsing PP
   // прыгает напрямую к финальному target — синхрон гарантирован.
-  navigatePptx: async (command, arg) => {
-    window.api.dbgLog(`navigatePptx: ENTER command=${command} arg=${arg} typeof-arg=${typeof arg}`)
+  navigatePptx: async (command, arg, stopAtBoundary = false) => {
+    window.api.dbgLog(
+      `navigatePptx: ENTER command=${command} arg=${arg} ` +
+      `typeof-arg=${typeof arg} stopAtBoundary=${stopAtBoundary}`
+    )
     const { overlayState } = get()
     if (overlayState.kind === 'pinned-pptx') {
       window.api.hideOverlay()
@@ -504,7 +515,7 @@ export const useAppStore = create<AppState>()(persist(
       return dispatchPptxGotoCollapsed(arg)
     }
     window.api.dbgLog(`navigatePptx: direct powerpointCommand(${command})`)
-    return window.api.powerpointCommand(command)
+    return window.api.powerpointCommand(command, stopAtBoundary ? { stopAtBoundary: true } : undefined)
   },
 
   // Doc previews
@@ -585,9 +596,11 @@ export const useAppStore = create<AppState>()(persist(
     // - timerSoundEnd/Warning — юзер явно не хочет чтобы звуки подтягивались
     //   автоматом. Каждая сессия начинается с null.
     //
+    // channelBoundaryNavigationEnabled is session-only: every launch starts
+    // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 3,
+    version: 4,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -601,6 +614,11 @@ export const useAppStore = create<AppState>()(persist(
       // path already saved by previous releases on the first v3 launch.
       if (version < 3) {
         delete migrated.backdropImage
+      }
+      // v3 -> v4: channel boundary navigation is deliberately session-only
+      // and must start disabled on every application launch.
+      if (version < 4) {
+        delete migrated.channelBoundaryNavigationEnabled
       }
       return migrated
     },

@@ -1445,13 +1445,25 @@ while ($true) {
                     $sBefore = [int]$view.Slide.SlideIndex
                     $cBefore = -1
                     try { $cBefore = [int]$view.GetClickIndex() } catch {}
+                    $cCount = -1
+                    try { $cCount = [int]$view.GetClickCount() } catch {}
                     $t0 = [DateTime]::UtcNow.Ticks
                     $mediaClick = Invoke-SlideVideoClick $view
+                    $boundary = $false
                     if (-not $mediaClick.Handled) {
-                        if ($mediaClick.ForceAdvance -and $sBefore -lt $total) {
-                            $view.GotoSlide($sBefore + 1)
-                        } else {
-                            $view.Next()
+                        # In channel-boundary mode do not let LoopUntilStopped
+                        # wrap the final slide back to slide 1. GetClickCount
+                        # preserves every click animation before this boundary.
+                        $boundary = [bool]$req.stopAtBoundary -and `
+                            $sBefore -eq $total -and `
+                            $cBefore -ge 0 -and $cCount -ge 0 -and `
+                            $cBefore -ge $cCount
+                        if (-not $boundary) {
+                            if ($mediaClick.ForceAdvance -and $sBefore -lt $total) {
+                                $view.GotoSlide($sBefore + 1)
+                            } else {
+                                $view.Next()
+                            }
                         }
                     }
                     $sMid = [int]$view.Slide.SlideIndex
@@ -1472,9 +1484,9 @@ while ($true) {
                     $cAfter = -1
                     try { $cAfter = [int]$view.GetClickIndex() } catch {}
                     if ($sAfter -ne $sBefore) { Reset-SlideVideoClickState }
-                    Log ("next: slide {0}->{1} click {2}->{3} retry={4} media={5} dur={6}ms" -f `
-                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, $mediaClick.Detail, [int](($t1-$t0)/10000))
-                    Reply @{ id = $id; ok = $true; slide = $sAfter }
+                    Log ("next: slide {0}->{1} click {2}->{3}/{4} retry={5} media={6} boundary={7} dur={8}ms" -f `
+                        $sBefore, $sAfter, $cBefore, $cAfter, $cCount, $retried, $mediaClick.Detail, $boundary, [int](($t1-$t0)/10000))
+                    Reply @{ id = $id; ok = $true; slide = $sAfter; boundary = $boundary }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }
@@ -1491,7 +1503,9 @@ while ($true) {
                     try { $cBefore = [int]$view.GetClickIndex() } catch {}
                     $hasVideo = (@(Get-SlideVideoShapes $view).Count -gt 0)
                     $t0 = [DateTime]::UtcNow.Ticks
-                    $view.Previous()
+                    $boundary = [bool]$req.stopAtBoundary -and `
+                        $sBefore -eq 1 -and $cBefore -le 0
+                    if (-not $boundary) { $view.Previous() }
                     $sMid = [int]$view.Slide.SlideIndex
                     $cMid = -1
                     try { $cMid = [int]$view.GetClickIndex() } catch {}
@@ -1505,9 +1519,9 @@ while ($true) {
                     $cAfter = -1
                     try { $cAfter = [int]$view.GetClickIndex() } catch {}
                     if ($sAfter -ne $sBefore) { Reset-SlideVideoClickState }
-                    Log ("prev: slide {0}->{1} click {2}->{3} retry={4} media={5} dur={6}ms" -f `
-                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, $hasVideo, [int](($t1-$t0)/10000))
-                    Reply @{ id = $id; ok = $true; slide = $sAfter }
+                    Log ("prev: slide {0}->{1} click {2}->{3} retry={4} media={5} boundary={6} dur={7}ms" -f `
+                        $sBefore, $sAfter, $cBefore, $cAfter, $retried, $hasVideo, $boundary, [int](($t1-$t0)/10000))
+                    Reply @{ id = $id; ok = $true; slide = $sAfter; boundary = $boundary }
                 } else {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }

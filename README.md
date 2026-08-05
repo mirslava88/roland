@@ -39,6 +39,7 @@ Presentation Display Manager — Windows-приложение для конфе�
 ## Основные возможности
 
 - **Каналы 1 / 2 / 3 / 4 и дополнительные страницы** — заранее разложите контент и отправляйте нужный канал в эфир одним нажатием.
+- **Автопереход между презентациями** — по желанию клик «вперёд» на последнем слайде PPTX/PDF открывает ближайший следующий непустой канал, а клик «назад» на первом слайде — предыдущий. Пустые каналы пропускаются, функция при каждом запуске выключена.
 - **Бесшовное переключение эфира** — PDF, PowerPoint, видео и внешние источники сменяют друг друга без чёрного кадра, рабочего стола и мерцания; предыдущий кадр остаётся видимым до полной готовности следующего.
 - **PowerPoint** — превью всех слайдов, переход к нужному слайду, next/prev и нативное слайд-шоу через Microsoft PowerPoint. При выходе Roland закрывает только созданный им экземпляр PowerPoint, а уже открытое пользовательское окно возвращает в исходное состояние.
 - **PDF и офисные документы** — быстрый показ тяжёлых PDF, прогрессивная загрузка миниатюр и кэширование кадров; комбинированный рендер через Windows.Data.Pdf, PDFium и резервный pdf.js автоматически обходит проблемные страницы. Также доступен предпросмотр Word и Excel через установленный Microsoft Office.
@@ -92,10 +93,12 @@ PDF, изображения, видео, музыка и таймер не тр�
 1. Выберите папку с материалами в левой панели либо добавьте камеру, плату видеозахвата, окно программы или экран в разделе **«Внешние источники»**.
 2. Перетащите материал или внешний источник в канал 1, 2, 3 или 4. Кнопка `+` добавляет ещё одну страницу из четырёх каналов.
 3. При необходимости заранее выберите слайд или поставьте видео на нужную позицию.
-4. Нажмите **«В эфир»** или дважды щёлкните по каналу. Свёрнутое окно программы развернётся только на этом шаге.
+4. Выберите канал с контентом — после этого станет доступна кнопка **«В эфир»**. Нажмите её или дважды щёлкните по каналу. Свёрнутое окно программы развернётся только на этом шаге.
 5. Кнопка **«Выйти из эфира»** закрывает текущий материал. Если в этой сессии выбрана подложка, появится она; иначе внешний экран станет чёрным.
 
 Для PPTX и PDF доступны стрелки и прямой ввод номера слайда. Позиции слайдов сохраняются отдельно для каждого файла. При переключении с поставленного на паузу видео на другой канал его позиция сохраняется до закрытия приложения.
+
+Кнопка **«Автопереход»** находится между кнопками **«Видео»** и **«Подложка (Фон)»**. Когда она включена, переход вперёд с последнего слайда PPTX/PDF запускает ближайший следующий канал с контентом, а переход назад с первого слайда — ближайший предыдущий. Пустые каналы автоматически пропускаются. При каждом запуске PDM автопереход выключен.
 
 ## Таймер
 
@@ -195,7 +198,7 @@ docs/         архитектурные заметки и правила про
 
 Presentation Display Manager is a Windows desktop application for driving a projector or secondary display during conferences, talks, streams, and live events. The operator keeps the library, channel grid, and playback controls on the primary monitor while the audience sees only the selected content.
 
-Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), seamless flicker-free switching between PDF, PowerPoint, video and live sources, native PowerPoint control and slide previews, fast rendering and progressive thumbnails for complex PDFs, Office document previews, cameras and USB/HDMI capture devices, program-window and screen capture, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging. Minimized program windows are restored only when taken on air, and the operator cursor is kept out of captured-window previews while PDM has focus. Program-window audio is not captured.
+Key features include numbered multi-page channels (1/2/3/4, 5/6/7/8, …), optional automatic navigation from the first or last PPTX/PDF slide to the nearest populated adjacent channel, seamless flicker-free switching between PDF, PowerPoint, video and live sources, native PowerPoint control and slide previews, fast rendering and progressive thumbnails for complex PDFs, Office document previews, cameras and USB/HDMI capture devices, program-window and screen capture, video playback with in-session position restore, images, background music, configurable display and audio output, a draggable timer with normal/warning/overtime colors, and built-in diagnostic logging. Minimized program windows are restored only when taken on air, and the operator cursor is kept out of captured-window previews while PDM has focus. Program-window audio is not captured.
 
 Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 

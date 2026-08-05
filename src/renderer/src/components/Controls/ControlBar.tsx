@@ -4,6 +4,7 @@ import {
   queueAbsoluteNavigationDuringTransition,
   queueNavigationDuringTransition
 } from '../../navigation-transition'
+import { takeAdjacentChannel } from '../../channel-boundary-navigation'
 
 export function ControlBar(): JSX.Element {
   const {
@@ -52,12 +53,23 @@ export function ControlBar(): JSX.Element {
     // Next() сыграет следующий шаг, slide index не изменится — optimistic
     // обгонит реальное состояние PP. UI обновляется по фактическому slide
     // от daemon после ответа.
-    navigatePptx(direction).then((result) => {
+    const { channelBoundaryNavigationEnabled, liveChannel } = useAppStore.getState()
+    const sourcePath = activeFile.path
+    navigatePptx(direction, undefined, channelBoundaryNavigationEnabled).then((result) => {
       if (result?.success && result.output) {
         try {
           const data = JSON.parse(result.output)
           if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
             setCurrentSlide(data.CurrentSlide)
+          }
+          if (data.Boundary === true) {
+            const latest = useAppStore.getState()
+            if (
+              latest.liveChannel === liveChannel &&
+              latest.activeFile?.path === sourcePath
+            ) {
+              takeAdjacentChannel(direction)
+            }
           }
         } catch { /* ignore */ }
       }
@@ -66,7 +78,15 @@ export function ControlBar(): JSX.Element {
 
   const handlePrev = (): void => {
     if (queueNavigationDuringTransition('prev')) return
-    const { currentSlide } = useAppStore.getState()
+    const { currentSlide, channelBoundaryNavigationEnabled } = useAppStore.getState()
+    if (
+      activeFile.type === 'pdf' &&
+      currentSlide <= 1 &&
+      channelBoundaryNavigationEnabled
+    ) {
+      takeAdjacentChannel('prev')
+      return
+    }
     // Для PPTX НЕ блокируем prev на первом слайде — Previous() откатывает
     // click-анимацию назад (clickIndex уменьшается, slide index не меняется).
     // Daemon сам останавливается на границе через retry guard $sBefore > 1.
@@ -82,7 +102,20 @@ export function ControlBar(): JSX.Element {
 
   const handleNext = (): void => {
     if (queueNavigationDuringTransition('next')) return
-    const { currentSlide, totalSlides } = useAppStore.getState()
+    const {
+      currentSlide,
+      totalSlides,
+      channelBoundaryNavigationEnabled
+    } = useAppStore.getState()
+    if (
+      activeFile.type === 'pdf' &&
+      totalSlides > 0 &&
+      currentSlide >= totalSlides &&
+      channelBoundaryNavigationEnabled
+    ) {
+      takeAdjacentChannel('next')
+      return
+    }
     // Для PPTX НЕ блокируем по slide index — анимации внутри слайда не
     // меняют slide index, guard «съедал» бы анимационные клики на последнем
     // слайде с pending entrance-эффектами. Daemon сам останавливается на

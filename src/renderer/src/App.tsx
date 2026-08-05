@@ -9,6 +9,7 @@ import { SlideNavigator } from './components/SlideNavigator/SlideNavigator'
 import { OperatorCursorGuard } from './components/Capture/OperatorCursorGuard'
 import { queueNavigationDuringTransition } from './navigation-transition'
 import type { NavigationRequest } from './navigation-transition'
+import { takeAdjacentChannel } from './channel-boundary-navigation'
 
 export default function App(): JSX.Element {
   const {
@@ -91,7 +92,13 @@ export default function App(): JSX.Element {
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
       if (queueNavigationDuringTransition(direction)) return
 
-      const { activeFile, currentSlide, totalSlides } = useAppStore.getState()
+      const {
+        activeFile,
+        currentSlide,
+        totalSlides,
+        channelBoundaryNavigationEnabled,
+        liveChannel
+      } = useAppStore.getState()
       if (!activeFile) return
 
       if (activeFile.type === 'presentation') {
@@ -109,16 +116,37 @@ export default function App(): JSX.Element {
         // по фактическому slide от daemon (а не optimistic — иначе counter
         // обгонит PP когда тот ещё проигрывает анимацию на текущем).
         const cmd = direction === 'next' ? 'next' : 'prev'
-        const result = await useAppStore.getState().navigatePptx(cmd)
+        const result = await useAppStore.getState().navigatePptx(
+          cmd,
+          undefined,
+          channelBoundaryNavigationEnabled
+        )
         if (result?.success && result.output) {
           try {
             const data = JSON.parse(result.output)
             if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
               useAppStore.getState().setCurrentSlide(data.CurrentSlide)
             }
+            if (data.Boundary === true) {
+              const latest = useAppStore.getState()
+              if (
+                latest.liveChannel === liveChannel &&
+                latest.activeFile?.path === activeFile.path
+              ) {
+                takeAdjacentChannel(direction)
+              }
+            }
           } catch { /* ignore */ }
         }
       } else if (activeFile.type === 'pdf') {
+        const atBoundary = totalSlides > 0 && (
+          (direction === 'next' && currentSlide >= totalSlides) ||
+          (direction === 'prev' && currentSlide <= 1)
+        )
+        if (channelBoundaryNavigationEnabled && atBoundary) {
+          takeAdjacentChannel(direction)
+          return
+        }
         // Let the output window advance from the page it has actually drawn.
         // An absolute, optimistic page number can race with PDF initialization:
         // the control store moves to page 2, then the late page-1 ready signal

@@ -350,10 +350,13 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> в центре — добавить новую страницу из 4 каналов (1/2/3/4, 5/6/7/8, …)</li>
                   <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
                   <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> справа от пагинации</li>
-                  <li>Перетащите файл или внешний источник в любой канал, затем нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или двойной клик по каналу</li>
+                  <li>Перетащите файл или внешний источник в любой канал и выберите этот канал. Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> станет доступна только для выбранного канала с контентом</li>
+                  <li>Для запуска нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или дважды щёлкните по каналу</li>
                   <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
                   <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
+                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⇆ Автопереход</code> находится между кнопками «Видео» и «Подложка (Фон)» и при каждом запуске программы выключен</li>
+                  <li>При включённом автопереходе нажатие вперёд после последнего слайда PPTX/PDF открывает ближайший следующий канал с контентом, а нажатие назад на первом слайде — предыдущий. Пустые каналы пропускаются</li>
                 </ul>
               </section>
 

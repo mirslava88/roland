@@ -36,7 +36,7 @@ const api = {
   launchPowerPoint: (filePath: string, displayId?: number, startSlide?: number) =>
     ipcRenderer.invoke('launch-powerpoint', filePath, displayId, startSlide),
 
-  powerpointCommand: (command: string, arg?: number) =>
+  powerpointCommand: (command: string, arg?: number | { stopAtBoundary?: boolean }) =>
     ipcRenderer.invoke('powerpoint-command', command, arg),
 
   generatePptxThumbnails: (filePath: string) =>

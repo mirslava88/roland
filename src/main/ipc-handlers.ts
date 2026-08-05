@@ -597,14 +597,23 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('powerpoint-command', async (_event, command: string, arg?: number) => {
+  ipcMain.handle('powerpoint-command', async (
+    _event,
+    command: string,
+    arg?: number | { stopAtBoundary?: boolean }
+  ) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     console.log(`[IPC ${Date.now()}] powerpoint-command: BEGIN command=${command} arg=${arg}`)
     try {
       const t0 = Date.now()
       const res = command === 'goto' && typeof arg === 'number'
         ? await pptDaemon.send('goto', { slide: arg })
-        : await pptDaemon.send(command)
+        : await pptDaemon.send(
+          command,
+          typeof arg === 'object' && arg !== null
+            ? { stopAtBoundary: arg.stopAtBoundary === true }
+            : {}
+        )
       if (command === 'close' && !controlWindow.isDestroyed()) {
         // PowerPoint owns the foreground while its slideshow is running. When
         // that HWND is destroyed Windows can promote Explorer/Start unless a
@@ -617,6 +626,7 @@ export function registerIpcHandlers(
       const output = JSON.stringify({
         Status: res.ok ? 'ok' : 'error',
         CurrentSlide: res.slide,
+        Boundary: res.boundary === true,
         Message: res.error
       })
       return { success: res.ok, output }

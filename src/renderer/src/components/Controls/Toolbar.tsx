@@ -19,6 +19,9 @@ export function Toolbar(): JSX.Element {
     setBackdropImage,
     globalHookEnabled,
     setGlobalHookEnabled,
+    channelBoundaryNavigationEnabled,
+    setChannelBoundaryNavigationEnabled,
+    channels,
     selectedChannel,
     setOverlayState
   } = useAppStore()
@@ -26,6 +29,8 @@ export function Toolbar(): JSX.Element {
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 
   const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
+  const selectedChannelHasContent = selectedChannel !== null && Boolean(channels[selectedChannel]?.file)
+  const canTogglePresentation = isOutputActive || selectedChannelHasContent
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
@@ -95,28 +100,8 @@ export function Toolbar(): JSX.Element {
       setActiveFile(null)
       setLiveChannelNull()
     } else {
-      // If a channel is selected, take it
-      if (selectedChannel) {
-        const { channels } = useAppStore.getState()
-        const channel = channels[selectedChannel]
-        if (channel?.file) {
-          window.dispatchEvent(new CustomEvent('take-channel', { detail: selectedChannel }))
-          return
-        }
-      }
-      // Switch audio to external display
-      await window.api.switchAudioToExternal()
-      if (!isPresentationWindowOpen) {
-        await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-        setPresentationWindowOpen(true)
-      }
-      if (backdropImage) {
-        window.api.sendToPresentation('load-content', {
-          type: 'backdrop',
-          path: backdropImage,
-          name: 'Backdrop'
-        })
-      }
+      if (!selectedChannelHasContent || selectedChannel === null) return
+      window.dispatchEvent(new CustomEvent('take-channel', { detail: selectedChannel }))
     }
   }
 
@@ -176,6 +161,19 @@ export function Toolbar(): JSX.Element {
       <VideoPlayer />
 
       <button
+        onClick={() => setChannelBoundaryNavigationEnabled(!channelBoundaryNavigationEnabled)}
+        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
+          channelBoundaryNavigationEnabled
+            ? 'bg-emerald-600/80 hover:bg-emerald-600 text-white border-transparent'
+            : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
+        }`}
+        title="По завершении презентации переключаться на следующий канал"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        ⇆ Автопереход: {channelBoundaryNavigationEnabled ? 'Вкл' : 'Выкл'}
+      </button>
+
+      <button
         onClick={handleSelectBackdrop}
         className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
           backdropImage
@@ -207,11 +205,15 @@ export function Toolbar(): JSX.Element {
 
       <button
         onClick={handleTogglePresentation}
+        disabled={!canTogglePresentation}
         className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
           isOutputActive
             ? 'bg-red-600/80 hover:bg-red-600 text-white'
-            : 'bg-red-600 hover:bg-red-500 text-white'
+            : selectedChannelHasContent
+              ? 'bg-red-600 hover:bg-red-500 text-white'
+              : 'bg-gray-700 text-gray-500 cursor-not-allowed'
         }`}
+        title={!isOutputActive && !selectedChannelHasContent ? 'Выберите канал с контентом' : undefined}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         {isOutputActive ? '⏹ Выйти из эфира' : '▶ В эфир'}
