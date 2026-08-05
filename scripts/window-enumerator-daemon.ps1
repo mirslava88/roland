@@ -490,22 +490,12 @@ namespace Pdm.NativeWindows
             result.visible = result.valid && IsWindowVisible(hwnd);
             if (activate && result.valid && !result.minimized)
             {
-                // SetForegroundWindow can be rejected by Windows foreground
-                // locking when called from the helper process. Raising the
-                // restored HWND in the normal z-order first still guarantees
-                // that Word/Excel is visibly expanded above PDM; the explicit
-                // foreground request then transfers keyboard/mouse control on
-                // systems where Windows grants it.
-                SetWindowPos(
-                    hwnd,
-                    HWND_TOP,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-                BringWindowToTop(hwnd);
-                result.activated = SetForegroundWindow(hwnd);
+                // TAKE originates in PDM but this helper is a separate
+                // process. Attach its input thread temporarily so Windows does
+                // not reject a repeated foreground request after the first
+                // TAKE left the captured window open behind PDM.
+                result.foreground = ForceForeground(hwnd);
+                result.activated = result.foreground;
                 Thread.Sleep(50);
                 result.foreground = GetForegroundWindow() == hwnd;
             }

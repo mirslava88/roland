@@ -912,28 +912,23 @@ function createWindows(): void {
         // again only after the fullscreen transition has completed.
         electronSource = undefined
       }
-      // Restoring belongs exclusively to the explicit "В эфир" action. A
-      // stale Chromium source can still exist for an iconic window, so force
-      // a fresh lookup after requesting the native restore.
-      if (targetWindow?.minimized && !targetWasActivated) {
-        // TAKE is the explicit hand-off point requested by the operator: make
-        // the selected application visible in front instead of restoring it
-        // behind PDM with SW_SHOWNOACTIVATE.
+      if (targetWindow && !browserTarget) {
+        // TAKE is an explicit hand-off every time, not only while a window is
+        // minimized. After the first TAKE the source remains valid in
+        // desktopCapturer but usually sits behind PDM; skipping activation in
+        // that state made the second TAKE appear to do nothing.
         const restored = await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
         targetWasActivated = true
         diagnosticLog(
           'capture',
-          `restore window hwnd=${targetWindow.hwnd} requested=${restored.requested} ` +
+          `activate window hwnd=${targetWindow.hwnd} requested=${restored.requested} ` +
           `minimized=${restored.minimized} activated=${restored.activated} foreground=${restored.foreground}`
         )
-        electronSource = undefined
+        // A restored HWND can acquire a new Chromium capture surface. A
+        // merely covered window keeps the existing source and needs no wait.
+        if (targetWindow.minimized) electronSource = undefined
       }
       if (!electronSource && targetWindow) {
-        if (!targetWindow.minimized) {
-          await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
-          targetWasActivated = true
-        }
-
         for (let attempt = 0; attempt < 24 && !electronSource; attempt++) {
           await new Promise<void>((resolve) => setTimeout(resolve, 100))
           electronSource = await findElectronSource()
