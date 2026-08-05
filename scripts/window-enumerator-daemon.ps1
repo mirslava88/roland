@@ -74,6 +74,7 @@ namespace Pdm.NativeWindows
     public static class WindowApi
     {
         private const int GWL_EXSTYLE = -20;
+        private const long WS_EX_LAYERED = 0x00080000L;
         private const long WS_EX_TOOLWINDOW = 0x00000080L;
         private const long WS_EX_APPWINDOW = 0x00040000L;
         private const long WS_EX_NOACTIVATE = 0x08000000L;
@@ -84,11 +85,16 @@ namespace Pdm.NativeWindows
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_SHOWWINDOW = 0x0040;
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_NOACTIVATE = 0x0010;
+        private const uint SWP_FRAMECHANGED = 0x0020;
         private static readonly IntPtr HWND_TOP = IntPtr.Zero;
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
         private const uint MONITOR_DEFAULTTONEAREST = 2;
         private const byte VK_F11 = 0x7A;
         private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const uint LWA_ALPHA = 0x00000002;
+        private const int SW_MINIMIZE = 6;
 
         [return: MarshalAs(UnmanagedType.Bool)]
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
@@ -225,12 +231,37 @@ namespace Pdm.NativeWindows
         [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
         private static extern IntPtr GetWindowLong32(IntPtr hwnd, int index);
 
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr SetWindowLongPtr64(IntPtr hwnd, int index, IntPtr value);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+        private static extern int SetWindowLong32(IntPtr hwnd, int index, int value);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetLayeredWindowAttributes(
+            IntPtr hwnd,
+            uint colorKey,
+            byte alpha,
+            uint flags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetLayeredWindowAttributes(
+            IntPtr hwnd,
+            out uint colorKey,
+            out byte alpha,
+            out uint flags);
+
         [DllImport("dwmapi.dll")]
         private static extern int DwmGetWindowAttribute(
             IntPtr hwnd,
             uint attribute,
             out int value,
             int valueSize);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmFlush();
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr OpenProcess(
@@ -266,6 +297,14 @@ namespace Pdm.NativeWindows
                 ? GetWindowLongPtr64(hwnd, GWL_EXSTYLE)
                 : GetWindowLong32(hwnd, GWL_EXSTYLE);
             return value.ToInt64();
+        }
+
+        private static void SetExtendedStyle(IntPtr hwnd, long style)
+        {
+            if (IntPtr.Size == 8)
+                SetWindowLongPtr64(hwnd, GWL_EXSTYLE, new IntPtr(style));
+            else
+                SetWindowLong32(hwnd, GWL_EXSTYLE, unchecked((int)style));
         }
 
         private static bool IsCloaked(IntPtr hwnd)
@@ -545,44 +584,114 @@ namespace Pdm.NativeWindows
             return result;
         }
 
-        public static FullscreenResult ExitFullscreen(ulong handle)
+        public static FullscreenResult ExitFullscreen(ulong handle, ulong returnFocusHandle)
         {
             IntPtr hwnd = ToIntPtr(handle);
+            IntPtr requestedReturnFocus = ToIntPtr(returnFocusHandle);
             FullscreenResult result = new FullscreenResult
             {
                 hwnd = handle.ToString(),
                 valid = IsWindow(hwnd)
             };
             if (!result.valid) return result;
+            // Keep the tracked fullscreen state on any masking/focus failure;
+            // the caller will retry on the next cleanup instead of assuming a
+            // failed operation succeeded.
+            result.fullscreen = true;
 
-            // A minimized browser keeps its internal F11 state even though its
-            // current native bounds no longer cover the monitor. Restore it
-            // first so the fullscreen check and the matching F11 are reliable.
-            if (IsIconic(hwnd))
+            IntPtr previousForeground = GetForegroundWindow();
+            IntPtr returnFocus = IsWindow(requestedReturnFocus)
+                ? requestedReturnFocus
+                : previousForeground;
+            bool wasMinimized = IsIconic(hwnd);
+            long originalExStyle = GetExtendedStyle(hwnd);
+            bool originallyLayered = (originalExStyle & WS_EX_LAYERED) != 0;
+            uint originalColorKey = 0;
+            byte originalAlpha = 255;
+            uint originalLayerFlags = LWA_ALPHA;
+            bool hadLayerAttributes = originallyLayered && GetLayeredWindowAttributes(
+                hwnd,
+                out originalColorKey,
+                out originalAlpha,
+                out originalLayerFlags);
+            bool maskApplied = false;
+
+            try
             {
-                ShowWindowAsync(hwnd, SW_RESTORE);
-                for (int attempt = 0; attempt < 30 && IsWindow(hwnd) && IsIconic(hwnd); attempt++)
-                    Thread.Sleep(25);
+                // A foreign window cannot be DWM-cloaked, so make its complete
+                // top-level surface transparent before it receives focus.
+                // This preserves real keyboard F11 semantics in Chromium while
+                // preventing even one browser frame from appearing over PDM.
+                if (!originallyLayered)
+                    SetExtendedStyle(hwnd, originalExStyle | WS_EX_LAYERED);
+                maskApplied = SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+                if (!maskApplied) return result;
+                try { DwmFlush(); } catch { /* DWM is always present on supported Windows */ }
+
+                // A minimized browser retains its F11 state internally. It can
+                // be restored safely while fully transparent, then returned to
+                // the taskbar after the state change.
+                if (wasMinimized)
+                {
+                    ShowWindowAsync(hwnd, SW_RESTORE);
+                    for (int attempt = 0; attempt < 30 && IsWindow(hwnd) && IsIconic(hwnd); attempt++)
+                        Thread.Sleep(25);
+                }
+
+                result.wasFullscreen = IsFullscreen(hwnd);
+                result.fullscreen = result.wasFullscreen;
+                if (!result.wasFullscreen) return result;
+
+                result.foreground = ForceForeground(hwnd);
+                Thread.Sleep(75);
+                result.foreground = GetForegroundWindow() == hwnd;
+                if (!result.foreground) return result;
+
+                keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
+                Thread.Sleep(30);
+                keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                result.requested = true;
+
+                for (int attempt = 0; attempt < 20 && IsWindow(hwnd) && IsFullscreen(hwnd); attempt++)
+                    Thread.Sleep(50);
+                result.valid = IsWindow(hwnd);
+                result.fullscreen = result.valid && IsFullscreen(hwnd);
+            }
+            finally
+            {
+                // Move focus away while the browser is still invisible. Only
+                // then restore its native style/opacity, leaving it behind PDM.
+                if (IsWindow(returnFocus) && returnFocus != hwnd)
+                    ForceForeground(returnFocus);
+                if (wasMinimized && IsWindow(hwnd))
+                    ShowWindowAsync(hwnd, SW_MINIMIZE);
+                try { DwmFlush(); } catch { }
+
+                if (maskApplied && IsWindow(hwnd))
+                {
+                    if (hadLayerAttributes)
+                        SetLayeredWindowAttributes(
+                            hwnd,
+                            originalColorKey,
+                            originalAlpha,
+                            originalLayerFlags);
+                    else
+                        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                    if (!originallyLayered)
+                        SetExtendedStyle(hwnd, originalExStyle);
+                    SetWindowPos(
+                        hwnd,
+                        IntPtr.Zero,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                    try { DwmFlush(); } catch { }
+                }
             }
 
-            result.wasFullscreen = IsFullscreen(hwnd);
-            result.fullscreen = result.wasFullscreen;
-            if (!result.wasFullscreen) return result;
-
-            result.foreground = ForceForeground(hwnd);
-            Thread.Sleep(75);
-            result.foreground = GetForegroundWindow() == hwnd;
-            if (!result.foreground) return result;
-
-            keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(30);
-            keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            result.requested = true;
-
-            for (int attempt = 0; attempt < 20 && IsWindow(hwnd) && IsFullscreen(hwnd); attempt++)
-                Thread.Sleep(50);
             result.valid = IsWindow(hwnd);
-            result.fullscreen = result.valid && IsFullscreen(hwnd);
             result.foreground = result.valid && GetForegroundWindow() == hwnd;
             return result;
         }
@@ -653,7 +762,13 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             }
             'exit-fullscreen' {
                 $handle = ConvertTo-WindowHandle $request.hwnd
-                $fullscreenResult = [Pdm.NativeWindows.WindowApi]::ExitFullscreen($handle)
+                [UInt64]$returnFocusHandle = 0
+                if ($null -ne $request.returnFocusHwnd) {
+                    $returnFocusHandle = ConvertTo-WindowHandle $request.returnFocusHwnd
+                }
+                $fullscreenResult = [Pdm.NativeWindows.WindowApi]::ExitFullscreen(
+                    $handle,
+                    $returnFocusHandle)
                 Write-JsonLine ([ordered]@{
                     id = $requestId
                     ok = $true

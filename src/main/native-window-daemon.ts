@@ -219,7 +219,10 @@ class NativeWindowDaemon {
     return response.fullscreenResult
   }
 
-  async exitBrowserFullscreen(hwnd: string): Promise<NativeWindowFullscreenResult> {
+  async exitBrowserFullscreen(
+    hwnd: string,
+    returnFocusHwnd?: string
+  ): Promise<NativeWindowFullscreenResult> {
     if (!this.supported) {
       return {
         hwnd,
@@ -232,7 +235,11 @@ class NativeWindowDaemon {
     }
     const normalized = normalizeHwnd(hwnd)
     if (!normalized) throw new Error(`Invalid HWND '${hwnd}'`)
-    const response = await this.send('exit-fullscreen', { hwnd: normalized }, 4000)
+    const normalizedReturnFocus = returnFocusHwnd ? normalizeHwnd(returnFocusHwnd) : undefined
+    const response = await this.send('exit-fullscreen', {
+      hwnd: normalized,
+      ...(normalizedReturnFocus ? { returnFocusHwnd: normalizedReturnFocus } : {})
+    }, 4000)
     if (!response.fullscreenResult) {
       throw new Error('Window enumerator returned no fullscreen result')
     }

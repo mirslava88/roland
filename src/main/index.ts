@@ -86,10 +86,13 @@ async function releaseBrowserFullscreenWindows(
   restoreControlFocus = true
 ): Promise<{ released: number; remaining: number }> {
   let released = 0
+  const returnFocusHwnd = restoreControlFocus && controlWindow && !controlWindow.isDestroyed()
+    ? browserWindowNativeHwnd(controlWindow)
+    : undefined
   for (const [hwnd, entry] of [...fullscreenBrowserWindows]) {
     if (keepSourceKey && entry.sourceKey === keepSourceKey) continue
     try {
-      const result = await nativeWindowDaemon.exitBrowserFullscreen(hwnd)
+      const result = await nativeWindowDaemon.exitBrowserFullscreen(hwnd, returnFocusHwnd)
       diagnosticLog(
         'capture',
         `browser fullscreen exit hwnd=${hwnd} process=${entry.processName} ` +
@@ -312,15 +315,26 @@ function nativeSourceKey(window: Pick<NativeTopLevelWindow, 'hwnd' | 'pid'>): st
   return `native-window:${window.hwnd}:${window.pid}`
 }
 
+function browserWindowNativeHwnd(window: BrowserWindow): string | undefined {
+  if (window.isDestroyed()) return undefined
+  try {
+    const handle = window.getNativeWindowHandle()
+    if (handle.length >= 8) return handle.readBigUInt64LE(0).toString(10)
+    if (handle.length >= 4) return String(handle.readUInt32LE(0))
+  } catch { /* window may be closing */ }
+  try {
+    return hwndFromCaptureSourceId(window.getMediaSourceId())
+  } catch {
+    return undefined
+  }
+}
+
 function getOwnWindowHwnds(): Set<string> {
   const handles = new Set<string>()
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.isDestroyed()) continue
-    try {
-      const handle = window.getNativeWindowHandle()
-      if (handle.length >= 8) handles.add(handle.readBigUInt64LE(0).toString(10))
-      else if (handle.length >= 4) handles.add(String(handle.readUInt32LE(0)))
-    } catch { /* window may be closing */ }
+    const nativeHwnd = browserWindowNativeHwnd(window)
+    if (nativeHwnd) handles.add(nativeHwnd)
     try {
       const sourceHwnd = hwndFromCaptureSourceId(window.getMediaSourceId())
       if (sourceHwnd) handles.add(sourceHwnd)
@@ -947,7 +961,10 @@ function createWindows(): void {
       }
       if (!electronSource) {
         if (browserFullscreenHwnd && browserFullscreenRequested) {
-          await nativeWindowDaemon.exitBrowserFullscreen(browserFullscreenHwnd)
+          await nativeWindowDaemon.exitBrowserFullscreen(
+            browserFullscreenHwnd,
+            controlWindow ? browserWindowNativeHwnd(controlWindow) : undefined
+          )
           if (controlWindow && !controlWindow.isDestroyed()) controlWindow.focus()
         }
         return {
@@ -984,7 +1001,10 @@ function createWindows(): void {
     } catch (error) {
       if (browserFullscreenHwnd && browserFullscreenRequested) {
         try {
-          await nativeWindowDaemon.exitBrowserFullscreen(browserFullscreenHwnd)
+          await nativeWindowDaemon.exitBrowserFullscreen(
+            browserFullscreenHwnd,
+            controlWindow ? browserWindowNativeHwnd(controlWindow) : undefined
+          )
           if (controlWindow && !controlWindow.isDestroyed()) controlWindow.focus()
         } catch { /* original prepare error is more useful */ }
       }
