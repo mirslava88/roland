@@ -142,29 +142,47 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
 }
 
 function prewarmPresentationWindow(): void {
-  if (presentationWindow && !presentationWindow.isDestroyed()) return
   const displays = screen.getAllDisplays()
-  if (displays.length < 2) {
-    diagnosticLog('window', 'presentation prewarm skipped: no external display')
-    return
-  }
   const primaryDisplay = screen.getPrimaryDisplay()
-  const targetDisplay = displays.find((display) => display.id !== primaryDisplay.id)
-  if (!targetDisplay) return
-  console.log(`[MAIN ${Date.now()}] presentation-window: prewarm BEGIN display=${targetDisplay.id}`)
-  presentationWindow = createManagedPresentationWindow(targetDisplay)
-  void waitForPresentationWindowReady().then(() => {
-    if (
-      presentationWindow &&
-      !presentationWindow.isDestroyed() &&
-      !presentationWindowRequestedVisible
-    ) {
+  const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
+  const targetDisplay = externalDisplay || primaryDisplay
+
+  if (presentationWindow && !presentationWindow.isDestroyed()) {
+    // A renderer created headlessly on the primary display keeps camera/device
+    // enumeration alive when the laptop starts without an external monitor.
+    // Once an output is attached, move that same warm surface onto it instead
+    // of creating a second CaptureHub and duplicate media streams.
+    if (externalDisplay) {
+      presentationWindow.setBounds(externalDisplay.bounds)
       presentationWindow.setIgnoreMouseEvents(true)
       presentationWindow.setOpacity(0)
-      presentationWindow.showInactive()
+      if (!presentationWindow.isVisible()) presentationWindow.showInactive()
+      diagnosticLog('window', `presentation headless surface promoted to display=${externalDisplay.id}`)
+    }
+    return
+  }
+
+  const headless = !externalDisplay
+  console.log(`[MAIN ${Date.now()}] presentation-window: prewarm BEGIN display=${targetDisplay.id} headless=${headless}`)
+  const warmWindow = createManagedPresentationWindow(targetDisplay)
+  presentationWindow = warmWindow
+  void waitForPresentationWindowReady().then(() => {
+    if (
+      presentationWindow === warmWindow &&
+      !warmWindow.isDestroyed() &&
+      !presentationWindowRequestedVisible
+    ) {
+      warmWindow.setIgnoreMouseEvents(true)
+      warmWindow.setOpacity(0)
+      // With one monitor the renderer must exist for camera enumeration, but
+      // its native HWND must stay hidden so it cannot cover the control UI.
+      if (externalDisplay) warmWindow.showInactive()
     }
     console.log(`[MAIN ${Date.now()}] presentation-window: prewarm END ready=${presentationWindowReady}`)
-    diagnosticLog('window', `presentation prewarm ready=${presentationWindowReady} visible=${presentationWindow?.isVisible() ?? false}`)
+    diagnosticLog(
+      'window',
+      `presentation prewarm ready=${presentationWindowReady} headless=${headless} visible=${warmWindow.isDestroyed() ? false : warmWindow.isVisible()}`
+    )
   })
 }
 
@@ -1275,6 +1293,9 @@ function createWindows(): void {
       presentationWindow.setIgnoreMouseEvents(true)
       diagnosticLog('window', 'presentation window closed: external display removed')
       presentationWindow.close()
+      // Recreate only the hidden renderer on the primary display. CaptureHub
+      // remains available for USB-camera enumeration without blocking input.
+      setTimeout(() => prewarmPresentationWindow(), 250)
     }
   })
 
