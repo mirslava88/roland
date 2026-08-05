@@ -124,6 +124,10 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
   const win = createPresentationWindow(display)
   // Keep the 4K native surface alive. On the affected PC a hidden window
   // takes 5–6 seconds to reactivate even when its renderer is already loaded.
+  // A fully transparent Windows HWND still receives mouse input unless told
+  // otherwise. Without this guard a warm surface on the primary display can
+  // make the control UI look frozen even though its renderer is healthy.
+  win.setIgnoreMouseEvents(true)
   win.setOpacity(0)
   win.on('closed', () => {
     if (presentationWindow !== win) return
@@ -140,8 +144,13 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
 function prewarmPresentationWindow(): void {
   if (presentationWindow && !presentationWindow.isDestroyed()) return
   const displays = screen.getAllDisplays()
+  if (displays.length < 2) {
+    diagnosticLog('window', 'presentation prewarm skipped: no external display')
+    return
+  }
   const primaryDisplay = screen.getPrimaryDisplay()
-  const targetDisplay = displays.find((display) => display.id !== primaryDisplay.id) || primaryDisplay
+  const targetDisplay = displays.find((display) => display.id !== primaryDisplay.id)
+  if (!targetDisplay) return
   console.log(`[MAIN ${Date.now()}] presentation-window: prewarm BEGIN display=${targetDisplay.id}`)
   presentationWindow = createManagedPresentationWindow(targetDisplay)
   void waitForPresentationWindowReady().then(() => {
@@ -150,6 +159,7 @@ function prewarmPresentationWindow(): void {
       !presentationWindow.isDestroyed() &&
       !presentationWindowRequestedVisible
     ) {
+      presentationWindow.setIgnoreMouseEvents(true)
       presentationWindow.setOpacity(0)
       presentationWindow.showInactive()
     }
@@ -409,6 +419,7 @@ function createWindows(): void {
     if (!presentationWindow.isVisible()) presentationWindow.showInactive()
     presentationWindow.setAlwaysOnTop(false)
     presentationWindow.setOpacity(1)
+    presentationWindow.setIgnoreMouseEvents(false)
     if (behindPowerPoint) {
       diagnosticLog('window', 'presentation output revealed behind live PowerPoint')
     } else if (overlayPlacement === 'underlay') {
@@ -429,6 +440,7 @@ function createWindows(): void {
       // Keep the renderer, PDF cache and GPU surface warm. Destroying this
       // window made every PPTX→PDF switch pay a 5–8 second renderer startup
       // and introduced a new fullscreen HWND into DWM on every TAKE.
+      presentationWindow.setIgnoreMouseEvents(true)
       presentationWindow.setOpacity(0)
       console.log(`[MAIN ${Date.now()}] presentation-window: opacity=0 (kept warm)`)
       diagnosticLog('window', 'presentation output opacity=0 (kept warm)')
@@ -1245,8 +1257,26 @@ function createWindows(): void {
     // Auto-extend display (instead of duplicate) when external monitor is connected
     ensureExtendDisplayMode()
     sendDisplays()
+    // DisplaySwitch/Windows may need a moment to publish stable extended
+    // bounds. Prewarm only after a genuine second display is visible.
+    setTimeout(() => {
+      sendDisplays()
+      prewarmPresentationWindow()
+    }, 1500)
   })
-  screen.on('display-removed', sendDisplays)
+  screen.on('display-removed', () => {
+    sendDisplays()
+    if (
+      screen.getAllDisplays().length < 2 &&
+      presentationWindow &&
+      !presentationWindow.isDestroyed()
+    ) {
+      presentationWindowRequestedVisible = false
+      presentationWindow.setIgnoreMouseEvents(true)
+      diagnosticLog('window', 'presentation window closed: external display removed')
+      presentationWindow.close()
+    }
+  })
 
   ipcMain.handle('open-display-settings', () => {
     if (process.platform === 'win32') {
