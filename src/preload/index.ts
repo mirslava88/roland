@@ -85,6 +85,9 @@ const api = {
   prepareDesktopCaptureSource: (sourceId: string) =>
     ipcRenderer.invoke('prepare-desktop-capture-source', sourceId),
 
+  releaseBrowserFullscreen: (keepSourceKey?: string): Promise<{ released: number; remaining: number }> =>
+    ipcRenderer.invoke('release-browser-fullscreen', keepSourceKey),
+
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
 
   getAudioDevices: (): Promise<{ id: string; name: string; isDefault: boolean }[]> =>

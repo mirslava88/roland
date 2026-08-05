@@ -26,6 +26,15 @@ const EXT_TYPE_MAP: Record<string, FileEntry['type']> = {}
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg'])
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'])
 
+function desktopWindowSourceKey(file?: FileEntry | null): string | undefined {
+  const capture = file?.type === 'capture' ? file.capture : undefined
+  const isWindow = capture?.captureKind === 'desktop' && (
+    capture.desktopSourceType === 'window' ||
+    (!capture.desktopSourceType && capture.desktopSourceId?.startsWith('window:'))
+  )
+  return isWindow ? (capture.desktopSourceKey || capture.desktopSourceId) : undefined
+}
+
 // Read an image file (PNG/JPEG) from disk via main process and convert to
 // base64 dataUrl for embedding into overlay. Used for PPTX freeze-frame
 // (pre-rendered slides via generatePptxSlides).
@@ -196,6 +205,7 @@ export function PreviewPanel(): JSX.Element {
         setOverlayState({ kind: 'hidden' })
       }
 
+      await window.api.releaseBrowserFullscreen()
       setActiveFile(null)
       useAppStore.setState({ liveChannel: null })
     }
@@ -359,6 +369,7 @@ export function PreviewPanel(): JSX.Element {
         }
         await window.api.hideOverlay()
         setOverlayState({ kind: 'hidden' })
+        await window.api.releaseBrowserFullscreen()
         log('cancellation cleanup END')
       })()
       return cancelCleanupPromise
@@ -459,6 +470,14 @@ export function PreviewPanel(): JSX.Element {
       })
       channel = { ...currentChannel, file: resolvedEntry }
       log(`desktop window prepare END captureId=${resolvedCaptureId}`)
+    }
+
+    // Once the replacement is visibly ready, leave only that browser (if
+    // any) in F11. This keeps browser -> PDF/PPTX/video transitions covered by
+    // the existing seamless layer until the old browser changes back to a
+    // regular window.
+    const releaseInactiveBrowserFullscreen = async (): Promise<void> => {
+      await window.api.releaseBrowserFullscreen(desktopWindowSourceKey(channel.file))
     }
 
     const FINAL_NAVIGATION_QUIET_MS = 70
@@ -884,6 +903,7 @@ export function PreviewPanel(): JSX.Element {
           }
         })
       }
+      await releaseInactiveBrowserFullscreen()
       return
     }
 
@@ -946,6 +966,7 @@ export function PreviewPanel(): JSX.Element {
       }
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
+      await releaseInactiveBrowserFullscreen()
       return
     }
 
@@ -1002,6 +1023,7 @@ export function PreviewPanel(): JSX.Element {
       }
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
+      await releaseInactiveBrowserFullscreen()
       return
     }
 
@@ -1221,6 +1243,7 @@ export function PreviewPanel(): JSX.Element {
         await window.api.pinOverlay()
         setOverlayState({ kind: 'pinned-pdf', pdfPath: channel.file.path })
         log('atomic target swap complete: PDF frame pinned until navigation')
+        await releaseInactiveBrowserFullscreen()
         return
       }
     }
@@ -1233,6 +1256,7 @@ export function PreviewPanel(): JSX.Element {
     }
     await window.api.hideOverlay()
     setOverlayState({ kind: 'hidden' })
+    await releaseInactiveBrowserFullscreen()
   }
 
   // Listen for take-channel events from Toolbar's Open Output button

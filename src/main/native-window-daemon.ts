@@ -49,6 +49,15 @@ export interface NativeWindowRestoreResult {
   foreground: boolean
 }
 
+export interface NativeWindowFullscreenResult {
+  hwnd: string
+  valid: boolean
+  wasFullscreen: boolean
+  requested: boolean
+  fullscreen: boolean
+  foreground: boolean
+}
+
 export interface NativeWindowListOptions {
   /** PIDs belonging to PDM (main + renderer processes) that must not be listed. */
   excludedPids?: Iterable<number>
@@ -67,6 +76,7 @@ interface DaemonResponse {
   error?: string
   windows?: RawNativeTopLevelWindow[]
   result?: NativeWindowRestoreResult
+  fullscreenResult?: NativeWindowFullscreenResult
 }
 
 interface PendingRequest {
@@ -187,6 +197,46 @@ class NativeWindowDaemon {
     const response = await this.send('restore', { hwnd: normalized, activate }, 3000)
     if (!response.result) throw new Error('Window enumerator returned no restore result')
     return response.result
+  }
+
+  async ensureBrowserFullscreen(hwnd: string): Promise<NativeWindowFullscreenResult> {
+    if (!this.supported) {
+      return {
+        hwnd,
+        valid: false,
+        wasFullscreen: false,
+        requested: false,
+        fullscreen: false,
+        foreground: false
+      }
+    }
+    const normalized = normalizeHwnd(hwnd)
+    if (!normalized) throw new Error(`Invalid HWND '${hwnd}'`)
+    const response = await this.send('ensure-fullscreen', { hwnd: normalized }, 4000)
+    if (!response.fullscreenResult) {
+      throw new Error('Window enumerator returned no fullscreen result')
+    }
+    return response.fullscreenResult
+  }
+
+  async exitBrowserFullscreen(hwnd: string): Promise<NativeWindowFullscreenResult> {
+    if (!this.supported) {
+      return {
+        hwnd,
+        valid: false,
+        wasFullscreen: false,
+        requested: false,
+        fullscreen: false,
+        foreground: false
+      }
+    }
+    const normalized = normalizeHwnd(hwnd)
+    if (!normalized) throw new Error(`Invalid HWND '${hwnd}'`)
+    const response = await this.send('exit-fullscreen', { hwnd: normalized }, 4000)
+    if (!response.fullscreenResult) {
+      throw new Error('Window enumerator returned no fullscreen result')
+    }
+    return response.fullscreenResult
   }
 
   async shutdown(): Promise<void> {

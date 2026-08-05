@@ -59,7 +59,61 @@ let quitCleanupStarted = false
 let quitCleanupComplete = false
 const nativeDesktopSourceRegistry = new Map<string, NativeDesktopSourceRegistryEntry>()
 const nativeAppIconCache = new Map<string, Promise<string | undefined>>()
+const fullscreenBrowserWindows = new Map<string, { sourceKey: string; processName: string }>()
 let lastDesktopWindowInventorySignature = ''
+
+const BROWSER_PROCESS_NAMES = new Set([
+  'chrome',
+  'chromium',
+  'msedge',
+  'firefox',
+  'librewolf',
+  'waterfox',
+  'brave',
+  'vivaldi',
+  'opera',
+  'opera_gx',
+  'browser', // Yandex Browser
+  'arc'
+])
+
+function isBrowserProcess(processName: string): boolean {
+  return BROWSER_PROCESS_NAMES.has(processName.trim().replace(/\.exe$/i, '').toLowerCase())
+}
+
+async function releaseBrowserFullscreenWindows(
+  keepSourceKey?: string,
+  restoreControlFocus = true
+): Promise<{ released: number; remaining: number }> {
+  let released = 0
+  for (const [hwnd, entry] of [...fullscreenBrowserWindows]) {
+    if (keepSourceKey && entry.sourceKey === keepSourceKey) continue
+    try {
+      const result = await nativeWindowDaemon.exitBrowserFullscreen(hwnd)
+      diagnosticLog(
+        'capture',
+        `browser fullscreen exit hwnd=${hwnd} process=${entry.processName} ` +
+        `wasFullscreen=${result.wasFullscreen} requested=${result.requested} ` +
+        `fullscreen=${result.fullscreen} foreground=${result.foreground}`
+      )
+      if (!result.valid || !result.fullscreen) {
+        fullscreenBrowserWindows.delete(hwnd)
+        released++
+      }
+    } catch (error) {
+      diagnosticLog('capture', `browser fullscreen exit failed hwnd=${hwnd} ${formatDiagnosticError(error)}`)
+    }
+  }
+
+  if (released > 0 && restoreControlFocus && controlWindow && !controlWindow.isDestroyed()) {
+    try {
+      if (controlWindow.isMinimized()) controlWindow.restore()
+      controlWindow.show()
+      controlWindow.focus()
+    } catch { /* window may be closing */ }
+  }
+  return { released, remaining: fullscreenBrowserWindows.size }
+}
 
 // Live capture sources must start rendering even though the prewarmed output
 // window never receives a mouse click of its own. This affects only media
@@ -794,6 +848,9 @@ function createWindows(): void {
       return { success: false, error: 'Источник окна недоступен.' }
     }
 
+    let browserFullscreenHwnd: string | null = null
+    let browserFullscreenRequested = false
+    let browserFullscreenActive = false
     try {
       const ownWindowHwnds = getOwnWindowHwnds()
       const registryEntry = nativeDesktopSourceRegistry.get(sourceKey)
@@ -837,10 +894,28 @@ function createWindows(): void {
 
       let electronSource = await findElectronSource()
       let targetWasActivated = false
+      const browserTarget = !!targetWindow && isBrowserProcess(targetWindow.processName)
+      if (targetWindow && browserTarget) {
+        const restored = await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
+        targetWasActivated = true
+        const fullscreen = await nativeWindowDaemon.ensureBrowserFullscreen(targetWindow.hwnd)
+        browserFullscreenHwnd = targetWindow.hwnd
+        browserFullscreenRequested = fullscreen.requested
+        browserFullscreenActive = fullscreen.fullscreen
+        diagnosticLog(
+          'capture',
+          `browser fullscreen hwnd=${targetWindow.hwnd} process=${targetWindow.processName} ` +
+          `restoreForeground=${restored.foreground} wasFullscreen=${fullscreen.wasFullscreen} ` +
+          `requested=${fullscreen.requested} fullscreen=${fullscreen.fullscreen} foreground=${fullscreen.foreground}`
+        )
+        // F11 changes the browser's native surface. Resolve Chromium's source
+        // again only after the fullscreen transition has completed.
+        electronSource = undefined
+      }
       // Restoring belongs exclusively to the explicit "В эфир" action. A
       // stale Chromium source can still exist for an iconic window, so force
       // a fresh lookup after requesting the native restore.
-      if (targetWindow?.minimized) {
+      if (targetWindow?.minimized && !targetWasActivated) {
         // TAKE is the explicit hand-off point requested by the operator: make
         // the selected application visible in front instead of restoring it
         // behind PDM with SW_SHOWNOACTIVATE.
@@ -876,6 +951,10 @@ function createWindows(): void {
         diagnosticLog('capture', `foreground handed to captured window hwnd=${targetHwnd}`)
       }
       if (!electronSource) {
+        if (browserFullscreenHwnd && browserFullscreenRequested) {
+          await nativeWindowDaemon.exitBrowserFullscreen(browserFullscreenHwnd)
+          if (controlWindow && !controlWindow.isDestroyed()) controlWindow.focus()
+        }
         return {
           success: false,
           error: 'Windows показала окно в списке, но не разрешила его захватить. Разверните окно и попробуйте ещё раз.'
@@ -900,11 +979,40 @@ function createWindows(): void {
         'capture',
         `desktop source prepared key=${sourceKey} captureId=${electronSource.id} label=${name}`
       )
+      if (targetWindow && browserTarget && browserFullscreenHwnd && browserFullscreenActive) {
+        fullscreenBrowserWindows.set(browserFullscreenHwnd, {
+          sourceKey,
+          processName: targetWindow.processName
+        })
+      }
       return { success: true, source: prepared }
     } catch (error) {
+      if (browserFullscreenHwnd && browserFullscreenRequested) {
+        try {
+          await nativeWindowDaemon.exitBrowserFullscreen(browserFullscreenHwnd)
+          if (controlWindow && !controlWindow.isDestroyed()) controlWindow.focus()
+        } catch { /* original prepare error is more useful */ }
+      }
       diagnosticLog('capture', `desktop source prepare failed ${formatDiagnosticError(error)}`)
       return { success: false, error: `Не удалось подготовить окно: ${formatDiagnosticError(error)}` }
     }
+  })
+
+  ipcMain.handle('release-browser-fullscreen', async (
+    event,
+    keepSourceKey?: string
+  ): Promise<{ released: number; remaining: number }> => {
+    if (
+      !controlWindow ||
+      controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id
+    ) {
+      return { released: 0, remaining: fullscreenBrowserWindows.size }
+    }
+    const keep = typeof keepSourceKey === 'string' && keepSourceKey.length <= 200
+      ? keepSourceKey
+      : undefined
+    return releaseBrowserFullscreenWindows(keep)
   })
 
   // Capture the Electron output window itself, not a desktop thumbnail. This
@@ -1658,10 +1766,13 @@ app.on('before-quit', (event) => {
   if (quitCleanupStarted) return
 
   quitCleanupStarted = true
-  diagnosticLog('shutdown', 'waiting for PowerPoint and window-enumerator cleanup')
+  diagnosticLog('shutdown', 'waiting for PowerPoint, browser fullscreen and window-enumerator cleanup')
   void Promise.allSettled([
     pptDaemon.shutdown(),
-    nativeWindowDaemon.shutdown()
+    (async () => {
+      await releaseBrowserFullscreenWindows(undefined, false)
+      await nativeWindowDaemon.shutdown()
+    })()
   ])
     .then((results) => {
       if (results[0].status === 'rejected') {

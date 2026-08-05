@@ -61,6 +61,16 @@ namespace Pdm.NativeWindows
         public bool foreground { get; set; }
     }
 
+    public sealed class FullscreenResult
+    {
+        public string hwnd { get; set; }
+        public bool valid { get; set; }
+        public bool wasFullscreen { get; set; }
+        public bool requested { get; set; }
+        public bool fullscreen { get; set; }
+        public bool foreground { get; set; }
+    }
+
     public static class WindowApi
     {
         private const int GWL_EXSTYLE = -20;
@@ -76,6 +86,9 @@ namespace Pdm.NativeWindows
         private const uint SWP_SHOWWINDOW = 0x0040;
         private static readonly IntPtr HWND_TOP = IntPtr.Zero;
         private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+        private const byte VK_F11 = 0x7A;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
 
         [return: MarshalAs(UnmanagedType.Bool)]
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
@@ -105,6 +118,15 @@ namespace Pdm.NativeWindows
             public POINT ptMinPosition;
             public POINT ptMaxPosition;
             public RECT rcNormalPosition;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
         }
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -168,6 +190,23 @@ namespace Pdm.NativeWindows
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AttachThreadInput(uint attach, uint attachTo, bool value);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -309,6 +348,50 @@ namespace Pdm.NativeWindows
             };
         }
 
+        private static bool IsFullscreen(IntPtr hwnd)
+        {
+            RECT bounds;
+            if (!IsWindow(hwnd) || IsIconic(hwnd) || !GetWindowRect(hwnd, out bounds)) return false;
+            IntPtr monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (monitor == IntPtr.Zero) return false;
+            MONITORINFO info = new MONITORINFO();
+            info.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+            if (!GetMonitorInfo(monitor, ref info)) return false;
+            const int tolerance = 2;
+            return
+                Math.Abs(bounds.Left - info.rcMonitor.Left) <= tolerance &&
+                Math.Abs(bounds.Top - info.rcMonitor.Top) <= tolerance &&
+                Math.Abs(bounds.Right - info.rcMonitor.Right) <= tolerance &&
+                Math.Abs(bounds.Bottom - info.rcMonitor.Bottom) <= tolerance;
+        }
+
+        private static bool ForceForeground(IntPtr hwnd)
+        {
+            IntPtr foreground = GetForegroundWindow();
+            uint ignored;
+            uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
+            uint targetThread = GetWindowThreadProcessId(hwnd, out ignored);
+            uint currentThread = GetCurrentThreadId();
+            bool attachedForeground = false;
+            bool attachedTarget = false;
+            try
+            {
+                if (foregroundThread != 0 && foregroundThread != currentThread)
+                    attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
+                if (targetThread != 0 && targetThread != currentThread)
+                    attachedTarget = AttachThreadInput(currentThread, targetThread, true);
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                BringWindowToTop(hwnd);
+                SetForegroundWindow(hwnd);
+                return GetForegroundWindow() == hwnd;
+            }
+            finally
+            {
+                if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+                if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+            }
+        }
+
         public static WindowInfo[] Enumerate()
         {
             List<WindowInfo> windows = new List<WindowInfo>();
@@ -428,6 +511,91 @@ namespace Pdm.NativeWindows
             }
             return result;
         }
+
+        public static FullscreenResult EnsureFullscreen(ulong handle)
+        {
+            IntPtr hwnd = ToIntPtr(handle);
+            FullscreenResult result = new FullscreenResult
+            {
+                hwnd = handle.ToString(),
+                valid = IsWindow(hwnd)
+            };
+            if (!result.valid) return result;
+
+            result.wasFullscreen = IsFullscreen(hwnd);
+            result.fullscreen = result.wasFullscreen;
+            if (result.wasFullscreen) return result;
+
+            if (IsIconic(hwnd))
+            {
+                ShowWindowAsync(hwnd, SW_RESTORE);
+                for (int attempt = 0; attempt < 30 && IsWindow(hwnd) && IsIconic(hwnd); attempt++)
+                    Thread.Sleep(25);
+            }
+
+            result.foreground = ForceForeground(hwnd);
+            Thread.Sleep(75);
+            result.foreground = GetForegroundWindow() == hwnd;
+            // Never let F11 leak into PDM or another application when Windows
+            // refuses to foreground the selected browser.
+            if (!result.foreground) return result;
+            // F11 is intentionally emitted only after checking the monitor
+            // bounds, so taking an already-fullscreen browser never toggles it
+            // back to windowed mode.
+            keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(30);
+            keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            result.requested = true;
+
+            for (int attempt = 0; attempt < 20 && IsWindow(hwnd) && !IsFullscreen(hwnd); attempt++)
+                Thread.Sleep(50);
+            result.valid = IsWindow(hwnd);
+            result.fullscreen = result.valid && IsFullscreen(hwnd);
+            result.foreground = result.valid && GetForegroundWindow() == hwnd;
+            return result;
+        }
+
+        public static FullscreenResult ExitFullscreen(ulong handle)
+        {
+            IntPtr hwnd = ToIntPtr(handle);
+            FullscreenResult result = new FullscreenResult
+            {
+                hwnd = handle.ToString(),
+                valid = IsWindow(hwnd)
+            };
+            if (!result.valid) return result;
+
+            // A minimized browser keeps its internal F11 state even though its
+            // current native bounds no longer cover the monitor. Restore it
+            // first so the fullscreen check and the matching F11 are reliable.
+            if (IsIconic(hwnd))
+            {
+                ShowWindowAsync(hwnd, SW_RESTORE);
+                for (int attempt = 0; attempt < 30 && IsWindow(hwnd) && IsIconic(hwnd); attempt++)
+                    Thread.Sleep(25);
+            }
+
+            result.wasFullscreen = IsFullscreen(hwnd);
+            result.fullscreen = result.wasFullscreen;
+            if (!result.wasFullscreen) return result;
+
+            result.foreground = ForceForeground(hwnd);
+            Thread.Sleep(75);
+            result.foreground = GetForegroundWindow() == hwnd;
+            if (!result.foreground) return result;
+
+            keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(30);
+            keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            result.requested = true;
+
+            for (int attempt = 0; attempt < 20 && IsWindow(hwnd) && IsFullscreen(hwnd); attempt++)
+                Thread.Sleep(50);
+            result.valid = IsWindow(hwnd);
+            result.fullscreen = result.valid && IsFullscreen(hwnd);
+            result.foreground = result.valid && GetForegroundWindow() == hwnd;
+            return result;
+        }
     }
 }
 '@
@@ -482,6 +650,24 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                     id = $requestId
                     ok = $true
                     result = $result
+                })
+            }
+            'ensure-fullscreen' {
+                $handle = ConvertTo-WindowHandle $request.hwnd
+                $fullscreenResult = [Pdm.NativeWindows.WindowApi]::EnsureFullscreen($handle)
+                Write-JsonLine ([ordered]@{
+                    id = $requestId
+                    ok = $true
+                    fullscreenResult = $fullscreenResult
+                })
+            }
+            'exit-fullscreen' {
+                $handle = ConvertTo-WindowHandle $request.hwnd
+                $fullscreenResult = [Pdm.NativeWindows.WindowApi]::ExitFullscreen($handle)
+                Write-JsonLine ([ordered]@{
+                    id = $requestId
+                    ok = $true
+                    fullscreenResult = $fullscreenResult
                 })
             }
             'ping' {

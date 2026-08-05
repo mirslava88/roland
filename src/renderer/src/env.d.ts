@@ -141,6 +141,7 @@ interface Api {
     excludedDisplayId?: number
   ): Promise<DesktopCaptureSourceDescriptor[]>
   prepareDesktopCaptureSource(sourceId: string): Promise<DesktopCapturePrepareResult>
+  releaseBrowserFullscreen(keepSourceKey?: string): Promise<{ released: number; remaining: number }>
   selectBackdropImage(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
   setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>

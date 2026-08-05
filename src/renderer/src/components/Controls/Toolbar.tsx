@@ -91,6 +91,7 @@ export function Toolbar(): JSX.Element {
       // backdrop loaded — overlay поверх всего из-за screen-saver z-order.
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
+      await window.api.releaseBrowserFullscreen()
       setActiveFile(null)
       setLiveChannelNull()
     } else {
