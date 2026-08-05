@@ -1,6 +1,8 @@
 import { BrowserWindow, Display, shell, screen } from 'electron'
 import { join } from 'path'
 
+export type AuxiliaryWindowRole = 'speaker' | 'info'
+
 export function createControlWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
@@ -83,6 +85,47 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/presentation.html`)
   } else {
     win.loadFile(join(__dirname, '../renderer/presentation.html'))
+  }
+
+  return win
+}
+
+export function createAuxiliaryWindow(
+  display: Display,
+  role: AuxiliaryWindowRole
+): BrowserWindow {
+  const { x, y, width, height } = display.bounds
+  const title = role === 'speaker' ? 'PDM Speaker Display' : 'PDM Information Display'
+  const win = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    fullscreen: true,
+    frame: false,
+    show: false,
+    backgroundColor: '#000000',
+    title,
+    autoHideMenuBar: true,
+    skipTaskbar: true,
+    focusable: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      backgroundThrottling: false
+    }
+  })
+
+  win.removeMenu()
+  win.setIgnoreMouseEvents(true)
+
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/auxiliary.html?role=${role}`)
+  } else {
+    win.loadFile(join(__dirname, '../renderer/auxiliary.html'), { query: { role } })
   }
 
   return win

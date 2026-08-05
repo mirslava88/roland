@@ -16,6 +16,7 @@ export interface DaemonResponse {
   slide?: number
   slideCount?: number
   boundary?: boolean
+  notes?: string
   error?: string
   event?: string
   path?: string

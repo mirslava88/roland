@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: pdm-media:; media-src 'self' pdm-media:; font-src 'self' data:; worker-src 'self' blob:"
+    />
+    <title>PDM Auxiliary Display</title>
+  </head>
+  <body style="margin: 0; padding: 0; overflow: hidden; background: #000;">
+    <div id="root"></div>
+    <script type="module" src="./src/auxiliary-main.tsx"></script>
+  </body>
+</html>

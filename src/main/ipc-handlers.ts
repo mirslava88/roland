@@ -671,6 +671,19 @@ export function registerIpcHandlers(
     return { success: false, error: 'Unsupported platform' }
   })
 
+  ipcMain.handle('get-pptx-slide-notes', async (_event, filePath: string, slide: number) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    try {
+      const result = await pptDaemon.send('notes', { path: filePath, slide }, 20000)
+      return result.ok
+        ? { success: true, notes: result.notes || '' }
+        : { success: false, error: result.error || 'PowerPoint notes are unavailable' }
+    } catch (error) {
+      diagnosticLog('pptx-notes', `failed file=${filePath} slide=${slide} ${formatDiagnosticError(error)}`)
+      return { success: false, error: String(error) }
+    }
+  })
+
   ipcMain.handle('generate-pptx-slides', async (_event, filePath: string, width?: number, height?: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const w = width && width > 0 ? width : 1920
@@ -716,6 +729,30 @@ export function registerIpcHandlers(
       properties: ['openFile'],
       title: 'Select Backdrop Image',
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('select-information-media', async () => {
+    const result = await dialog.showOpenDialog(controlWindow, {
+      properties: ['openFile'],
+      title: 'Выберите файл для информационного дисплея',
+      filters: [
+        {
+          name: 'Презентации и мультимедиа',
+          extensions: [
+            'ppt', 'pptx', 'pptm', 'pps', 'ppsx',
+            'pdf',
+            'mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v',
+            'png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp', 'tif', 'tiff', 'svg'
+          ]
+        },
+        { name: 'PowerPoint', extensions: ['ppt', 'pptx', 'pptm', 'pps', 'ppsx'] },
+        { name: 'PDF', extensions: ['pdf'] },
+        { name: 'Видео', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v'] },
+        { name: 'Изображения', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp', 'tif', 'tiff', 'svg'] }
+      ]
     })
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]

@@ -1562,6 +1562,66 @@ while ($true) {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow' }
                 }
             }
+            'notes' {
+                $notesPath = [string]$req.path
+                $slideNumber = [int]$req.slide
+                if ([string]::IsNullOrWhiteSpace($notesPath) -or -not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+                    throw "PPTX notes source does not exist: $notesPath"
+                }
+                $ppt = Get-OrCreatePPT
+                $notesPres = $null
+                $openedForNotes = $false
+                try {
+                    for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
+                        $candidate = $ppt.Presentations($i)
+                        try {
+                            if ($candidate.FullName -ieq $notesPath) {
+                                $notesPres = $candidate
+                                break
+                            }
+                        } catch {}
+                    }
+                    if (-not $notesPres) {
+                        try { $ppt.WindowState = 2 } catch {}
+                        try { $ppt.Visible = -1 } catch {}
+                        Hide-PPEditor $ppt
+                        $notesPres = $ppt.Presentations.Open($notesPath, -1, 0, 0)
+                        $openedForNotes = $true
+                    }
+                    $slideCount = [int]$notesPres.Slides.Count
+                    if ($slideNumber -lt 1 -or $slideNumber -gt $slideCount) {
+                        throw "Slide $slideNumber is outside 1..$slideCount"
+                    }
+                    $parts = New-Object System.Collections.Generic.List[string]
+                    $shapes = $notesPres.Slides.Item($slideNumber).NotesPage.Shapes
+                    for ($shapeIndex = 1; $shapeIndex -le $shapes.Count; $shapeIndex++) {
+                        $shape = $shapes.Item($shapeIndex)
+                        $placeholderType = -1
+                        try { $placeholderType = [int]$shape.PlaceholderFormat.Type } catch {}
+                        # ppPlaceholderBody (2) is the speaker-notes body. Ignore
+                        # slide image, slide number, date and footer placeholders.
+                        if ($placeholderType -ne 2) { continue }
+                        $text = ''
+                        try {
+                            if ($shape.HasTextFrame -and $shape.TextFrame.HasText) {
+                                $text = [string]$shape.TextFrame.TextRange.Text
+                            }
+                        } catch {}
+                        if (-not [string]::IsNullOrWhiteSpace($text)) {
+                            $parts.Add($text.Trim())
+                        }
+                    }
+                    $notesText = [string]::Join("`n", $parts)
+                    Reply @{ id = $id; ok = $true; slide = $slideNumber; notes = $notesText }
+                } finally {
+                    if ($notesPres -and $openedForNotes) {
+                        try { $notesPres.Close() } catch {}
+                    }
+                    try {
+                        if (-not (Resolve-ActiveSlideShowWindow $ppt)) { $ppt.Visible = 0 }
+                    } catch {}
+                }
+            }
             'export' {
                 # Preview export intentionally runs through this already-running
                 # daemon instead of launching powerpoint-control.ps1 with

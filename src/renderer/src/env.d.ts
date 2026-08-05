@@ -76,6 +76,47 @@ interface DisplayInfo {
   scaleFactor: number
 }
 
+type AuxiliaryDisplayRole = 'speaker' | 'info'
+
+interface SpeakerDisplayState {
+  active: boolean
+  fileType: 'presentation' | 'pdf' | null
+  filePath: string | null
+  fileName: string
+  currentSlide: number
+  totalSlides: number
+  currentImagePath?: string | null
+  nextImagePath?: string | null
+  notes?: string
+  backdropImage?: string | null
+}
+
+type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image'
+
+interface InformationDisplayState {
+  media: {
+    type: InformationMediaType
+    path: string
+    name: string
+    currentSlide: number
+    totalSlides: number
+    slideImages: string[]
+    playing: boolean
+  } | null
+  displayTimer: boolean
+  backdropImage?: string | null
+}
+
+interface TimerDisplayState {
+  remaining: number
+  running: boolean
+  duration: number
+  textColor: string
+  warningTextColor: string
+  overtimeTextColor: string
+  textOpacity: number
+}
+
 interface MusicState {
   playing: boolean
   currentIndex: number
@@ -115,6 +156,9 @@ interface Api {
   }>>
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
+  openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>
+  closeAuxiliaryWindow(role: AuxiliaryDisplayRole): Promise<void>
+  sendToAuxiliary(role: AuxiliaryDisplayRole, channel: string, ...args: unknown[]): void
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
   launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
@@ -123,6 +167,7 @@ interface Api {
     arg?: number | { stopAtBoundary?: boolean }
   ): Promise<{ success: boolean; output?: string; error?: string }>
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
+  getPptxSlideNotes(filePath: string, slide: number): Promise<{ success: boolean; notes?: string; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>
   showOverlay(
@@ -146,6 +191,7 @@ interface Api {
   prepareDesktopCaptureSource(sourceId: string): Promise<DesktopCapturePrepareResult>
   releaseBrowserFullscreen(keepSourceKey?: string): Promise<{ released: number; remaining: number }>
   selectBackdropImage(): Promise<string | null>
+  selectInformationMedia(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
   setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>
   switchAudioToExternal(): Promise<{ success: boolean; device?: string; error?: string }>

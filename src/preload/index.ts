@@ -29,6 +29,16 @@ const api = {
   openPresentationWindow: (displayId?: number, behindPowerPoint?: boolean) =>
     ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
 
+  openAuxiliaryWindow: (role: 'speaker' | 'info', displayId: number) =>
+    ipcRenderer.invoke('open-auxiliary-window', role, displayId),
+
+  closeAuxiliaryWindow: (role: 'speaker' | 'info') =>
+    ipcRenderer.invoke('close-auxiliary-window', role),
+
+  sendToAuxiliary: (role: 'speaker' | 'info', channel: string, ...args: unknown[]): void => {
+    ipcRenderer.send('send-to-auxiliary', role, channel, ...args)
+  },
+
   closePresentationWindow: () => ipcRenderer.invoke('close-presentation-window'),
 
   checkPowerPoint: (): Promise<boolean> => ipcRenderer.invoke('check-powerpoint'),
@@ -41,6 +51,9 @@ const api = {
 
   generatePptxThumbnails: (filePath: string) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath),
+
+  getPptxSlideNotes: (filePath: string, slide: number) =>
+    ipcRenderer.invoke('get-pptx-slide-notes', filePath, slide),
 
   generatePptxSlides: (filePath: string, width?: number, height?: number) =>
     ipcRenderer.invoke('generate-pptx-slides', filePath, width, height),
@@ -89,6 +102,8 @@ const api = {
     ipcRenderer.invoke('release-browser-fullscreen', keepSourceKey),
 
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
+
+  selectInformationMedia: (): Promise<string | null> => ipcRenderer.invoke('select-information-media'),
 
   getAudioDevices: (): Promise<{ id: string; name: string; isDefault: boolean }[]> =>
     ipcRenderer.invoke('get-audio-devices'),

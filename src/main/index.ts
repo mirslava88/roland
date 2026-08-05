@@ -1,6 +1,13 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session } from 'electron'
 import type { DesktopCapturerSource, Display } from 'electron'
-import { createControlWindow, createPresentationWindow, createOverlayWindow, createMusicPlayerWindow } from './windows'
+import {
+  createAuxiliaryWindow,
+  createControlWindow,
+  createPresentationWindow,
+  createOverlayWindow,
+  createMusicPlayerWindow
+} from './windows'
+import type { AuxiliaryWindowRole } from './windows'
 import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync, existsSync, createReadStream } from 'fs'
 import { readFile, stat } from 'fs/promises'
@@ -44,6 +51,10 @@ interface NativeDesktopSourceRegistryEntry {
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
+let speakerWindow: BrowserWindow | null = null
+let infoWindow: BrowserWindow | null = null
+let speakerWindowDisplayId: number | null = null
+let infoWindowDisplayId: number | null = null
 let overlayWindow: BrowserWindow | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
@@ -61,6 +72,34 @@ const nativeDesktopSourceRegistry = new Map<string, NativeDesktopSourceRegistryE
 const nativeAppIconCache = new Map<string, Promise<string | undefined>>()
 const fullscreenBrowserWindows = new Map<string, { sourceKey: string; processName: string }>()
 let lastDesktopWindowInventorySignature = ''
+
+function getAuxiliaryWindow(role: AuxiliaryWindowRole): BrowserWindow | null {
+  return role === 'speaker' ? speakerWindow : infoWindow
+}
+
+function setAuxiliaryWindow(role: AuxiliaryWindowRole, win: BrowserWindow | null): void {
+  if (role === 'speaker') speakerWindow = win
+  else infoWindow = win
+}
+
+function getAuxiliaryDisplayId(role: AuxiliaryWindowRole): number | null {
+  return role === 'speaker' ? speakerWindowDisplayId : infoWindowDisplayId
+}
+
+function setAuxiliaryDisplayId(role: AuxiliaryWindowRole, displayId: number | null): void {
+  if (role === 'speaker') speakerWindowDisplayId = displayId
+  else infoWindowDisplayId = displayId
+}
+
+function closeAuxiliaryWindow(role: AuxiliaryWindowRole, notify = false): void {
+  const win = getAuxiliaryWindow(role)
+  setAuxiliaryWindow(role, null)
+  setAuxiliaryDisplayId(role, null)
+  if (win && !win.isDestroyed()) win.close()
+  if (notify && controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.webContents.send('auxiliary-window-closed', { role })
+  }
+}
 
 const BROWSER_PROCESS_NAMES = new Set([
   'chrome',
@@ -421,12 +460,82 @@ function createWindows(): void {
   controlWindow = createControlWindow()
   registerIpcHandlers(controlWindow, () => presentationWindow)
 
+  ipcMain.handle('open-auxiliary-window', async (
+    _event,
+    role: AuxiliaryWindowRole,
+    displayId: number
+  ) => {
+    if (role !== 'speaker' && role !== 'info') {
+      return { success: false, error: 'Unknown auxiliary display role' }
+    }
+    const primary = screen.getPrimaryDisplay()
+    const target = screen.getAllDisplays().find((display) => display.id === displayId)
+    if (!target || target.id === primary.id) {
+      return {
+        success: false,
+        error: 'Назначенный внешний монитор не подключён'
+      }
+    }
+
+    let win = getAuxiliaryWindow(role)
+    if (
+      win &&
+      !win.isDestroyed() &&
+      getAuxiliaryDisplayId(role) !== target.id
+    ) {
+      closeAuxiliaryWindow(role)
+      win = null
+    }
+    if (!win || win.isDestroyed()) {
+      win = createAuxiliaryWindow(target, role)
+      setAuxiliaryWindow(role, win)
+      setAuxiliaryDisplayId(role, target.id)
+      win.on('closed', () => {
+        if (getAuxiliaryWindow(role) === win) {
+          setAuxiliaryWindow(role, null)
+          setAuxiliaryDisplayId(role, null)
+        }
+      })
+    }
+
+    if (win.webContents.isLoading()) {
+      await new Promise<void>((resolve) => {
+        win!.webContents.once('did-finish-load', () => resolve())
+      })
+    }
+    if (win.isDestroyed()) {
+      return { success: false, error: 'Окно дисплея было закрыто во время запуска' }
+    }
+    win.setBounds(target.bounds)
+    if (!win.isVisible()) win.showInactive()
+    win.setAlwaysOnTop(false)
+    diagnosticLog('display', `auxiliary open role=${role} display=${target.id} bounds=${JSON.stringify(target.bounds)}`)
+    return { success: true }
+  })
+
+  ipcMain.handle('close-auxiliary-window', (_event, role: AuxiliaryWindowRole) => {
+    if (role !== 'speaker' && role !== 'info') return
+    closeAuxiliaryWindow(role)
+  })
+
+  ipcMain.on('send-to-auxiliary', (
+    _event,
+    role: AuxiliaryWindowRole,
+    channel: string,
+    ...args: unknown[]
+  ) => {
+    const win = getAuxiliaryWindow(role)
+    if (win && !win.isDestroyed()) win.webContents.send(channel, ...args)
+  })
+
   controlWindow.on('closed', () => {
     controlWindow = null
     if (presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindow.close()
     }
     presentationWindow = null
+    closeAuxiliaryWindow('speaker')
+    closeAuxiliaryWindow('info')
     hideWpfTimer()
     closeAllExternalFiles()
     // Restore taskbar visibility on exit
@@ -1356,7 +1465,7 @@ function createWindows(): void {
     const primary = screen.getPrimaryDisplay()
     return displays.map((d) => ({
       id: d.id,
-      label: `${d.size.width}x${d.size.height}`,
+      label: d.label?.trim() || `${d.size.width}x${d.size.height}`,
       isPrimary: d.id === primary.id,
       bounds: d.bounds,
       scaleFactor: d.scaleFactor
@@ -1386,7 +1495,7 @@ function createWindows(): void {
       const primary = screen.getPrimaryDisplay()
       controlWindow.webContents.send('displays-changed', displays.map((d) => ({
         id: d.id,
-        label: `${d.size.width}x${d.size.height}`,
+        label: d.label?.trim() || `${d.size.width}x${d.size.height}`,
         isPrimary: d.id === primary.id,
         bounds: d.bounds,
         scaleFactor: d.scaleFactor
@@ -1407,6 +1516,15 @@ function createWindows(): void {
   })
   screen.on('display-removed', () => {
     sendDisplays()
+    const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
+    if (speakerWindowDisplayId !== null && !connectedIds.has(speakerWindowDisplayId)) {
+      diagnosticLog('display', `speaker display removed id=${speakerWindowDisplayId}`)
+      closeAuxiliaryWindow('speaker', true)
+    }
+    if (infoWindowDisplayId !== null && !connectedIds.has(infoWindowDisplayId)) {
+      diagnosticLog('display', `information display removed id=${infoWindowDisplayId}`)
+      closeAuxiliaryWindow('info', true)
+    }
     if (
       screen.getAllDisplays().length < 2 &&
       presentationWindow &&

@@ -10,6 +10,7 @@ import { OperatorCursorGuard } from './components/Capture/OperatorCursorGuard'
 import { queueNavigationDuringTransition } from './navigation-transition'
 import type { NavigationRequest } from './navigation-transition'
 import { takeAdjacentChannel } from './channel-boundary-navigation'
+import { AuxiliaryDisplayBridge } from './components/AuxiliaryDisplays/AuxiliaryDisplayBridge'
 
 export default function App(): JSX.Element {
   const {
@@ -219,6 +220,7 @@ export default function App(): JSX.Element {
     <div className="h-screen flex flex-col overflow-hidden dark">
       <Toolbar />
       <NowPlaying />
+      <AuxiliaryDisplayBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="flex flex-1 overflow-hidden">
         <FileLibrary />

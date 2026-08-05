@@ -4,9 +4,11 @@ import { Timer } from './Timer'
 import { MusicPlayer } from './MusicPlayer'
 import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
+import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
 
 export function Toolbar(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [auxiliaryDisplaysOpen, setAuxiliaryDisplaysOpen] = useState(false)
   const {
     isPresentationWindowOpen,
     setPresentationWindowOpen,
@@ -21,6 +23,8 @@ export function Toolbar(): JSX.Element {
     setGlobalHookEnabled,
     channelBoundaryNavigationEnabled,
     setChannelBoundaryNavigationEnabled,
+    speakerDisplayEnabled,
+    informationDisplayEnabled,
     channels,
     selectedChannel,
     setOverlayState
@@ -152,6 +156,19 @@ export function Toolbar(): JSX.Element {
         <span className="text-base">⚙</span> Настройки
       </button>
 
+      <button
+        onClick={() => setAuxiliaryDisplaysOpen(true)}
+        className={`text-xs px-2 py-1.5 rounded-lg font-medium transition-colors border ${
+          speakerDisplayEnabled || informationDisplayEnabled
+            ? 'bg-blue-600/80 border-blue-500 text-white hover:bg-blue-600'
+            : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
+        }`}
+        title="Суфлёр и информационный экран"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        🖥 Экраны
+      </button>
+
       <div className="flex-1" />
 
       <Timer />
@@ -220,6 +237,9 @@ export function Toolbar(): JSX.Element {
       </button>
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {auxiliaryDisplaysOpen && (
+        <AuxiliaryDisplaysModal onClose={() => setAuxiliaryDisplaysOpen(false)} />
+      )}
     </div>
   )
 }

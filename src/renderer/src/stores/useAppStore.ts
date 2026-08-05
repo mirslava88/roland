@@ -118,6 +118,19 @@ export interface VideoPlaybackState {
   playing: boolean
 }
 
+export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image'
+export type TimerDisplayTarget = 'presentation' | 'information'
+
+export interface InformationMediaConfig {
+  type: InformationMediaType
+  path: string
+  name: string
+  currentSlide: number
+  totalSlides: number
+  slideImages: string[]
+  playing: boolean
+}
+
 interface AppState {
   folderPath: string | null
   rootFolderPath: string | null
@@ -137,6 +150,11 @@ interface AppState {
   pptxSlidesMap: Record<string, string[]>
   displays: DisplayInfo[]
   selectedDisplayId: number | null
+  speakerDisplayId: number | null
+  informationDisplayId: number | null
+  speakerDisplayEnabled: boolean
+  informationDisplayEnabled: boolean
+  informationMedia: InformationMediaConfig | null
   backdropImage: string | null
   globalHookEnabled: boolean
   channelBoundaryNavigationEnabled: boolean
@@ -184,6 +202,11 @@ interface AppState {
   clearSlidePosition: (filePath: string) => void
   setDisplays: (displays: DisplayInfo[]) => void
   setSelectedDisplayId: (id: number | null) => void
+  setSpeakerDisplayId: (id: number | null) => void
+  setInformationDisplayId: (id: number | null) => void
+  setSpeakerDisplayEnabled: (enabled: boolean) => void
+  setInformationDisplayEnabled: (enabled: boolean) => void
+  setInformationMedia: (media: InformationMediaConfig | null) => void
   setBackdropImage: (path: string | null) => void
   setGlobalHookEnabled: (enabled: boolean) => void
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
@@ -221,6 +244,7 @@ interface AppState {
   timerWarningTextColor: string
   timerOvertimeTextColor: string
   timerTextOpacity: number
+  timerDisplayTarget: TimerDisplayTarget
   setTimerDuration: (seconds: number) => void
   setTimerRemaining: (seconds: number) => void
   setTimerRunning: (running: boolean) => void
@@ -234,6 +258,7 @@ interface AppState {
   setTimerWarningTextColor: (color: string) => void
   setTimerOvertimeTextColor: (color: string) => void
   setTimerTextOpacity: (opacity: number) => void
+  setTimerDisplayTarget: (target: TimerDisplayTarget) => void
 }
 
 export const useAppStore = create<AppState>()(persist(
@@ -258,6 +283,11 @@ export const useAppStore = create<AppState>()(persist(
   pptxSlidesMap: {},
   displays: [],
   selectedDisplayId: null,
+  speakerDisplayId: null,
+  informationDisplayId: null,
+  speakerDisplayEnabled: false,
+  informationDisplayEnabled: false,
+  informationMedia: null,
   backdropImage: null,
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,
@@ -472,9 +502,46 @@ export const useAppStore = create<AppState>()(persist(
     set({ slidePositions: nextPositions })
   },
 
-  setDisplays: (displays) => set({ displays }),
+  setDisplays: (displays) => {
+    const state = get()
+    const primaryId = displays.find((display) => display.isPrimary)?.id ?? null
+    const externalIds = displays
+      .filter((display) => display.id !== primaryId)
+      .sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y)
+      .map((display) => display.id)
+    const connected = new Set(externalIds)
+
+    const presentationId = state.selectedDisplayId !== null && connected.has(state.selectedDisplayId)
+      ? state.selectedDisplayId
+      : externalIds[0] ?? null
+    const speakerId = state.speakerDisplayId !== null &&
+      connected.has(state.speakerDisplayId) &&
+      state.speakerDisplayId !== presentationId
+      ? state.speakerDisplayId
+      : externalIds.find((id) => id !== presentationId) ?? null
+    const informationId = state.informationDisplayId !== null &&
+      connected.has(state.informationDisplayId) &&
+      state.informationDisplayId !== presentationId &&
+      state.informationDisplayId !== speakerId
+      ? state.informationDisplayId
+      : externalIds.find((id) => id !== presentationId && id !== speakerId) ?? null
+
+    set({
+      displays,
+      selectedDisplayId: presentationId,
+      speakerDisplayId: speakerId,
+      informationDisplayId: informationId,
+      speakerDisplayEnabled: state.speakerDisplayEnabled && speakerId !== null,
+      informationDisplayEnabled: state.informationDisplayEnabled && informationId !== null
+    })
+  },
 
   setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
+  setSpeakerDisplayId: (id) => set({ speakerDisplayId: id }),
+  setInformationDisplayId: (id) => set({ informationDisplayId: id }),
+  setSpeakerDisplayEnabled: (enabled) => set({ speakerDisplayEnabled: enabled }),
+  setInformationDisplayEnabled: (enabled) => set({ informationDisplayEnabled: enabled }),
+  setInformationMedia: (media) => set({ informationMedia: media }),
   setBackdropImage: (path) => set({ backdropImage: path }),
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
   setChannelBoundaryNavigationEnabled: (enabled) => set({ channelBoundaryNavigationEnabled: enabled }),
@@ -562,6 +629,7 @@ export const useAppStore = create<AppState>()(persist(
   timerWarningTextColor: '#facc15',
   timerOvertimeTextColor: '#ef4444',
   timerTextOpacity: 1,
+  timerDisplayTarget: 'presentation' as TimerDisplayTarget,
   setTimerDuration: (seconds) => set({ timerDuration: seconds, timerRemaining: seconds }),
   setTimerRemaining: (seconds) => set({ timerRemaining: seconds }),
   setTimerRunning: (running) => set({ timerRunning: running }),
@@ -583,7 +651,13 @@ export const useAppStore = create<AppState>()(persist(
   setTimerTextColor: (color) => set({ timerTextColor: color }),
   setTimerWarningTextColor: (color) => set({ timerWarningTextColor: color }),
   setTimerOvertimeTextColor: (color) => set({ timerOvertimeTextColor: color }),
-  setTimerTextOpacity: (opacity) => set({ timerTextOpacity: Math.max(0.1, Math.min(1, opacity)) })
+  setTimerTextOpacity: (opacity) => set({ timerTextOpacity: Math.max(0.1, Math.min(1, opacity)) }),
+  setTimerDisplayTarget: (target) => set((state) => ({
+    timerDisplayTarget: target,
+    informationDisplayEnabled: target === 'information' && state.informationDisplayId !== null
+      ? true
+      : state.informationDisplayEnabled
+  }))
   }
   },
   {
@@ -600,7 +674,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 4,
+    version: 6,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -620,10 +694,17 @@ export const useAppStore = create<AppState>()(persist(
       if (version < 4) {
         delete migrated.channelBoundaryNavigationEnabled
       }
+      // v5 -> v6: the agenda/message scene editor was replaced by a
+      // session-only multimedia output for Display 3.
+      if (version < 6) {
+        delete migrated.informationScene
+      }
       return migrated
     },
     partialize: (state) => ({
       selectedDisplayId: state.selectedDisplayId,
+      speakerDisplayId: state.speakerDisplayId,
+      informationDisplayId: state.informationDisplayId,
       folderPath: state.folderPath,
       rootFolderPath: state.rootFolderPath,
       globalHookEnabled: state.globalHookEnabled,
@@ -633,6 +714,7 @@ export const useAppStore = create<AppState>()(persist(
       timerWarningTextColor: state.timerWarningTextColor,
       timerOvertimeTextColor: state.timerOvertimeTextColor,
       timerTextOpacity: state.timerTextOpacity,
+      timerDisplayTarget: state.timerDisplayTarget,
     }),
   }
 ))

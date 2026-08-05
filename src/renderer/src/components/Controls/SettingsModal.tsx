@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useAppStore } from '../../stores/useAppStore'
 
 interface AudioDevice {
   id: string
@@ -34,10 +35,21 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
+  const {
+    displays: connectedDisplays,
+    selectedDisplayId,
+    speakerDisplayId,
+    informationDisplayId,
+    setSelectedDisplayId,
+    setSpeakerDisplayId,
+    setInformationDisplayId,
+    setSpeakerDisplayEnabled,
+    setInformationDisplayEnabled
+  } = useAppStore()
   const [tab, setTab] = useState<'audio' | 'display' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
-  const [displays, setDisplays] = useState<DisplayInfoFull[]>([])
+  const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
   const [displaysLoading, setDisplaysLoading] = useState(false)
   const [applyingMode, setApplyingMode] = useState<DisplayMultiMode | null>(null)
   const [diagnosticStatus, setDiagnosticStatus] = useState('')
@@ -58,7 +70,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     setDisplaysLoading(true)
     try {
       const d = await window.api.getDisplayModes()
-      setDisplays(d || [])
+      setDisplayModes(d || [])
     } finally {
       setDisplaysLoading(false)
     }
@@ -105,6 +117,39 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   const handleSetDevice = async (deviceId: string): Promise<void> => {
     await window.api.setAudioDevice(deviceId)
     await loadDevices()
+  }
+
+  const assignDisplay = (role: 1 | 2 | 3, value: string): void => {
+    const id = value === '' ? null : Number(value)
+    if (role === 1) {
+      setSelectedDisplayId(id)
+      if (id !== null && speakerDisplayId === id) {
+        setSpeakerDisplayEnabled(false)
+        setSpeakerDisplayId(null)
+      }
+      if (id !== null && informationDisplayId === id) {
+        setInformationDisplayEnabled(false)
+        setInformationDisplayId(null)
+      }
+      return
+    }
+    if (role === 2) {
+      setSpeakerDisplayId(id)
+      if (id === null) setSpeakerDisplayEnabled(false)
+      if (id !== null && selectedDisplayId === id) setSelectedDisplayId(null)
+      if (id !== null && informationDisplayId === id) {
+        setInformationDisplayEnabled(false)
+        setInformationDisplayId(null)
+      }
+      return
+    }
+    setInformationDisplayId(id)
+    if (id === null) setInformationDisplayEnabled(false)
+    if (id !== null && selectedDisplayId === id) setSelectedDisplayId(null)
+    if (id !== null && speakerDisplayId === id) {
+      setSpeakerDisplayEnabled(false)
+      setSpeakerDisplayId(null)
+    }
   }
 
   // Close on Escape
@@ -207,6 +252,52 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
           {tab === 'display' && (
             <div className="space-y-5">
               <section>
+                <h3 className="text-sm font-semibold text-gray-200 mb-2">Назначение дисплеев PDM</h3>
+                <p className="text-[10px] text-gray-500 mb-3">
+                  Нумерация PDM не зависит от номеров экранов Windows. Один физический монитор можно назначить только одной роли.
+                </p>
+                <div className="space-y-2">
+                  <div className="rounded-lg border border-gray-700 bg-surface-100 p-3 flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-medium text-white">Дисплей 0 — Интерфейс PDM</div>
+                      <div className="text-[10px] text-gray-500">Основной экран ноутбука</div>
+                    </div>
+                    <span className="text-[10px] text-emerald-400">Назначается автоматически</span>
+                  </div>
+
+                  {([
+                    { role: 1 as const, title: 'Дисплей 1 — Презентация', value: selectedDisplayId },
+                    { role: 2 as const, title: 'Дисплей 2 — Суфлёр', value: speakerDisplayId },
+                    { role: 3 as const, title: 'Дисплей 3 — Информационный экран', value: informationDisplayId }
+                  ]).map((item) => (
+                    <label key={item.role} className="rounded-lg border border-gray-700 bg-surface-100 p-3 block">
+                      <span className="text-xs font-medium text-white block mb-2">{item.title}</span>
+                      <select
+                        className="w-full bg-surface-200 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-200 outline-hidden hover:border-gray-600 focus:border-accent"
+                        value={item.value ?? ''}
+                        onChange={(event) => assignDisplay(item.role, event.target.value)}
+                      >
+                        <option value="">Не назначен</option>
+                        {connectedDisplays.filter((display) => !display.isPrimary).map((display) => (
+                          <option
+                            key={display.id}
+                            value={display.id}
+                            disabled={
+                              (item.role !== 1 && selectedDisplayId === display.id) ||
+                              (item.role !== 2 && speakerDisplayId === display.id) ||
+                              (item.role !== 3 && informationDisplayId === display.id)
+                            }
+                          >
+                            {display.label} · {display.bounds.width}×{display.bounds.height} · x={display.bounds.x}, y={display.bounds.y}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section>
                 <h3 className="text-sm font-semibold text-gray-200 mb-2">Режим нескольких экранов</h3>
                 <div className="grid grid-cols-2 gap-2">
                   {(['extend', 'clone', 'internal', 'external'] as DisplayMultiMode[]).map((mode) => (
@@ -238,11 +329,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 </div>
                 {displaysLoading ? (
                   <p className="text-xs text-gray-500">Загрузка…</p>
-                ) : displays.length === 0 ? (
+                ) : displayModes.length === 0 ? (
                   <p className="text-xs text-gray-500">Дисплеи не найдены</p>
                 ) : (
                   <div className="space-y-3">
-                    {displays.map((d) => (
+                    {displayModes.map((d) => (
                       <div key={d.deviceName} className="bg-surface-100 border border-gray-700 rounded-lg p-3">
                         <div className="flex items-center justify-between mb-2">
                           <div>
@@ -364,7 +455,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">3. Подложка (Фон) и выход из эфира</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖼 Подложка (Фон)</code> выбирает и включает фон; повторное нажатие той же кнопки отключает его</li>
-                  <li>Подложка отображается когда нет активного контента и действует только до закрытия программы; новая сессия всегда начинается без фона</li>
+                  <li>Подложка применяется ко всем включённым дополнительным дисплеям. На суфлёре она показывается только когда в эфире нет PPTX/PDF, например во время видео</li>
+                  <li>Подложка действует только до закрытия программы; новая сессия всегда начинается без фона</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⏹ Выйти из эфира</code> — убирает любой активный материал, включая видеовход, и показывает подложку. Если подложка не настроена — внешний экран освобождается</li>
                 </ul>
               </section>
@@ -375,7 +467,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>Обратный отсчёт с настраиваемой длительностью (часы/минуты)</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Установить</code> применяет введённое время. Нажатие <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">▶</code> без «Установить» стартует со значения из полей</li>
                   <li>Быстрые кнопки: +1/+5/+10 мин, -1/-5/-10 мин и произвольное значение</li>
-                  <li>Отображается отдельным окном поверх контента на внешнем дисплее. Можно <b>перетаскивать</b> мышью и <b>масштабировать</b> колёсиком</li>
+                  <li>В блоке «Где показывать таймер» выберите только один выход: поверх основного эфира на Дисплее 1 или на весь информационный Дисплей 3</li>
+                  <li>На Дисплее 1 таймер можно <b>перетаскивать</b> мышью и <b>масштабировать</b> колёсиком. На Дисплее 3 он временно заменяет выбранный мультимедийный файл</li>
                   <li>Цвета: зелёный — идёт отсчёт; жёлтый — меньше минуты; красный — overtime (минусовое время)</li>
                   <li>Два звука оповещения: <b>«Звук (1 мин)»</b> срабатывает при достижении 60 секунд, <b>«Звук (конец)»</b> — при достижении 0</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🔊</code> — принудительный запуск звука таймера</li>
@@ -403,6 +496,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">7. Настройки — вкладка «Дисплеи»</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li><b>Дисплей 0</b> — основной экран ноутбука с интерфейсом PDM; назначается автоматически</li>
+                  <li><b>Дисплей 1</b> — основной эфир для зрителей: презентации, PDF, видео, изображения и внешние источники</li>
+                  <li><b>Дисплей 2</b> — суфлёр докладчика: текущий и следующий слайды PPTX/PDF, номер слайда и заметки PowerPoint</li>
+                  <li><b>Дисплей 3</b> — независимый информационный экран для PPTX, PDF, видео, изображений или таймера</li>
+                  <li>Нумерация PDM не зависит от номеров Windows. Выберите физический монитор для каждой роли в блоке «Назначение дисплеев PDM»</li>
                   <li>Прямо из приложения: режим (Расширить / Дублировать / Только основной / Только внешний)</li>
                   <li>Для каждого подключённого дисплея — выбор разрешения и частоты из выпадающего списка</li>
                   <li>При подключении нового монитора автоматически включается режим «Расширить»</li>
@@ -411,7 +509,20 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">8. Настройки — вкладка «Аудиовыход»</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">8. Суфлёр и информационный экран</h4>
+                <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li>Нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖥 Экраны</code> на верхней панели, чтобы включить или скрыть Дисплей 2 и Дисплей 3</li>
+                  <li>Суфлёр автоматически следует за PPTX/PDF, который сейчас находится в эфире. Для другого контента он переходит в режим ожидания</li>
+                  <li>Инфоэкран работает независимо от эфира: нажмите «Выбрать файл» и загрузите отдельный PPTX, PDF, видеоролик или изображение</li>
+                  <li>PPTX/PDF на Дисплее 3 листаются отдельными стрелками в окне «Экраны», а видео запускается вручную кнопкой «Воспроизвести»</li>
+                  <li>Кнопка «Убрать файл с информационного экрана» возвращает общую подложку или чёрный фон</li>
+                  <li>В настройках таймера выберите одно место вывода: поверх основного эфира на Дисплее 1 либо только на информационном Дисплее 3</li>
+                  <li>Если назначенный монитор отключён, PDM не перенесёт служебное изображение на экран оператора или зрителей</li>
+                </ul>
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">9. Настройки — вкладка «Аудиовыход»</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Выбор устройства вывода звука (колонки, наушники, HDMI)</li>
                   <li>При выводе контента на внешний дисплей звук автоматически переключается на выбранное устройство, а после — возвращается на исходное</li>
@@ -419,7 +530,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">9. Горячие клавиши</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">10. Горячие клавиши</h4>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-gray-400 mt-2">
                   <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+C</code> — Копировать</span>
                   <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+X</code> — Вырезать</span>
