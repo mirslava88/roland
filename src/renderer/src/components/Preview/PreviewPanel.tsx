@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { useAppStore, ChannelState, ChannelId, CHANNELS_PER_PAGE, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
+import { useAppStore, ChannelState, ChannelId, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import {
@@ -79,16 +79,112 @@ function nativeFileToEntry(filePath: string): FileEntry | null {
   }
 }
 
+type PptxCacheResult = { success: boolean; slideCount: number; error?: string }
+type PptxCacheStatus = 'loading' | 'ready' | 'error'
+
+// One background preparation job per physical PPTX. The main process also
+// serializes PowerPoint exports, while this renderer-side map prevents the
+// same deck from being requested by several channel cards at once.
+const pptxChannelCacheJobs = new Map<string, Promise<PptxCacheResult>>()
+
+function applyPptxSlideCount(filePath: string, slideCount: number): void {
+  if (slideCount < 1) return
+  const state = useAppStore.getState()
+  let changed = false
+  const channels = { ...state.channels }
+  for (const [channelId, channel] of Object.entries(channels)) {
+    if (channel.file?.type !== 'presentation' || channel.file.path !== filePath) continue
+    if (channel.totalSlides === slideCount) continue
+    channels[channelId] = { ...channel, totalSlides: slideCount }
+    changed = true
+  }
+  if (changed) useAppStore.setState({ channels })
+}
+
+function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
+  const state = useAppStore.getState()
+  const fullSlides = state.pptxSlidesMap[filePath]
+  if (fullSlides?.length) {
+    if (!state.pptxThumbnailsMap[filePath]?.length) {
+      useAppStore.setState({
+        pptxThumbnailsMap: { ...state.pptxThumbnailsMap, [filePath]: fullSlides }
+      })
+    }
+    applyPptxSlideCount(filePath, fullSlides.length)
+    return Promise.resolve({ success: true, slideCount: fullSlides.length })
+  }
+
+  const existing = pptxChannelCacheJobs.get(filePath)
+  if (existing) return existing
+
+  const job = (async (): Promise<PptxCacheResult> => {
+    window.api.dbgLog(`PPTX channel cache: BEGIN file=${filePath}`)
+    try {
+      // Fast low-resolution export first: the operator gets a channel preview
+      // and slide count as early as possible. Full slides follow immediately
+      // for the speaker display and seamless transitions.
+      const current = useAppStore.getState()
+      if (!current.pptxThumbnailsMap[filePath]?.length) {
+        const thumbnails = await window.api.generatePptxThumbnails(filePath)
+        if (thumbnails.success && thumbnails.thumbnails?.length) {
+          const latest = useAppStore.getState()
+          useAppStore.setState({
+            pptxThumbnailsMap: {
+              ...latest.pptxThumbnailsMap,
+              [filePath]: thumbnails.thumbnails
+            }
+          })
+          applyPptxSlideCount(filePath, thumbnails.slideCount || thumbnails.thumbnails.length)
+        }
+      }
+
+      const latest = useAppStore.getState()
+      const cachedSlides = latest.pptxSlidesMap[filePath]
+      if (cachedSlides?.length) {
+        applyPptxSlideCount(filePath, cachedSlides.length)
+        return { success: true, slideCount: cachedSlides.length }
+      }
+
+      const slides = await window.api.generatePptxSlides(filePath)
+      if (!slides.success || !slides.slides?.length) {
+        throw new Error(slides.error || 'PowerPoint не подготовил слайды')
+      }
+      const finalState = useAppStore.getState()
+      useAppStore.setState({
+        pptxSlidesMap: { ...finalState.pptxSlidesMap, [filePath]: slides.slides },
+        pptxThumbnailsMap: {
+          ...finalState.pptxThumbnailsMap,
+          [filePath]: finalState.pptxThumbnailsMap[filePath]?.length
+            ? finalState.pptxThumbnailsMap[filePath]
+            : slides.slides
+        }
+      })
+      const slideCount = slides.slideCount || slides.slides.length
+      applyPptxSlideCount(filePath, slideCount)
+      window.api.dbgLog(`PPTX channel cache: READY file=${filePath} slides=${slideCount}`)
+      return { success: true, slideCount }
+    } catch (error) {
+      window.api.dbgLog(`PPTX channel cache: ERROR file=${filePath} error=${String(error)}`)
+      return { success: false, slideCount: 0, error: String(error) }
+    } finally {
+      pptxChannelCacheJobs.delete(filePath)
+    }
+  })()
+  pptxChannelCacheJobs.set(filePath, job)
+  return job
+}
+
 export function PreviewPanel(): JSX.Element {
   const {
-    channels, channelIds, currentChannelPage,
+    channels, channelIds, channelGridSize, currentChannelPage,
     liveChannel, selectedChannel, setSelectedChannel,
     setChannelFile, setChannelSlide, setChannelTotalSlides,
+    setChannelVideoEndChannel, setChannelCaption,
     setPresentationWindowOpen,
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
     clearSlidePosition,
-    addChannelPage, removeChannelPage, setCurrentChannelPage,
-    pptxThumbnailsMap, setOverlayState
+    addChannelPage, removeChannelPage, setCurrentChannelPage, setChannelGridSize,
+    pptxThumbnailsMap, pptxSlidesMap, setOverlayState
   } = useAppStore()
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
@@ -105,6 +201,40 @@ export function PreviewPanel(): JSX.Element {
     channelId: ChannelId
     message: string | null
   } | null>(null)
+  const [pptxCacheStatuses, setPptxCacheStatuses] = useState<Record<string, PptxCacheStatus>>({})
+
+  const pptxChannelPaths = [...new Set(channelIds
+    .map((id) => channels[id]?.file)
+    .filter((file): file is FileEntry => file?.type === 'presentation')
+    .map((file) => file.path))]
+  const pptxChannelPathKey = pptxChannelPaths.join('\u0000')
+
+  useEffect(() => {
+    const activePaths = new Set(pptxChannelPaths)
+    setPptxCacheStatuses((current) => Object.fromEntries(
+      Object.entries(current).filter(([path]) => activePaths.has(path))
+    ))
+    for (const filePath of pptxChannelPaths) {
+      if (useAppStore.getState().pptxSlidesMap[filePath]?.length) {
+        setPptxCacheStatuses((current) => current[filePath] === 'ready'
+          ? current
+          : { ...current, [filePath]: 'ready' })
+        continue
+      }
+      setPptxCacheStatuses((current) => ({ ...current, [filePath]: 'loading' }))
+      void ensurePptxChannelCache(filePath).then((result) => {
+        if (!useAppStore.getState().channelIds.some((id) => (
+          useAppStore.getState().channels[id]?.file?.path === filePath
+        ))) return
+        setPptxCacheStatuses((current) => ({
+          ...current,
+          [filePath]: result.success ? 'ready' : 'error'
+        }))
+      })
+    }
+  // Map changes are included so a configuration load that clears caches but
+  // restores the same channel paths still starts a fresh preparation job.
+  }, [pptxChannelPathKey, pptxSlidesMap])
 
   useEffect(() => {
     const cancelCurrentTake = (event: Event): void => {
@@ -129,13 +259,14 @@ export function PreviewPanel(): JSX.Element {
     return () => window.removeEventListener('cancel-active-take', cancelCurrentTake)
   }, [])
 
-  const totalPages = Math.max(1, Math.ceil(channelIds.length / CHANNELS_PER_PAGE))
-  const pageStart = currentChannelPage * CHANNELS_PER_PAGE
-  const pageIds = channelIds.slice(pageStart, pageStart + CHANNELS_PER_PAGE)
+  const totalPages = Math.max(1, Math.ceil(channelIds.length / channelGridSize))
+  const nextChannelGridSize = channelGridSize === 4 ? 9 : 4
+  const pageStart = currentChannelPage * channelGridSize
+  const pageIds = channelIds.slice(pageStart, pageStart + channelGridSize)
   const liveChannelPage = liveChannel
-    ? Math.floor(channelIds.indexOf(liveChannel) / CHANNELS_PER_PAGE)
+    ? Math.floor(channelIds.indexOf(liveChannel) / channelGridSize)
     : -1
-  const currentPageIsEmpty = pageIds.every((id) => !channels[id]?.file)
+  const currentPageIsEmpty = pageIds.every((id) => !channels[id]?.file && !channels[id]?.caption.trim())
 
   const handleClear = async (ch: ChannelId): Promise<void> => {
     const channel = channels[ch]
@@ -882,27 +1013,9 @@ export function PreviewPanel(): JSX.Element {
           ? 'live-layer switch complete: warmed PowerPoint promoted once'
           : 'direct reveal: live PowerPoint ready')
       }
-      // Генерим превью/слайды ПОСЛЕ hideOverlay. Эти вызовы спавнят отдельный
-      // powerpoint-control.ps1 процесс, который делает $ppt.WindowState=2 +
-      // $ppt.Visible=1 + Hide-PPEditorWindow на том же COM-инстансе, который
-      // daemon уже держит со слайдшоу. Если это делать ПОКА оверлей ещё висит,
-      // PP может мигнуть editor-окном / ре-активировать slideshow прямо под
-      // оверлеем — user видит новый слайд до того, как оверлей исчезает.
-      window.api.generatePptxThumbnails(channel.file.path).then((thumbResult) => {
-        if (thumbResult.success && thumbResult.thumbnails) {
-          const { pptxThumbnailsMap } = useAppStore.getState()
-          useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [channel.file!.path]: thumbResult.thumbnails } })
-        }
-      })
-      const { pptxSlidesMap: existingSlides } = useAppStore.getState()
-      if (!existingSlides[pptxPath]) {
-        window.api.generatePptxSlides(pptxPath).then((slidesResult) => {
-          if (slidesResult.success && slidesResult.slides) {
-            const { pptxSlidesMap } = useAppStore.getState()
-            useAppStore.setState({ pptxSlidesMap: { ...pptxSlidesMap, [pptxPath]: slidesResult.slides } })
-          }
-        })
-      }
+      // Channel assignment starts preview/full-slide preparation immediately.
+      // Do not launch a second export after TAKE: besides being redundant, it
+      // used to make diagnostics look as if caching only began on air.
       await releaseInactiveBrowserFullscreen()
       return
     }
@@ -1028,10 +1141,17 @@ export function PreviewPanel(): JSX.Element {
     }
 
     const outputWindowWasOpen = useAppStore.getState().isPresentationWindowOpen
+    const programDisplayId = useAppStore.getState().selectedDisplayId ?? undefined
+    // A warm PDF/video surface survives underneath native PowerPoint to keep
+    // transitions fast and flicker-free. If the primary program display was
+    // changed while that surface was parked, move it before preparing the next
+    // Chromium frame. This operation deliberately does not touch opacity or
+    // z-order, so the existing seamless transition remains intact.
+    await window.api.placePresentationWindow(programDisplayId)
     const revealWarmOutputAfterPaint =
       !outputWindowWasOpen && prevActiveFile?.type === 'presentation'
     if (!outputWindowWasOpen && !revealWarmOutputAfterPaint) {
-      await window.api.openPresentationWindow(useAppStore.getState().selectedDisplayId ?? undefined)
+      await window.api.openPresentationWindow(programDisplayId)
       setPresentationWindowOpen(true)
     }
     if (isTakeCancelled()) {
@@ -1153,6 +1273,13 @@ export function PreviewPanel(): JSX.Element {
         : undefined,
       takeId
     })
+    if (channel.file.type === 'video') {
+      // Channel videos are single-shot cues. Do not inherit a loop flag that
+      // may have been enabled earlier in the independent video playlist;
+      // otherwise `ended` never fires and the configured channel transition
+      // can never run.
+      window.api.sendToPresentation('set-loop', false)
+    }
 
     const readiness = await contentReady
     if (readiness.cancelled || isTakeCancelled()) {
@@ -1269,11 +1396,90 @@ export function PreviewPanel(): JSX.Element {
     return () => window.removeEventListener('take-channel', handler)
   })
 
+  // A channel video can hand the live output to one explicitly selected
+  // channel when playback reaches its natural end. The source path guards
+  // against a late `ended` event from a video that has already left the air.
+  useEffect(() => {
+    return window.api.on('video-ended', (...args: unknown[]) => {
+      const data = args[0] as { path?: string } | undefined
+      const state = useAppStore.getState()
+      const sourceChannelId = state.liveChannel
+      if (!sourceChannelId || state.activeFile?.type !== 'video') return
+      const sourceChannel = state.channels[sourceChannelId]
+      if (!sourceChannel?.file || sourceChannel.file.type !== 'video') return
+      if (data?.path && data.path !== sourceChannel.file.path) {
+        window.api.dbgLog(
+          `video-end channel switch ignored stale path=${data.path} live=${sourceChannel.file.path}`
+        )
+        return
+      }
+
+      const targetChannelId = sourceChannel.videoEndChannel
+      if (!targetChannelId) return
+      if (!state.channels[targetChannelId]?.file || targetChannelId === sourceChannelId) {
+        state.setChannelVideoEndChannel(sourceChannelId, null)
+        window.api.dbgLog(
+          `video-end channel switch cleared invalid target source=${sourceChannelId} target=${targetChannelId}`
+        )
+        return
+      }
+
+      state.setSelectedChannel(targetChannelId)
+      const targetIndex = state.channelIds.indexOf(targetChannelId)
+      if (targetIndex >= 0) {
+        state.setCurrentChannelPage(Math.floor(targetIndex / state.channelGridSize))
+      }
+      window.api.dbgLog(
+        `video-end channel switch source=${sourceChannelId} target=${targetChannelId} path=${sourceChannel.file.path}`
+      )
+      void handleTake(targetChannelId)
+    })
+  })
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex-1 grid grid-cols-2 grid-rows-2 gap-2 overflow-hidden p-3 relative">
+      <div className="shrink-0 h-8 bg-surface-300 border-b border-gray-800 flex items-center justify-between px-3 select-none">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Каналы</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setChannelGridSize(nextChannelGridSize)}
+            className="h-6 w-6 shrink-0 rounded-md border border-gray-700 bg-surface-100 text-gray-400 hover:border-gray-600 hover:bg-surface-200 hover:text-white transition-colors flex items-center justify-center"
+            title={channelGridSize === 4 ? 'Показать 9 каналов сеткой 3×3' : 'Показать 4 канала сеткой 2×2'}
+            aria-label={channelGridSize === 4 ? 'Переключить на 9 каналов' : 'Переключить на 4 канала'}
+          >
+            <span
+              aria-hidden="true"
+              className={`grid h-3.5 w-3.5 ${
+                nextChannelGridSize === 4
+                  ? 'grid-cols-2 grid-rows-2 gap-[2px]'
+                  : 'grid-cols-3 grid-rows-3 gap-px'
+              }`}
+            >
+              {Array.from({ length: nextChannelGridSize }).map((_, index) => (
+                <span
+                  key={index}
+                  className={`${nextChannelGridSize === 4 ? 'rounded-[1.5px]' : 'rounded-full'} bg-current`}
+                />
+              ))}
+            </span>
+          </button>
+          <button
+            onClick={() => addChannelPage()}
+            title={`Добавить ${channelGridSize} каналов на новой странице`}
+            className="h-6 min-w-6 rounded-md border border-gray-700 bg-surface-100 px-2 text-sm leading-none text-gray-300 hover:border-accent/70 hover:bg-accent/80 hover:text-white transition-colors"
+          >
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className={`flex-1 grid overflow-hidden relative ${
+        channelGridSize === 9
+          ? 'grid-cols-3 grid-rows-3 gap-1.5 p-2'
+          : 'grid-cols-2 grid-rows-2 gap-2 p-3'
+      }`}>
         {pageIds.map((id) => {
-          const channel = channels[id] || { file: null, slide: 1, totalSlides: 0 }
+          const channel = channels[id] || { file: null, slide: 1, totalSlides: 0, videoEndChannel: null, caption: '' }
           return (
             <ChannelPanel
               key={id}
@@ -1286,22 +1492,22 @@ export function PreviewPanel(): JSX.Element {
               onDrop={(file) => setChannelFile(id, file)}
               onSlideChange={(s) => setChannelSlide(id, s)}
               onSetTotalSlides={(t) => setChannelTotalSlides(id, t)}
+              onVideoEndChannelChange={(target) => setChannelVideoEndChannel(id, target)}
+              onCaptionChange={(caption) => setChannelCaption(id, caption)}
               onSelect={() => setSelectedChannel(id)}
               onTake={() => handleTake(id)}
               onClear={() => handleClear(id)}
               pptxThumbnails={channel.file ? pptxThumbnailsMap[channel.file.path] || [] : []}
+              pptxCacheStatus={channel.file?.type === 'presentation'
+                ? pptxCacheStatuses[channel.file.path]
+                : undefined}
+              videoEndChannelOptions={channelIds.filter((targetId) => (
+                targetId !== id && Boolean(channels[targetId]?.file)
+              ))}
+              compact={channelGridSize === 9}
             />
           )
         })}
-
-        {/* Центральная "+" — добавить 4 новых канала на новой странице */}
-        <button
-          onClick={() => addChannelPage()}
-          title="Добавить 4 канала (новая страница)"
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full bg-surface-100/90 hover:bg-accent/90 hover:text-white text-gray-300 text-xl font-bold border border-gray-700 shadow-lg backdrop-blur-xs transition-colors z-10 flex items-center justify-center"
-        >
-          +
-        </button>
       </div>
 
       {/* Pagination footer — показываем только если есть больше одной страницы.
@@ -1378,10 +1584,13 @@ export function PreviewPanel(): JSX.Element {
               onClick={() => {
                 if (!currentPageIsEmpty) {
                   const ok = window.confirm(
-                    'На странице есть материалы в каналах. Удалить страницу со всем содержимым?'
+                    'На странице есть материалы или подписи каналов. Удалить страницу со всем содержимым?'
                   )
                   if (!ok) return
-                  pageIds.forEach((id) => setChannelFile(id, null))
+                  pageIds.forEach((id) => {
+                    setChannelFile(id, null)
+                    setChannelCaption(id, '')
+                  })
                 }
                 removeChannelPage(currentChannelPage)
               }}
@@ -1407,24 +1616,54 @@ interface ChannelPanelProps {
   onDrop: (file: FileEntry) => void
   onSlideChange: (slide: number) => void
   onSetTotalSlides: (total: number) => void
+  onVideoEndChannelChange: (target: ChannelId | null) => void
+  onCaptionChange: (caption: string) => void
   onSelect: () => void
   onTake: () => void
   onClear: () => void
   pptxThumbnails: string[]
+  pptxCacheStatus?: PptxCacheStatus
+  videoEndChannelOptions: ChannelId[]
+  compact: boolean
 }
 
 function ChannelPanel({
   label, channel, isLive, isSelected, isTaking, openingMessage,
-  onDrop, onSlideChange, onSetTotalSlides, onSelect, onTake, onClear, pptxThumbnails
+  onDrop, onSlideChange, onSetTotalSlides, onVideoEndChannelChange, onCaptionChange,
+  onSelect, onTake, onClear, pptxThumbnails, pptxCacheStatus, videoEndChannelOptions, compact
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [slideInput, setSlideInput] = useState('')
   const [slideFocused, setSlideFocused] = useState(false)
+  const [captionEditing, setCaptionEditing] = useState(false)
+  const [captionDraft, setCaptionDraft] = useState(channel.caption)
+  const captionInputRef = useRef<HTMLInputElement>(null)
+  const cancelCaptionOnBlurRef = useRef(false)
 
   // Keep input synced with channel.slide when not being edited
   useEffect(() => {
     if (!slideFocused) setSlideInput(String(channel.slide))
   }, [channel.slide, slideFocused])
+
+  useEffect(() => {
+    if (!captionEditing) setCaptionDraft(channel.caption)
+  }, [captionEditing, channel.caption])
+
+  useEffect(() => {
+    if (!captionEditing) return
+    captionInputRef.current?.focus()
+    captionInputRef.current?.select()
+  }, [captionEditing])
+
+  const finishCaptionEditing = (): void => {
+    onCaptionChange(captionDraft.trim())
+    setCaptionEditing(false)
+  }
+
+  const cancelCaptionEditing = (): void => {
+    setCaptionDraft(channel.caption)
+    setCaptionEditing(false)
+  }
 
   const handleDragOver = (e: React.DragEvent): void => {
     e.preventDefault()
@@ -1465,27 +1704,6 @@ function ChannelPanel({
     if (!file) return
 
     onDrop(file)
-    // Pre-generate thumbnails for PPTX
-    if (file.type === 'presentation') {
-      const result = await window.api.generatePptxThumbnails(file.path)
-      if (result.success && result.thumbnails) {
-        const { pptxThumbnailsMap } = useAppStore.getState()
-        useAppStore.setState({ pptxThumbnailsMap: { ...pptxThumbnailsMap, [file.path]: result.thumbnails } })
-        if (result.slideCount) onSetTotalSlides(result.slideCount)
-      }
-      // Pre-render full-resolution slides in background for zero-flicker
-      // PPTX→PPTX channel switches (Option 2 Hybrid mode).
-      const filePath = file.path
-      const { pptxSlidesMap: existingSlides } = useAppStore.getState()
-      if (!existingSlides[filePath]) {
-        window.api.generatePptxSlides(filePath).then((slidesResult) => {
-          if (slidesResult.success && slidesResult.slides) {
-            const { pptxSlidesMap } = useAppStore.getState()
-            useAppStore.setState({ pptxSlidesMap: { ...pptxSlidesMap, [filePath]: slidesResult.slides } })
-          }
-        })
-      }
-    }
     if (isLive) {
       // Auto-take when dropping into the live channel
       setTimeout(() => onTake(), 50)
@@ -1498,7 +1716,7 @@ function ChannelPanel({
 
   return (
     <div
-      className={`flex-1 flex flex-col overflow-hidden rounded-lg border-2 transition-colors cursor-pointer ${
+      className={`flex-1 flex flex-col overflow-hidden ${compact ? 'rounded-md border' : 'rounded-lg border-2'} transition-colors cursor-pointer ${
         dragOver ? 'border-accent bg-accent/5' :
         isLive ? 'border-red-500/60' :
         showSelected ? 'border-blue-500/60' : 'border-gray-700/50'
@@ -1513,20 +1731,87 @@ function ChannelPanel({
       {/* Header. min-w-0 на flex-контейнере + shrink-0 на фиксированных
           элементах (dot, label, ✕). Имя файла с flex-1 + min-w-0 + truncate
           — сжимается и обрезается многоточием вместо выталкивания ✕. */}
-      <div className={`flex items-center gap-2 px-3 py-1.5 min-w-0 ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
-        <span className={`w-2 h-2 rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : showSelected ? 'bg-blue-500' : 'bg-gray-600'}`} />
-        <span className={`shrink-0 text-[10px] font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
+      <div className={`flex items-center min-w-0 ${compact ? 'gap-1 px-2 py-1' : 'gap-2 px-3 py-1.5'} ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
+        <span className={`${compact ? 'w-1.5 h-1.5' : 'w-2 h-2'} rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : showSelected ? 'bg-blue-500' : 'bg-gray-600'}`} />
+        <span className={`shrink-0 ${compact ? 'text-[9px]' : 'text-[10px]'} font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
           Канал {label} {isLive ? '• В ЭФИРЕ' : showSelected ? '• ВЫБРАНО' : ''}
         </span>
-        {channel.file && (
-          <span className="flex-1 min-w-0 text-[11px] text-gray-400 truncate ml-1" title={channel.file.name}>{channel.file.name}</span>
+        {captionEditing ? (
+          <input
+            ref={captionInputRef}
+            type="text"
+            value={captionDraft}
+            maxLength={80}
+            placeholder="Введите подпись"
+            aria-label={`Подпись канала ${label}`}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onChange={(event) => setCaptionDraft(event.target.value)}
+            onBlur={() => {
+              if (cancelCaptionOnBlurRef.current) {
+                cancelCaptionOnBlurRef.current = false
+                cancelCaptionEditing()
+              } else {
+                finishCaptionEditing()
+              }
+            }}
+            onKeyDown={(event) => {
+              event.stopPropagation()
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                event.currentTarget.blur()
+              } else if (event.key === 'Escape') {
+                event.preventDefault()
+                cancelCaptionOnBlurRef.current = true
+                event.currentTarget.blur()
+              }
+            }}
+            className={`flex-1 min-w-0 bg-transparent text-right text-gray-100 outline-hidden placeholder:text-gray-600 ${compact ? 'text-[8px]' : 'text-[11px] ml-1'}`}
+          />
+        ) : (
+          <span
+            className={`flex-1 min-w-0 overflow-hidden whitespace-nowrap text-right ${compact ? 'text-[8px]' : 'text-[11px] ml-1'} ${channel.caption ? 'font-medium text-gray-200' : 'text-gray-500'}`}
+            title={channel.caption || channel.file?.name || 'Подпись не задана'}
+          >
+            {channel.caption || channel.file?.name || ''}
+          </span>
         )}
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            if (captionEditing) finishCaptionEditing()
+            else {
+              setCaptionDraft(channel.caption)
+              setCaptionEditing(true)
+            }
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+          disabled={isTaking}
+          className={`shrink-0 rounded-sm text-gray-500 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-30 ${compact ? 'p-0.5' : 'p-1'}`}
+          title={channel.caption ? 'Изменить подпись канала' : 'Добавить подпись канала'}
+          aria-label={channel.caption ? `Изменить подпись канала ${label}` : `Добавить подпись канала ${label}`}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'}
+            aria-hidden="true"
+          >
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+          </svg>
+        </button>
         {channel.file && (
           <button
             onClick={(e) => { e.stopPropagation(); onClear() }}
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={isTaking}
-            className="shrink-0 text-gray-500 hover:text-white text-sm leading-none px-1 rounded-sm hover:bg-white/10 transition-colors disabled:opacity-30 disabled:hover:text-gray-500 disabled:hover:bg-transparent"
+            className={`shrink-0 text-gray-500 hover:text-white ${compact ? 'text-xs px-0.5' : 'text-sm px-1'} leading-none rounded-sm hover:bg-white/10 transition-colors disabled:opacity-30 disabled:hover:text-gray-500 disabled:hover:bg-transparent`}
             title="Убрать материал"
           >
             ✕
@@ -1545,21 +1830,38 @@ function ChannelPanel({
             onTotalSlides={onSetTotalSlides}
           />
         ) : (
-          <div className="text-gray-600 text-xs text-center select-none p-4">
-            <div className="text-2xl mb-2 opacity-30">📥</div>
+          <div className={`${compact ? 'text-[10px] p-1' : 'text-xs p-4'} text-gray-600 text-center select-none`}>
+            <div className={`${compact ? 'text-lg mb-0.5' : 'text-2xl mb-2'} opacity-30`}>📥</div>
             Перетащите материал сюда
           </div>
         )}
         {isTaking && openingMessage && (
           <div
-            className="absolute inset-0 z-10 pointer-events-none flex flex-col items-center justify-center gap-3 bg-black/75 px-4"
+            className={`absolute inset-0 z-10 pointer-events-none flex flex-col items-center justify-center ${compact ? 'gap-1 px-2' : 'gap-3 px-4'} bg-black/75`}
             role="status"
             aria-live="polite"
           >
-            <span className="h-6 w-6 rounded-full border-2 border-gray-500 border-t-white animate-spin" />
-            <span className="text-xs font-medium text-gray-100 text-center">
+            <span className={`${compact ? 'h-4 w-4' : 'h-6 w-6'} rounded-full border-2 border-gray-500 border-t-white animate-spin`} />
+            <span className={`${compact ? 'text-[9px]' : 'text-xs'} font-medium text-gray-100 text-center`}>
               {openingMessage}
             </span>
+          </div>
+        )}
+        {!isTaking && channel.file?.type === 'presentation' && pptxCacheStatus === 'loading' && (
+          <div
+            className={`absolute right-2 top-2 z-10 flex items-center rounded-sm bg-blue-700/90 text-white shadow ${compact ? 'gap-1 px-1 py-0.5 text-[8px]' : 'gap-1.5 px-2 py-1 text-[9px]'}`}
+            title="PDM заранее подготавливает превью и полноразмерные слайды"
+          >
+            <span className={`${compact ? 'h-2.5 w-2.5' : 'h-3 w-3'} rounded-full border border-blue-200 border-t-transparent animate-spin`} />
+            Кэширование…
+          </div>
+        )}
+        {!isTaking && channel.file?.type === 'presentation' && pptxCacheStatus === 'error' && (
+          <div
+            className={`absolute right-2 top-2 z-10 rounded-sm bg-red-800/90 text-white shadow ${compact ? 'px-1 py-0.5 text-[8px]' : 'px-2 py-1 text-[9px]'}`}
+            title="Не удалось заранее подготовить презентацию. При запуске PDM попробует открыть её обычным способом."
+          >
+            Кэш не готов
           </div>
         )}
       </div>
@@ -1567,13 +1869,13 @@ function ChannelPanel({
       {/* Navigation — only for non-live channel */}
       {!isLive && channel.file && (channel.file.type === 'pdf' || channel.file.type === 'presentation') && (
         <div
-          className="flex items-center justify-center gap-3 py-1.5 bg-surface-200 border-t border-gray-800 relative"
+          className={`flex items-center justify-center ${compact ? 'gap-1 py-0.5 px-1' : 'gap-3 py-1.5'} bg-surface-200 border-t border-gray-800 relative`}
           onDoubleClick={(e) => e.stopPropagation()}
         >
           <button
             onClick={(e) => { e.stopPropagation(); if (channel.slide > 1) onSlideChange(channel.slide - 1) }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="btn-icon text-[10px]"
+            className={`btn-icon text-[10px] ${compact ? 'p-1' : ''}`}
             disabled={isTaking || channel.slide <= 1}
           >
             ◀
@@ -1606,35 +1908,37 @@ function ChannelPanel({
                   ;(e.target as HTMLInputElement).blur()
                 }
               }}
-              className="w-12 text-[10px] text-center bg-surface-100 border border-gray-600 focus:border-accent rounded-sm px-1 py-0.5 text-white tabular-nums outline-hidden"
+              className={`${compact ? 'w-9 text-[9px]' : 'w-12 text-[10px]'} text-center bg-surface-100 border border-gray-600 focus:border-accent rounded-sm px-1 py-0.5 text-white tabular-nums outline-hidden`}
               title="Введите номер слайда и нажмите Enter"
             />
             {channel.totalSlides > 0 && (
-              <span className="text-[10px] text-gray-500 tabular-nums">/ {channel.totalSlides}</span>
+              <span className={`${compact ? 'text-[8px]' : 'text-[10px]'} text-gray-500 tabular-nums`}>/ {channel.totalSlides}</span>
             )}
           </div>
           <button
             onClick={(e) => { e.stopPropagation(); if (channel.totalSlides === 0 || channel.slide < channel.totalSlides) onSlideChange(channel.slide + 1) }}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="btn-icon text-[10px]"
+            className={`btn-icon text-[10px] ${compact ? 'p-1' : ''}`}
             disabled={isTaking || (channel.totalSlides > 0 && channel.slide >= channel.totalSlides)}
           >
             ▶
           </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); if (channel.slide > 1) onSlideChange(1) }}
-            onDoubleClick={(e) => e.stopPropagation()}
-            className="btn-icon text-[10px]"
-            disabled={isTaking || channel.slide <= 1}
-            title="К первому слайду"
-          >
-            ⏮
-          </button>
+          {!compact && (
+            <button
+              onClick={(e) => { e.stopPropagation(); if (channel.slide > 1) onSlideChange(1) }}
+              onDoubleClick={(e) => e.stopPropagation()}
+              className="btn-icon text-[10px]"
+              disabled={isTaking || channel.slide <= 1}
+              title="К первому слайду"
+            >
+              ⏮
+            </button>
+          )}
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={isTaking}
-            className="absolute right-2 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600"
+            className={`absolute ${compact ? 'right-1 text-[8px] px-1.5 py-0.5' : 'right-2 text-[9px] px-2 py-1'} bg-red-600 hover:bg-red-500 text-white font-bold rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600`}
           >
             В эфир
           </button>
@@ -1643,14 +1947,35 @@ function ChannelPanel({
       {/* Take button for video/capture/other in non-live channel */}
       {!isLive && channel.file && (channel.file.type === 'video' || channel.file.type === 'capture' || channel.file.type === 'other') && (
         <div
-          className="flex items-center justify-end py-1.5 px-2 bg-surface-200 border-t border-gray-800"
+          className={`flex items-center ${channel.file.type === 'video' ? 'justify-between gap-1' : 'justify-end'} ${compact ? 'py-0.5 px-1' : 'py-1.5 px-2'} bg-surface-200 border-t border-gray-800`}
           onDoubleClick={(e) => e.stopPropagation()}
         >
+          {channel.file.type === 'video' && (
+            <label
+              className={`flex min-w-0 items-center ${compact ? 'gap-0.5' : 'gap-1.5'} text-gray-500`}
+              title="Канал, который автоматически выйдет в эфир после окончания ролика"
+              onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+            >
+              {!compact && <span className="shrink-0 text-[9px]">После:</span>}
+              <select
+                value={channel.videoEndChannel || ''}
+                disabled={isTaking}
+                onChange={(event) => onVideoEndChannelChange(event.target.value || null)}
+                className={`${compact ? 'max-w-[76px] px-0.5 py-0 text-[8px]' : 'max-w-[145px] px-1.5 py-0.5 text-[9px]'} min-w-0 rounded-sm border border-gray-700 bg-surface-100 text-gray-300 outline-hidden hover:border-gray-600 focus:border-accent disabled:opacity-40`}
+              >
+                <option value="">Не переключать</option>
+                {videoEndChannelOptions.map((targetId) => (
+                  <option key={targetId} value={targetId}>Канал {targetId}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={isTaking}
-            className="bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold px-2 py-1 rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600"
+            className={`bg-red-600 hover:bg-red-500 text-white ${compact ? 'text-[8px] px-1.5 py-0.5' : 'text-[9px] px-2 py-1'} font-bold rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600`}
           >
             В эфир
           </button>

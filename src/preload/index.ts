@@ -2,6 +2,15 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
+  saveAppConfig: (content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }> =>
+    ipcRenderer.invoke('save-app-config', content),
+
+  loadAppConfig: (): Promise<{ success: boolean; canceled: boolean; path?: string; content?: string; error?: string }> =>
+    ipcRenderer.invoke('load-app-config'),
+
+  validateConfigPaths: (paths: string[]): Promise<Array<{ path: string; exists: boolean; isDirectory: boolean }>> =>
+    ipcRenderer.invoke('validate-config-paths', paths),
+
   selectFolder: (): Promise<string | null> => ipcRenderer.invoke('select-folder'),
 
   loadFolder: (folderPath: string) => ipcRenderer.invoke('load-folder', folderPath),
@@ -29,15 +38,21 @@ const api = {
   openPresentationWindow: (displayId?: number, behindPowerPoint?: boolean) =>
     ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
 
-  openAuxiliaryWindow: (role: 'speaker' | 'info', displayId: number) =>
+  placePresentationWindow: (displayId?: number): Promise<boolean> =>
+    ipcRenderer.invoke('place-presentation-window', displayId),
+
+  openAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop', displayId: number) =>
     ipcRenderer.invoke('open-auxiliary-window', role, displayId),
 
-  closeAuxiliaryWindow: (role: 'speaker' | 'info') =>
-    ipcRenderer.invoke('close-auxiliary-window', role),
+  closeAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop', displayId?: number) =>
+    ipcRenderer.invoke('close-auxiliary-window', role, displayId),
 
-  sendToAuxiliary: (role: 'speaker' | 'info', channel: string, ...args: unknown[]): void => {
+  sendToAuxiliary: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop', channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-auxiliary', role, channel, ...args)
   },
+
+  getScreenCaptureSource: (displayId: number): Promise<string | null> =>
+    ipcRenderer.invoke('get-screen-capture-source', displayId),
 
   closePresentationWindow: () => ipcRenderer.invoke('close-presentation-window'),
 
@@ -48,6 +63,9 @@ const api = {
 
   powerpointCommand: (command: string, arg?: number | { stopAtBoundary?: boolean }) =>
     ipcRenderer.invoke('powerpoint-command', command, arg),
+
+  relocatePowerPoint: (displayId: number) =>
+    ipcRenderer.invoke('relocate-powerpoint', displayId),
 
   generatePptxThumbnails: (filePath: string) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath),

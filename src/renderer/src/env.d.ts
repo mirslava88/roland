@@ -25,6 +25,7 @@ interface CaptureSourceConfig {
   desktopAppIcon?: string
   audioEnabled: boolean
   audioDeviceId?: string
+  audioGroupId?: string
   audioLabel?: string
 }
 
@@ -76,7 +77,16 @@ interface DisplayInfo {
   scaleFactor: number
 }
 
-type AuxiliaryDisplayRole = 'speaker' | 'info'
+type AuxiliaryDisplayRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop'
+
+interface ProgramDirectContent {
+  type: 'pdf' | 'video' | 'image' | 'backdrop'
+  path: string
+  currentSlide?: number
+  currentTime?: number
+  playing?: boolean
+  loop?: boolean
+}
 
 interface SpeakerDisplayState {
   active: boolean
@@ -91,7 +101,7 @@ interface SpeakerDisplayState {
   backdropImage?: string | null
 }
 
-type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image'
+type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 'capture'
 
 interface InformationDisplayState {
   media: {
@@ -102,6 +112,11 @@ interface InformationDisplayState {
     totalSlides: number
     slideImages: string[]
     playing: boolean
+    currentTime?: number
+    duration?: number
+    seekRevision?: number
+    loop?: boolean
+    capture?: CaptureSourceConfig
   } | null
   displayTimer: boolean
   backdropImage?: string | null
@@ -139,6 +154,9 @@ interface DriveInfo {
 }
 
 interface Api {
+  saveAppConfig(content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }>
+  loadAppConfig(): Promise<{ success: boolean; canceled: boolean; path?: string; content?: string; error?: string }>
+  validateConfigPaths(paths: string[]): Promise<Array<{ path: string; exists: boolean; isDirectory: boolean }>>
   selectFolder(): Promise<string | null>
   loadFolder(folderPath: string): Promise<{ files: FileEntry[]; subfolders: { name: string; path: string }[] }>
   watchFolder(folderPath: string | null): Promise<void>
@@ -156,9 +174,11 @@ interface Api {
   }>>
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
+  placePresentationWindow(displayId?: number): Promise<boolean>
   openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>
-  closeAuxiliaryWindow(role: AuxiliaryDisplayRole): Promise<void>
+  closeAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId?: number): Promise<void>
   sendToAuxiliary(role: AuxiliaryDisplayRole, channel: string, ...args: unknown[]): void
+  getScreenCaptureSource(displayId: number): Promise<string | null>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
   launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
@@ -166,6 +186,7 @@ interface Api {
     command: string,
     arg?: number | { stopAtBoundary?: boolean }
   ): Promise<{ success: boolean; output?: string; error?: string }>
+  relocatePowerPoint(displayId: number): Promise<{ success: boolean; error?: string }>
   generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   getPptxSlideNotes(filePath: string, slide: number): Promise<{ success: boolean; notes?: string; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>

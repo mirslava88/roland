@@ -136,6 +136,10 @@ export function VideoPlayer(): JSX.Element {
   useEffect(() => {
     const unsub = window.api.on('video-ended', () => {
       const st = useAppStore.getState()
+      // A video assigned to a channel has its own explicit end target. The
+      // channel grid owns that transition; the independent playlist must not
+      // start another video at the same time.
+      if (st.liveChannel) return
       // Только если текущее активное видео — из нашего плейлиста
       if (!st.activeFile || st.activeFile.type !== 'video') return
       const idx = st.videoCurrentIndex

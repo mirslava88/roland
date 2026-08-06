@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
+import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
+import { loadAppConfigFromFile, saveCurrentAppConfig } from '../../app-config'
 
 interface AudioDevice {
   id: string
@@ -37,22 +38,56 @@ interface SettingsModalProps {
 export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   const {
     displays: connectedDisplays,
+    displayAssignments,
+    displayNames,
     selectedDisplayId,
-    speakerDisplayId,
-    informationDisplayId,
-    setSelectedDisplayId,
-    setSpeakerDisplayId,
-    setInformationDisplayId,
-    setSpeakerDisplayEnabled,
-    setInformationDisplayEnabled
+    setDisplayAssignment,
+    setDisplayName
   } = useAppStore()
-  const [tab, setTab] = useState<'audio' | 'display' | 'diagnostics' | 'help'>('audio')
+  const [tab, setTab] = useState<'audio' | 'display' | 'config' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
   const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
   const [displaysLoading, setDisplaysLoading] = useState(false)
   const [applyingMode, setApplyingMode] = useState<DisplayMultiMode | null>(null)
   const [diagnosticStatus, setDiagnosticStatus] = useState('')
+  const [configBusy, setConfigBusy] = useState(false)
+  const [configStatus, setConfigStatus] = useState('')
+  const [configWarnings, setConfigWarnings] = useState<string[]>([])
+
+  const saveConfig = async (): Promise<void> => {
+    setConfigBusy(true)
+    setConfigStatus('Подготавливаю конфигурацию…')
+    setConfigWarnings([])
+    try {
+      const result = await saveCurrentAppConfig()
+      if (result.canceled) setConfigStatus('Сохранение отменено.')
+      else if (result.error) setConfigStatus(`Не удалось сохранить: ${result.error}`)
+      else setConfigStatus(`Конфигурация сохранена: ${result.path || ''}`)
+      setConfigWarnings(result.warnings)
+    } catch (error) {
+      setConfigStatus(`Не удалось сохранить: ${String(error)}`)
+    } finally {
+      setConfigBusy(false)
+    }
+  }
+
+  const loadConfig = async (): Promise<void> => {
+    setConfigBusy(true)
+    setConfigStatus('Проверяю и загружаю конфигурацию…')
+    setConfigWarnings([])
+    try {
+      const result = await loadAppConfigFromFile()
+      if (result.canceled) setConfigStatus('Загрузка отменена.')
+      else if (result.error) setConfigStatus(`Не удалось загрузить: ${result.error}`)
+      else setConfigStatus(`Конфигурация загружена: ${result.path || ''}`)
+      setConfigWarnings(result.warnings)
+    } catch (error) {
+      setConfigStatus(`Не удалось загрузить: ${String(error)}`)
+    } finally {
+      setConfigBusy(false)
+    }
+  }
 
   const openDiagnosticLogs = async (): Promise<void> => {
     setDiagnosticStatus('Открываю папку...')
@@ -119,52 +154,10 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     await loadDevices()
   }
 
-  const assignDisplay = (role: 1 | 2 | 3, value: string): void => {
-    const id = value === '' ? null : Number(value)
-    if (role === 1) {
-      setSelectedDisplayId(id)
-      if (id !== null && speakerDisplayId === id) {
-        setSpeakerDisplayEnabled(false)
-        setSpeakerDisplayId(null)
-      }
-      if (id !== null && informationDisplayId === id) {
-        setInformationDisplayEnabled(false)
-        setInformationDisplayId(null)
-      }
-      return
-    }
-    if (role === 2) {
-      setSpeakerDisplayId(id)
-      if (id === null) setSpeakerDisplayEnabled(false)
-      if (id !== null && selectedDisplayId === id) setSelectedDisplayId(null)
-      if (id !== null && informationDisplayId === id) {
-        setInformationDisplayEnabled(false)
-        setInformationDisplayId(null)
-      }
-      return
-    }
-    setInformationDisplayId(id)
-    if (id === null) setInformationDisplayEnabled(false)
-    if (id !== null && selectedDisplayId === id) setSelectedDisplayId(null)
-    if (id !== null && speakerDisplayId === id) {
-      setSpeakerDisplayEnabled(false)
-      setSpeakerDisplayId(null)
-    }
-  }
-
-  // Close on Escape
-  useEffect(() => {
-    const handler = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div
-        className="bg-surface-200 border border-gray-700 rounded-xl shadow-2xl w-[600px] max-h-[80vh] flex flex-col"
+        className="bg-surface-200 border border-gray-700 rounded-xl shadow-2xl w-[680px] max-w-[90vw] max-h-[80vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -185,6 +178,14 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               }`}
             >
               Дисплеи
+            </button>
+            <button
+              onClick={() => setTab('config')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                tab === 'config' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
+              }`}
+            >
+              Конфиг
             </button>
             <button
               onClick={() => setTab('diagnostics')}
@@ -254,7 +255,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h3 className="text-sm font-semibold text-gray-200 mb-2">Назначение дисплеев PDM</h3>
                 <p className="text-[10px] text-gray-500 mb-3">
-                  Нумерация PDM не зависит от номеров экранов Windows. Один физический монитор можно назначить только одной роли.
+                  Каждый дополнительный монитор настраивается независимо. Один режим можно повторять на нескольких экранах.
                 </p>
                 <div className="space-y-2">
                   <div className="rounded-lg border border-gray-700 bg-surface-100 p-3 flex items-center justify-between gap-4">
@@ -265,35 +266,39 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                     <span className="text-[10px] text-emerald-400">Назначается автоматически</span>
                   </div>
 
-                  {([
-                    { role: 1 as const, title: 'Дисплей 1 — Презентация', value: selectedDisplayId },
-                    { role: 2 as const, title: 'Дисплей 2 — Суфлёр', value: speakerDisplayId },
-                    { role: 3 as const, title: 'Дисплей 3 — Информационный экран', value: informationDisplayId }
-                  ]).map((item) => (
-                    <label key={item.role} className="rounded-lg border border-gray-700 bg-surface-100 p-3 block">
-                      <span className="text-xs font-medium text-white block mb-2">{item.title}</span>
+                  {connectedDisplays.filter((display) => !display.isPrimary).map((display, index) => {
+                    const mode = displayAssignments[String(display.id)] || 'off'
+                    const customName = displayNames[String(display.id)] || ''
+                    return (
+                    <label key={display.id} className="rounded-lg border border-gray-700 bg-surface-100 p-3 block">
+                      <input
+                        type="text"
+                        value={customName}
+                        maxLength={80}
+                        placeholder="Добавить имя экрана"
+                        aria-label={`Имя монитора ${index + 1}`}
+                        onChange={(event) => setDisplayName(display.id, event.target.value)}
+                        className="mb-1.5 w-full rounded-sm border border-gray-700 bg-surface-200 px-2 py-1.5 text-xs font-medium text-white outline-hidden placeholder:text-gray-600 hover:border-gray-600 focus:border-accent"
+                      />
+                      <span className="text-[10px] text-gray-400 block">Монитор {index + 1} · {display.label}</span>
+                      <span className="text-[10px] text-gray-500 block mb-2">
+                        {display.bounds.width}×{display.bounds.height}
+                        {mode === 'program' && display.id === selectedDisplayId ? ' · главный эфир' : ''}
+                        {mode === 'program' && display.id !== selectedDisplayId ? ' · копия эфира' : ''}
+                      </span>
                       <select
                         className="w-full bg-surface-200 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-200 outline-hidden hover:border-gray-600 focus:border-accent"
-                        value={item.value ?? ''}
-                        onChange={(event) => assignDisplay(item.role, event.target.value)}
+                        value={mode}
+                        onChange={(event) => setDisplayAssignment(display.id, event.target.value as DisplayOutputMode)}
                       >
-                        <option value="">Не назначен</option>
-                        {connectedDisplays.filter((display) => !display.isPrimary).map((display) => (
-                          <option
-                            key={display.id}
-                            value={display.id}
-                            disabled={
-                              (item.role !== 1 && selectedDisplayId === display.id) ||
-                              (item.role !== 2 && speakerDisplayId === display.id) ||
-                              (item.role !== 3 && informationDisplayId === display.id)
-                            }
-                          >
-                            {display.label} · {display.bounds.width}×{display.bounds.height} · x={display.bounds.x}, y={display.bounds.y}
-                          </option>
-                        ))}
+                        <option value="off">Выключен</option>
+                        <option value="program">Основной эфир</option>
+                        <option value="speaker">Суфлёр</option>
+                        <option value="information">Информационный экран</option>
+                        <option value="timer">Таймер</option>
                       </select>
                     </label>
-                  ))}
+                  )})}
                 </div>
               </section>
 
@@ -379,6 +384,64 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
             </div>
           )}
 
+          {tab === 'config' && (
+            <div className="space-y-4 text-xs text-gray-300 leading-relaxed">
+              <section className="rounded-md border border-accent/40 bg-surface-300 p-4">
+                <h3 className="text-sm font-semibold text-white mb-2">Конфигурация PDM</h3>
+                <p className="text-gray-400 mb-4">
+                  Сохраните всю подготовку мероприятия в один файл: материалы в каналах, номера слайдов,
+                  раскладку каналов, назначения дисплеев, подложку, информационный экран, плейлисты,
+                  таймер, кликер и аудиовыход.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={saveConfig}
+                    disabled={configBusy}
+                    className="rounded bg-accent px-4 py-2.5 text-xs font-medium text-white hover:bg-accent/80 transition-colors disabled:cursor-wait disabled:opacity-50"
+                  >
+                    💾 Сохранить конфиг
+                  </button>
+                  <button
+                    onClick={loadConfig}
+                    disabled={configBusy}
+                    className="rounded border border-gray-600 bg-surface-100 px-4 py-2.5 text-xs font-medium text-white hover:border-accent hover:bg-surface-100/70 transition-colors disabled:cursor-wait disabled:opacity-50"
+                  >
+                    📂 Загрузить конфиг
+                  </button>
+                </div>
+                {configStatus && (
+                  <p className="mt-3 break-all text-[10px] text-gray-300">{configStatus}</p>
+                )}
+              </section>
+
+              <section className="rounded-md border border-gray-700 bg-surface-100 p-4 text-[11px] text-gray-400">
+                <h4 className="text-xs font-semibold text-gray-200 mb-2">Безопасное восстановление</h4>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li>Перед загрузкой нужно выйти из эфира. После загрузки ничего не запускается автоматически.</li>
+                  <li>Если файл удалён или переименован, PDM не угадывает замену: канал останется пустым, а путь появится в предупреждениях.</li>
+                  <li>USB-камеры и платы захвата сохраняются. Окна программ и захват экрана нужно выбрать заново.</li>
+                  <li>Назначение монитора применяется только при безопасном совпадении подключённого дисплея.</li>
+                </ul>
+              </section>
+
+              {configWarnings.length > 0 && (
+                <section className="rounded-md border border-yellow-700/60 bg-yellow-950/20 p-4">
+                  <h4 className="text-xs font-semibold text-yellow-300 mb-2">
+                    Загружено с предупреждениями: {configWarnings.length}
+                  </h4>
+                  <ul className="list-disc pl-4 space-y-1 text-[10px] text-yellow-100/80 break-all">
+                    {configWarnings.slice(0, 20).map((warning, index) => (
+                      <li key={`${index}-${warning}`}>{warning}</li>
+                    ))}
+                  </ul>
+                  {configWarnings.length > 20 && (
+                    <p className="mt-2 text-[10px] text-yellow-300">И ещё {configWarnings.length - 20}…</p>
+                  )}
+                </section>
+              )}
+            </div>
+          )}
+
           {tab === 'diagnostics' && (
             <div className="space-y-4 text-xs text-gray-300 leading-relaxed">
               <section className="rounded-md border border-accent/40 bg-surface-300 p-4">
@@ -425,6 +488,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">1. Выбор материалов (левая панель)</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Выберите диск или папку с файлами</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">123...-&gt;</code> автоматически раскладывает по каналам пронумерованные материалы из открытой папки: <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">3.pdf</code>, <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">03-Ролик.mp4</code>, <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">4. Презентация.pptx</code> и похожие имена. Файлы без номера в начале не перемещаются</li>
                   <li>Для камеры или платы захвата нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Внешний источник</code>, выберите устройство и добавьте его</li>
                   <li>Для показа браузера или другой открытой программы нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">＋ Окно / экран</code>. Не сворачивайте выбранное окно во время эфира</li>
                   <li>Фильтры вверху: Все, PPTX, PDF, Видео, Разное</li>
@@ -435,14 +499,18 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы (1 / 2 / 3 / 4 и более)</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">2. Каналы</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Каналы в сетке 2×2, сгруппированы по страницам — можно заранее подготовить много материалов</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> в центре — добавить новую страницу из 4 каналов (1/2/3/4, 5/6/7/8, …)</li>
+                  <li>Квадратная кнопка переключает сетку между 4 каналами (2×2) и 9 каналами (3×3). Значок показывает следующую раскладку: в режиме 2×2 видны 9 точек, а в режиме 3×3 — 4 квадрата</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> справа сверху добавляет новую страницу из 4 или 9 каналов — в зависимости от выбранной раскладки</li>
                   <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
                   <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> справа от пагинации</li>
                   <li>Перетащите файл или внешний источник в любой канал и выберите этот канал. Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> станет доступна только для выбранного канала с контентом</li>
+                  <li>Карандаш справа в заголовке канала добавляет понятную подпись. Нажмите Enter или щёлкните вне поля для сохранения, Escape — для отмены</li>
                   <li>Для запуска нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или дважды щёлкните по каналу</li>
+                  <li>PPTX начинает готовить превью и полноразмерные слайды сразу после добавления в канал. Пока идёт подготовка, на карточке виден статус <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Кэширование…</code>; материал можно продолжать настраивать</li>
+                  <li>В карточке видеоканала слева от кнопки «В эфир» находится список «После». Выберите другой непустой канал для автоматического перехода либо «Не переключать»</li>
+                  <li>В панели управления видео доступны воспроизведение, пауза, остановка, переход по таймлайну и зацикливание ролика либо всего видеоплейлиста. Ролик после выхода в эфир запускается только вручную</li>
                   <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью убирает контент с внешнего дисплея (включая PDF, видео, Word/Excel)</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
                   <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
@@ -456,7 +524,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖼 Подложка (Фон)</code> выбирает и включает фон; повторное нажатие той же кнопки отключает его</li>
                   <li>Подложка применяется ко всем включённым дополнительным дисплеям. На суфлёре она показывается только когда в эфире нет PPTX/PDF, например во время видео</li>
-                  <li>Подложка действует только до закрытия программы; новая сессия всегда начинается без фона</li>
+                  <li>Обычно подложка действует до закрытия программы; перенести её в следующую сессию можно через вкладку «Конфиг»</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⏹ Выйти из эфира</code> — убирает любой активный материал, включая видеовход, и показывает подложку. Если подложка не настроена — внешний экран освобождается</li>
                 </ul>
               </section>
@@ -467,8 +535,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>Обратный отсчёт с настраиваемой длительностью (часы/минуты)</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Установить</code> применяет введённое время. Нажатие <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">▶</code> без «Установить» стартует со значения из полей</li>
                   <li>Быстрые кнопки: +1/+5/+10 мин, -1/-5/-10 мин и произвольное значение</li>
-                  <li>В блоке «Где показывать таймер» выберите только один выход: поверх основного эфира на Дисплее 1 или на весь информационный Дисплей 3</li>
-                  <li>На Дисплее 1 таймер можно <b>перетаскивать</b> мышью и <b>масштабировать</b> колёсиком. На Дисплее 3 он временно заменяет выбранный мультимедийный файл</li>
+                  <li>Дисплей для таймера назначается кнопкой «Экраны»: выберите для нужного монитора режим «Таймер». Если такой дисплей не назначен, таймер автоматически показывается поверх основного эфира</li>
                   <li>Цвета: зелёный — идёт отсчёт; жёлтый — меньше минуты; красный — overtime (минусовое время)</li>
                   <li>Два звука оповещения: <b>«Звук (1 мин)»</b> срабатывает при достижении 60 секунд, <b>«Звук (конец)»</b> — при достижении 0</li>
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🔊</code> — принудительный запуск звука таймера</li>
@@ -496,11 +563,13 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">7. Настройки — вкладка «Дисплеи»</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li><b>Дисплей 0</b> — основной экран ноутбука с интерфейсом PDM; назначается автоматически</li>
-                  <li><b>Дисплей 1</b> — основной эфир для зрителей: презентации, PDF, видео, изображения и внешние источники</li>
-                  <li><b>Дисплей 2</b> — суфлёр докладчика: текущий и следующий слайды PPTX/PDF, номер слайда и заметки PowerPoint</li>
-                  <li><b>Дисплей 3</b> — независимый информационный экран для PPTX, PDF, видео, изображений или таймера</li>
-                  <li>Нумерация PDM не зависит от номеров Windows. Выберите физический монитор для каждой роли в блоке «Назначение дисплеев PDM»</li>
+                  <li>Основной экран ноутбука с интерфейсом PDM назначается автоматически и не используется как дополнительный выход</li>
+                  <li>Для каждого внешнего монитора выберите режим: «Основной эфир», «Суфлёр», «Информационный экран», «Таймер» или «Выключен»</li>
+                  <li>В поле «Добавить имя экрана» подпишите физические мониторы понятными именами; подписи сохраняются между запусками и вместе с конфигурацией</li>
+                  <li>В режиме «Выключен» на монитор выводится выбранная подложка; если подложка не выбрана, экран остаётся чёрным</li>
+                  <li>Одинаковый режим можно назначить нескольким мониторам. Второй «Основной эфир» становится живой беззвучной копией главного выхода</li>
+                  <li>Главный эфирный дисплей выделен жёлтой рамкой. Кнопка «Сделать главным» переносит основной выход на другую копию эфира, в том числе прямо во время показа</li>
+                  <li>Быстрый выбор доступен по кнопке «🖥 Экраны»; в настройках остаются те же назначения и параметры Windows</li>
                   <li>Прямо из приложения: режим (Расширить / Дублировать / Только основной / Только внешний)</li>
                   <li>Для каждого подключённого дисплея — выбор разрешения и частоты из выпадающего списка</li>
                   <li>При подключении нового монитора автоматически включается режим «Расширить»</li>
@@ -509,15 +578,16 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">8. Суфлёр и информационный экран</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">8. Универсальные экраны</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖥 Экраны</code> на верхней панели, чтобы включить или скрыть Дисплей 2 и Дисплей 3</li>
-                  <li>Суфлёр автоматически следует за PPTX/PDF, который сейчас находится в эфире. Для другого контента он переходит в режим ожидания</li>
-                  <li>Инфоэкран работает независимо от эфира: нажмите «Выбрать файл» и загрузите отдельный PPTX, PDF, видеоролик или изображение</li>
-                  <li>PPTX/PDF на Дисплее 3 листаются отдельными стрелками в окне «Экраны», а видео запускается вручную кнопкой «Воспроизвести»</li>
-                  <li>Кнопка «Убрать файл с информационного экрана» возвращает общую подложку или чёрный фон</li>
-                  <li>В настройках таймера выберите одно место вывода: поверх основного эфира на Дисплее 1 либо только на информационном Дисплее 3</li>
-                  <li>Если назначенный монитор отключён, PDM не перенесёт служебное изображение на экран оператора или зрителей</li>
+                  <li>Нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🖥 Экраны</code> и выберите режим отдельно для каждого подключённого монитора</li>
+                  <li>Несколько суфлёров синхронно следуют за PPTX/PDF, который сейчас находится в эфире. Для другого контента они переходят в режим ожидания</li>
+                  <li>Несколько инфоэкранов синхронно показывают выбранный независимый PPTX, PDF, видеоролик, изображение, внешний видеовход либо окно/экран компьютера</li>
+                  <li>PPTX/PDF на инфоэкранах листаются отдельными стрелками в окне «Экраны». Для видео доступны «Воспроизвести / Пауза», «Стоп», полоса перехода с текущим временем и длительностью, а также кнопка зацикливания</li>
+                  <li>Кнопка «Внешний источник» подключает плату видеозахвата или USB-камеру, а «Окно / экран» показывает выбранную программу или целый дисплей; звук этих источников не передаётся</li>
+                  <li>Несколько экранов режима «Основной эфир» показывают одну презентацию; главный выход управляет PowerPoint, остальные получают его живую копию</li>
+                  <li>Кнопка «Отключить контент на информационном экране» возвращает общую подложку или чёрный фон</li>
+                  <li>Если назначенный монитор отключён, PDM закрывает только его окно и не переносит изображение на другой экран</li>
                 </ul>
               </section>
 
@@ -530,7 +600,18 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">10. Горячие клавиши</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">10. Сохранение конфигурации</h4>
+                <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li>Откройте «Настройки → Конфиг», чтобы сохранить всю подготовку мероприятия в один файл</li>
+                  <li>Сохраняются материалы и подписи каналов, переходы после видео, позиции слайдов и видео, раскладка, дисплеи и их имена, подложка, информационный экран и зацикливание его видео, плейлисты, таймер, кликер и аудиовыход</li>
+                  <li>Перед загрузкой выйдите из эфира. После загрузки ничего не запускается автоматически</li>
+                  <li>Удалённый или переименованный файл пропускается, его канал остаётся пустым, а PDM показывает предупреждение</li>
+                  <li>USB-камеры и платы сохраняются; окна программ и захват экрана после загрузки выбираются заново</li>
+                </ul>
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">11. Горячие клавиши</h4>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-gray-400 mt-2">
                   <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+C</code> — Копировать</span>
                   <span><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Ctrl+X</code> — Вырезать</span>

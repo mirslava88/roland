@@ -74,7 +74,9 @@ export function CaptureThumbnail({
     config.desktopSourceType,
     config.desktopDisplayId,
     config.audioEnabled,
-    config.audioDeviceId
+    config.audioDeviceId,
+    config.audioGroupId,
+    config.audioLabel
   ])
 
   const ready = state.status === 'ready'

@@ -28,6 +28,12 @@ using System.Windows.Threading;
 public class TimerOverlay
 {
     [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
@@ -42,6 +48,16 @@ public class TimerOverlay
     private string dataFile;
     private string lastContent = "";
     private double scale = 1.0;
+    private int lastPositionRevision = -1;
+
+    public static void EnablePerMonitorDpiAwareness()
+    {
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4. The process call
+        // can already be locked by WPF assembly initialization; the thread
+        // call still guarantees physical-pixel SetWindowPos coordinates.
+        try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch {}
+        try { SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch {}
+    }
 
     public void Run(int x, int y, string file)
     {
@@ -115,6 +131,19 @@ public class TimerOverlay
         window.SourceInitialized += (s, e) =>
         {
             windowHwnd = new WindowInteropHelper(window).Handle;
+            try
+            {
+                SetWindowPos(
+                    windowHwnd,
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOACTIVATE
+                );
+            }
+            catch {}
         };
 
         var timer = new DispatcherTimer();
@@ -161,6 +190,33 @@ public class TimerOverlay
             {
                 window.Close();
                 return;
+            }
+
+            // The main program display can be reassigned while the timer is
+            // running. Move the existing WPF window in place so the countdown
+            // and its visual state continue without a restart or a blink.
+            int positionRevision = GetJsonInt(line, "windowPositionRevision");
+            if (windowHwnd != IntPtr.Zero &&
+                line.Contains("\"windowX\"") &&
+                line.Contains("\"windowY\"") &&
+                positionRevision != lastPositionRevision)
+            {
+                int targetX = GetJsonInt(line, "windowX");
+                int targetY = GetJsonInt(line, "windowY");
+                lastPositionRevision = positionRevision;
+                try
+                {
+                    SetWindowPos(
+                        windowHwnd,
+                        HWND_TOPMOST,
+                        targetX,
+                        targetY,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE
+                    );
+                }
+                catch {}
             }
 
             int remaining = GetJsonInt(line, "remaining");
@@ -289,5 +345,6 @@ public class TimerOverlay
 
 Add-Type -TypeDefinition $code -ReferencedAssemblies PresentationFramework, PresentationCore, WindowsBase, System, System.Xaml
 
+[TimerOverlay]::EnablePerMonitorDpiAwareness()
 $overlay = New-Object TimerOverlay
 $overlay.Run($X, $Y, $DataFile)

@@ -293,6 +293,89 @@ export function registerIpcHandlers(
   controlWindow: BrowserWindow,
   getPresentationWindow: () => BrowserWindow | null
 ): void {
+  ipcMain.handle('save-app-config', async (event, content: string) => {
+    if (event.sender.id !== controlWindow.webContents.id) {
+      return { success: false, canceled: false, error: 'Сохранение конфигурации запрещено.' }
+    }
+    if (typeof content !== 'string' || content.length < 2 || content.length > 5 * 1024 * 1024) {
+      return { success: false, canceled: false, error: 'Некорректный или слишком большой файл конфигурации.' }
+    }
+    try {
+      JSON.parse(content)
+    } catch {
+      return { success: false, canceled: false, error: 'Конфигурация содержит некорректный JSON.' }
+    }
+
+    const date = new Date().toISOString().slice(0, 10)
+    const result = await dialog.showSaveDialog(controlWindow, {
+      title: 'Сохранить конфигурацию PDM',
+      defaultPath: join(app.getPath('documents'), `PDM-config-${date}.pdmconfig`),
+      filters: [
+        { name: 'Конфигурация PDM', extensions: ['pdmconfig'] },
+        { name: 'JSON', extensions: ['json'] }
+      ]
+    })
+    if (result.canceled || !result.filePath) {
+      return { success: false, canceled: true }
+    }
+    const filePath = /\.(?:pdmconfig|json)$/i.test(result.filePath)
+      ? result.filePath
+      : `${result.filePath}.pdmconfig`
+    try {
+      await writeFile(filePath, content, 'utf8')
+      diagnosticLog('config', `saved path=${filePath} bytes=${Buffer.byteLength(content, 'utf8')}`)
+      return { success: true, canceled: false, path: filePath }
+    } catch (error) {
+      diagnosticLog('config', `save failed path=${filePath} ${formatDiagnosticError(error)}`)
+      return { success: false, canceled: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('load-app-config', async (event) => {
+    if (event.sender.id !== controlWindow.webContents.id) {
+      return { success: false, canceled: false, error: 'Загрузка конфигурации запрещена.' }
+    }
+    const result = await dialog.showOpenDialog(controlWindow, {
+      title: 'Загрузить конфигурацию PDM',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Конфигурация PDM', extensions: ['pdmconfig', 'json'] }
+      ]
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, canceled: true }
+    }
+    const filePath = result.filePaths[0]
+    try {
+      const info = await stat(filePath)
+      if (!info.isFile() || info.size > 5 * 1024 * 1024) {
+        return { success: false, canceled: false, error: 'Файл конфигурации слишком большой или недоступен.' }
+      }
+      const content = await readFile(filePath, 'utf8')
+      JSON.parse(content)
+      diagnosticLog('config', `loaded path=${filePath} bytes=${info.size}`)
+      return { success: true, canceled: false, path: filePath, content }
+    } catch (error) {
+      diagnosticLog('config', `load failed path=${filePath} ${formatDiagnosticError(error)}`)
+      return { success: false, canceled: false, error: 'Не удалось прочитать конфигурацию: ' + String(error) }
+    }
+  })
+
+  ipcMain.handle('validate-config-paths', async (event, paths: unknown) => {
+    if (event.sender.id !== controlWindow.webContents.id || !Array.isArray(paths)) return []
+    const uniquePaths = [...new Set(paths
+      .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 32768)
+      .slice(0, 2000))]
+    return await Promise.all(uniquePaths.map(async (filePath) => {
+      try {
+        const info = await stat(filePath)
+        return { path: filePath, exists: true, isDirectory: info.isDirectory() }
+      } catch {
+        return { path: filePath, exists: false, isDirectory: false }
+      }
+    }))
+  })
+
   ipcMain.handle('open-diagnostic-log-folder', async () => {
     const path = getDiagnosticLogDirectory()
     diagnosticLog('diagnostics', `open log folder path=${path}`)
@@ -669,6 +752,27 @@ export function registerIpcHandlers(
       })
     }
     return { success: false, error: 'Unsupported platform' }
+  })
+
+  ipcMain.handle('relocate-powerpoint', async (_event, displayId: number) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    try {
+      const displays = screen.getAllDisplays()
+      const primaryDisplay = screen.getPrimaryDisplay()
+      const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
+      const targetDisplay = displays.find((display) => display.id === displayId) || externalDisplay
+      if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
+      const bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+      const result = await pptDaemon.send('relocate', { bounds }, 5000)
+      diagnosticLog(
+        'window',
+        `PowerPoint output relocate display=${targetDisplay.id} bounds=${JSON.stringify(bounds)} ok=${result.ok}`
+      )
+      return { success: result.ok, error: result.error }
+    } catch (error) {
+      diagnosticLog('window', `PowerPoint output relocate failed: ${formatDiagnosticError(error)}`)
+      return { success: false, error: String(error) }
+    }
   })
 
   ipcMain.handle('get-pptx-slide-notes', async (_event, filePath: string, slide: number) => {

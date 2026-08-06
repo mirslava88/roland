@@ -317,7 +317,7 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
     })
     // Сигнал для плейлиста в control — переключает на след. ролик.
     // Не вызывается когда video.loop=true (браузер не шлёт 'ended' при loop).
-    window.api.sendToControl('video-ended')
+    window.api.sendToControl('video-ended', { path: filePath })
   }
 
   return (

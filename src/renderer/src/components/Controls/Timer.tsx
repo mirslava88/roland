@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
 
@@ -46,7 +46,9 @@ export function Timer(): JSX.Element {
     timerWarningTextColor,
     timerOvertimeTextColor,
     timerTextOpacity,
-    timerDisplayTarget,
+    displays,
+    displayAssignments,
+    selectedDisplayId,
     setTimerDuration,
     setTimerRemaining,
     setTimerRunning,
@@ -57,9 +59,7 @@ export function Timer(): JSX.Element {
     setTimerTextColor,
     setTimerWarningTextColor,
     setTimerOvertimeTextColor,
-    setTimerTextOpacity,
-    setTimerDisplayTarget,
-    isPresentationWindowOpen
+    setTimerTextOpacity
   } = useAppStore()
 
   const [inputH, setInputH] = useState('0')
@@ -74,41 +74,47 @@ export function Timer(): JSX.Element {
   const panelRef = useRef<HTMLDivElement>(null)
   const toggleRef = useRef<HTMLButtonElement>(null)
 
-  const selectedDisplayId = useAppStore((s) => s.selectedDisplayId)
-  const informationDisplayId = useAppStore((s) => s.informationDisplayId)
+  const hasDedicatedTimerDisplay = displays.some((display) => (
+    !display.isPrimary && displayAssignments[String(display.id)] === 'timer'
+  ))
 
-  // Sync timer to presentation window and timer overlay
-  const syncTimer = useCallback((remaining: number, running: boolean) => {
-    const state = useAppStore.getState()
-    const data = {
-      remaining,
-      running,
-      duration: state.timerDuration,
-      textColor: state.timerTextColor,
-      warningTextColor: state.timerWarningTextColor,
-      overtimeTextColor: state.timerOvertimeTextColor,
-      textOpacity: state.timerTextOpacity
-    }
-
-    if (state.timerDisplayTarget === 'presentation' && isPresentationWindowOpen) {
-      window.api.sendToPresentation('timer-update', data)
-    }
-
-    if (state.timerDisplayTarget === 'presentation') {
-      window.api.updateTimerOverlay({
-        ...data,
-        posX: 90,
-        posY: 90,
-        scale: 1
-      })
-    }
-  }, [isPresentationWindowOpen])
-
-  // Apply appearance changes immediately, including while the timer is paused.
+  // Keep the native overlay data current for the automatic fallback. The
+  // update is sent before the overlay is opened so its first frame is never
+  // an empty/zero timer.
   useEffect(() => {
-    const state = useAppStore.getState()
-    syncTimer(state.timerRemaining, state.timerRunning)
-  }, [timerTextColor, timerWarningTextColor, timerOvertimeTextColor, timerTextOpacity, timerDisplayTarget, syncTimer])
+    if (timerDuration <= 0 || hasDedicatedTimerDisplay) return
+    window.api.updateTimerOverlay({
+      remaining: timerRemaining,
+      running: timerRunning,
+      duration: timerDuration,
+      posX: 90,
+      posY: 90,
+      scale: 1,
+      textColor: timerTextColor,
+      warningTextColor: timerWarningTextColor,
+      overtimeTextColor: timerOvertimeTextColor,
+      textOpacity: timerTextOpacity
+    })
+  }, [
+    hasDedicatedTimerDisplay,
+    timerDuration,
+    timerOvertimeTextColor,
+    timerRemaining,
+    timerRunning,
+    timerTextColor,
+    timerTextOpacity,
+    timerWarningTextColor
+  ])
+
+  // "Screens" is the only explicit output selector. Without a dedicated
+  // timer display, fall back to the main program display as an overlay.
+  useEffect(() => {
+    if (timerDuration > 0 && !hasDedicatedTimerDisplay) {
+      void window.api.showTimerOverlay(selectedDisplayId ?? undefined)
+    } else {
+      void window.api.hideTimerOverlay()
+    }
+  }, [hasDedicatedTimerDisplay, selectedDisplayId, timerDuration])
 
   // Timer tick
   useEffect(() => {
@@ -117,7 +123,6 @@ export function Timer(): JSX.Element {
         const { timerRemaining: r, timerSoundWarning: sw, timerSoundEnd: se } = useAppStore.getState()
         const newR = r - 1
         setTimerRemaining(newR)
-        syncTimer(newR, true)
 
         // Warning sound: первый тик где remaining опускается на/ниже 60
         // (но не в overtime). Было `=== 60` — ломалось если interval-drift
@@ -142,15 +147,7 @@ export function Timer(): JSX.Element {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [timerRunning, setTimerRemaining, syncTimer])
-
-  // Sync when presentation window opens
-  useEffect(() => {
-    const state = useAppStore.getState()
-    if (isPresentationWindowOpen || timerDisplayTarget === 'information') {
-      syncTimer(state.timerRemaining, state.timerRunning)
-    }
-  }, [isPresentationWindowOpen, timerDisplayTarget, syncTimer])
+  }, [timerRunning, setTimerRemaining])
 
   // Close settings panel on click outside
   useEffect(() => {
@@ -167,18 +164,6 @@ export function Timer(): JSX.Element {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [expanded])
 
-  // Show/hide timer overlay window when needed
-  useEffect(() => {
-    if (timerDisplayTarget === 'presentation' && timerDuration > 0) {
-      window.api.showTimerOverlay(selectedDisplayId ?? undefined)
-    } else {
-      window.api.hideTimerOverlay()
-      if (timerDisplayTarget === 'information' && timerDuration > 0 && informationDisplayId !== null) {
-        useAppStore.getState().setInformationDisplayEnabled(true)
-      }
-    }
-  }, [informationDisplayId, timerDisplayTarget, timerDuration, selectedDisplayId])
-
   const handleSetTime = (): void => {
     const h = parseInt(inputH) || 0
     const m = parseInt(inputM) || 0
@@ -190,7 +175,6 @@ export function Timer(): JSX.Element {
       window.api.dbgLog(`Timer: after setTimerDuration store={duration=${after.timerDuration}, remaining=${after.timerRemaining}, running=${after.timerRunning}}`)
       warnedRef.current = false
       endedRef.current = false
-      syncTimer(total, false)
     } else {
       window.api.dbgLog(`Timer: handleSetTime total=0, SKIP setTimerDuration`)
     }
@@ -212,12 +196,10 @@ export function Timer(): JSX.Element {
     endedRef.current = freshRemaining <= 0
     window.api.dbgLog(`Timer: handleStart freshRemaining=${freshRemaining} warnedRef=${warnedRef.current} endedRef=${endedRef.current}`)
     setTimerRunning(true)
-    syncTimer(freshRemaining, true)
   }
 
   const handlePause = (): void => {
     setTimerRunning(false)
-    syncTimer(timerRemaining, false)
   }
 
   const handleStop = (): void => {
@@ -226,14 +208,12 @@ export function Timer(): JSX.Element {
     setTimerRemaining(0)
     warnedRef.current = false
     endedRef.current = false
-    syncTimer(0, false)
   }
 
   const handleReset = (): void => {
     resetTimer()
     warnedRef.current = false
     endedRef.current = false
-    syncTimer(timerDuration, false)
   }
 
   const handleAddMin = (min: number): void => {
@@ -241,7 +221,6 @@ export function Timer(): JSX.Element {
     const newR = useAppStore.getState().timerRemaining
     if (newR > 0) endedRef.current = false
     if (newR > 60) warnedRef.current = false
-    syncTimer(newR, timerRunning)
   }
 
   const handleCustomAdd = (): void => {
@@ -312,34 +291,6 @@ export function Timer(): JSX.Element {
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <div className="text-[11px] text-gray-400 font-bold uppercase mb-2">Настройки таймера</div>
-
-          <div className="mb-3 rounded-lg border border-gray-700 bg-gray-900/60 p-2.5">
-            <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-2">Где показывать таймер</div>
-            <label className="flex items-center gap-2 text-xs text-gray-200 cursor-pointer mb-2">
-              <input
-                type="radio"
-                name="timer-display-target"
-                checked={timerDisplayTarget === 'presentation'}
-                onChange={() => setTimerDisplayTarget('presentation')}
-                className="accent-blue-500"
-              />
-              На основном эфирном Дисплее 1
-            </label>
-            <label className={`flex items-center gap-2 text-xs ${informationDisplayId === null ? 'text-gray-600' : 'text-gray-200 cursor-pointer'}`}>
-              <input
-                type="radio"
-                name="timer-display-target"
-                checked={timerDisplayTarget === 'information'}
-                disabled={informationDisplayId === null}
-                onChange={() => setTimerDisplayTarget('information')}
-                className="accent-blue-500"
-              />
-              Только на информационном Дисплее 3
-            </label>
-            {informationDisplayId === null && (
-              <div className="mt-2 text-[10px] text-amber-400">Сначала назначьте Дисплей 3 в настройках дисплеев</div>
-            )}
-          </div>
 
           {/* Time input */}
           <div className="flex items-center gap-2 mb-3">

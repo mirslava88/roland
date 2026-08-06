@@ -81,7 +81,8 @@ export type OverlayState =
   | { kind: 'pinned-pptx'; pptxPath: string }
   | { kind: 'pinned-pdf'; pdfPath: string }
 
-export const CHANNELS_PER_PAGE = 4
+export type ChannelGridSize = 4 | 9
+export const DEFAULT_CHANNELS_PER_PAGE: ChannelGridSize = 4
 
 // 0 -> '1', 1 -> '2', 2 -> '3', ...
 export function channelIdFromIndex(i: number): ChannelId {
@@ -92,14 +93,16 @@ export interface ChannelState {
   file: FileEntry | null
   slide: number
   totalSlides: number
+  videoEndChannel: ChannelId | null
+  caption: string
 }
 
-const EMPTY_CHANNEL: ChannelState = { file: null, slide: 1, totalSlides: 0 }
+const EMPTY_CHANNEL: ChannelState = { file: null, slide: 1, totalSlides: 0, videoEndChannel: null, caption: '' }
 
 function makeInitialChannels(): { channels: Record<ChannelId, ChannelState>; channelIds: ChannelId[] } {
   const channelIds: ChannelId[] = []
   const channels: Record<ChannelId, ChannelState> = {}
-  for (let i = 0; i < CHANNELS_PER_PAGE; i++) {
+  for (let i = 0; i < DEFAULT_CHANNELS_PER_PAGE; i++) {
     const id = channelIdFromIndex(i)
     channelIds.push(id)
     channels[id] = { ...EMPTY_CHANNEL }
@@ -118,8 +121,9 @@ export interface VideoPlaybackState {
   playing: boolean
 }
 
-export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image'
-export type TimerDisplayTarget = 'presentation' | 'information'
+export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 'capture'
+export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer'
+export type DisplayAssignments = Record<string, DisplayOutputMode>
 
 export interface InformationMediaConfig {
   type: InformationMediaType
@@ -129,6 +133,11 @@ export interface InformationMediaConfig {
   totalSlides: number
   slideImages: string[]
   playing: boolean
+  currentTime?: number
+  duration?: number
+  seekRevision?: number
+  loop?: boolean
+  capture?: CaptureSourceConfig
 }
 
 interface AppState {
@@ -149,11 +158,9 @@ interface AppState {
   pptxThumbnailsMap: Record<string, string[]>
   pptxSlidesMap: Record<string, string[]>
   displays: DisplayInfo[]
+  displayAssignments: DisplayAssignments
+  displayNames: Record<string, string>
   selectedDisplayId: number | null
-  speakerDisplayId: number | null
-  informationDisplayId: number | null
-  speakerDisplayEnabled: boolean
-  informationDisplayEnabled: boolean
   informationMedia: InformationMediaConfig | null
   backdropImage: string | null
   globalHookEnabled: boolean
@@ -170,6 +177,7 @@ interface AppState {
 
   channels: Record<ChannelId, ChannelState>
   channelIds: ChannelId[]
+  channelGridSize: ChannelGridSize
   currentChannelPage: number
   liveChannel: ChannelId | null
   selectedChannel: ChannelId | null
@@ -179,10 +187,13 @@ interface AppState {
   setChannelFile: (ch: ChannelId, file: FileEntry | null) => void
   setChannelSlide: (ch: ChannelId, slide: number) => void
   setChannelTotalSlides: (ch: ChannelId, total: number) => void
+  setChannelVideoEndChannel: (ch: ChannelId, target: ChannelId | null) => void
+  setChannelCaption: (ch: ChannelId, caption: string) => void
   setLiveChannel: (ch: ChannelId) => void
   addChannelPage: () => void
   removeChannelPage: (page: number) => void
   setCurrentChannelPage: (page: number) => void
+  setChannelGridSize: (size: ChannelGridSize) => void
   addCaptureSource: (source: FileEntry) => void
   removeCaptureSource: (sourceId: string) => void
 
@@ -201,11 +212,9 @@ interface AppState {
   saveSlidePosition: () => void
   clearSlidePosition: (filePath: string) => void
   setDisplays: (displays: DisplayInfo[]) => void
+  setDisplayAssignment: (displayId: number, mode: DisplayOutputMode) => void
+  setDisplayName: (displayId: number, name: string) => void
   setSelectedDisplayId: (id: number | null) => void
-  setSpeakerDisplayId: (id: number | null) => void
-  setInformationDisplayId: (id: number | null) => void
-  setSpeakerDisplayEnabled: (enabled: boolean) => void
-  setInformationDisplayEnabled: (enabled: boolean) => void
   setInformationMedia: (media: InformationMediaConfig | null) => void
   setBackdropImage: (path: string | null) => void
   setGlobalHookEnabled: (enabled: boolean) => void
@@ -244,7 +253,6 @@ interface AppState {
   timerWarningTextColor: string
   timerOvertimeTextColor: string
   timerTextOpacity: number
-  timerDisplayTarget: TimerDisplayTarget
   setTimerDuration: (seconds: number) => void
   setTimerRemaining: (seconds: number) => void
   setTimerRunning: (running: boolean) => void
@@ -258,7 +266,6 @@ interface AppState {
   setTimerWarningTextColor: (color: string) => void
   setTimerOvertimeTextColor: (color: string) => void
   setTimerTextOpacity: (opacity: number) => void
-  setTimerDisplayTarget: (target: TimerDisplayTarget) => void
 }
 
 export const useAppStore = create<AppState>()(persist(
@@ -282,11 +289,9 @@ export const useAppStore = create<AppState>()(persist(
   pptxThumbnailsMap: {},
   pptxSlidesMap: {},
   displays: [],
+  displayAssignments: {},
+  displayNames: {},
   selectedDisplayId: null,
-  speakerDisplayId: null,
-  informationDisplayId: null,
-  speakerDisplayEnabled: false,
-  informationDisplayEnabled: false,
   informationMedia: null,
   backdropImage: null,
   globalHookEnabled: true,
@@ -296,6 +301,7 @@ export const useAppStore = create<AppState>()(persist(
 
   channels: initial.channels,
   channelIds: initial.channelIds,
+  channelGridSize: DEFAULT_CHANNELS_PER_PAGE,
   currentChannelPage: 0,
   liveChannel: null,
   selectedChannel: null,
@@ -306,8 +312,31 @@ export const useAppStore = create<AppState>()(persist(
   setChannelFile: (ch, file) => {
     const { channels, slidePositions } = get()
     const saved = file ? slidePositions[file.path] || 1 : 1
+    const current = channels[ch] || EMPTY_CHANNEL
+    const keepVideoEndChannel = (
+      current.file?.type === 'video' &&
+      file?.type === 'video' &&
+      current.file.path === file.path
+    )
+    const nextChannels = {
+      ...channels,
+      [ch]: {
+        file,
+        slide: saved,
+        totalSlides: 0,
+        videoEndChannel: keepVideoEndChannel ? current.videoEndChannel : null,
+        caption: current.caption || ''
+      }
+    }
+    if (!file) {
+      for (const [channelId, channel] of Object.entries(nextChannels)) {
+        if (channel.videoEndChannel === ch) {
+          nextChannels[channelId] = { ...channel, videoEndChannel: null }
+        }
+      }
+    }
     set({
-      channels: { ...channels, [ch]: { file, slide: saved, totalSlides: 0 } }
+      channels: nextChannels
     })
   },
 
@@ -335,6 +364,31 @@ export const useAppStore = create<AppState>()(persist(
     set({ channels: { ...channels, [ch]: { ...channel, totalSlides: total } } })
   },
 
+  setChannelVideoEndChannel: (ch, target) => {
+    const { channels } = get()
+    const channel = channels[ch]
+    if (!channel || channel.file?.type !== 'video') return
+    const safeTarget = target && target !== ch && channels[target]?.file ? target : null
+    set({
+      channels: {
+        ...channels,
+        [ch]: { ...channel, videoEndChannel: safeTarget }
+      }
+    })
+  },
+
+  setChannelCaption: (ch, caption) => {
+    const { channels } = get()
+    const channel = channels[ch]
+    if (!channel) return
+    set({
+      channels: {
+        ...channels,
+        [ch]: { ...channel, caption: caption.slice(0, 80) }
+      }
+    })
+  },
+
   setLiveChannel: (ch) => {
     const { channels } = get()
     const channel = channels[ch]
@@ -344,32 +398,32 @@ export const useAppStore = create<AppState>()(persist(
   },
 
   addChannelPage: () => {
-    const { channels, channelIds } = get()
+    const { channels, channelIds, channelGridSize } = get()
     const startIdx = channelIds.length
     const newChannels = { ...channels }
     const newIds = [...channelIds]
-    for (let i = 0; i < CHANNELS_PER_PAGE; i++) {
+    for (let i = 0; i < channelGridSize; i++) {
       const id = channelIdFromIndex(startIdx + i)
       newIds.push(id)
       newChannels[id] = { ...EMPTY_CHANNEL }
     }
-    const newPage = Math.floor(startIdx / CHANNELS_PER_PAGE)
+    const newPage = Math.floor(startIdx / channelGridSize)
     set({ channels: newChannels, channelIds: newIds, currentChannelPage: newPage })
   },
 
   removeChannelPage: (page) => {
-    const { channels, channelIds, currentChannelPage, liveChannel, selectedChannel } = get()
-    const totalPages = Math.ceil(channelIds.length / CHANNELS_PER_PAGE)
+    const { channels, channelIds, channelGridSize, currentChannelPage, liveChannel, selectedChannel } = get()
+    const totalPages = Math.ceil(channelIds.length / channelGridSize)
     // Can't remove last remaining page (always keep at least one)
     if (totalPages <= 1) return
-    const start = page * CHANNELS_PER_PAGE
-    const pageIds = channelIds.slice(start, start + CHANNELS_PER_PAGE)
+    const start = page * channelGridSize
+    const pageIds = channelIds.slice(start, start + channelGridSize)
     // Only remove if all channels on that page are empty
-    const hasFiles = pageIds.some((id) => channels[id]?.file)
-    if (hasFiles) return
+    const hasContent = pageIds.some((id) => channels[id]?.file || channels[id]?.caption.trim())
+    if (hasContent) return
     // Don't orphan live/selected channel
     if (liveChannel && pageIds.includes(liveChannel)) return
-    const remainingIds = [...channelIds.slice(0, start), ...channelIds.slice(start + CHANNELS_PER_PAGE)]
+    const remainingIds = [...channelIds.slice(0, start), ...channelIds.slice(start + channelGridSize)]
     const idMap = new Map<ChannelId, ChannelId>()
     const newIds = remainingIds.map((oldId, index) => {
       const newId = channelIdFromIndex(index)
@@ -378,12 +432,18 @@ export const useAppStore = create<AppState>()(persist(
     })
     const newChannels: Record<ChannelId, ChannelState> = {}
     for (const oldId of remainingIds) {
-      newChannels[idMap.get(oldId)!] = channels[oldId]
+      const channel = channels[oldId]
+      newChannels[idMap.get(oldId)!] = {
+        ...channel,
+        videoEndChannel: channel.videoEndChannel
+          ? idMap.get(channel.videoEndChannel) ?? null
+          : null
+      }
     }
     let newPage = currentChannelPage
     if (page < currentChannelPage) newPage--
-    if (newPage >= Math.ceil(newIds.length / CHANNELS_PER_PAGE)) {
-      newPage = Math.max(0, Math.ceil(newIds.length / CHANNELS_PER_PAGE) - 1)
+    if (newPage >= Math.ceil(newIds.length / channelGridSize)) {
+      newPage = Math.max(0, Math.ceil(newIds.length / channelGridSize) - 1)
     }
     const newLive = liveChannel ? idMap.get(liveChannel) ?? null : null
     const newSelected = selectedChannel ? idMap.get(selectedChannel) ?? null : null
@@ -397,10 +457,43 @@ export const useAppStore = create<AppState>()(persist(
   },
 
   setCurrentChannelPage: (page) => {
-    const { channelIds } = get()
-    const totalPages = Math.ceil(channelIds.length / CHANNELS_PER_PAGE)
+    const { channelIds, channelGridSize } = get()
+    const totalPages = Math.ceil(channelIds.length / channelGridSize)
     const clamped = Math.max(0, Math.min(page, totalPages - 1))
     set({ currentChannelPage: clamped })
+  },
+
+  setChannelGridSize: (size) => {
+    const state = get()
+    if (state.channelGridSize === size) return
+
+    const oldPageStart = state.currentChannelPage * state.channelGridSize
+    const lastRequiredIndex = state.channelIds.reduce((last, id, index) => (
+      state.channels[id]?.file || state.channels[id]?.caption.trim() || id === state.liveChannel || id === state.selectedChannel
+        ? index
+        : last
+    ), -1)
+    const requiredCount = Math.max(size, lastRequiredIndex + 1)
+    const normalizedCount = Math.ceil(requiredCount / size) * size
+    const nextChannels = { ...state.channels }
+    const nextIds = state.channelIds.slice(0, normalizedCount)
+
+    for (let index = nextIds.length; index < normalizedCount; index++) {
+      const id = channelIdFromIndex(index)
+      nextIds.push(id)
+      nextChannels[id] = { ...EMPTY_CHANNEL }
+    }
+    for (const id of state.channelIds.slice(normalizedCount)) {
+      delete nextChannels[id]
+    }
+
+    const anchorIndex = Math.min(oldPageStart, normalizedCount - 1)
+    set({
+      channels: nextChannels,
+      channelIds: nextIds,
+      channelGridSize: size,
+      currentChannelPage: Math.floor(anchorIndex / size)
+    })
   },
 
   addCaptureSource: (source) => {
@@ -509,38 +602,66 @@ export const useAppStore = create<AppState>()(persist(
       .filter((display) => display.id !== primaryId)
       .sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y)
       .map((display) => display.id)
-    const connected = new Set(externalIds)
+    const assignments: DisplayAssignments = {}
+    for (const id of externalIds) {
+      const mode = state.displayAssignments[String(id)]
+      if (mode) assignments[String(id)] = mode
+    }
 
-    const presentationId = state.selectedDisplayId !== null && connected.has(state.selectedDisplayId)
+    if (Object.keys(assignments).length === 0) {
+      if (externalIds[0] !== undefined) assignments[String(externalIds[0])] = 'program'
+    }
+
+    const programIds = externalIds.filter((id) => assignments[String(id)] === 'program')
+    const presentationId = state.selectedDisplayId !== null && programIds.includes(state.selectedDisplayId)
       ? state.selectedDisplayId
-      : externalIds[0] ?? null
-    const speakerId = state.speakerDisplayId !== null &&
-      connected.has(state.speakerDisplayId) &&
-      state.speakerDisplayId !== presentationId
-      ? state.speakerDisplayId
-      : externalIds.find((id) => id !== presentationId) ?? null
-    const informationId = state.informationDisplayId !== null &&
-      connected.has(state.informationDisplayId) &&
-      state.informationDisplayId !== presentationId &&
-      state.informationDisplayId !== speakerId
-      ? state.informationDisplayId
-      : externalIds.find((id) => id !== presentationId && id !== speakerId) ?? null
+      : programIds[0] ?? null
 
     set({
       displays,
-      selectedDisplayId: presentationId,
-      speakerDisplayId: speakerId,
-      informationDisplayId: informationId,
-      speakerDisplayEnabled: state.speakerDisplayEnabled && speakerId !== null,
-      informationDisplayEnabled: state.informationDisplayEnabled && informationId !== null
+      displayAssignments: assignments,
+      selectedDisplayId: presentationId
     })
   },
 
-  setSelectedDisplayId: (id) => set({ selectedDisplayId: id }),
-  setSpeakerDisplayId: (id) => set({ speakerDisplayId: id }),
-  setInformationDisplayId: (id) => set({ informationDisplayId: id }),
-  setSpeakerDisplayEnabled: (enabled) => set({ speakerDisplayEnabled: enabled }),
-  setInformationDisplayEnabled: (enabled) => set({ informationDisplayEnabled: enabled }),
+  setDisplayAssignment: (displayId, mode) => {
+    const state = get()
+    const assignments = {
+      ...state.displayAssignments,
+      [String(displayId)]: mode
+    }
+
+    const externalIds = state.displays
+      .filter((display) => !display.isPrimary)
+      .sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y)
+      .map((display) => display.id)
+    const programIds = externalIds.filter((id) => assignments[String(id)] === 'program')
+    const selectedDisplayId = state.selectedDisplayId !== null && programIds.includes(state.selectedDisplayId)
+      ? state.selectedDisplayId
+      : programIds[0] ?? null
+
+    set({
+      displayAssignments: assignments,
+      selectedDisplayId
+    })
+  },
+
+  setDisplayName: (displayId, name) => {
+    const { displayNames } = get()
+    const key = String(displayId)
+    const normalized = name.replace(/[\r\n\t]+/g, ' ').slice(0, 80)
+    const nextNames = { ...displayNames }
+    if (normalized.trim()) nextNames[key] = normalized
+    else delete nextNames[key]
+    set({ displayNames: nextNames })
+  },
+
+  setSelectedDisplayId: (id) => {
+    const { displayAssignments } = get()
+    if (id === null || displayAssignments[String(id)] === 'program') {
+      set({ selectedDisplayId: id })
+    }
+  },
   setInformationMedia: (media) => set({ informationMedia: media }),
   setBackdropImage: (path) => set({ backdropImage: path }),
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
@@ -629,7 +750,6 @@ export const useAppStore = create<AppState>()(persist(
   timerWarningTextColor: '#facc15',
   timerOvertimeTextColor: '#ef4444',
   timerTextOpacity: 1,
-  timerDisplayTarget: 'presentation' as TimerDisplayTarget,
   setTimerDuration: (seconds) => set({ timerDuration: seconds, timerRemaining: seconds }),
   setTimerRemaining: (seconds) => set({ timerRemaining: seconds }),
   setTimerRunning: (running) => set({ timerRunning: running }),
@@ -651,13 +771,7 @@ export const useAppStore = create<AppState>()(persist(
   setTimerTextColor: (color) => set({ timerTextColor: color }),
   setTimerWarningTextColor: (color) => set({ timerWarningTextColor: color }),
   setTimerOvertimeTextColor: (color) => set({ timerOvertimeTextColor: color }),
-  setTimerTextOpacity: (opacity) => set({ timerTextOpacity: Math.max(0.1, Math.min(1, opacity)) }),
-  setTimerDisplayTarget: (target) => set((state) => ({
-    timerDisplayTarget: target,
-    informationDisplayEnabled: target === 'information' && state.informationDisplayId !== null
-      ? true
-      : state.informationDisplayEnabled
-  }))
+  setTimerTextOpacity: (opacity) => set({ timerTextOpacity: Math.max(0.1, Math.min(1, opacity)) })
   }
   },
   {
@@ -674,7 +788,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 6,
+    version: 9,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -699,12 +813,27 @@ export const useAppStore = create<AppState>()(persist(
       if (version < 6) {
         delete migrated.informationScene
       }
+      // v6 -> v7: fixed Display 1/2/3 roles became repeatable assignments.
+      if (version < 7) {
+        const assignments: DisplayAssignments = {}
+        const selectedDisplayId = migrated.selectedDisplayId
+        const speakerDisplayId = migrated.speakerDisplayId
+        const informationDisplayId = migrated.informationDisplayId
+        if (typeof selectedDisplayId === 'number') assignments[String(selectedDisplayId)] = 'program'
+        if (typeof speakerDisplayId === 'number') assignments[String(speakerDisplayId)] = 'speaker'
+        if (typeof informationDisplayId === 'number') assignments[String(informationDisplayId)] = 'information'
+        migrated.displayAssignments = assignments
+      }
+      // v7 -> v8: timer output is controlled exclusively by display assignments.
+      if (version < 8) {
+        delete migrated.timerDisplayTarget
+      }
       return migrated
     },
     partialize: (state) => ({
       selectedDisplayId: state.selectedDisplayId,
-      speakerDisplayId: state.speakerDisplayId,
-      informationDisplayId: state.informationDisplayId,
+      displayAssignments: state.displayAssignments,
+      displayNames: state.displayNames,
       folderPath: state.folderPath,
       rootFolderPath: state.rootFolderPath,
       globalHookEnabled: state.globalHookEnabled,
@@ -714,7 +843,6 @@ export const useAppStore = create<AppState>()(persist(
       timerWarningTextColor: state.timerWarningTextColor,
       timerOvertimeTextColor: state.timerOvertimeTextColor,
       timerTextOpacity: state.timerTextOpacity,
-      timerDisplayTarget: state.timerDisplayTarget,
     }),
   }
 ))

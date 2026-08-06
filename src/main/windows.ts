@@ -1,7 +1,7 @@
 import { BrowserWindow, Display, shell, screen } from 'electron'
 import { join } from 'path'
 
-export type AuxiliaryWindowRole = 'speaker' | 'info'
+export type AuxiliaryWindowRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop'
 
 export function createControlWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -95,7 +95,15 @@ export function createAuxiliaryWindow(
   role: AuxiliaryWindowRole
 ): BrowserWindow {
   const { x, y, width, height } = display.bounds
-  const title = role === 'speaker' ? 'PDM Speaker Display' : 'PDM Information Display'
+  const title = role === 'mirror'
+    ? 'PDM Program Mirror'
+    : role === 'speaker'
+      ? 'PDM Speaker Display'
+      : role === 'timer'
+        ? 'PDM Timer Display'
+        : role === 'backdrop'
+          ? 'PDM Backdrop Display'
+          : 'PDM Information Display'
   const win = new BrowserWindow({
     x,
     y,
@@ -123,9 +131,11 @@ export function createAuxiliaryWindow(
   win.setIgnoreMouseEvents(true)
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/auxiliary.html?role=${role}`)
+    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/auxiliary.html?role=${role}&displayId=${display.id}`)
   } else {
-    win.loadFile(join(__dirname, '../renderer/auxiliary.html'), { query: { role } })
+    win.loadFile(join(__dirname, '../renderer/auxiliary.html'), {
+      query: { role, displayId: String(display.id) }
+    })
   }
 
   return win

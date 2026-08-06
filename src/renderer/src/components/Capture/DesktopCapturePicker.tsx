@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+const EMPTY_EXCLUDED_DISPLAY_IDS: number[] = []
+
 interface DesktopCapturePickerProps {
   excludedDisplayId: number | null
+  excludedDisplayIds?: number[]
   onClose: () => void
   onSelect: (source: DesktopCaptureSourceDescriptor) => void
 }
 
 export function DesktopCapturePicker({
   excludedDisplayId,
+  excludedDisplayIds = EMPTY_EXCLUDED_DISPLAY_IDS,
   onClose,
   onSelect
 }: DesktopCapturePickerProps): JSX.Element {
@@ -33,9 +37,16 @@ export function DesktopCapturePicker({
         excludedDisplayId ?? undefined
       )
       if (generation !== generationRef.current) return
+      const excludedIds = new Set([
+        ...(excludedDisplayId === null ? [] : [String(excludedDisplayId)]),
+        ...excludedDisplayIds.map(String)
+      ])
+      const filtered = next.filter((source) => (
+        source.kind !== 'screen' || !source.displayId || !excludedIds.has(source.displayId)
+      ))
       setSources((current) => {
         const previousById = new Map(current.map((source) => [source.id, source]))
-        return next.map((source) => {
+        return filtered.map((source) => {
           const previous = previousById.get(source.id)
           if (!previous) return source
           return {
@@ -60,7 +71,7 @@ export function DesktopCapturePicker({
         if (mode === 'foreground') setLoading(false)
       }
     }
-  }, [excludedDisplayId, kind])
+  }, [excludedDisplayId, excludedDisplayIds, kind])
 
   useEffect(() => {
     void loadSources('foreground')
@@ -122,7 +133,6 @@ export function DesktopCapturePicker({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
-      onClick={onClose}
     >
       <div
         className="flex max-h-[86vh] w-full max-w-4xl flex-col rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"

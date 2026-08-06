@@ -1,21 +1,49 @@
-import { useEffect } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
+import { useEffect, useMemo, useRef } from 'react'
+import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
 
 const notesCache = new Map<string, string>()
 
+function useAuxiliaryWindows(
+  role: AuxiliaryDisplayRole,
+  ids: number[],
+  setDisplayAssignment: (displayId: number, mode: DisplayOutputMode) => void
+): void {
+  const signature = ids.join(',')
+  useEffect(() => {
+    let cancelled = false
+    const reconcile = async (): Promise<void> => {
+      await window.api.closeAuxiliaryWindow(role)
+      for (const displayId of ids) {
+        if (cancelled) return
+        const opened = await window.api.openAuxiliaryWindow(role, displayId)
+        if (!opened.success) {
+          window.api.dbgLog(`${role} display open failed id=${displayId}: ${opened.error || 'unknown error'}`)
+          setDisplayAssignment(displayId, 'off')
+        }
+      }
+    }
+    void reconcile()
+    return () => { cancelled = true }
+  }, [role, setDisplayAssignment, signature])
+}
+
 export function AuxiliaryDisplayBridge(): null {
+  const taskbarSyncChainRef = useRef<Promise<void>>(Promise.resolve())
   const {
     activeFile,
+    isPlaying,
+    isPresentationWindowOpen,
     currentSlide,
     totalSlides,
     pptxSlidesMap,
     pptxThumbnailsMap,
-    speakerDisplayId,
-    informationDisplayId,
-    speakerDisplayEnabled,
-    informationDisplayEnabled,
+    displays,
+    displayAssignments,
+    selectedDisplayId,
     informationMedia,
     backdropImage,
+    videoLoopTrack,
+    videoPlayback,
     timerRemaining,
     timerRunning,
     timerDuration,
@@ -23,41 +51,156 @@ export function AuxiliaryDisplayBridge(): null {
     timerWarningTextColor,
     timerOvertimeTextColor,
     timerTextOpacity,
-    timerDisplayTarget,
-    setSpeakerDisplayEnabled,
-    setInformationDisplayEnabled,
+    setDisplayAssignment,
     setInformationMedia
   } = useAppStore()
 
-  useEffect(() => window.api.on('auxiliary-window-closed', (...args: unknown[]) => {
-    const data = args[0] as { role?: AuxiliaryDisplayRole }
-    if (data.role === 'speaker') setSpeakerDisplayEnabled(false)
-    if (data.role === 'info') setInformationDisplayEnabled(false)
-  }), [setInformationDisplayEnabled, setSpeakerDisplayEnabled])
+  const roleIds = useMemo(() => {
+    const sortedDisplays = displays
+      .filter((display) => !display.isPrimary)
+      .sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y)
+    const ids = (mode: Exclude<DisplayOutputMode, 'off'>): number[] => sortedDisplays
+      .filter((display) => displayAssignments[String(display.id)] === mode)
+      .map((display) => display.id)
+    const program = ids('program')
+    return {
+      mirror: program.filter((displayId) => displayId !== selectedDisplayId),
+      speaker: ids('speaker'),
+      info: ids('information'),
+      timer: ids('timer'),
+      backdrop: sortedDisplays
+        .filter((display) => {
+          const mode = displayAssignments[String(display.id)]
+          return mode === undefined || mode === 'off'
+        })
+        .map((display) => display.id)
+    }
+  }, [displayAssignments, displays, selectedDisplayId])
 
-  useEffect(() => window.api.on('information-video-ended', () => {
+  useAuxiliaryWindows('mirror', roleIds.mirror, setDisplayAssignment)
+  useAuxiliaryWindows('speaker', roleIds.speaker, setDisplayAssignment)
+  useAuxiliaryWindows('info', roleIds.info, setDisplayAssignment)
+  useAuxiliaryWindows('timer', roleIds.timer, setDisplayAssignment)
+  useAuxiliaryWindows('backdrop', roleIds.backdrop, setDisplayAssignment)
+
+  const programDisplays = useMemo(() => displays
+    .filter((display) => (
+      !display.isPrimary && displayAssignments[String(display.id)] === 'program'
+    )), [displayAssignments, displays])
+  const programDisplaySignature = programDisplays.map((display) => display.id).join(',')
+  const programOutputActive = activeFile !== null || isPresentationWindowOpen
+
+  useEffect(() => {
+    // Serialize PowerShell taskbar operations. If the operator exits while a
+    // hide request is still running, the queued show request must always be
+    // the final operation so Windows is restored reliably.
+    taskbarSyncChainRef.current = taskbarSyncChainRef.current
+      .catch(() => {})
+      .then(async () => {
+        if (!programOutputActive) {
+          await window.api.showTaskbar()
+          return
+        }
+        for (const display of programDisplays) {
+          await window.api.hideTaskbar(display.bounds)
+        }
+      })
+  }, [programDisplaySignature, programOutputActive])
+
+  useEffect(() => window.api.on('auxiliary-window-closed', (...args: unknown[]) => {
+    const data = args[0] as { role?: AuxiliaryDisplayRole; displayId?: number }
+    if (typeof data.displayId === 'number') setDisplayAssignment(data.displayId, 'off')
+  }), [setDisplayAssignment])
+
+  useEffect(() => window.api.on('information-video-ended', (...args: unknown[]) => {
+    const ended = args[0] as { path?: string; currentTime?: number; duration?: number } | undefined
     const media = useAppStore.getState().informationMedia
-    if (media?.type === 'video' && media.playing) {
-      setInformationMedia({ ...media, playing: false })
+    if (media?.type === 'video' && media.playing && (!ended?.path || ended.path === media.path)) {
+      const duration = Number.isFinite(ended?.duration)
+        ? Math.max(0, ended?.duration as number)
+        : media.duration || 0
+      setInformationMedia({
+        ...media,
+        playing: false,
+        currentTime: duration || media.currentTime || 0,
+        duration
+      })
     }
   }), [setInformationMedia])
 
+  useEffect(() => window.api.on('information-video-state', (...args: unknown[]) => {
+    const update = args[0] as { path?: string; currentTime?: number; duration?: number }
+    const media = useAppStore.getState().informationMedia
+    if (media?.type !== 'video' || !update || update.path !== media.path) return
+    const currentTime = Number.isFinite(update.currentTime)
+      ? Math.max(0, update.currentTime as number)
+      : media.currentTime || 0
+    const duration = Number.isFinite(update.duration)
+      ? Math.max(0, update.duration as number)
+      : media.duration || 0
+    if (
+      Math.abs((media.currentTime || 0) - currentTime) < 0.05 &&
+      Math.abs((media.duration || 0) - duration) < 0.05
+    ) return
+    setInformationMedia({ ...media, currentTime, duration })
+  }), [setInformationMedia])
+
+  useEffect(() => {
+    const sourceDisplay = displays.find((display) => display.id === selectedDisplayId)
+    const playback = activeFile?.type === 'video'
+      ? videoPlayback[activeFile.path]
+      : undefined
+    let directContent: ProgramDirectContent | null = null
+    if (activeFile?.type === 'pdf') {
+      directContent = {
+        type: 'pdf',
+        path: activeFile.path,
+        currentSlide
+      }
+    } else if (activeFile?.type === 'video') {
+      directContent = {
+        type: 'video',
+        path: activeFile.path,
+        currentTime: playback?.currentTime ?? 0,
+        playing: playback?.playing ?? isPlaying,
+        loop: videoLoopTrack
+      }
+    } else if (activeFile?.type === 'other' && activeFile.isImage) {
+      directContent = { type: 'image', path: activeFile.path }
+    } else if (
+      backdropImage &&
+      ((!activeFile && isPresentationWindowOpen) || activeFile?.isAudio)
+    ) {
+      directContent = { type: 'backdrop', path: backdropImage }
+    }
+    window.api.sendToAuxiliary('mirror', 'mirror-state', {
+      sourceDisplayId: selectedDisplayId,
+      sourcePixelWidth: sourceDisplay
+        ? Math.round(sourceDisplay.bounds.width * sourceDisplay.scaleFactor)
+        : null,
+      sourcePixelHeight: sourceDisplay
+        ? Math.round(sourceDisplay.bounds.height * sourceDisplay.scaleFactor)
+        : null,
+      contentType: activeFile?.type ?? null,
+      directContent,
+      active: activeFile !== null || isPresentationWindowOpen,
+      backdropImage
+    })
+  }, [
+    activeFile,
+    backdropImage,
+    currentSlide,
+    displays,
+    isPlaying,
+    isPresentationWindowOpen,
+    selectedDisplayId,
+    videoLoopTrack,
+    videoPlayback
+  ])
+
   useEffect(() => {
     let cancelled = false
-    if (!speakerDisplayEnabled || speakerDisplayId === null) {
-      void window.api.closeAuxiliaryWindow('speaker')
-      return
-    }
-
     const sync = async (): Promise<void> => {
-      const opened = await window.api.openAuxiliaryWindow('speaker', speakerDisplayId)
-      if (cancelled) return
-      if (!opened.success) {
-        window.api.dbgLog(`speaker display open failed: ${opened.error || 'unknown error'}`)
-        setSpeakerDisplayEnabled(false)
-        return
-      }
-
       const supported = activeFile?.type === 'presentation' || activeFile?.type === 'pdf'
       if (!activeFile || !supported) {
         window.api.sendToAuxiliary('speaker', 'speaker-state', {
@@ -110,7 +253,7 @@ export function AuxiliaryDisplayBridge(): null {
       if (
         latest.activeFile?.path !== activeFile.path ||
         latest.currentSlide !== safeCurrent ||
-        !latest.speakerDisplayEnabled
+        !Object.values(latest.displayAssignments).includes('speaker')
       ) return
       const notes = notesResult.success ? notesResult.notes || '' : ''
       notesCache.set(cacheKey, notes)
@@ -125,70 +268,25 @@ export function AuxiliaryDisplayBridge(): null {
     currentSlide,
     pptxSlidesMap,
     pptxThumbnailsMap,
-    setSpeakerDisplayEnabled,
-    speakerDisplayEnabled,
-    speakerDisplayId,
     totalSlides
   ])
 
   useEffect(() => {
-    let cancelled = false
-    if (!informationDisplayEnabled || informationDisplayId === null) {
-      void window.api.closeAuxiliaryWindow('info')
-      return
-    }
-
-    const sync = async (): Promise<void> => {
-      const opened = await window.api.openAuxiliaryWindow('info', informationDisplayId)
-      if (cancelled) return
-      if (!opened.success) {
-        window.api.dbgLog(`information display open failed: ${opened.error || 'unknown error'}`)
-        setInformationDisplayEnabled(false)
-        return
-      }
-      const latest = useAppStore.getState()
-      window.api.sendToAuxiliary('info', 'information-state', {
-        media: latest.informationMedia,
-        displayTimer: latest.timerDisplayTarget === 'information' && latest.timerDuration > 0,
-        backdropImage: latest.backdropImage
-      } satisfies InformationDisplayState)
-      window.api.sendToAuxiliary('info', 'timer-update', {
-        remaining: latest.timerRemaining,
-        running: latest.timerRunning,
-        duration: latest.timerDuration,
-        textColor: latest.timerTextColor,
-        warningTextColor: latest.timerWarningTextColor,
-        overtimeTextColor: latest.timerOvertimeTextColor,
-        textOpacity: latest.timerTextOpacity
-      } satisfies TimerDisplayState)
-    }
-
-    void sync()
-    return () => { cancelled = true }
-  }, [
-    informationDisplayEnabled,
-    informationDisplayId,
-    setInformationDisplayEnabled
-  ])
-
-  useEffect(() => {
-    if (!informationDisplayEnabled) return
+    window.api.sendToAuxiliary('backdrop', 'backdrop-state', { backdropImage })
     window.api.sendToAuxiliary('info', 'information-state', {
       media: informationMedia,
-      displayTimer: timerDisplayTarget === 'information' && timerDuration > 0,
+      displayTimer: false,
       backdropImage
     } satisfies InformationDisplayState)
-  }, [
-    backdropImage,
-    informationDisplayEnabled,
-    informationMedia,
-    timerDisplayTarget,
-    timerDuration
-  ])
+    window.api.sendToAuxiliary('timer', 'information-state', {
+      media: null,
+      displayTimer: timerDuration > 0,
+      backdropImage
+    } satisfies InformationDisplayState)
+  }, [backdropImage, informationMedia, timerDuration])
 
   useEffect(() => {
-    if (!informationDisplayEnabled) return
-    window.api.sendToAuxiliary('info', 'timer-update', {
+    const timerState = {
       remaining: timerRemaining,
       running: timerRunning,
       duration: timerDuration,
@@ -196,9 +294,9 @@ export function AuxiliaryDisplayBridge(): null {
       warningTextColor: timerWarningTextColor,
       overtimeTextColor: timerOvertimeTextColor,
       textOpacity: timerTextOpacity
-    } satisfies TimerDisplayState)
+    } satisfies TimerDisplayState
+    window.api.sendToAuxiliary('timer', 'timer-update', timerState)
   }, [
-    informationDisplayEnabled,
     timerDuration,
     timerOvertimeTextColor,
     timerRemaining,

@@ -140,6 +140,7 @@ export function CaptureSourcesPanel(): JSX.Element {
       videoGroupId: video.groupId || undefined,
       audioEnabled: audioEnabled && !!audio,
       audioDeviceId: audio?.deviceId,
+      audioGroupId: audio?.groupId || undefined,
       audioLabel: audio?.label
     }
     const entry: FileEntry = {
@@ -372,7 +373,6 @@ export function CaptureSourcesPanel(): JSX.Element {
       {pickerOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
-          onClick={() => setPickerOpen(false)}
         >
           <div
             className="w-full max-w-lg rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"

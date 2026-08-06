@@ -14,17 +14,14 @@ export function Toolbar(): JSX.Element {
     setPresentationWindowOpen,
     activeFile,
     setActiveFile,
-    displays,
     selectedDisplayId,
-    setSelectedDisplayId,
     backdropImage,
     setBackdropImage,
     globalHookEnabled,
     setGlobalHookEnabled,
     channelBoundaryNavigationEnabled,
     setChannelBoundaryNavigationEnabled,
-    speakerDisplayEnabled,
-    informationDisplayEnabled,
+    displayAssignments,
     channels,
     selectedChannel,
     setOverlayState
@@ -35,6 +32,9 @@ export function Toolbar(): JSX.Element {
   const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
   const selectedChannelHasContent = selectedChannel !== null && Boolean(channels[selectedChannel]?.file)
   const canTogglePresentation = isOutputActive || selectedChannelHasContent
+  const assignedModes = Object.values(displayAssignments)
+  const hasAdditionalScreenOutput = assignedModes.some((mode) => mode !== 'program') ||
+    assignedModes.filter((mode) => mode === 'program').length > 1
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
@@ -159,7 +159,7 @@ export function Toolbar(): JSX.Element {
       <button
         onClick={() => setAuxiliaryDisplaysOpen(true)}
         className={`text-xs px-2 py-1.5 rounded-lg font-medium transition-colors border ${
-          speakerDisplayEnabled || informationDisplayEnabled
+          hasAdditionalScreenOutput
             ? 'bg-blue-600/80 border-blue-500 text-white hover:bg-blue-600'
             : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
         }`}
@@ -195,7 +195,7 @@ export function Toolbar(): JSX.Element {
         className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
           backdropImage
             ? 'bg-purple-600/80 hover:bg-purple-600 text-white border-transparent'
-            : 'bg-purple-900/50 text-purple-300 hover:bg-purple-800/50 border-purple-700/50'
+            : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
         }`}
         title={backdropImage ? 'Отключить подложку' : 'Выбрать подложку'}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}

@@ -1,4 +1,4 @@
-import { CHANNELS_PER_PAGE, useAppStore } from './stores/useAppStore'
+import { useAppStore } from './stores/useAppStore'
 
 export type ChannelBoundaryDirection = 'next' | 'prev'
 
@@ -27,7 +27,7 @@ export function takeAdjacentChannel(direction: ChannelBoundaryDirection): boolea
 
   useAppStore.setState({
     selectedChannel: targetChannel,
-    currentChannelPage: Math.floor(targetIndex / CHANNELS_PER_PAGE)
+    currentChannelPage: Math.floor(targetIndex / state.channelGridSize)
   })
   window.api.dbgLog(
     `channel-boundary: ${direction} ${state.liveChannel}->${targetChannel}`

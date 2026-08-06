@@ -128,6 +128,7 @@ function CaptureSourceLayer({
   config,
   active,
   audioActive,
+  deviceRevision,
   takeRevision,
   onTakeReady,
   onTakeError
@@ -135,11 +136,13 @@ function CaptureSourceLayer({
   config: CaptureSourceConfig
   active: boolean
   audioActive: boolean
+  deviceRevision: number
   takeRevision?: number
   onTakeReady: (sourceId: string, revision: number) => void
   onTakeError: (sourceId: string, revision: number, message: string) => void
 }): JSX.Element {
   const isDesktopCapture = config.captureKind === 'desktop'
+  const reconnectRevision = isDesktopCapture ? 0 : deviceRevision
   const desktopTarget = config.desktopSourceType === 'screen' ? 'экрана' : 'окна'
   const videoRef = useRef<VideoWithFrameCallbacks>(null)
   const holdImageRef = useRef<HTMLImageElement>(null)
@@ -298,6 +301,12 @@ function CaptureSourceLayer({
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
       const delayMs = Math.min(30000, 2500 * (2 ** retryAttemptRef.current))
       retryAttemptRef.current += 1
+      emitState({
+        status: 'reconnecting',
+        message: isDesktopCapture
+          ? `Ожидание ${desktopTarget}…`
+          : 'Устройство не подключено. Ожидание подключения…'
+      })
       retryTimerRef.current = setTimeout(() => {
         emitState({
           status: 'reconnecting',
@@ -333,22 +342,42 @@ function CaptureSourceLayer({
       const startedAt = performance.now()
 
       let resolvedVideoDeviceId = config.videoDeviceId
+      let resolvedAudioDeviceId = config.audioDeviceId
       if (!isDesktopCapture) {
         try {
-          const devices = (await navigator.mediaDevices.enumerateDevices())
-            .filter((device) => device.kind === 'videoinput')
-          if (!devices.some((device) => device.deviceId === resolvedVideoDeviceId)) {
+          const devices = await navigator.mediaDevices.enumerateDevices()
+          const videoDevices = devices.filter((device) => device.kind === 'videoinput')
+          if (!videoDevices.some((device) => device.deviceId === resolvedVideoDeviceId)) {
             const replacement = (
               (config.videoGroupId
-                ? devices.find((device) => device.groupId && device.groupId === config.videoGroupId)
+                ? videoDevices.find((device) => device.groupId && device.groupId === config.videoGroupId)
                 : undefined) ||
-              devices.find((device) => device.label && device.label === config.videoLabel)
+              videoDevices.find((device) => device.label && device.label === config.videoLabel)
             )
             if (replacement) {
               resolvedVideoDeviceId = replacement.deviceId
               window.api.dbgLog(
                 `Capture ${config.sourceId.slice(-8)}: recovered deviceId by ${replacement.groupId === config.videoGroupId ? 'group' : 'label'}`
               )
+            }
+          }
+          if (config.audioEnabled && resolvedAudioDeviceId) {
+            const audioDevices = devices.filter((device) => device.kind === 'audioinput')
+            if (!audioDevices.some((device) => device.deviceId === resolvedAudioDeviceId)) {
+              const replacement = (
+                (config.audioGroupId
+                  ? audioDevices.find((device) => device.groupId && device.groupId === config.audioGroupId)
+                  : undefined) ||
+                (config.audioLabel
+                  ? audioDevices.find((device) => device.label && device.label === config.audioLabel)
+                  : undefined)
+              )
+              if (replacement) {
+                resolvedAudioDeviceId = replacement.deviceId
+                window.api.dbgLog(
+                  `Capture ${config.sourceId.slice(-8)}: recovered audio deviceId by ${replacement.groupId === config.audioGroupId ? 'group' : 'label'}`
+                )
+              }
             }
           }
         } catch { /* getUserMedia below will report the actionable error */ }
@@ -386,9 +415,9 @@ function CaptureSourceLayer({
             height: { ideal: 1080 },
             frameRate: { ideal: 30 }
           }
-      const audioConstraints: MediaTrackConstraints | false = !isDesktopCapture && config.audioEnabled && config.audioDeviceId
+      const audioConstraints: MediaTrackConstraints | false = !isDesktopCapture && config.audioEnabled && resolvedAudioDeviceId
         ? {
-            deviceId: { exact: config.audioDeviceId },
+            deviceId: { exact: resolvedAudioDeviceId },
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false
@@ -571,11 +600,15 @@ function CaptureSourceLayer({
     config.captureKind,
     config.videoDeviceId,
     config.videoLabel,
+    config.videoGroupId,
     config.desktopSourceId,
     config.desktopSourceType,
     config.desktopDisplayId,
     config.audioEnabled,
     config.audioDeviceId,
+    config.audioGroupId,
+    config.audioLabel,
+    reconnectRevision,
     emitState,
     rejectFrameWaiters,
     resolveFrameWaiters,
@@ -670,6 +703,7 @@ export function CaptureHub({
   onTakeError
 }: CaptureHubProps): JSX.Element {
   const [sources, setSources] = useState<CaptureSourceConfig[]>([])
+  const [deviceRevision, setDeviceRevision] = useState(0)
 
   useEffect(() => {
     const unsubRegister = window.api.on('capture-source-register', (...args: unknown[]) => {
@@ -708,7 +742,8 @@ export function CaptureHub({
 
     const handleDeviceChange = (): void => {
       window.api.sendToControl('capture-devices-changed')
-      window.api.dbgLog('CaptureHub: mediaDevices devicechange')
+      setDeviceRevision((revision) => revision + 1)
+      window.api.dbgLog('CaptureHub: mediaDevices devicechange; reconnecting saved device sources now')
     }
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange)
     window.api.sendToControl('capture-hub-ready')
@@ -729,6 +764,7 @@ export function CaptureHub({
           config={config}
           active={activeSourceId === config.sourceId}
           audioActive={audioSourceId === config.sourceId}
+          deviceRevision={deviceRevision}
           takeRevision={takeRequest?.sourceId === config.sourceId ? takeRequest.revision : undefined}
           onTakeReady={onTakeReady}
           onTakeError={onTakeError}

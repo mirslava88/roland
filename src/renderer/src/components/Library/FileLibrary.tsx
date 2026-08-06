@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useAppStore, FilterType, SubfolderEntry } from '../../stores/useAppStore'
+import { channelIdFromIndex, useAppStore, FilterType, SubfolderEntry } from '../../stores/useAppStore'
 import { FileItem } from './FileItem'
 import { FileItemGrid } from './FileItemGrid'
 import { CaptureSourcesPanel } from '../Capture/CaptureSourcesPanel'
@@ -11,6 +11,18 @@ const FILTERS: { label: string; value: FilterType }[] = [
   { label: 'Видео', value: 'video' },
   { label: 'Разное', value: 'other' }
 ]
+
+const MAX_AUTO_ASSIGN_CHANNEL = 360
+
+function numberedChannelOf(file: FileEntry): number | null {
+  if (file.type === 'unknown' || file.type === 'capture') return null
+  // Supported examples: "1 - Name", "4. Name", "01-Name", as well as
+  // whitespace, underscore, en/em dash or a closing parenthesis separators.
+  const match = file.name.match(/^\s*0*(\d{1,3})(?=\s*(?:$|[-–—._)]|\s+))/u)
+  if (!match) return null
+  const channel = Number.parseInt(match[1], 10)
+  return channel >= 1 && channel <= MAX_AUTO_ASSIGN_CHANNEL ? channel : null
+}
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return ''
@@ -40,6 +52,7 @@ export function FileLibrary(): JSX.Element {
   const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
+  const [autoAssigning, setAutoAssigning] = useState(false)
   const [clipboardFile, setClipboardFile] = useState<{ path: string; cut: boolean; isFolder?: boolean } | null>(null)
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file?: FileEntry; folderPath?: string; folderName?: string } | null>(null)
@@ -117,6 +130,103 @@ export function FileLibrary(): JSX.Element {
     const path = await window.api.selectFolder()
     if (path) {
       navigateToPath(path)
+    }
+  }
+
+  const handleAutoAssignNumbered = async (): Promise<void> => {
+    const currentPath = useAppStore.getState().folderPath
+    if (!currentPath || autoAssigning) return
+
+    setAutoAssigning(true)
+    try {
+      // Read the folder again so a file renamed in Explorer immediately before
+      // the click participates even if fs.watch has not delivered its event yet.
+      const folder = await window.api.loadFolder(currentPath)
+      const currentState = useAppStore.getState()
+      if (currentState.folderPath !== currentPath) return
+      currentState.setFiles(folder.files)
+      currentState.setSubfolders(folder.subfolders)
+
+      const ordered = folder.files
+        .map((file) => ({ file, channel: numberedChannelOf(file) }))
+        .filter((entry): entry is { file: FileEntry; channel: number } => entry.channel !== null)
+        .sort((a, b) => a.channel - b.channel || a.file.name.localeCompare(b.file.name, 'ru', { numeric: true }))
+
+      const assignments = new Map<number, FileEntry>()
+      let duplicateCount = 0
+      for (const entry of ordered) {
+        if (assignments.has(entry.channel)) {
+          duplicateCount += 1
+          continue
+        }
+        assignments.set(entry.channel, entry.file)
+      }
+
+      if (assignments.size === 0) {
+        setCopyFeedback('Пронумерованные поддерживаемые файлы не найдены')
+        setTimeout(() => setCopyFeedback(null), 3000)
+        return
+      }
+
+      const state = useAppStore.getState()
+      const overwriteCount = [...assignments].filter(([channelNumber, file]) => {
+        const existing = state.channels[String(channelNumber)]?.file
+        return existing && existing.path !== file.path && state.liveChannel !== String(channelNumber)
+      }).length
+      if (overwriteCount > 0 && !window.confirm(
+        `В ${overwriteCount} целевых ${overwriteCount === 1 ? 'канале уже есть материал' : 'каналах уже есть материалы'}. Заменить?`
+      )) return
+
+      const highestChannel = Math.max(...assignments.keys())
+      const requiredCount = Math.ceil(highestChannel / state.channelGridSize) * state.channelGridSize
+      const channels = { ...state.channels }
+      const channelIds = [...state.channelIds]
+      for (let index = channelIds.length; index < requiredCount; index++) {
+        const id = channelIdFromIndex(index)
+        channelIds.push(id)
+        channels[id] = { file: null, slide: 1, totalSlides: 0, videoEndChannel: null, caption: '' }
+      }
+
+      let assignedCount = 0
+      let liveSkipped = 0
+      let firstAssignedChannel: number | null = null
+      for (const [channelNumber, file] of assignments) {
+        const id = String(channelNumber)
+        if (state.liveChannel === id) {
+          liveSkipped += 1
+          continue
+        }
+        const existing = channels[id]
+        channels[id] = {
+          ...existing,
+          file,
+          slide: state.slidePositions[file.path] || 1,
+          totalSlides: 0,
+          videoEndChannel: null
+        }
+        firstAssignedChannel ??= channelNumber
+        assignedCount += 1
+      }
+
+      useAppStore.setState({
+        channels,
+        channelIds,
+        currentChannelPage: firstAssignedChannel === null
+          ? state.currentChannelPage
+          : Math.floor((firstAssignedChannel - 1) / state.channelGridSize)
+      })
+
+      const details = [
+        duplicateCount > 0 ? `дубликатов пропущено: ${duplicateCount}` : '',
+        liveSkipped > 0 ? `эфирных каналов пропущено: ${liveSkipped}` : ''
+      ].filter(Boolean)
+      setCopyFeedback(`Распределено по каналам: ${assignedCount}${details.length ? ` · ${details.join(' · ')}` : ''}`)
+      setTimeout(() => setCopyFeedback(null), 4000)
+    } catch (error) {
+      setCopyFeedback(`Не удалось распределить файлы: ${String(error)}`)
+      setTimeout(() => setCopyFeedback(null), 4000)
+    } finally {
+      setAutoAssigning(false)
     }
   }
 
@@ -424,13 +534,22 @@ export function FileLibrary(): JSX.Element {
         <div className="p-3 border-b border-gray-800">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-gray-400 uppercase">Материалы</span>
-            <button
-              onClick={handleOpenFolder}
-              className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
-              title="Открыть папку"
-            >
-              📂 Обзор
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                disabled
+                className="cursor-not-allowed rounded-sm px-2 py-1 text-[10px] text-gray-600"
+                title="Сначала откройте папку с пронумерованными материалами"
+              >
+                123...-&gt;
+              </button>
+              <button
+                onClick={handleOpenFolder}
+                className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
+                title="Открыть папку"
+              >
+                📂 Обзор
+              </button>
+            </div>
           </div>
         </div>
         <CaptureSourcesPanel />
@@ -477,13 +596,24 @@ export function FileLibrary(): JSX.Element {
       <div className="p-3 border-b border-gray-800">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-bold text-gray-400 uppercase">Материалы</span>
-          <button
-            onClick={handleOpenFolder}
-            className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
-            title="Открыть папку"
-          >
-            📂 Обзор
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => void handleAutoAssignNumbered()}
+              disabled={autoAssigning}
+              className="rounded-sm border border-gray-700 bg-surface-100 px-2 py-1 text-[10px] font-semibold text-gray-300 transition-colors hover:border-accent/70 hover:bg-accent/15 hover:text-white disabled:cursor-wait disabled:opacity-50"
+              title="Распределить пронумерованные материалы по каналам"
+              aria-label="Распределить пронумерованные материалы по каналам"
+            >
+              {autoAssigning ? '...->' : '123...->'}
+            </button>
+            <button
+              onClick={handleOpenFolder}
+              className="text-[10px] text-gray-400 hover:text-white px-2 py-1 rounded-sm hover:bg-surface-100 transition-colors"
+              title="Открыть папку"
+            >
+              📂 Обзор
+            </button>
+          </div>
         </div>
         <div className="flex gap-1 bg-surface-400 rounded-lg p-0.5 mb-2">
           {FILTERS.map((f) => (

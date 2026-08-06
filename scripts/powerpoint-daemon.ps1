@@ -1399,6 +1399,39 @@ while ($true) {
 
                 Reply @{ id = $id; ok = $true; slideCount = $count; slide = $startSlide }
             }
+            'relocate' {
+                $ppt = Get-PPT
+                $sw = Resolve-ActiveSlideShowWindow $ppt
+                $targetRect = $null
+                try {
+                    if ($null -ne $req.bounds) {
+                        $bx = [int]$req.bounds.x
+                        $by = [int]$req.bounds.y
+                        $bw = [int]$req.bounds.width
+                        $bh = [int]$req.bounds.height
+                        if ($bw -gt 0 -and $bh -gt 0) { $targetRect = @($bx, $by, $bw, $bh) }
+                    }
+                } catch {}
+                $hwnd = [long]$script:activeSlideShowHwnd
+                if ($hwnd -eq 0 -and $sw) { try { $hwnd = [long]$sw.HWND } catch {} }
+                if ($hwnd -eq 0) {
+                    try {
+                        $visibleSlideShows = @([PptDaemon.Native]::FindSlideShowHwnds())
+                        if ($visibleSlideShows.Count -gt 0) {
+                            $hwnd = [long]$visibleSlideShows[$visibleSlideShows.Count - 1]
+                        }
+                    } catch {}
+                }
+                if (-not $sw -or $hwnd -eq 0 -or $null -eq $targetRect) {
+                    Reply @{ id = $id; ok = $false; error = 'no slideshow or invalid target bounds' }
+                } else {
+                    Set-SlideShowBounds $hwnd $targetRect
+                    Raise-SlideShow $hwnd $targetRect
+                    $script:activeSlideShowHwnd = $hwnd
+                    Log "relocate: slideshow HWND=$hwnd targetRect=$($targetRect -join ',')"
+                    Reply @{ id = $id; ok = $true }
+                }
+            }
             'close' {
                 Reset-SlideVideoClickState
                 $ppt = Get-PPT

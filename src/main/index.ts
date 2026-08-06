@@ -51,12 +51,16 @@ interface NativeDesktopSourceRegistryEntry {
 
 let controlWindow: BrowserWindow | null = null
 let presentationWindow: BrowserWindow | null = null
-let speakerWindow: BrowserWindow | null = null
-let infoWindow: BrowserWindow | null = null
-let speakerWindowDisplayId: number | null = null
-let infoWindowDisplayId: number | null = null
+const auxiliaryWindows = new Map<number, {
+  role: AuxiliaryWindowRole
+  window: BrowserWindow
+}>()
+const auxiliaryLastMessages = new Map<AuxiliaryWindowRole, Map<string, unknown[]>>()
 let overlayWindow: BrowserWindow | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
+let wpfTimerDisplayKey: string | null = null
+let lastWpfTimerData: Record<string, unknown> = {}
+let wpfTimerPositionRevision = 0
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
 let musicPlayerWindow: BrowserWindow | null = null
 let activeContentType: string | null = null // tracks what's on the external display
@@ -73,31 +77,20 @@ const nativeAppIconCache = new Map<string, Promise<string | undefined>>()
 const fullscreenBrowserWindows = new Map<string, { sourceKey: string; processName: string }>()
 let lastDesktopWindowInventorySignature = ''
 
-function getAuxiliaryWindow(role: AuxiliaryWindowRole): BrowserWindow | null {
-  return role === 'speaker' ? speakerWindow : infoWindow
-}
-
-function setAuxiliaryWindow(role: AuxiliaryWindowRole, win: BrowserWindow | null): void {
-  if (role === 'speaker') speakerWindow = win
-  else infoWindow = win
-}
-
-function getAuxiliaryDisplayId(role: AuxiliaryWindowRole): number | null {
-  return role === 'speaker' ? speakerWindowDisplayId : infoWindowDisplayId
-}
-
-function setAuxiliaryDisplayId(role: AuxiliaryWindowRole, displayId: number | null): void {
-  if (role === 'speaker') speakerWindowDisplayId = displayId
-  else infoWindowDisplayId = displayId
-}
-
-function closeAuxiliaryWindow(role: AuxiliaryWindowRole, notify = false): void {
-  const win = getAuxiliaryWindow(role)
-  setAuxiliaryWindow(role, null)
-  setAuxiliaryDisplayId(role, null)
-  if (win && !win.isDestroyed()) win.close()
-  if (notify && controlWindow && !controlWindow.isDestroyed()) {
-    controlWindow.webContents.send('auxiliary-window-closed', { role })
+function closeAuxiliaryWindow(
+  role: AuxiliaryWindowRole,
+  displayId?: number,
+  notify = false
+): void {
+  const entries = [...auxiliaryWindows.entries()].filter(([id, entry]) => (
+    entry.role === role && (displayId === undefined || id === displayId)
+  ))
+  for (const [id, entry] of entries) {
+    auxiliaryWindows.delete(id)
+    if (!entry.window.isDestroyed()) entry.window.close()
+    if (notify && controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('auxiliary-window-closed', { role, displayId: id })
+    }
   }
 }
 
@@ -283,7 +276,22 @@ function prewarmPresentationWindow(): void {
 }
 
 function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
-  if (wpfTimerProcess && !wpfTimerProcess.killed) return
+  const posX = displayBounds.x + displayBounds.width - 320
+  const posY = displayBounds.y + displayBounds.height - 120
+  const displayKey = `${displayBounds.x},${displayBounds.y},${displayBounds.width},${displayBounds.height}`
+  if (wpfTimerProcess && !wpfTimerProcess.killed) {
+    if (wpfTimerDisplayKey !== displayKey) {
+      wpfTimerDisplayKey = displayKey
+      wpfTimerPositionRevision++
+      sendToWpfTimer({
+        windowX: posX,
+        windowY: posY,
+        windowPositionRevision: wpfTimerPositionRevision
+      })
+      diagnosticLog('window', `timer overlay relocated bounds=${displayKey} position=${posX},${posY}`)
+    }
+    return
+  }
   // Create the data file before spawning so the script can find it.
   // НЕ затираем существующий файл — handleSetTime в Timer.tsx делает
   // syncTimer (пишет {remaining,duration,...} в файл) ДО того как
@@ -296,9 +304,15 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     }
   } catch {}
   const timerScript = scriptPath('timer-overlay.ps1')
-  const posX = displayBounds.x + displayBounds.width - 320
-  const posY = displayBounds.y + displayBounds.height - 120
-  wpfTimerProcess = spawn('powershell.exe', [
+  wpfTimerDisplayKey = displayKey
+  wpfTimerPositionRevision++
+  sendToWpfTimer({
+    windowX: posX,
+    windowY: posY,
+    windowPositionRevision: wpfTimerPositionRevision
+  })
+  diagnosticLog('window', `timer overlay spawn bounds=${displayKey} position=${posX},${posY}`)
+  const timerProcess = spawn('powershell.exe', [
     '-ExecutionPolicy', 'Bypass',
     '-NoProfile',
     '-STA',
@@ -307,22 +321,35 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     '-Y', String(posY),
     '-DataFile', wpfTimerDataFile
   ], { stdio: 'ignore' })
-  wpfTimerProcess.on('exit', () => { wpfTimerProcess = null })
+  wpfTimerProcess = timerProcess
+  timerProcess.on('exit', () => {
+    if (wpfTimerProcess === timerProcess) {
+      wpfTimerProcess = null
+      wpfTimerDisplayKey = null
+    }
+  })
 }
 
 function hideWpfTimer(): void {
+  const closingProcess = wpfTimerProcess
+  wpfTimerProcess = null
+  wpfTimerDisplayKey = null
   try { writeFileSync(wpfTimerDataFile, JSON.stringify({ cmd: 'exit' })) } catch {}
   setTimeout(() => {
-    if (wpfTimerProcess && !wpfTimerProcess.killed) {
-      wpfTimerProcess.kill()
-      wpfTimerProcess = null
+    if (closingProcess && !closingProcess.killed) {
+      closingProcess.kill()
     }
-    try { unlinkSync(wpfTimerDataFile) } catch {}
+    if (!wpfTimerProcess) {
+      try { unlinkSync(wpfTimerDataFile) } catch {}
+    }
   }, 500)
 }
 
 function sendToWpfTimer(data: unknown): void {
-  try { writeFileSync(wpfTimerDataFile, JSON.stringify(data)) } catch {}
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    lastWpfTimerData = { ...lastWpfTimerData, ...(data as Record<string, unknown>) }
+  }
+  try { writeFileSync(wpfTimerDataFile, JSON.stringify(lastWpfTimerData)) } catch {}
 }
 
 
@@ -465,11 +492,12 @@ function createWindows(): void {
     role: AuxiliaryWindowRole,
     displayId: number
   ) => {
-    if (role !== 'speaker' && role !== 'info') {
+    if (!(['mirror', 'speaker', 'info', 'timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) {
       return { success: false, error: 'Unknown auxiliary display role' }
     }
     const primary = screen.getPrimaryDisplay()
-    const target = screen.getAllDisplays().find((display) => display.id === displayId)
+    const displays = screen.getAllDisplays()
+    const target = displays.find((display) => display.id === displayId)
     if (!target || target.id === primary.id) {
       return {
         success: false,
@@ -477,23 +505,18 @@ function createWindows(): void {
       }
     }
 
-    let win = getAuxiliaryWindow(role)
-    if (
-      win &&
-      !win.isDestroyed() &&
-      getAuxiliaryDisplayId(role) !== target.id
-    ) {
-      closeAuxiliaryWindow(role)
-      win = null
+    const existing = auxiliaryWindows.get(target.id)
+    if (existing && (existing.role !== role || existing.window.isDestroyed())) {
+      closeAuxiliaryWindow(existing.role, target.id)
     }
+
+    let win = auxiliaryWindows.get(target.id)?.window ?? null
     if (!win || win.isDestroyed()) {
       win = createAuxiliaryWindow(target, role)
-      setAuxiliaryWindow(role, win)
-      setAuxiliaryDisplayId(role, target.id)
+      auxiliaryWindows.set(target.id, { role, window: win })
       win.on('closed', () => {
-        if (getAuxiliaryWindow(role) === win) {
-          setAuxiliaryWindow(role, null)
-          setAuxiliaryDisplayId(role, null)
+        if (auxiliaryWindows.get(target.id)?.window === win) {
+          auxiliaryWindows.delete(target.id)
         }
       })
     }
@@ -506,6 +529,9 @@ function createWindows(): void {
     if (win.isDestroyed()) {
       return { success: false, error: 'Окно дисплея было закрыто во время запуска' }
     }
+    for (const [channel, args] of auxiliaryLastMessages.get(role) ?? []) {
+      win.webContents.send(channel, ...args)
+    }
     win.setBounds(target.bounds)
     if (!win.isVisible()) win.showInactive()
     win.setAlwaysOnTop(false)
@@ -513,9 +539,13 @@ function createWindows(): void {
     return { success: true }
   })
 
-  ipcMain.handle('close-auxiliary-window', (_event, role: AuxiliaryWindowRole) => {
-    if (role !== 'speaker' && role !== 'info') return
-    closeAuxiliaryWindow(role)
+  ipcMain.handle('close-auxiliary-window', (
+    _event,
+    role: AuxiliaryWindowRole,
+    displayId?: number
+  ) => {
+    if (!(['mirror', 'speaker', 'info', 'timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) return
+    closeAuxiliaryWindow(role, displayId)
   })
 
   ipcMain.on('send-to-auxiliary', (
@@ -524,8 +554,43 @@ function createWindows(): void {
     channel: string,
     ...args: unknown[]
   ) => {
-    const win = getAuxiliaryWindow(role)
-    if (win && !win.isDestroyed()) win.webContents.send(channel, ...args)
+    let roleMessages = auxiliaryLastMessages.get(role)
+    if (!roleMessages) {
+      roleMessages = new Map()
+      auxiliaryLastMessages.set(role, roleMessages)
+    }
+    roleMessages.set(channel, args)
+    for (const entry of auxiliaryWindows.values()) {
+      if (entry.role === role && !entry.window.isDestroyed()) {
+        entry.window.webContents.send(channel, ...args)
+      }
+    }
+  })
+
+  ipcMain.handle('get-screen-capture-source', async (
+    event,
+    displayId: number
+  ): Promise<string | null> => {
+    const trustedMirror = [...auxiliaryWindows.values()].some((entry) => (
+      entry.role === 'mirror' &&
+      !entry.window.isDestroyed() &&
+      entry.window.webContents.id === event.sender.id
+    ))
+    if (!trustedMirror) {
+      diagnosticLog('display', `mirror source denied wc=${event.sender.id}`)
+      return null
+    }
+    const displays = screen.getAllDisplays()
+    const target = displays.find((display) => display.id === displayId)
+    if (!target) return null
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1, height: 1 }
+    })
+    const source = sources.find((item) => item.display_id === String(target.id)) ||
+      sources[displays.indexOf(target)] ||
+      null
+    return source?.id ?? null
   })
 
   controlWindow.on('closed', () => {
@@ -534,8 +599,9 @@ function createWindows(): void {
       presentationWindow.close()
     }
     presentationWindow = null
-    closeAuxiliaryWindow('speaker')
-    closeAuxiliaryWindow('info')
+    for (const role of ['mirror', 'speaker', 'info', 'timer', 'backdrop'] as AuxiliaryWindowRole[]) {
+      closeAuxiliaryWindow(role)
+    }
     hideWpfTimer()
     closeAllExternalFiles()
     // Restore taskbar visibility on exit
@@ -627,6 +693,38 @@ function createWindows(): void {
     diagnosticLog('window', 'presentation output opacity=1 (warm reveal)')
     if (!behindPowerPoint) raiseOverlay('after-show')
 
+  })
+
+  // Reposition the persistent Chromium output without changing visibility or
+  // z-order. The renderer stays warm underneath PowerPoint for seamless
+  // switching, but the operator can change the primary program display while
+  // it is parked. PDF/video must be moved to that same display before their
+  // next frame is prepared, otherwise PowerPoint and Chromium diverge onto two
+  // different monitors.
+  ipcMain.handle('place-presentation-window', (_event, displayId?: number): boolean => {
+    if (!presentationWindow || presentationWindow.isDestroyed()) return false
+
+    const displays = screen.getAllDisplays()
+    const primaryDisplay = screen.getPrimaryDisplay()
+    const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
+    const targetDisplay = displayId
+      ? displays.find((display) => display.id === displayId) || externalDisplay || primaryDisplay
+      : externalDisplay || primaryDisplay
+    const currentBounds = presentationWindow.getBounds()
+    const nextBounds = targetDisplay.bounds
+    const changed =
+      currentBounds.x !== nextBounds.x || currentBounds.y !== nextBounds.y ||
+      currentBounds.width !== nextBounds.width || currentBounds.height !== nextBounds.height
+
+    if (changed) {
+      presentationWindow.setBounds(nextBounds)
+      diagnosticLog(
+        'window',
+        `presentation output relocated display=${targetDisplay.id} ` +
+        `from=${JSON.stringify(currentBounds)} to=${JSON.stringify(nextBounds)}`
+      )
+    }
+    return true
   })
 
   ipcMain.handle('close-presentation-window', () => {
@@ -960,10 +1058,14 @@ function createWindows(): void {
     event,
     sourceKey: string
   ): Promise<{ success: boolean; source?: DesktopCaptureSourceInfo; error?: string }> => {
+    const isInformationDisplay = [...auxiliaryWindows.values()].some((entry) => (
+      entry.role === 'info' &&
+      !entry.window.isDestroyed() &&
+      entry.window.webContents.id === event.sender.id
+    ))
     if (
-      !controlWindow ||
-      controlWindow.isDestroyed() ||
-      event.sender.id !== controlWindow.webContents.id ||
+      ((!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) &&
+        !isInformationDisplay) ||
       typeof sourceKey !== 'string' ||
       sourceKey.length > 200
     ) {
@@ -1298,7 +1400,11 @@ function createWindows(): void {
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
     if (targetDisplay) {
-      showWpfTimer(targetDisplay.bounds)
+      // WPF/SetWindowPos consume physical pixels. Electron display bounds are
+      // DIP coordinates, so passing them directly moves the timer to the
+      // wrong monitor in mixed 100%/150% layouts.
+      const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+      showWpfTimer(physicalBounds)
     }
   })
 
@@ -1517,13 +1623,11 @@ function createWindows(): void {
   screen.on('display-removed', () => {
     sendDisplays()
     const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
-    if (speakerWindowDisplayId !== null && !connectedIds.has(speakerWindowDisplayId)) {
-      diagnosticLog('display', `speaker display removed id=${speakerWindowDisplayId}`)
-      closeAuxiliaryWindow('speaker', true)
-    }
-    if (infoWindowDisplayId !== null && !connectedIds.has(infoWindowDisplayId)) {
-      diagnosticLog('display', `information display removed id=${infoWindowDisplayId}`)
-      closeAuxiliaryWindow('info', true)
+    for (const [displayId, entry] of [...auxiliaryWindows.entries()]) {
+      if (!connectedIds.has(displayId)) {
+        diagnosticLog('display', `auxiliary display removed role=${entry.role} id=${displayId}`)
+        closeAuxiliaryWindow(entry.role, displayId, true)
+      }
     }
     if (
       screen.getAllDisplays().length < 2 &&
@@ -1762,17 +1866,37 @@ app.whenReady().then(() => {
     }
   }
 
+  const isAuxiliaryRendererUrl = (url: string): boolean => {
+    try {
+      const current = new URL(url)
+      const devUrl = process.env['ELECTRON_RENDERER_URL']
+      const expected = devUrl
+        ? new URL(`${devUrl.replace(/\/$/, '')}/auxiliary.html`)
+        : new URL(pathToFileURL(join(__dirname, '../renderer/auxiliary.html')).href)
+      return current.protocol === expected.protocol && current.pathname === expected.pathname
+    } catch {
+      return false
+    }
+  }
+
   const isTrustedMediaRequester = (contents: Electron.WebContents | null): boolean => {
     if (!contents || contents.isDestroyed()) return false
-    return (
+    const isPresentation = (
       contents.id === presentationWindow?.webContents.id &&
       isPresentationRendererUrl(contents.getURL())
     )
+    const isTrustedAuxiliaryCapture = [...auxiliaryWindows.values()].some((entry) => (
+      (entry.role === 'mirror' || entry.role === 'info') &&
+      !entry.window.isDestroyed() &&
+      entry.window.webContents.id === contents.id
+    )) && isAuxiliaryRendererUrl(contents.getURL())
+    return isPresentation || isTrustedAuxiliaryCapture
   }
 
   // Default-deny remains in place for every permission except media requested
-  // by the exact local presentation renderer. It is the sole long-lived owner
-  // of UVC/USB capture devices; the control renderer never opens camera/mic.
+  // by the exact local presentation renderer and the auxiliary renderers that
+  // need video capture (program mirrors and information displays). The control
+  // renderer itself never opens a camera or microphone.
   session.defaultSession.setPermissionCheckHandler((contents, permission) => {
     const allowed = permission === 'media' && isTrustedMediaRequester(contents)
     diagnosticLog('capture', `permission check=${permission} allowed=${allowed} wc=${contents?.id ?? '-'}`)
