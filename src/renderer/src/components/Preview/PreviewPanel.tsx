@@ -9,6 +9,11 @@ import {
   finishNavigationTransition
 } from '../../navigation-transition'
 import * as pdfjsLib from 'pdfjs-dist'
+import {
+  getPdfLiveTargetSize,
+  makePdfLiveCacheKey,
+  type PdfLivePrewarmRequest
+} from '../../pdf-live-cache'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -80,7 +85,7 @@ function nativeFileToEntry(filePath: string): FileEntry | null {
 }
 
 type PptxCacheResult = { success: boolean; slideCount: number; error?: string }
-type PptxCacheStatus = 'loading' | 'ready' | 'error'
+type ChannelCacheStatus = 'loading' | 'ready' | 'error'
 
 // One background preparation job per physical PPTX. The main process also
 // serializes PowerPoint exports, while this renderer-side map prevents the
@@ -184,7 +189,7 @@ export function PreviewPanel(): JSX.Element {
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
     clearSlidePosition,
     addChannelPage, removeChannelPage, setCurrentChannelPage, setChannelGridSize,
-    pptxThumbnailsMap, pptxSlidesMap, setOverlayState
+    pptxThumbnailsMap, pptxSlidesMap, displays, selectedDisplayId, setOverlayState
   } = useAppStore()
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
@@ -201,13 +206,29 @@ export function PreviewPanel(): JSX.Element {
     channelId: ChannelId
     message: string | null
   } | null>(null)
-  const [pptxCacheStatuses, setPptxCacheStatuses] = useState<Record<string, PptxCacheStatus>>({})
+  const [pptxCacheStatuses, setPptxCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
+  const [pdfCacheStatuses, setPdfCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
+  const pdfCacheRequestKeysRef = useRef<Record<string, string>>({})
 
   const pptxChannelPaths = [...new Set(channelIds
     .map((id) => channels[id]?.file)
     .filter((file): file is FileEntry => file?.type === 'presentation')
     .map((file) => file.path))]
   const pptxChannelPathKey = pptxChannelPaths.join('\u0000')
+
+  const pdfChannelFiles = [...new Map(channelIds
+    .map((id) => channels[id])
+    .filter((channel): channel is ChannelState => channel?.file?.type === 'pdf')
+    .map((channel) => [channel.file!.path, {
+      filePath: channel.file!.path,
+      anchorPage: Math.max(1, channel.slide || 1)
+    }])).values()]
+  const pdfChannelPathKey = pdfChannelFiles.map((file) => file.filePath).join('\u0000')
+  const programDisplay = displays.find((display) => display.id === selectedDisplayId) ||
+    displays.find((display) => !display.isPrimary) ||
+    displays[0]
+  const pdfTargetSize = programDisplay ? getPdfLiveTargetSize(programDisplay) : null
+  const pdfTargetKey = pdfTargetSize ? `${pdfTargetSize.width}x${pdfTargetSize.height}` : 'none'
 
   useEffect(() => {
     const activePaths = new Set(pptxChannelPaths)
@@ -235,6 +256,85 @@ export function PreviewPanel(): JSX.Element {
   // Map changes are included so a configuration load that clears caches but
   // restores the same channel paths still starts a fresh preparation job.
   }, [pptxChannelPathKey, pptxSlidesMap])
+
+  useEffect(() => window.api.on('pdf-channel-cache-status', (...args: unknown[]) => {
+    const update = args[0] as {
+      filePath?: string
+      cacheKey?: string
+      status?: ChannelCacheStatus
+      totalPages?: number
+    }
+    if (!update?.filePath || !update.cacheKey || !update.status) return
+    const state = useAppStore.getState()
+    const pathIsStillInChannel = state.channelIds.some((id) => (
+      state.channels[id]?.file?.type === 'pdf' &&
+      state.channels[id]?.file?.path === update.filePath
+    ))
+    if (!pathIsStillInChannel) return
+
+    const expectedKey = pdfCacheRequestKeysRef.current[update.filePath]
+    window.api.dbgLog(
+      `PDF channel cache status: status=${update.status} keyMatch=${expectedKey === update.cacheKey} file=${update.filePath}`
+    )
+    if (update.status === 'ready') {
+      // A display refresh can replace the expected key while an already-valid
+      // job is finishing. The frames are still cached by file/content/size;
+      // never leave the current PDF displaying an endless "Кэширование…".
+      setPdfCacheStatuses((current) => {
+        const next = { ...current }
+        delete next[update.filePath as string]
+        return next
+      })
+    } else {
+      // Loading/error from an older display size must not overwrite the state
+      // of a newer request. Only successful completion is safe across keys.
+      if (expectedKey !== update.cacheKey) return
+      setPdfCacheStatuses((current) => ({
+        ...current,
+        [update.filePath as string]: update.status as ChannelCacheStatus
+      }))
+    }
+    if (update.status === 'ready' && Number.isFinite(update.totalPages)) {
+      for (const id of state.channelIds) {
+        const channel = state.channels[id]
+        if (channel?.file?.type === 'pdf' && channel.file.path === update.filePath) {
+          state.setChannelTotalSlides(id, Math.max(1, Math.round(update.totalPages as number)))
+        }
+      }
+    }
+  }), [])
+
+  useEffect(() => {
+    const activePaths = new Set(pdfChannelFiles.map((file) => file.filePath))
+    pdfCacheRequestKeysRef.current = Object.fromEntries(
+      Object.entries(pdfCacheRequestKeysRef.current).filter(([path]) => activePaths.has(path))
+    )
+    setPdfCacheStatuses((current) => Object.fromEntries(
+      Object.entries(current).filter(([path]) => activePaths.has(path))
+    ))
+    if (!pdfTargetSize) return
+
+    for (const file of pdfChannelFiles) {
+      const cacheKey = makePdfLiveCacheKey(
+        file.filePath,
+        pdfTargetSize.width,
+        pdfTargetSize.height
+      )
+      pdfCacheRequestKeysRef.current[file.filePath] = cacheKey
+      setPdfCacheStatuses((current) => ({
+        ...current,
+        [file.filePath]: 'loading'
+      }))
+      const request: PdfLivePrewarmRequest = {
+        filePath: file.filePath,
+        cacheKey,
+        targetWidth: pdfTargetSize.width,
+        targetHeight: pdfTargetSize.height,
+        anchorPage: file.anchorPage
+      }
+      window.api.sendToPresentation('prewarm-pdf', request)
+    }
+  }, [pdfChannelPathKey, pdfTargetKey])
 
   useEffect(() => {
     const cancelCurrentTake = (event: Event): void => {
@@ -1498,9 +1598,11 @@ export function PreviewPanel(): JSX.Element {
               onTake={() => handleTake(id)}
               onClear={() => handleClear(id)}
               pptxThumbnails={channel.file ? pptxThumbnailsMap[channel.file.path] || [] : []}
-              pptxCacheStatus={channel.file?.type === 'presentation'
+              cacheStatus={channel.file?.type === 'presentation'
                 ? pptxCacheStatuses[channel.file.path]
-                : undefined}
+                : channel.file?.type === 'pdf'
+                  ? pdfCacheStatuses[channel.file.path]
+                  : undefined}
               videoEndChannelOptions={channelIds.filter((targetId) => (
                 targetId !== id && Boolean(channels[targetId]?.file)
               ))}
@@ -1622,7 +1724,7 @@ interface ChannelPanelProps {
   onTake: () => void
   onClear: () => void
   pptxThumbnails: string[]
-  pptxCacheStatus?: PptxCacheStatus
+  cacheStatus?: ChannelCacheStatus
   videoEndChannelOptions: ChannelId[]
   compact: boolean
 }
@@ -1630,7 +1732,7 @@ interface ChannelPanelProps {
 function ChannelPanel({
   label, channel, isLive, isSelected, isTaking, openingMessage,
   onDrop, onSlideChange, onSetTotalSlides, onVideoEndChannelChange, onCaptionChange,
-  onSelect, onTake, onClear, pptxThumbnails, pptxCacheStatus, videoEndChannelOptions, compact
+  onSelect, onTake, onClear, pptxThumbnails, cacheStatus, videoEndChannelOptions, compact
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [slideInput, setSlideInput] = useState('')
@@ -1847,19 +1949,25 @@ function ChannelPanel({
             </span>
           </div>
         )}
-        {!isTaking && channel.file?.type === 'presentation' && pptxCacheStatus === 'loading' && (
+        {!isTaking &&
+          (channel.file?.type === 'presentation' || channel.file?.type === 'pdf') &&
+          cacheStatus === 'loading' && (
           <div
             className={`absolute right-2 top-2 z-10 flex items-center rounded-sm bg-blue-700/90 text-white shadow ${compact ? 'gap-1 px-1 py-0.5 text-[8px]' : 'gap-1.5 px-2 py-1 text-[9px]'}`}
-            title="PDM заранее подготавливает превью и полноразмерные слайды"
+            title={channel.file.type === 'pdf'
+              ? 'PDM заранее подготавливает полноразмерные страницы PDF для эфира'
+              : 'PDM заранее подготавливает превью и полноразмерные слайды'}
           >
             <span className={`${compact ? 'h-2.5 w-2.5' : 'h-3 w-3'} rounded-full border border-blue-200 border-t-transparent animate-spin`} />
             Кэширование…
           </div>
         )}
-        {!isTaking && channel.file?.type === 'presentation' && pptxCacheStatus === 'error' && (
+        {!isTaking &&
+          (channel.file?.type === 'presentation' || channel.file?.type === 'pdf') &&
+          cacheStatus === 'error' && (
           <div
             className={`absolute right-2 top-2 z-10 rounded-sm bg-red-800/90 text-white shadow ${compact ? 'px-1 py-0.5 text-[8px]' : 'px-2 py-1 text-[9px]'}`}
-            title="Не удалось заранее подготовить презентацию. При запуске PDM попробует открыть её обычным способом."
+            title={`Не удалось заранее подготовить ${channel.file.type === 'pdf' ? 'PDF' : 'презентацию'}. При запуске PDM попробует открыть материал обычным способом.`}
           >
             Кэш не готов
           </div>

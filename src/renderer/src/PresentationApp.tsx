@@ -6,6 +6,10 @@ import {
   CaptureHub,
   type CaptureTakeRequest
 } from './components/PresentationView/CaptureHub'
+import {
+  ensurePdfLiveCache,
+  type PdfLivePrewarmRequest
+} from './pdf-live-cache'
 
 interface ContentPayload {
   type: 'presentation' | 'pdf' | 'video' | 'capture' | 'backdrop' | 'other'
@@ -268,6 +272,71 @@ export function PresentationApp(): JSX.Element {
   }, [])
 
   useEffect(() => {
+    const unsubPdfPrewarm = window.api.on('prewarm-pdf', (...args: unknown[]) => {
+      const raw = args[0] as Partial<PdfLivePrewarmRequest> | undefined
+      if (
+        !raw ||
+        typeof raw.filePath !== 'string' ||
+        typeof raw.cacheKey !== 'string' ||
+        !Number.isFinite(raw.targetWidth) ||
+        !Number.isFinite(raw.targetHeight)
+      ) return
+
+      const request: PdfLivePrewarmRequest = {
+        filePath: raw.filePath,
+        cacheKey: raw.cacheKey,
+        targetWidth: Math.max(64, Math.round(raw.targetWidth as number)),
+        targetHeight: Math.max(64, Math.round(raw.targetHeight as number)),
+        anchorPage: Number.isFinite(raw.anchorPage)
+          ? Math.max(1, Math.round(raw.anchorPage as number))
+          : 1
+      }
+      window.api.sendToControl('pdf-channel-cache-status', {
+        filePath: request.filePath,
+        cacheKey: request.cacheKey,
+        status: 'loading'
+      })
+      let completionSent = false
+      const sendCompletion = (result: {
+        success: boolean
+        totalPages: number
+        cachedPages: number
+        error?: string
+      }): void => {
+        if (completionSent) return
+        completionSent = true
+        window.api.dbgLog(
+          `PDF channel cache: SEND status=${result.success ? 'ready' : 'error'} ` +
+          `cached=${result.cachedPages}/${result.totalPages} file=${request.filePath}`
+        )
+        window.api.sendToControl('pdf-channel-cache-status', {
+          filePath: request.filePath,
+          cacheKey: request.cacheKey,
+          status: result.success ? 'ready' : 'error',
+          totalPages: result.totalPages,
+          cachedPages: result.cachedPages,
+          error: result.error
+        })
+      }
+      void ensurePdfLiveCache(request, (cachedPages, totalPages) => {
+        // Notify the operator window from the rendering loop itself. PDF.js
+        // promise cleanup has proved capable of delaying the outer `.then`,
+        // while the exact-size frames are already fully prepared.
+        if (totalPages > 0 && cachedPages >= totalPages) {
+          sendCompletion({ success: true, totalPages, cachedPages })
+        }
+      }).then((result) => {
+        sendCompletion(result)
+      }).catch((error) => {
+        sendCompletion({
+          success: false,
+          totalPages: 0,
+          cachedPages: 0,
+          error: String(error)
+        })
+      })
+    })
+
     const unsubLoad = window.api.on('load-content', (...args: unknown[]) => {
       const payload = args[0] as ContentPayload
       window.api.dbgLog(`PresApp: load-content received type=${payload.type}`)
@@ -339,6 +408,7 @@ export function PresentationApp(): JSX.Element {
 
     window.api.signalReady()
     return () => {
+      unsubPdfPrewarm()
       unsubLoad()
       unsubStop()
       unsubCaptureAudioLive()

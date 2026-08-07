@@ -1718,6 +1718,20 @@ function createWindows(): void {
     if (channel === 'load-content' && args[0]) {
       activeContentType = (args[0] as { type: string }).type
     }
+    if (channel === 'prewarm-pdf') {
+      // Channel assignment can happen while the hidden output renderer is
+      // still starting. Queue this one background-only command until its
+      // listener exists instead of silently losing the cache request.
+      if (!presentationWindow || presentationWindow.isDestroyed()) {
+        prewarmPresentationWindow()
+      }
+      const target = presentationWindow
+      void waitForPresentationWindowReady().then(() => {
+        if (!target || target.isDestroyed() || presentationWindow !== target) return
+        target.webContents.send(channel, ...args)
+      })
+      return
+    }
     if (presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindow.webContents.send(channel, ...args)
     }
