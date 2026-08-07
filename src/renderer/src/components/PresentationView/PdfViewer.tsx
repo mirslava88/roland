@@ -6,7 +6,6 @@ import {
   warmPdfiumDocument,
   type PdfiumRenderLane
 } from '../../pdfium-renderer'
-import { PDF_LIVE_SAFE_INSET_CSS_PX } from '../../pdf-live-cache'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -652,17 +651,8 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
   }, [currentPage, totalPages])
 
   return (
-    <div className="w-full h-full flex items-center justify-center bg-black">
-      <div
-        ref={containerRef}
-        className="flex items-center justify-center"
-        style={{
-          width: `calc(100% - ${PDF_LIVE_SAFE_INSET_CSS_PX * 2}px)`,
-          height: `calc(100% - ${PDF_LIVE_SAFE_INSET_CSS_PX * 2}px)`
-        }}
-      >
-        <canvas ref={canvasRef} />
-      </div>
+    <div ref={containerRef} className="w-full h-full flex items-center justify-center bg-black">
+      <canvas ref={canvasRef} />
     </div>
   )
 }

@@ -492,7 +492,7 @@ function createWindows(): void {
     role: AuxiliaryWindowRole,
     displayId: number
   ) => {
-    if (!(['mirror', 'speaker', 'info', 'timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) {
+    if (!(['mirror', 'speaker', 'info', 'timer', 'event-timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) {
       return { success: false, error: 'Unknown auxiliary display role' }
     }
     const primary = screen.getPrimaryDisplay()
@@ -544,7 +544,7 @@ function createWindows(): void {
     role: AuxiliaryWindowRole,
     displayId?: number
   ) => {
-    if (!(['mirror', 'speaker', 'info', 'timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) return
+    if (!(['mirror', 'speaker', 'info', 'timer', 'event-timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) return
     closeAuxiliaryWindow(role, displayId)
   })
 
@@ -599,7 +599,7 @@ function createWindows(): void {
       presentationWindow.close()
     }
     presentationWindow = null
-    for (const role of ['mirror', 'speaker', 'info', 'timer', 'backdrop'] as AuxiliaryWindowRole[]) {
+    for (const role of ['mirror', 'speaker', 'info', 'timer', 'event-timer', 'backdrop'] as AuxiliaryWindowRole[]) {
       closeAuxiliaryWindow(role)
     }
     hideWpfTimer()

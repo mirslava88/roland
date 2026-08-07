@@ -41,13 +41,13 @@ const api = {
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
     ipcRenderer.invoke('place-presentation-window', displayId),
 
-  openAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop', displayId: number) =>
+  openAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop', displayId: number) =>
     ipcRenderer.invoke('open-auxiliary-window', role, displayId),
 
-  closeAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop', displayId?: number) =>
+  closeAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop', displayId?: number) =>
     ipcRenderer.invoke('close-auxiliary-window', role, displayId),
 
-  sendToAuxiliary: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop', channel: string, ...args: unknown[]): void => {
+  sendToAuxiliary: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop', channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-auxiliary', role, channel, ...args)
   },
 
@@ -57,6 +57,12 @@ const api = {
   closePresentationWindow: () => ipcRenderer.invoke('close-presentation-window'),
 
   checkPowerPoint: (): Promise<boolean> => ipcRenderer.invoke('check-powerpoint'),
+
+  preparePowerPoint: (filePath: string) =>
+    ipcRenderer.invoke('prepare-powerpoint', filePath),
+
+  syncPreparedPowerPoints: (filePaths: string[]) =>
+    ipcRenderer.invoke('sync-prepared-powerpoints', filePaths),
 
   launchPowerPoint: (filePath: string, displayId?: number, startSlide?: number) =>
     ipcRenderer.invoke('launch-powerpoint', filePath, displayId, startSlide),

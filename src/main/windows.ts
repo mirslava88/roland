@@ -1,7 +1,7 @@
 import { BrowserWindow, Display, shell, screen } from 'electron'
 import { join } from 'path'
 
-export type AuxiliaryWindowRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop'
+export type AuxiliaryWindowRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop'
 
 export function createControlWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -101,6 +101,8 @@ export function createAuxiliaryWindow(
       ? 'PDM Speaker Display'
       : role === 'timer'
         ? 'PDM Timer Display'
+        : role === 'event-timer'
+          ? 'PDM Event Timer Display'
         : role === 'backdrop'
           ? 'PDM Backdrop Display'
           : 'PDM Information Display'

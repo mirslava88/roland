@@ -381,6 +381,7 @@ $script:pptOriginalEditorWasVisible = $false
 $script:pptOriginalEditorRect = $null
 $script:pptRegistryWindowSnapshot = $null
 $script:managedPresentationKeys = @{}
+$script:preparedPresentationKeys = @{}
 
 function Restore-MediaForeground {
     $hwnd = [long]$script:mediaReturnForegroundHwnd
@@ -642,12 +643,35 @@ function Unmark-ManagedPresentation($presentation) {
     }
 }
 
+function Mark-PreparedPresentation($presentation) {
+    $key = Get-PresentationKey $presentation
+    if (-not [string]::IsNullOrEmpty($key)) {
+        $script:preparedPresentationKeys[$key] = $true
+        Log "prepared presentation registered '$key'"
+    }
+}
+
+function Test-PreparedPresentation($presentation) {
+    $key = Get-PresentationKey $presentation
+    return (-not [string]::IsNullOrEmpty($key)) -and $script:preparedPresentationKeys.ContainsKey($key)
+}
+
+function Unmark-PreparedPresentation($presentation) {
+    $key = Get-PresentationKey $presentation
+    if (-not [string]::IsNullOrEmpty($key)) {
+        $script:preparedPresentationKeys.Remove($key)
+    }
+}
+
 function Close-ManagedPresentation($presentation) {
     if (-not $presentation) { return }
     $key = Get-PresentationKey $presentation
     try { $presentation.Saved = -1 } catch {}
     try { $presentation.Close() } catch { Log "managed presentation close failed: $($_.Exception.Message)" }
-    if (-not [string]::IsNullOrEmpty($key)) { $script:managedPresentationKeys.Remove($key) }
+    if (-not [string]::IsNullOrEmpty($key)) {
+        $script:managedPresentationKeys.Remove($key)
+        $script:preparedPresentationKeys.Remove($key)
+    }
 }
 
 function Reset-PowerPointSessionTracking {
@@ -661,6 +685,7 @@ function Reset-PowerPointSessionTracking {
     $script:pptOriginalEditorRect = $null
     $script:pptRegistryWindowSnapshot = $null
     $script:managedPresentationKeys = @{}
+    $script:preparedPresentationKeys = @{}
 }
 
 function Initialize-PowerPointSession($ppt, [bool]$ownedByRoland) {
@@ -882,6 +907,106 @@ while ($true) {
         $cmd  = [string]$req.cmd
 
         switch ($cmd) {
+            'prepare' {
+                $prepareStarted = [DateTime]::UtcNow
+                $preparePath = [string]$req.path
+                if ([string]::IsNullOrWhiteSpace($preparePath) -or
+                    -not (Test-Path -LiteralPath $preparePath -PathType Leaf)) {
+                    throw "Presentation file not found: $preparePath"
+                }
+
+                Log "prepare: BEGIN file='$preparePath'"
+                $ppt = Get-OrCreatePPT
+                # A PDM-owned PowerPoint instance can remain completely hidden.
+                # If the user already had PowerPoint open, never minimize or hide
+                # their editor just because a channel is being prepared.
+                if ($script:pptOwnedByRoland) {
+                    try { $ppt.WindowState = 2 } catch {}
+                    try { $ppt.Visible = -1 } catch {}
+                    Hide-PPEditor $ppt
+                }
+
+                $pres = $null
+                try {
+                    for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
+                        $candidate = $ppt.Presentations($i)
+                        try {
+                            if ($candidate.FullName -ieq $preparePath) {
+                                $pres = $candidate
+                                break
+                            }
+                        } catch {}
+                    }
+                } catch {}
+
+                $openedByPdm = $false
+                if (-not $pres) {
+                    try {
+                        # ReadOnly=true, Untitled=false, WithWindow=false.
+                        $pres = $ppt.Presentations.Open($preparePath, -1, 0, 0)
+                    } catch {
+                        if (-not $script:pptOwnedByRoland) {
+                            throw "Hidden PowerPoint preparation failed without changing the user's editor: $($_.Exception.Message)"
+                        }
+                        Log "prepare: hidden open failed, retrying in hidden PDM instance: $($_.Exception.Message)"
+                        $pres = $ppt.Presentations.Open($preparePath)
+                        Hide-PPEditor $ppt
+                    }
+                    $openedByPdm = $true
+                    Mark-ManagedPresentation $pres
+                }
+
+                # Only PDM-owned documents participate in automatic release.
+                # A presentation that the user had already opened is reused for
+                # TAKE, but is never closed or otherwise owned by PDM.
+                if ($openedByPdm -or (Test-ManagedPresentation $pres)) {
+                    Mark-PreparedPresentation $pres
+                }
+                $count = [int]$pres.Slides.Count
+                if ($count -lt 1) { throw 'Presentation contains no slides' }
+                if ($script:pptOwnedByRoland) { Hide-PPEditor $ppt }
+                $prepareMs = [int]([DateTime]::UtcNow - $prepareStarted).TotalMilliseconds
+                Log "prepare: READY file='$preparePath' slides=$count dur=${prepareMs}ms managed=$(Test-ManagedPresentation $pres)"
+                Reply @{ id = $id; ok = $true; slideCount = $count }
+            }
+            'sync-prepared' {
+                $desired = @{}
+                try {
+                    foreach ($requestedPath in @($req.paths)) {
+                        $key = ([string]$requestedPath).ToLowerInvariant()
+                        if (-not [string]::IsNullOrWhiteSpace($key)) { $desired[$key] = $true }
+                    }
+                } catch {}
+
+                $ppt = Get-PPT
+                $released = 0
+                if ($ppt) {
+                    for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
+                        $candidate = $ppt.Presentations($i)
+                        if (-not (Test-PreparedPresentation $candidate)) { continue }
+                        $key = Get-PresentationKey $candidate
+                        if ($desired.ContainsKey($key)) { continue }
+
+                        $isActive = $false
+                        try {
+                            $isActive = (-not [string]::IsNullOrEmpty($script:activePresentationPath)) -and
+                                ([string]$candidate.FullName -ieq $script:activePresentationPath)
+                        } catch {}
+                        Unmark-PreparedPresentation $candidate
+                        if ($isActive) {
+                            Log "sync-prepared: deferred active release '$key'"
+                        } elseif (Test-ManagedPresentation $candidate) {
+                            Close-ManagedPresentation $candidate
+                            $released++
+                            Log "sync-prepared: released '$key'"
+                        }
+                    }
+                    if ($script:pptOwnedByRoland -and -not (Resolve-ActiveSlideShowWindow $ppt)) {
+                        try { $ppt.Visible = 0 } catch {}
+                    }
+                }
+                Reply @{ id = $id; ok = $true; released = $released }
+            }
             'open' {
                 Reset-SlideVideoClickState
                 $script:activeSlideShowHwnd = 0
@@ -1309,7 +1434,9 @@ while ($true) {
                 }
                 foreach ($p in $oldPres) {
                     try {
-                        if ($p.FullName -ine $pres.FullName -and (Test-ManagedPresentation $p)) {
+                        if ($p.FullName -ine $pres.FullName -and
+                            (Test-ManagedPresentation $p) -and
+                            -not (Test-PreparedPresentation $p)) {
                             Close-ManagedPresentation $p
                         }
                     } catch {}
@@ -1441,10 +1568,14 @@ while ($true) {
                     try {
                         if ($script:activePresentation) {
                             if (Test-ManagedPresentation $script:activePresentation) {
-                                Close-ManagedPresentation $script:activePresentation
+                                if (-not (Test-PreparedPresentation $script:activePresentation)) {
+                                    Close-ManagedPresentation $script:activePresentation
+                                }
                             }
                         } elseif ($ppt.ActivePresentation -and (Test-ManagedPresentation $ppt.ActivePresentation)) {
-                            Close-ManagedPresentation $ppt.ActivePresentation
+                            if (-not (Test-PreparedPresentation $ppt.ActivePresentation)) {
+                                Close-ManagedPresentation $ppt.ActivePresentation
+                            }
                         }
                     } catch {}
                     # Visible=1 был выставлен в 'open' для Run() слайдшоу. После
@@ -1681,9 +1812,11 @@ while ($true) {
                 New-Item -ItemType Directory -Path $outputDir -Force -ErrorAction Stop | Out-Null
 
                 $ppt = Get-OrCreatePPT
-                try { $ppt.WindowState = 2 } catch {}
-                $ppt.Visible = -1
-                Hide-PPEditor $ppt
+                if ($script:pptOwnedByRoland) {
+                    try { $ppt.WindowState = 2 } catch {}
+                    $ppt.Visible = -1
+                    Hide-PPEditor $ppt
+                }
 
                 $exportPres = $null
                 $openedForExport = $false
@@ -1705,6 +1838,9 @@ while ($true) {
                             # ReadOnly=true, Untitled=false, WithWindow=false.
                             $exportPres = $ppt.Presentations.Open($exportPath, -1, 0, 0)
                         } catch {
+                            if (-not $script:pptOwnedByRoland) {
+                                throw "Hidden export failed without changing the user's PowerPoint window: $($_.Exception.Message)"
+                            }
                             Log "export: hidden open failed, retrying windowed: $($_.Exception.Message)"
                             $exportPres = $ppt.Presentations.Open($exportPath)
                             Hide-PPEditor $ppt
@@ -1760,7 +1896,9 @@ while ($true) {
                         # The collection can say zero during a live slideshow;
                         # hiding PowerPoint then makes a rapid channel switch
                         # appear black. Trust the cached direct window first.
-                        if (-not (Resolve-ActiveSlideShowWindow $ppt)) { $ppt.Visible = 0 }
+                        if ($script:pptOwnedByRoland -and -not (Resolve-ActiveSlideShowWindow $ppt)) {
+                            $ppt.Visible = 0
+                        }
                     } catch {}
                 }
                 $exportMs = [int]([DateTime]::UtcNow - $exportStarted).TotalMilliseconds

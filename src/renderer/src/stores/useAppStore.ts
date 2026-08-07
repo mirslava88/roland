@@ -75,6 +75,7 @@ function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
 export type ContentType = 'presentation' | 'pdf' | 'video' | 'capture' | 'other' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
 export type ChannelId = string
+export type ChannelCacheStatus = 'loading' | 'ready' | 'error'
 
 export type OverlayState =
   | { kind: 'hidden' }
@@ -122,8 +123,72 @@ export interface VideoPlaybackState {
 }
 
 export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 'capture'
-export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer'
+export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer' | 'event-timer'
 export type DisplayAssignments = Record<string, DisplayOutputMode>
+
+export type EventTimerCentralMode = 'current' | 'timer' | 'to-start' | 'to-end'
+export type EventTimerHeadings = Record<EventTimerCentralMode, string>
+
+export interface EventTimerVisibility {
+  clock: boolean
+  schedule: boolean
+  heading: boolean
+  eventName: boolean
+  remaining: boolean
+  cost: boolean
+}
+
+export interface EventTimerState {
+  eventName: string
+  headings: EventTimerHeadings
+  startTime: string
+  endTime: string
+  costPerMinute: number
+  overtimeCostTotal: number
+  backgroundMode: 'solid' | 'gradient'
+  backgroundColor: string
+  backgroundGradientColor: string
+  backgroundGradientAngle: number
+  backgroundImage: string | null
+  centralTimeMode: EventTimerCentralMode
+  visibility: EventTimerVisibility
+  duration: number
+  remaining: number
+  running: boolean
+  live: boolean
+}
+
+export const DEFAULT_EVENT_TIMER_STATE: EventTimerState = {
+  eventName: 'Оперативное совещание',
+  headings: {
+    current: 'Текущее время:',
+    timer: 'Таймер:',
+    'to-start': 'До начала мероприятия:',
+    'to-end': 'До конца мероприятия:'
+  },
+  startTime: '14:30',
+  endTime: '16:00',
+  costPerMinute: 0,
+  overtimeCostTotal: 0,
+  backgroundMode: 'gradient',
+  backgroundColor: '#18c56e',
+  backgroundGradientColor: '#19b9d1',
+  backgroundGradientAngle: 115,
+  backgroundImage: null,
+  centralTimeMode: 'to-end',
+  visibility: {
+    clock: true,
+    schedule: true,
+    heading: true,
+    eventName: true,
+    remaining: true,
+    cost: true
+  },
+  duration: 90 * 60,
+  remaining: 90 * 60,
+  running: false,
+  live: false
+}
 
 export interface InformationMediaConfig {
   type: InformationMediaType
@@ -157,6 +222,7 @@ interface AppState {
   pptxThumbnails: string[]
   pptxThumbnailsMap: Record<string, string[]>
   pptxSlidesMap: Record<string, string[]>
+  pptxCacheStatuses: Record<string, ChannelCacheStatus>
   displays: DisplayInfo[]
   displayAssignments: DisplayAssignments
   displayNames: Record<string, string>
@@ -165,6 +231,8 @@ interface AppState {
   backdropImage: string | null
   globalHookEnabled: boolean
   channelBoundaryNavigationEnabled: boolean
+  eventTimer: EventTimerState
+  eventTimerOutput: EventTimerState | null
 
   overlayState: OverlayState
   setOverlayState: (state: OverlayState) => void
@@ -198,6 +266,9 @@ interface AppState {
   removeCaptureSource: (sourceId: string) => void
 
   setPptxThumbnails: (thumbnails: string[]) => void
+  setPptxCacheStatuses: (
+    update: Record<string, ChannelCacheStatus> | ((current: Record<string, ChannelCacheStatus>) => Record<string, ChannelCacheStatus>)
+  ) => void
   setFolderPath: (path: string | null) => void
   setRootFolderPath: (path: string | null) => void
   setSubfolders: (subfolders: SubfolderEntry[]) => void
@@ -219,6 +290,8 @@ interface AppState {
   setBackdropImage: (path: string | null) => void
   setGlobalHookEnabled: (enabled: boolean) => void
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
+  setEventTimer: (update: Partial<EventTimerState>) => void
+  setEventTimerOutput: (timer: EventTimerState | null) => void
 
   // Doc previews (Word/Excel -> temp PDF path)
   docPreviewsMap: Record<string, string>
@@ -288,6 +361,7 @@ export const useAppStore = create<AppState>()(persist(
   pptxThumbnails: [],
   pptxThumbnailsMap: {},
   pptxSlidesMap: {},
+  pptxCacheStatuses: {},
   displays: [],
   displayAssignments: {},
   displayNames: {},
@@ -296,6 +370,12 @@ export const useAppStore = create<AppState>()(persist(
   backdropImage: null,
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,
+  eventTimer: {
+    ...DEFAULT_EVENT_TIMER_STATE,
+    headings: { ...DEFAULT_EVENT_TIMER_STATE.headings },
+    visibility: { ...DEFAULT_EVENT_TIMER_STATE.visibility }
+  },
+  eventTimerOutput: null,
 
   overlayState: { kind: 'hidden' } as OverlayState,
 
@@ -308,6 +388,10 @@ export const useAppStore = create<AppState>()(persist(
   captureSources: [],
 
   setSelectedChannel: (ch) => set({ selectedChannel: ch }),
+
+  setPptxCacheStatuses: (update) => set((state) => ({
+    pptxCacheStatuses: typeof update === 'function' ? update(state.pptxCacheStatuses) : update
+  })),
 
   setChannelFile: (ch, file) => {
     const { channels, slidePositions } = get()
@@ -666,6 +750,23 @@ export const useAppStore = create<AppState>()(persist(
   setBackdropImage: (path) => set({ backdropImage: path }),
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
   setChannelBoundaryNavigationEnabled: (enabled) => set({ channelBoundaryNavigationEnabled: enabled }),
+  setEventTimer: (update) => set((state) => ({
+    eventTimer: {
+      ...state.eventTimer,
+      ...update,
+      headings: update.headings
+        ? { ...state.eventTimer.headings, ...update.headings }
+        : state.eventTimer.headings,
+      visibility: update.visibility
+        ? { ...state.eventTimer.visibility, ...update.visibility }
+        : state.eventTimer.visibility
+    }
+  })),
+  setEventTimerOutput: (timer) => set({
+    eventTimerOutput: timer
+      ? { ...timer, headings: { ...timer.headings }, visibility: { ...timer.visibility } }
+      : null
+  }),
 
   setOverlayState: (state) => set({ overlayState: state }),
 

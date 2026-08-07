@@ -107,47 +107,58 @@ function applyPptxSlideCount(filePath: string, slideCount: number): void {
 }
 
 function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
-  const state = useAppStore.getState()
-  const fullSlides = state.pptxSlidesMap[filePath]
-  if (fullSlides?.length) {
-    if (!state.pptxThumbnailsMap[filePath]?.length) {
-      useAppStore.setState({
-        pptxThumbnailsMap: { ...state.pptxThumbnailsMap, [filePath]: fullSlides }
-      })
-    }
-    applyPptxSlideCount(filePath, fullSlides.length)
-    return Promise.resolve({ success: true, slideCount: fullSlides.length })
-  }
-
   const existing = pptxChannelCacheJobs.get(filePath)
   if (existing) return existing
 
   const job = (async (): Promise<PptxCacheResult> => {
     window.api.dbgLog(`PPTX channel cache: BEGIN file=${filePath}`)
     try {
-      // Fast low-resolution export first: the operator gets a channel preview
-      // and slide count as early as possible. Full slides follow immediately
-      // for the speaker display and seamless transitions.
-      const current = useAppStore.getState()
-      if (!current.pptxThumbnailsMap[filePath]?.length) {
+      const beforeNativePrepare = useAppStore.getState()
+      const isStillAssigned = beforeNativePrepare.channelIds.some((id) => (
+        beforeNativePrepare.channels[id]?.file?.type === 'presentation' &&
+        beforeNativePrepare.channels[id]?.file?.path === filePath
+      ))
+      if (!isStillAssigned) {
+        return { success: false, slideCount: 0, error: 'Presentation was removed from channels' }
+      }
+
+      // Opening the native Presentation object is the expensive part of the
+      // first TAKE. Keep it hidden in PowerPoint as soon as the file is placed
+      // in a channel, before producing the remaining full-size cache.
+      const prepared = await window.api.preparePowerPoint(filePath)
+      if (!prepared.success) {
+        throw new Error(prepared.error || 'PowerPoint did not prepare the presentation')
+      }
+      if (prepared.slideCount) applyPptxSlideCount(filePath, prepared.slideCount)
+
+      const stateAfterPrepare = useAppStore.getState()
+      const cachedSlides = stateAfterPrepare.pptxSlidesMap[filePath]
+      if (cachedSlides?.length) {
+        if (!stateAfterPrepare.pptxThumbnailsMap[filePath]?.length) {
+          useAppStore.setState({
+            pptxThumbnailsMap: { ...stateAfterPrepare.pptxThumbnailsMap, [filePath]: cachedSlides }
+          })
+        }
+        const slideCount = prepared.slideCount || cachedSlides.length
+        applyPptxSlideCount(filePath, slideCount)
+        window.api.dbgLog(`PPTX channel cache: READY native=true file=${filePath} slides=${slideCount}`)
+        return { success: true, slideCount }
+      }
+
+      // With the native deck already open, generate the lightweight channel
+      // preview and then the full-size frames without reopening PowerPoint.
+      if (!stateAfterPrepare.pptxThumbnailsMap[filePath]?.length) {
         const thumbnails = await window.api.generatePptxThumbnails(filePath)
         if (thumbnails.success && thumbnails.thumbnails?.length) {
-          const latest = useAppStore.getState()
+          const thumbnailState = useAppStore.getState()
           useAppStore.setState({
             pptxThumbnailsMap: {
-              ...latest.pptxThumbnailsMap,
+              ...thumbnailState.pptxThumbnailsMap,
               [filePath]: thumbnails.thumbnails
             }
           })
           applyPptxSlideCount(filePath, thumbnails.slideCount || thumbnails.thumbnails.length)
         }
-      }
-
-      const latest = useAppStore.getState()
-      const cachedSlides = latest.pptxSlidesMap[filePath]
-      if (cachedSlides?.length) {
-        applyPptxSlideCount(filePath, cachedSlides.length)
-        return { success: true, slideCount: cachedSlides.length }
       }
 
       const slides = await window.api.generatePptxSlides(filePath)
@@ -166,7 +177,7 @@ function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
       })
       const slideCount = slides.slideCount || slides.slides.length
       applyPptxSlideCount(filePath, slideCount)
-      window.api.dbgLog(`PPTX channel cache: READY file=${filePath} slides=${slideCount}`)
+      window.api.dbgLog(`PPTX channel cache: READY native=true file=${filePath} slides=${slideCount}`)
       return { success: true, slideCount }
     } catch (error) {
       window.api.dbgLog(`PPTX channel cache: ERROR file=${filePath} error=${String(error)}`)
@@ -189,7 +200,8 @@ export function PreviewPanel(): JSX.Element {
     setActiveFile, setCurrentSlide, setTotalSlides, setLiveChannel,
     clearSlidePosition,
     addChannelPage, removeChannelPage, setCurrentChannelPage, setChannelGridSize,
-    pptxThumbnailsMap, pptxSlidesMap, displays, selectedDisplayId, setOverlayState
+    pptxThumbnailsMap, pptxSlidesMap, pptxCacheStatuses, setPptxCacheStatuses,
+    displays, selectedDisplayId, setOverlayState
   } = useAppStore()
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
@@ -206,7 +218,6 @@ export function PreviewPanel(): JSX.Element {
     channelId: ChannelId
     message: string | null
   } | null>(null)
-  const [pptxCacheStatuses, setPptxCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
   const [pdfCacheStatuses, setPdfCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
   const pdfCacheRequestKeysRef = useRef<Record<string, string>>({})
 
@@ -232,16 +243,14 @@ export function PreviewPanel(): JSX.Element {
 
   useEffect(() => {
     const activePaths = new Set(pptxChannelPaths)
-    setPptxCacheStatuses((current) => Object.fromEntries(
-      Object.entries(current).filter(([path]) => activePaths.has(path))
-    ))
+    setPptxCacheStatuses((current) => {
+      const filtered = Object.fromEntries(
+        Object.entries(current).filter(([path]) => activePaths.has(path))
+      )
+      return Object.keys(filtered).length === Object.keys(current).length ? current : filtered
+    })
     for (const filePath of pptxChannelPaths) {
-      if (useAppStore.getState().pptxSlidesMap[filePath]?.length) {
-        setPptxCacheStatuses((current) => current[filePath] === 'ready'
-          ? current
-          : { ...current, [filePath]: 'ready' })
-        continue
-      }
+      if (useAppStore.getState().pptxCacheStatuses[filePath] !== undefined) continue
       setPptxCacheStatuses((current) => ({ ...current, [filePath]: 'loading' }))
       void ensurePptxChannelCache(filePath).then((result) => {
         if (!useAppStore.getState().channelIds.some((id) => (
@@ -253,9 +262,11 @@ export function PreviewPanel(): JSX.Element {
         }))
       })
     }
-  // Map changes are included so a configuration load that clears caches but
-  // restores the same channel paths still starts a fresh preparation job.
-  }, [pptxChannelPathKey, pptxSlidesMap])
+  }, [pptxChannelPathKey, pptxCacheStatuses])
+
+  useEffect(() => {
+    void window.api.syncPreparedPowerPoints(pptxChannelPaths)
+  }, [pptxChannelPathKey])
 
   useEffect(() => window.api.on('pdf-channel-cache-status', (...args: unknown[]) => {
     const update = args[0] as {
@@ -484,11 +495,12 @@ export function PreviewPanel(): JSX.Element {
     if (freshState.activeFile?.type === 'presentation') {
       hasPowerPointStartedRef.current = true
     }
-    const isFirstPowerPointStart =
+    const isUnpreparedPowerPointStart =
       file.type === 'presentation' &&
       !isSameFilePptx &&
-      !hasPowerPointStartedRef.current
-    const message = isFirstPowerPointStart
+      !hasPowerPointStartedRef.current &&
+      pptxCacheStatuses[file.path] !== 'ready'
+    const message = isUnpreparedPowerPointStart
       ? 'Ожидайте, презентация открывается...'
       : file.type === 'video'
         ? 'Ожидайте, видеоролик открывается...'
@@ -1807,14 +1819,22 @@ function ChannelPanel({
 
     onDrop(file)
     if (isLive) {
-      // Auto-take when dropping into the live channel
-      setTimeout(() => onTake(), 50)
+      // A file dropped into the live channel is still taken automatically, but
+      // a PPTX must first finish the same native preparation as an offline
+      // channel. Otherwise this path could bypass the disabled TAKE buttons.
+      if (file.type === 'presentation') {
+        void ensurePptxChannelCache(file.path).then(() => onTake())
+      } else {
+        setTimeout(() => onTake(), 50)
+      }
     }
   }
 
   const { isPresentationWindowOpen, activeFile: storeActiveFile } = useAppStore()
   const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation' || (storeActiveFile?.type === 'other' && !storeActiveFile.isImage)
   const showSelected = isSelected && !isOutputActive
+  const pptxIsPreparing = channel.file?.type === 'presentation' &&
+    cacheStatus !== 'ready' && cacheStatus !== 'error'
 
   return (
     <div
@@ -1827,8 +1847,8 @@ function ChannelPanel({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onClick={onSelect}
-      onDoubleClick={isTaking ? undefined : onTake}
-      aria-busy={isTaking}
+      onDoubleClick={isTaking || pptxIsPreparing ? undefined : onTake}
+      aria-busy={isTaking || pptxIsPreparing}
     >
       {/* Header. min-w-0 на flex-контейнере + shrink-0 на фиксированных
           элементах (dot, label, ✕). Имя файла с flex-1 + min-w-0 + truncate
@@ -1927,7 +1947,6 @@ function ChannelPanel({
           <SlideRenderer
             file={channel.file}
             slideNum={channel.slide}
-            isLive={isLive}
             pptxThumbnails={pptxThumbnails}
             onTotalSlides={onSetTotalSlides}
           />
@@ -1956,7 +1975,7 @@ function ChannelPanel({
             className={`absolute right-2 top-2 z-10 flex items-center rounded-sm bg-blue-700/90 text-white shadow ${compact ? 'gap-1 px-1 py-0.5 text-[8px]' : 'gap-1.5 px-2 py-1 text-[9px]'}`}
             title={channel.file.type === 'pdf'
               ? 'PDM заранее подготавливает полноразмерные страницы PDF для эфира'
-              : 'PDM заранее подготавливает превью и полноразмерные слайды'}
+               : 'PDM заранее открывает презентацию в PowerPoint и готовит слайды к мгновенному выводу'}
           >
             <span className={`${compact ? 'h-2.5 w-2.5' : 'h-3 w-3'} rounded-full border border-blue-200 border-t-transparent animate-spin`} />
             Кэширование…
@@ -2045,7 +2064,8 @@ function ChannelPanel({
           <button
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
-            disabled={isTaking}
+            disabled={isTaking || pptxIsPreparing}
+            title={pptxIsPreparing ? 'Презентация ещё подготавливается в PowerPoint' : undefined}
             className={`absolute ${compact ? 'right-1 text-[8px] px-1.5 py-0.5' : 'right-2 text-[9px] px-2 py-1'} bg-red-600 hover:bg-red-500 text-white font-bold rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600`}
           >
             В эфир
@@ -2093,14 +2113,13 @@ function ChannelPanel({
   )
 }
 
-function SlideRenderer({ file, slideNum, isLive, pptxThumbnails, onTotalSlides }: {
+function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
   file: FileEntry
   slideNum: number
-  isLive: boolean
   pptxThumbnails: string[]
   onTotalSlides: (total: number) => void
 }): JSX.Element {
-  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} isLive={isLive} onTotalSlides={onTotalSlides} />
+  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
   if (file.type === 'video') return <VideoPreview file={file} />
   if (file.type === 'capture') {
@@ -2112,8 +2131,8 @@ function SlideRenderer({ file, slideNum, isLive, pptxThumbnails, onTotalSlides }
   return <div className="text-gray-500 text-xs">Unsupported</div>
 }
 
-function PdfPreview({ file, currentSlide, isLive, onTotalSlides }: {
-  file: FileEntry; currentSlide: number; isLive: boolean; onTotalSlides: (t: number) => void
+function PdfPreview({ file, currentSlide, onTotalSlides }: {
+  file: FileEntry; currentSlide: number; onTotalSlides: (t: number) => void
 }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2170,19 +2189,13 @@ function PdfPreview({ file, currentSlide, isLive, onTotalSlides }: {
   }, [pdf])
 
   useEffect(() => {
-    if (isLive) {
-      renderGenerationRef.current += 1
-      renderTaskRef.current?.cancel()
-      renderTaskRef.current = null
-      return
-    }
     if (pdf && currentSlide >= 1 && currentSlide <= pdf.numPages) void renderPage(currentSlide)
     return () => {
       renderGenerationRef.current += 1
       renderTaskRef.current?.cancel()
       renderTaskRef.current = null
     }
-  }, [currentSlide, isLive, pdf, renderPage])
+  }, [currentSlide, pdf, renderPage])
 
   return (
     <div ref={containerRef} className="w-full h-full flex items-center justify-center">

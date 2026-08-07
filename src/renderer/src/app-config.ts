@@ -1,12 +1,14 @@
 import { warmPdfiumDocument } from './pdfium-renderer'
 import {
   channelIdFromIndex,
+  DEFAULT_EVENT_TIMER_STATE,
   useAppStore,
   type ChannelGridSize,
   type ChannelId,
   type ChannelState,
   type DisplayAssignments,
   type DisplayOutputMode,
+  type EventTimerState,
   type FilterType,
   type InformationMediaConfig
 } from './stores/useAppStore'
@@ -102,6 +104,7 @@ interface PdmConfigV1 {
     overtimeTextColor: string
     textOpacity: number
   }
+  eventTimer: EventTimerState
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -255,6 +258,8 @@ function collectConfigPaths(raw: Record<string, unknown>): string[] {
   const timer = isRecord(raw.timer) ? raw.timer : {}
   addPath(timer.soundEnd)
   addPath(timer.soundWarning)
+  const eventTimer = isRecord(raw.eventTimer) ? raw.eventTimer : {}
+  addPath(eventTimer.backgroundImage)
   return [...paths]
 }
 
@@ -342,7 +347,7 @@ function parseDisplayOutputs(value: unknown): SavedDisplayOutput[] {
     if (!isRecord(item)) continue
     const id = safeInteger(item.id, Number.NaN, -2147483648, 2147483647)
     const mode = String(item.mode)
-    if (!Number.isFinite(id) || !['off', 'program', 'speaker', 'information', 'timer'].includes(mode)) continue
+    if (!Number.isFinite(id) || !['off', 'program', 'speaker', 'information', 'timer', 'event-timer'].includes(mode)) continue
     outputs.push({
       id,
       label: safeString(item.label, 512) || `Монитор ${index + 1}`,
@@ -540,6 +545,13 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
       warningTextColor: state.timerWarningTextColor,
       overtimeTextColor: state.timerOvertimeTextColor,
       textOpacity: state.timerTextOpacity
+    },
+    eventTimer: {
+      ...state.eventTimer,
+      headings: { ...state.eventTimer.headings },
+      visibility: { ...state.eventTimer.visibility },
+      running: false,
+      live: false
     }
   }
 
@@ -700,6 +712,94 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   const duration = safeInteger(rawTimer.duration, 0, 0, 7 * 24 * 60 * 60)
   const remaining = safeInteger(rawTimer.remaining, duration, -7 * 24 * 60 * 60, 7 * 24 * 60 * 60)
 
+  const rawEventTimer = isRecord(raw.eventTimer) ? raw.eventTimer : {}
+  const rawEventVisibility = isRecord(rawEventTimer.visibility) ? rawEventTimer.visibility : {}
+  const eventBackgroundImage = safeString(rawEventTimer.backgroundImage)
+  const restoredEventBackground = eventBackgroundImage && pathExists(eventBackgroundImage, validation)
+    ? eventBackgroundImage
+    : null
+  if (eventBackgroundImage && !restoredEventBackground) {
+    warnMissing(warnings, 'Фон таймера мероприятия', eventBackgroundImage)
+  }
+  const eventDuration = safeInteger(
+    rawEventTimer.duration,
+    DEFAULT_EVENT_TIMER_STATE.duration,
+    0,
+    7 * 24 * 60 * 60
+  )
+  const restoredCentralTimeMode: EventTimerState['centralTimeMode'] = (
+    ['current', 'timer', 'to-start', 'to-end'].includes(String(rawEventTimer.centralTimeMode))
+      ? rawEventTimer.centralTimeMode
+      : rawEventTimer.countdownMode === 'to-start'
+        ? 'to-start'
+        : 'to-end'
+  ) as EventTimerState['centralTimeMode']
+  const rawEventHeadings = isRecord(rawEventTimer.headings) ? rawEventTimer.headings : {}
+  const restoreEventHeading = (mode: EventTimerState['centralTimeMode']): string => {
+    const value = safeString(rawEventHeadings[mode], 120)
+    if (!value) return DEFAULT_EVENT_TIMER_STATE.headings[mode]
+    if (mode === 'to-start' && value === 'До начала доклада:') {
+      return DEFAULT_EVENT_TIMER_STATE.headings['to-start']
+    }
+    if (mode === 'to-end' && value === 'До конца доклада:') {
+      return DEFAULT_EVENT_TIMER_STATE.headings['to-end']
+    }
+    return value
+  }
+  const restoredEventHeadings = {
+    current: restoreEventHeading('current'),
+    timer: restoreEventHeading('timer'),
+    'to-start': restoreEventHeading('to-start'),
+    'to-end': restoreEventHeading('to-end')
+  }
+  const legacyEventHeading = safeString(rawEventTimer.heading, 120)
+  if (legacyEventHeading && Object.keys(rawEventHeadings).length === 0) {
+    restoredEventHeadings[restoredCentralTimeMode] =
+      restoredCentralTimeMode === 'to-start' && legacyEventHeading === 'До начала доклада:'
+        ? DEFAULT_EVENT_TIMER_STATE.headings['to-start']
+        : restoredCentralTimeMode === 'to-end' && legacyEventHeading === 'До конца доклада:'
+          ? DEFAULT_EVENT_TIMER_STATE.headings['to-end']
+          : legacyEventHeading
+  }
+  const eventTimer: EventTimerState = {
+    eventName: safeString(rawEventTimer.eventName, 120) || DEFAULT_EVENT_TIMER_STATE.eventName,
+    headings: restoredEventHeadings,
+    startTime: /^\d{2}:\d{2}$/.test(String(rawEventTimer.startTime))
+      ? String(rawEventTimer.startTime)
+      : DEFAULT_EVENT_TIMER_STATE.startTime,
+    endTime: /^\d{2}:\d{2}$/.test(String(rawEventTimer.endTime))
+      ? String(rawEventTimer.endTime)
+      : DEFAULT_EVENT_TIMER_STATE.endTime,
+    costPerMinute: safeNumber(rawEventTimer.costPerMinute, 0, 0, 1000000000),
+    overtimeCostTotal: safeNumber(rawEventTimer.overtimeCostTotal, 0, 0, 1000000000000),
+    backgroundMode: rawEventTimer.backgroundMode === 'solid' ? 'solid' : 'gradient',
+    backgroundColor: safeColor(rawEventTimer.backgroundColor, DEFAULT_EVENT_TIMER_STATE.backgroundColor),
+    backgroundGradientColor: safeColor(
+      rawEventTimer.backgroundGradientColor,
+      DEFAULT_EVENT_TIMER_STATE.backgroundGradientColor
+    ),
+    backgroundGradientAngle: safeNumber(
+      rawEventTimer.backgroundGradientAngle,
+      DEFAULT_EVENT_TIMER_STATE.backgroundGradientAngle,
+      0,
+      360
+    ),
+    backgroundImage: restoredEventBackground,
+    centralTimeMode: restoredCentralTimeMode,
+    visibility: {
+      clock: safeBoolean(rawEventVisibility.clock, true),
+      schedule: safeBoolean(rawEventVisibility.schedule, true),
+      heading: safeBoolean(rawEventVisibility.heading, true),
+      eventName: safeBoolean(rawEventVisibility.eventName, true),
+      remaining: safeBoolean(rawEventVisibility.remaining, true),
+      cost: safeBoolean(rawEventVisibility.cost, true)
+    },
+    duration: eventDuration,
+    remaining: safeInteger(rawEventTimer.remaining, eventDuration, -7 * 24 * 60 * 60, 7 * 24 * 60 * 60),
+    running: false,
+    live: false
+  }
+
   let files: FileEntry[] = []
   let subfolders: Array<{ name: string; path: string }> = []
   if (folderPath) {
@@ -756,6 +856,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     pptxThumbnails: [],
     pptxThumbnailsMap: {},
     pptxSlidesMap: {},
+    pptxCacheStatuses: {},
     displayAssignments: displays.assignments,
     displayNames: displays.displayNames,
     selectedDisplayId: displays.selectedDisplayId,
@@ -792,7 +893,9 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     timerTextColor: safeColor(rawTimer.textColor, '#ffffff'),
     timerWarningTextColor: safeColor(rawTimer.warningTextColor, '#facc15'),
     timerOvertimeTextColor: safeColor(rawTimer.overtimeTextColor, '#ef4444'),
-    timerTextOpacity: safeNumber(rawTimer.textOpacity, 1, 0.1, 1)
+    timerTextOpacity: safeNumber(rawTimer.textOpacity, 1, 0.1, 1),
+    eventTimer,
+    eventTimerOutput: null
   })
 
   await window.api.watchFolder(folderPath).catch(() => undefined)

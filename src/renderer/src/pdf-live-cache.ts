@@ -6,10 +6,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString()
 
-// A small safe area protects PDF edges on displays/projectors with overscan.
-// PowerPoint, video and every auxiliary output keep their existing sizing.
-export const PDF_LIVE_SAFE_INSET_CSS_PX = 16
-
 export interface PdfLivePrewarmRequest {
   filePath: string
   cacheKey: string
@@ -30,11 +26,9 @@ let pdfLivePrewarmQueue: Promise<void> = Promise.resolve()
 
 export function getPdfLiveTargetSize(display: DisplayInfo): { width: number; height: number } {
   const scaleFactor = Math.max(1, display.scaleFactor || 1)
-  const cssWidth = Math.max(64, display.bounds.width - PDF_LIVE_SAFE_INSET_CSS_PX * 2)
-  const cssHeight = Math.max(64, display.bounds.height - PDF_LIVE_SAFE_INSET_CSS_PX * 2)
   return {
-    width: Math.max(64, Math.round(cssWidth * scaleFactor)),
-    height: Math.max(64, Math.round(cssHeight * scaleFactor))
+    width: Math.max(64, Math.round(display.bounds.width * scaleFactor)),
+    height: Math.max(64, Math.round(display.bounds.height * scaleFactor))
   }
 }
 

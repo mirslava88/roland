@@ -555,7 +555,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
         <header className="shrink-0 px-5 py-3 border-b border-gray-700 flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-white">Экраны PDM</h2>
-            <p className="text-[10px] text-gray-500 mt-0.5">Назначение мониторов, суфлёр, мультимедиа и таймер</p>
+            <p className="text-[10px] text-gray-500 mt-0.5">Назначение мониторов, суфлёр, мультимедиа и таймеры</p>
           </div>
           <button onClick={onClose} className="text-lg text-gray-500 hover:text-white">✕</button>
         </header>
@@ -616,6 +616,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
                     <option value="speaker">Суфлёр</option>
                     <option value="information">Информационный экран</option>
                     <option value="timer">Таймер</option>
+                    <option value="event-timer">Таймер мероприятия</option>
                   </select>
                   {programDescription && (
                     <span className={`mt-2 flex items-center justify-between gap-2 text-[10px] ${

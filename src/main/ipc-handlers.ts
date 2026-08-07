@@ -512,6 +512,48 @@ export function registerIpcHandlers(
     return false
   })
 
+  ipcMain.handle('prepare-powerpoint', async (_event, filePath: string) => {
+    if (process.platform !== 'win32') {
+      return { success: false, error: 'Unsupported platform' }
+    }
+    const started = Date.now()
+    try {
+      diagnosticLog('pptx-preload', `prepare request file=${filePath}`)
+      const result = await pptDaemon.send('prepare', { path: filePath }, 120000)
+      diagnosticLog(
+        'pptx-preload',
+        `prepare result file=${filePath} ok=${result.ok} slides=${result.slideCount ?? 0} dur=${Date.now() - started}ms error=${result.error ?? '-'}`
+      )
+      return result.ok
+        ? { success: true, slideCount: result.slideCount ?? 0 }
+        : { success: false, error: result.error || 'PowerPoint preparation failed' }
+    } catch (error) {
+      diagnosticLog(
+        'pptx-preload',
+        `prepare failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`
+      )
+      return { success: false, error: String(error) }
+    }
+  })
+
+  ipcMain.handle('sync-prepared-powerpoints', async (_event, filePaths: unknown) => {
+    if (process.platform !== 'win32') return { success: true }
+    const paths = Array.isArray(filePaths)
+      ? filePaths.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : []
+    try {
+      const result = await pptDaemon.send('sync-prepared', { paths }, 60000)
+      diagnosticLog(
+        'pptx-preload',
+        `sync prepared count=${paths.length} ok=${result.ok} error=${result.error ?? '-'}`
+      )
+      return { success: result.ok, error: result.error }
+    } catch (error) {
+      diagnosticLog('pptx-preload', `sync prepared failed ${formatDiagnosticError(error)}`)
+      return { success: false, error: String(error) }
+    }
+  })
+
   ipcMain.handle(
     'launch-powerpoint',
     async (event, filePath: string, displayId?: number, startSlide?: number) => {

@@ -77,7 +77,7 @@ interface DisplayInfo {
   scaleFactor: number
 }
 
-type AuxiliaryDisplayRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'backdrop'
+type AuxiliaryDisplayRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop'
 
 interface ProgramDirectContent {
   type: 'pdf' | 'video' | 'image' | 'backdrop'
@@ -132,6 +132,33 @@ interface TimerDisplayState {
   textOpacity: number
 }
 
+interface EventTimerDisplayState {
+  eventName: string
+  headings: Record<'current' | 'timer' | 'to-start' | 'to-end', string>
+  startTime: string
+  endTime: string
+  costPerMinute: number
+  overtimeCostTotal: number
+  backgroundMode: 'solid' | 'gradient'
+  backgroundColor: string
+  backgroundGradientColor: string
+  backgroundGradientAngle: number
+  backgroundImage: string | null
+  centralTimeMode: 'current' | 'timer' | 'to-start' | 'to-end'
+  visibility: {
+    clock: boolean
+    schedule: boolean
+    heading: boolean
+    eventName: boolean
+    remaining: boolean
+    cost: boolean
+  }
+  duration: number
+  remaining: number
+  running: boolean
+  live: boolean
+}
+
 interface MusicState {
   playing: boolean
   currentIndex: number
@@ -181,6 +208,8 @@ interface Api {
   getScreenCaptureSource(displayId: number): Promise<string | null>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
+  preparePowerPoint(filePath: string): Promise<{ success: boolean; slideCount?: number; error?: string }>
+  syncPreparedPowerPoints(filePaths: string[]): Promise<{ success: boolean; error?: string }>
   launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
   powerpointCommand(
     command: string,

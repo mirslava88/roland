@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
+import { EventTimer } from '../EventTimer/EventTimer'
 import { MusicPlayer } from './MusicPlayer'
 import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
@@ -24,6 +25,7 @@ export function Toolbar(): JSX.Element {
     displayAssignments,
     channels,
     selectedChannel,
+    pptxCacheStatuses,
     setOverlayState
   } = useAppStore()
 
@@ -31,7 +33,11 @@ export function Toolbar(): JSX.Element {
 
   const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
   const selectedChannelHasContent = selectedChannel !== null && Boolean(channels[selectedChannel]?.file)
-  const canTogglePresentation = isOutputActive || selectedChannelHasContent
+  const selectedChannelFile = selectedChannel !== null ? channels[selectedChannel]?.file : null
+  const selectedPptxIsPreparing = selectedChannelFile?.type === 'presentation' &&
+    pptxCacheStatuses[selectedChannelFile.path] !== 'ready' &&
+    pptxCacheStatuses[selectedChannelFile.path] !== 'error'
+  const canTogglePresentation = isOutputActive || (selectedChannelHasContent && !selectedPptxIsPreparing)
   const assignedModes = Object.values(displayAssignments)
   const hasAdditionalScreenOutput = assignedModes.some((mode) => mode !== 'program') ||
     assignedModes.filter((mode) => mode === 'program').length > 1
@@ -173,6 +179,8 @@ export function Toolbar(): JSX.Element {
 
       <Timer />
 
+      <EventTimer />
+
       <MusicPlayer />
 
       <VideoPlayer />
@@ -226,11 +234,17 @@ export function Toolbar(): JSX.Element {
         className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
           isOutputActive
             ? 'bg-red-600/80 hover:bg-red-600 text-white'
-            : selectedChannelHasContent
+            : selectedChannelHasContent && !selectedPptxIsPreparing
               ? 'bg-red-600 hover:bg-red-500 text-white'
               : 'bg-gray-700 text-gray-500 cursor-not-allowed'
         }`}
-        title={!isOutputActive && !selectedChannelHasContent ? 'Выберите канал с контентом' : undefined}
+        title={!isOutputActive
+          ? selectedPptxIsPreparing
+            ? 'PowerPoint подготавливает презентацию к эфиру'
+            : !selectedChannelHasContent
+              ? 'Выберите канал с контентом'
+              : undefined
+          : undefined}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         {isOutputActive ? '⏹ Выйти из эфира' : '▶ В эфир'}

@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { mediaUrl } from './media'
 import { renderPdfiumPageToCanvas } from './pdfium-renderer'
+import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 
 const requestedRole = new URLSearchParams(window.location.search).get('role')
 const requestedDisplayId = Number(new URLSearchParams(window.location.search).get('displayId'))
 const auxiliaryDisplayId = Number.isFinite(requestedDisplayId) ? requestedDisplayId : null
+const MIRROR_PDF_SAFE_WIDTH_RATIO = 0.96
+const MIRROR_PDF_MAX_HORIZONTAL_STRETCH = 1.08
 const role: AuxiliaryDisplayRole = requestedRole === 'mirror' ||
   requestedRole === 'info' ||
   requestedRole === 'timer' ||
+  requestedRole === 'event-timer' ||
   requestedRole === 'backdrop'
   ? requestedRole
   : 'speaker'
@@ -31,6 +35,7 @@ function SpeakerPdfFrame({
   compact = false,
   maxRenderWidth = 2560,
   maxRenderHeight = 1600,
+  adaptiveMirrorWidth = false,
   imageStyle,
   onReady
 }: {
@@ -39,6 +44,7 @@ function SpeakerPdfFrame({
   compact?: boolean
   maxRenderWidth?: number
   maxRenderHeight?: number
+  adaptiveMirrorWidth?: boolean
   imageStyle?: CSSProperties
   onReady?: () => void
 }): JSX.Element {
@@ -115,7 +121,31 @@ function SpeakerPdfFrame({
           className="h-full w-full object-contain"
           style={imageStyle}
           draggable={false}
-          onLoad={() => onReadyRef.current?.()}
+          onLoad={(event) => {
+            if (adaptiveMirrorWidth) {
+              const image = event.currentTarget
+              const container = containerRef.current
+              if (container && image.naturalWidth > 0 && image.naturalHeight > 0) {
+                const imageAspect = image.naturalWidth / image.naturalHeight
+                const containerAspect = container.clientWidth / Math.max(1, container.clientHeight)
+                // object-contain already fits the PDF. Stretch narrow pages a
+                // little, but shrink wide pages enough to preserve both edges
+                // on mirror displays with overscan or a different aspect ratio.
+                const fittedWidthRatio = Math.min(1, imageAspect / Math.max(0.01, containerAspect))
+                const scaleX = Math.min(
+                  MIRROR_PDF_MAX_HORIZONTAL_STRETCH,
+                  MIRROR_PDF_SAFE_WIDTH_RATIO / Math.max(0.01, fittedWidthRatio)
+                )
+                image.style.transform = `scaleX(${scaleX.toFixed(4)})`
+                image.style.transformOrigin = 'center center'
+                window.api.dbgLog(
+                  `program mirror PDF fit image=${image.naturalWidth}x${image.naturalHeight} ` +
+                  `container=${container.clientWidth}x${container.clientHeight} scaleX=${scaleX.toFixed(4)}`
+                )
+              }
+            }
+            onReadyRef.current?.()
+          }}
         />
       ) : (
         <div className="text-lg text-gray-400">{failed ? 'Не удалось подготовить слайд' : 'Подготовка слайда…'}</div>
@@ -237,6 +267,63 @@ function TimerValue({ timer }: { timer: TimerDisplayState }): JSX.Element {
       {formatTime(timer.remaining)}
     </div>
   )
+}
+
+function EventTimerDisplay(): JSX.Element {
+  const [timer, setTimer] = useState<EventTimerDisplayState>({
+    eventName: 'Оперативное совещание',
+    headings: {
+      current: 'Текущее время:',
+      timer: 'Таймер:',
+      'to-start': 'До начала мероприятия:',
+      'to-end': 'До конца мероприятия:'
+    },
+    startTime: '14:30',
+    endTime: '16:00',
+    costPerMinute: 0,
+    overtimeCostTotal: 0,
+    backgroundMode: 'gradient',
+    backgroundColor: '#18c56e',
+    backgroundGradientColor: '#19b9d1',
+    backgroundGradientAngle: 115,
+    backgroundImage: null,
+    centralTimeMode: 'to-end',
+    visibility: {
+      clock: true,
+      schedule: true,
+      heading: true,
+      eventName: true,
+      remaining: true,
+      cost: true
+    },
+    duration: 90 * 60,
+    remaining: 90 * 60,
+    running: false,
+    live: false
+  })
+
+  useEffect(() => {
+    const unsubscribe = window.api.on('event-timer-state', (...args: unknown[]) => {
+      const next = args[0] as EventTimerDisplayState
+      setTimer((previous) => {
+        if (previous.live !== next.live) {
+          window.api.dbgLog(`event timer display state live=${next.live} display=${auxiliaryDisplayId ?? 'unknown'}`)
+        }
+        return next
+      })
+    })
+    window.api.dbgLog(`event timer display ready display=${auxiliaryDisplayId ?? 'unknown'}`)
+    window.api.sendToControl('event-timer-ready', { displayId: auxiliaryDisplayId })
+    return unsubscribe
+  }, [])
+
+  return timer.live
+    ? (
+        <div className="h-screen w-screen overflow-hidden bg-black">
+          <EventTimerScene timer={timer} />
+        </div>
+      )
+    : <div className="h-screen w-screen bg-black" />
 }
 
 function InformationVideo({
@@ -667,7 +754,7 @@ function ProgramDirectLayer({
         page={content.currentSlide || 1}
         maxRenderWidth={8192}
         maxRenderHeight={4320}
-        imageStyle={{ transform: 'scaleX(1.14)', transformOrigin: 'center center' }}
+        adaptiveMirrorWidth
         onReady={onReady}
       />
     )
@@ -888,7 +975,9 @@ function ProgramMirrorDisplay(): JSX.Element {
           mirrorState.active && (!hasDirectContent || !nativeReady) ? '' : 'hidden'
         }`}
         style={{
-          transform: mirrorState.contentType === 'pdf' ? 'scaleX(1.14)' : undefined,
+          transform: mirrorState.contentType === 'pdf'
+            ? `scaleX(${MIRROR_PDF_SAFE_WIDTH_RATIO})`
+            : undefined,
           transformOrigin: 'center center'
         }}
         muted
@@ -925,14 +1014,17 @@ export function AuxiliaryApp(): JSX.Element {
       ? 'PDM Program Mirror'
       : role === 'speaker'
         ? 'PDM Speaker Display'
-        : role === 'timer'
+      : role === 'timer'
           ? 'PDM Timer Display'
+          : role === 'event-timer'
+            ? 'PDM Event Timer Display'
           : role === 'backdrop'
             ? 'PDM Backdrop Display'
             : 'PDM Information Display'
   }, [])
   if (role === 'mirror') return <ProgramMirrorDisplay />
   if (role === 'speaker') return <SpeakerDisplay />
+  if (role === 'event-timer') return <EventTimerDisplay />
   if (role === 'backdrop') return <BackdropDisplay />
   return <InformationDisplay />
 }

@@ -51,6 +51,8 @@ export function AuxiliaryDisplayBridge(): null {
     timerWarningTextColor,
     timerOvertimeTextColor,
     timerTextOpacity,
+    eventTimer,
+    eventTimerOutput,
     setDisplayAssignment,
     setInformationMedia
   } = useAppStore()
@@ -68,6 +70,7 @@ export function AuxiliaryDisplayBridge(): null {
       speaker: ids('speaker'),
       info: ids('information'),
       timer: ids('timer'),
+      eventTimer: ids('event-timer'),
       backdrop: sortedDisplays
         .filter((display) => {
           const mode = displayAssignments[String(display.id)]
@@ -81,6 +84,7 @@ export function AuxiliaryDisplayBridge(): null {
   useAuxiliaryWindows('speaker', roleIds.speaker, setDisplayAssignment)
   useAuxiliaryWindows('info', roleIds.info, setDisplayAssignment)
   useAuxiliaryWindows('timer', roleIds.timer, setDisplayAssignment)
+  useAuxiliaryWindows('event-timer', roleIds.eventTimer, setDisplayAssignment)
   useAuxiliaryWindows('backdrop', roleIds.backdrop, setDisplayAssignment)
 
   const programDisplays = useMemo(() => displays
@@ -111,6 +115,14 @@ export function AuxiliaryDisplayBridge(): null {
     const data = args[0] as { role?: AuxiliaryDisplayRole; displayId?: number }
     if (typeof data.displayId === 'number') setDisplayAssignment(data.displayId, 'off')
   }), [setDisplayAssignment])
+
+  useEffect(() => window.api.on('event-timer-ready', (...args: unknown[]) => {
+    const data = args[0] as { displayId?: number } | undefined
+    const state = useAppStore.getState()
+    const current = state.eventTimerOutput || { ...state.eventTimer, running: false, live: false }
+    window.api.dbgLog(`event timer ready acknowledged display=${data?.displayId ?? 'unknown'} live=${current.live}`)
+    window.api.sendToAuxiliary('event-timer', 'event-timer-state', current)
+  }), [])
 
   useEffect(() => window.api.on('information-video-ended', (...args: unknown[]) => {
     const ended = args[0] as { path?: string; currentTime?: number; duration?: number } | undefined
@@ -305,6 +317,14 @@ export function AuxiliaryDisplayBridge(): null {
     timerTextOpacity,
     timerWarningTextColor
   ])
+
+  useEffect(() => {
+    window.api.sendToAuxiliary(
+      'event-timer',
+      'event-timer-state',
+      eventTimerOutput || { ...eventTimer, running: false, live: false }
+    )
+  }, [eventTimerOutput])
 
   return null
 }
