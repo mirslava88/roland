@@ -7,31 +7,6 @@ import {
 } from '../../stores/useAppStore'
 import { EventTimerScene } from './EventTimerScene'
 
-function scheduleDuration(startTime: string, endTime: string): number {
-  const parse = (value: string): number | null => {
-    const match = /^(\d{2}):(\d{2})$/.exec(value)
-    if (!match) return null
-    const hours = Number(match[1])
-    const minutes = Number(match[2])
-    if (hours > 23 || minutes > 59) return null
-    return hours * 60 + minutes
-  }
-  const start = parse(startTime)
-  const end = parse(endTime)
-  if (start === null || end === null) return 0
-  let minutes = end - start
-  if (minutes <= 0) minutes += 24 * 60
-  return minutes * 60
-}
-
-function secondsUntilToday(time: string): number {
-  const match = /^(\d{2}):(\d{2})$/.exec(time)
-  if (!match) return 0
-  const target = new Date()
-  target.setHours(Number(match[1]), Number(match[2]), 0, 0)
-  return Math.round((target.getTime() - Date.now()) / 1000)
-}
-
 function defaultHeading(mode: EventTimerCentralMode): string {
   if (mode === 'current') return 'Текущее время:'
   if (mode === 'timer') return 'Таймер:'
@@ -171,36 +146,11 @@ export function EventTimer(): JSX.Element {
   }
 
   const updateSchedule = (field: 'startTime' | 'endTime', value: string): void => {
-    const nextStart = field === 'startTime' ? value : eventTimer.startTime
-    const nextEnd = field === 'endTime' ? value : eventTimer.endTime
-    const scheduleLength = scheduleDuration(nextStart, nextEnd)
-    const targetTime = eventTimer.centralTimeMode === 'to-start'
-      ? nextStart
-      : eventTimer.centralTimeMode === 'to-end'
-        ? nextEnd
-        : null
-    const scheduledRemaining = targetTime ? secondsUntilToday(targetTime) : null
-    updateDraft({
-      [field]: value,
-      ...(scheduleLength <= 0 || scheduledRemaining === null
-        ? {}
-        : { duration: Math.max(0, scheduledRemaining), remaining: scheduledRemaining })
-    })
+    updateDraft({ [field]: value })
   }
 
   const selectCentralTimeMode = (mode: EventTimerCentralMode): void => {
-    const targetTime = mode === 'to-start'
-      ? eventTimer.startTime
-      : mode === 'to-end'
-        ? eventTimer.endTime
-        : null
-    const remaining = targetTime ? secondsUntilToday(targetTime) : null
-    updateDraft({
-      centralTimeMode: mode,
-      ...(remaining === null
-        ? {}
-        : { duration: Math.max(0, remaining), remaining })
-    })
+    updateDraft({ centralTimeMode: mode })
   }
 
   const start = (): void => updateTimerControl({ running: true })
@@ -238,7 +188,7 @@ export function EventTimer(): JSX.Element {
       </button>
 
       {open && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3">
+        <div className="event-timer-ui fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3">
           <div
             className="flex h-[calc(100vh-24px)] w-[min(1440px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-gray-700 bg-surface-300 shadow-2xl"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}

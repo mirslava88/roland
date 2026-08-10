@@ -86,6 +86,18 @@
   animation: fade-out 0.4s ease-in-out forwards;
 }
 
+.event-timer-ui,
+.event-timer-ui *,
+.event-timer-scene,
+.event-timer-scene * {
+  font-family: 'Inter', sans-serif;
+  font-weight: 300;
+}
+
+.event-timer-central-time {
+  font-weight: 100 !important;
+}
+
 /*
  * Keep the Windows cursor out of an external-window capture while PDM is the
  * active app. The operator still sees the DOM proxy below; it cannot become

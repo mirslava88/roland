@@ -28,12 +28,12 @@ function currentClockWithSeconds(date: Date): string {
   })
 }
 
-function secondsUntilEnd(now: Date, endTime: string): number {
-  const match = /^(\d{2}):(\d{2})$/.exec(endTime)
+function secondsUntilTime(now: Date, time: string): number {
+  const match = /^(\d{2}):(\d{2})$/.exec(time)
   if (!match) return 0
-  const end = new Date(now)
-  end.setHours(Number(match[1]), Number(match[2]), 0, 0)
-  return Math.round((end.getTime() - now.getTime()) / 1000)
+  const target = new Date(now)
+  target.setHours(Number(match[1]), Number(match[2]), 0, 0)
+  return Math.round((target.getTime() - now.getTime()) / 1000)
 }
 
 export function EventTimerScene({ timer, className = '' }: {
@@ -47,16 +47,23 @@ export function EventTimerScene({ timer, className = '' }: {
     return () => clearInterval(interval)
   }, [])
 
-  const overtime = timer.centralTimeMode !== 'current' && timer.remaining < 0
+  const centralSeconds = timer.centralTimeMode === 'timer'
+    ? timer.remaining
+    : timer.centralTimeMode === 'to-start'
+      ? secondsUntilTime(now, timer.startTime)
+      : timer.centralTimeMode === 'to-end'
+        ? secondsUntilTime(now, timer.endTime)
+        : null
+  const overtime = centralSeconds !== null && centralSeconds < 0
   const totalCost = calculateEventTimerCost(timer)
-  const scheduledRemaining = secondsUntilEnd(now, timer.endTime)
+  const scheduledRemaining = secondsUntilTime(now, timer.endTime)
   const formattedCost = totalCost.toLocaleString('ru-RU', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2
   })
   const centralText = timer.centralTimeMode === 'current'
     ? currentClockWithSeconds(now)
-    : formatEventTimer(timer.remaining)
+    : formatEventTimer(centralSeconds ?? 0)
   const foreground = '#ffffff'
   const alertColor = '#ef1717'
   const background = timer.backgroundMode === 'gradient'
@@ -65,7 +72,7 @@ export function EventTimerScene({ timer, className = '' }: {
 
   return (
     <div
-      className={`relative h-full w-full overflow-hidden bg-black font-sans select-none ${className}`}
+      className={`event-timer-scene relative h-full w-full overflow-hidden bg-black font-sans select-none ${className}`}
       style={{ containerType: 'size', color: foreground, background }}
     >
       {timer.backgroundImage && (
@@ -113,7 +120,7 @@ export function EventTimerScene({ timer, className = '' }: {
           </div>
         )}
         <div
-          className="font-extralight tabular-nums leading-[0.9] tracking-[-0.055em]"
+          className="event-timer-central-time tabular-nums leading-[0.9] tracking-[-0.055em]"
           style={{
             color: overtime ? alertColor : foreground,
             fontSize: 'min(13.4cqw, 25cqh)'

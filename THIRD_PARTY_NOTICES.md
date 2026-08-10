@@ -19,4 +19,12 @@ application's `LICENSES.chromium.html` file under the `PDFium` section.
 
 Source: https://github.com/chromium/pdfium
 
+## Inter
+
+The Timer+ interface uses the bundled Inter typeface, distributed under the
+SIL Open Font License 1.1. The complete license is included with the installed
+application at `resources/licenses/Inter-OFL-1.1.txt`.
+
+Source: https://github.com/rsms/inter
+
 No endorsement by the third-party authors or contributors is implied.
