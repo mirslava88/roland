@@ -14,15 +14,6 @@ function defaultHeading(mode: EventTimerCentralMode): string {
   return 'До конца мероприятия:'
 }
 
-function secondsUntilTime(time: string): number {
-  const match = /^(\d{2}):(\d{2})$/.exec(time)
-  if (!match) return 0
-  const now = new Date()
-  const target = new Date(now)
-  target.setHours(Number(match[1]), Number(match[2]), 0, 0)
-  return Math.round((target.getTime() - now.getTime()) / 1000)
-}
-
 function nextTimerTick(timer: EventTimerState): Pick<EventTimerState, 'remaining' | 'overtimeCostTotal'> {
   const remaining = timer.remaining - 1
   const overtimeIncrement = remaining < 0 && timer.costPerMinute > 0
@@ -174,12 +165,23 @@ export function EventTimer(): JSX.Element {
     })
   }
 
-  const syncTimerToNow = (): void => {
-    const remaining = secondsUntilTime(eventTimer.endTime)
-    updateTimerControl({
-      duration: Math.max(0, remaining),
-      remaining
+  const restoreTimerFromLive = (): void => {
+    if (!eventTimerOutput) return
+    const nextDraft = {
+      ...eventTimer,
+      duration: eventTimerOutput.duration,
+      remaining: eventTimerOutput.remaining,
+      running: eventTimerOutput.running
+    }
+    setEventTimer({
+      duration: eventTimerOutput.duration,
+      remaining: eventTimerOutput.remaining,
+      running: eventTimerOutput.running
     })
+    setTimeParts(timePartsFromSeconds(eventTimerOutput.remaining))
+    setEditingTime(false)
+    setTimePartsDirty(false)
+    setHasUnpublishedChanges(JSON.stringify(nextDraft) !== JSON.stringify(eventTimerOutput))
   }
 
   const toggleVisibility = (key: keyof EventTimerVisibility): void => {
@@ -518,11 +520,14 @@ export function EventTimer(): JSX.Element {
                       <button
                         key={minutes}
                         type="button"
-                        onClick={() => minutes === 0 ? syncTimerToNow() : adjustMinutes(minutes)}
+                        disabled={minutes === 0 && !eventTimerOutput}
+                        onClick={() => minutes === 0 ? restoreTimerFromLive() : adjustMinutes(minutes)}
                         title={minutes === 0
-                          ? 'Синхронизировать таймер с оставшимся временем до конца мероприятия'
+                          ? eventTimerOutput
+                            ? 'Вернуть в превью время и состояние таймера, которые сейчас идут в эфире'
+                            : 'Сначала отправьте таймер в эфир'
                           : undefined}
-                        className={`rounded-full px-1 py-1.5 text-[8px] transition-colors ${
+                        className={`rounded-full px-1 py-1.5 text-[8px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                           minutes < 0
                             ? 'bg-red-950/70 text-red-300 hover:bg-red-900'
                             : minutes > 0
