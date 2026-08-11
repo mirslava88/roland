@@ -167,6 +167,13 @@
   text-overflow: ellipsis;
   font-size: min(3.05cqw, 5.9cqh);
   line-height: 1;
+  /*
+   * SB Sans can paint a few pixels above its line box at fractional Windows
+   * display scales. Keep the glyphs in the same visual position, but expand
+   * the vertical clipping area so their tops are never cut off.
+   */
+  padding-block: .12em .08em;
+  transform: translateY(-.12em);
   text-transform: uppercase;
 }
 
