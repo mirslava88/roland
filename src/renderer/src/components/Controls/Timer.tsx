@@ -255,7 +255,7 @@ export function Timer(): JSX.Element {
         <button
           ref={toggleRef}
           onClick={() => setExpanded(!expanded)}
-          className={`text-xs font-mono font-bold px-2 py-1.5 rounded-lg transition-colors ${timerColor} ${
+          className={`text-[11px] font-mono font-bold px-1.5 py-1 rounded-lg transition-colors ${timerColor} ${
             timerRunning ? 'bg-gray-800' : 'bg-gray-800/50 hover:bg-gray-800'
           }`}
           title="Таймер доклада"
@@ -287,7 +287,7 @@ export function Timer(): JSX.Element {
       {expanded && (
         <div
           ref={panelRef}
-          className="absolute top-10 left-1/2 -translate-x-1/2 bg-surface-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50 min-w-[320px]"
+          className="absolute top-full mt-1 left-1/2 -translate-x-1/2 bg-surface-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50 min-w-[320px]"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <div className="text-[11px] text-gray-400 font-bold uppercase mb-2">Настройки таймера</div>

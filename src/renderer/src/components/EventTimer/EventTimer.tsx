@@ -190,12 +190,16 @@ export function EventTimer(): JSX.Element {
     })
   }
 
+  const openScreens = (): void => {
+    window.dispatchEvent(new CustomEvent('open-auxiliary-displays'))
+  }
+
   return (
     <>
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className={`text-xs px-2 py-1.5 rounded-lg font-medium transition-colors border ${
+        className={`text-[11px] px-1.5 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
           isLive
             ? 'bg-emerald-600/80 border-emerald-500 text-white hover:bg-emerald-600'
             : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
@@ -220,11 +224,23 @@ export function EventTimer(): JSX.Element {
                 </p>
               </div>
               <div className="flex items-center gap-3">
-                <span className={`text-[10px] ${assignedDisplays.length ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  {assignedDisplays.length
-                    ? `Назначено экранов: ${assignedDisplays.length}`
-                    : 'Назначьте «Таймер мероприятия» в разделе «Экраны»'}
-                </span>
+                {assignedDisplays.length ? (
+                  <span className="text-[10px] text-emerald-400">
+                    Назначено экранов: {assignedDisplays.length}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-amber-400">
+                    Назначьте «Таймер мероприятия» в разделе{' '}
+                    <button
+                      type="button"
+                      onClick={openScreens}
+                      className="font-semibold text-blue-400 underline decoration-blue-400/60 underline-offset-2 transition-colors hover:text-blue-300"
+                      title="Открыть раздел «Экраны»"
+                    >
+                      «Экраны»
+                    </button>
+                  </span>
+                )}
                 <button type="button" onClick={() => setOpen(false)} className="text-xl text-gray-500 hover:text-white">✕</button>
               </div>
             </header>

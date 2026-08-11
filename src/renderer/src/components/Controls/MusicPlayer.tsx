@@ -112,7 +112,7 @@ export function MusicPlayer(): JSX.Element {
         <button
           ref={toggleRef}
           onClick={() => setExpanded(!expanded)}
-          className={`text-xs px-2 py-1.5 rounded-lg font-medium transition-colors border ${
+          className={`text-[11px] px-1.5 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
             isPlaying
               ? 'bg-green-600/80 hover:bg-green-600 text-white border-transparent'
               : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
@@ -137,7 +137,7 @@ export function MusicPlayer(): JSX.Element {
       {expanded && (
         <div
           ref={panelRef}
-          className="absolute top-10 left-1/2 -translate-x-1/2 bg-surface-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50 min-w-[360px] max-w-[420px]"
+          className="absolute top-full mt-1 left-1/2 -translate-x-1/2 bg-surface-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50 min-w-[360px] max-w-[420px]"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <div className="text-[11px] text-gray-400 font-bold uppercase mb-2">Фоновая музыка</div>

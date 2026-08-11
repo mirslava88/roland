@@ -1,11 +1,17 @@
 import { warmPdfiumDocument } from './pdfium-renderer'
 import {
   channelIdFromIndex,
+  DEFAULT_BROADCAST_TITLES,
+  DEFAULT_BROADCAST_TITLES_OUTPUT,
   DEFAULT_EVENT_TIMER_STATE,
   useAppStore,
   type ChannelGridSize,
   type ChannelId,
   type ChannelState,
+  type BroadcastTitlesDraft,
+  type BroadcastTitleEffect,
+  type BroadcastTitlePosition,
+  type BroadcastTitleStyle,
   type DisplayAssignments,
   type DisplayOutputMode,
   type EventTimerState,
@@ -105,6 +111,7 @@ interface PdmConfigV1 {
     textOpacity: number
   }
   eventTimer: EventTimerState
+  broadcastTitles: BroadcastTitlesDraft
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -552,6 +559,10 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
       visibility: { ...state.eventTimer.visibility },
       running: false,
       live: false
+    },
+    broadcastTitles: {
+      ...state.broadcastTitles,
+      speakers: state.broadcastTitles.speakers.map((speaker) => ({ ...speaker }))
     }
   }
 
@@ -800,6 +811,91 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     running: false,
     live: false
   }
+  const rawBroadcastTitles = isRecord(raw.broadcastTitles) ? raw.broadcastTitles : {}
+  const validTitleEffects: BroadcastTitleEffect[] = ['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'scale']
+  const validTitleStyles: BroadcastTitleStyle[] = ['rounded', 'rectangle', 'slant-right', 'slant-left', 'pill']
+  const validTitlePositions: BroadcastTitlePosition[] = [
+    'top-left', 'top-center', 'top-right',
+    'center-left', 'center', 'center-right',
+    'bottom-left', 'bottom-center', 'bottom-right'
+  ]
+  const titleEffect = (value: unknown, fallback: BroadcastTitleEffect): BroadcastTitleEffect => (
+    typeof value === 'string' && validTitleEffects.includes(value as BroadcastTitleEffect)
+      ? value as BroadcastTitleEffect
+      : fallback
+  )
+  const titlePosition = (value: unknown): BroadcastTitlePosition => (
+    typeof value === 'string' && validTitlePositions.includes(value as BroadcastTitlePosition)
+      ? value as BroadcastTitlePosition
+      : DEFAULT_BROADCAST_TITLES.eventPosition
+  )
+  const titleStyle = (value: unknown, fallback: BroadcastTitleStyle): BroadcastTitleStyle => (
+    value === 'cut-corner'
+      ? 'slant-right'
+      :
+    typeof value === 'string' && validTitleStyles.includes(value as BroadcastTitleStyle)
+      ? value as BroadcastTitleStyle
+      : fallback
+  )
+  const rawSpeakers = Array.isArray(rawBroadcastTitles.speakers)
+    ? rawBroadcastTitles.speakers.slice(0, 500)
+    : []
+  const usedSpeakerIds = new Set<string>()
+  const speakers = rawSpeakers.flatMap((value, index) => {
+    if (!isRecord(value)) return []
+    const name = safeString(value.name, 120) || ''
+    const role = safeString(value.role, 180) || ''
+    let id = safeString(value.id, 80) || `speaker-${index + 1}`
+    while (usedSpeakerIds.has(id)) id = `${id}-${index + 1}`
+    usedSpeakerIds.add(id)
+    return [{ id, name, role }]
+  })
+  // Backward compatibility with configurations saved by the first titles build.
+  if (speakers.length === 0) {
+    const oldName = safeString(rawBroadcastTitles.speakerName, 120) || ''
+    const oldRole = safeString(rawBroadcastTitles.speakerRole, 180) || ''
+    if (oldName || oldRole) speakers.push({ id: 'speaker-migrated', name: oldName, role: oldRole })
+  }
+  const requestedSpeakerId = safeString(rawBroadcastTitles.selectedSpeakerId, 80)
+  const broadcastTitles: BroadcastTitlesDraft = {
+    speakers,
+    selectedSpeakerId: requestedSpeakerId && speakers.some((speaker) => speaker.id === requestedSpeakerId)
+      ? requestedSpeakerId
+      : speakers[0]?.id || null,
+    eventLabel: typeof rawBroadcastTitles.eventLabel === 'string'
+      ? rawBroadcastTitles.eventLabel.replace(/[\r\n\t]+/g, ' ').slice(0, 80)
+      : DEFAULT_BROADCAST_TITLES.eventLabel,
+    eventInfo: (safeString(rawBroadcastTitles.eventInfo, 320) || DEFAULT_BROADCAST_TITLES.eventInfo).replace(/\r/g, ''),
+    speakerEnterEffect: titleEffect(rawBroadcastTitles.speakerEnterEffect, DEFAULT_BROADCAST_TITLES.speakerEnterEffect),
+    speakerExitEffect: titleEffect(rawBroadcastTitles.speakerExitEffect, DEFAULT_BROADCAST_TITLES.speakerExitEffect),
+    speakerAutoHideSeconds: safeInteger(
+      rawBroadcastTitles.speakerAutoHideSeconds,
+      DEFAULT_BROADCAST_TITLES.speakerAutoHideSeconds,
+      0,
+      86400
+    ),
+    speakerStyle: titleStyle(rawBroadcastTitles.speakerStyle, DEFAULT_BROADCAST_TITLES.speakerStyle),
+    speakerTextColor: safeColor(rawBroadcastTitles.speakerTextColor, DEFAULT_BROADCAST_TITLES.speakerTextColor),
+    speakerBackgroundStart: safeColor(rawBroadcastTitles.speakerBackgroundStart, DEFAULT_BROADCAST_TITLES.speakerBackgroundStart),
+    speakerBackgroundEnd: safeColor(rawBroadcastTitles.speakerBackgroundEnd, DEFAULT_BROADCAST_TITLES.speakerBackgroundEnd),
+    speakerAccentStart: safeColor(rawBroadcastTitles.speakerAccentStart, DEFAULT_BROADCAST_TITLES.speakerAccentStart),
+    speakerAccentEnd: safeColor(rawBroadcastTitles.speakerAccentEnd, DEFAULT_BROADCAST_TITLES.speakerAccentEnd),
+    eventEnterEffect: titleEffect(rawBroadcastTitles.eventEnterEffect, DEFAULT_BROADCAST_TITLES.eventEnterEffect),
+    eventExitEffect: titleEffect(rawBroadcastTitles.eventExitEffect, DEFAULT_BROADCAST_TITLES.eventExitEffect),
+    eventAutoHideSeconds: safeInteger(
+      rawBroadcastTitles.eventAutoHideSeconds,
+      DEFAULT_BROADCAST_TITLES.eventAutoHideSeconds,
+      0,
+      86400
+    ),
+    eventPosition: titlePosition(rawBroadcastTitles.eventPosition),
+    eventStyle: titleStyle(rawBroadcastTitles.eventStyle, DEFAULT_BROADCAST_TITLES.eventStyle),
+    eventTextColor: safeColor(rawBroadcastTitles.eventTextColor, DEFAULT_BROADCAST_TITLES.eventTextColor),
+    eventBackgroundStart: safeColor(rawBroadcastTitles.eventBackgroundStart, DEFAULT_BROADCAST_TITLES.eventBackgroundStart),
+    eventBackgroundEnd: safeColor(rawBroadcastTitles.eventBackgroundEnd, DEFAULT_BROADCAST_TITLES.eventBackgroundEnd),
+    eventAccentStart: safeColor(rawBroadcastTitles.eventAccentStart, DEFAULT_BROADCAST_TITLES.eventAccentStart),
+    eventAccentEnd: safeColor(rawBroadcastTitles.eventAccentEnd, DEFAULT_BROADCAST_TITLES.eventAccentEnd)
+  }
 
   let files: FileEntry[] = []
   let subfolders: Array<{ name: string; path: string }> = []
@@ -896,7 +992,9 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     timerOvertimeTextColor: safeColor(rawTimer.overtimeTextColor, '#ef4444'),
     timerTextOpacity: safeNumber(rawTimer.textOpacity, 1, 0.1, 1),
     eventTimer,
-    eventTimerOutput: null
+    eventTimerOutput: null,
+    broadcastTitles,
+    broadcastTitlesOutput: { ...DEFAULT_BROADCAST_TITLES_OUTPUT }
   })
 
   await window.api.watchFolder(folderPath).catch(() => undefined)

@@ -254,7 +254,13 @@ switch ($Action) {
         foreach ($tb in $taskbars) {
             $rect = New-Object WinMgr+RECT
             [WinMgr]::GetWindowRect($tb, [ref]$rect) | Out-Null
-            if ($rect.Left -ge $X -and $rect.Left -lt ($X + $Width)) {
+            $intersectsDisplay = (
+                $rect.Right -gt $X -and
+                $rect.Left -lt ($X + $Width) -and
+                $rect.Bottom -gt $Y -and
+                $rect.Top -lt ($Y + $Height)
+            )
+            if ($intersectsDisplay) {
                 [WinMgr]::ShowWindow($tb, [WinMgr]::SW_HIDE) | Out-Null
             }
         }

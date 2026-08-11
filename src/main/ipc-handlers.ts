@@ -1080,17 +1080,29 @@ export function registerIpcHandlers(
     if (process.platform !== 'win32') return
     const scriptPath = resolveScript('manage-window.ps1')
     try {
+      // Renderer display bounds are DIP coordinates, while GetWindowRect in
+      // manage-window.ps1 returns physical pixels. Match the authoritative
+      // display and convert its complete bounds before comparing taskbars.
+      const targetDisplay = screen.getDisplayMatching(displayBounds)
+      const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+      diagnosticLog(
+        'display',
+        `hide taskbar display=${targetDisplay.id} dip=${JSON.stringify(targetDisplay.bounds)} ` +
+        `physical=${JSON.stringify(physicalBounds)}`
+      )
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
         '-NoProfile',
         '-File', scriptPath,
         '-Action', 'hide-taskbar',
-        '-X', String(displayBounds.x),
-        '-Y', String(displayBounds.y),
-        '-Width', String(displayBounds.width),
-        '-Height', String(displayBounds.height)
+        '-X', String(physicalBounds.x),
+        '-Y', String(physicalBounds.y),
+        '-Width', String(physicalBounds.width),
+        '-Height', String(physicalBounds.height)
       ], { timeout: 5000 })
-    } catch { /* ignore */ }
+    } catch (error) {
+      diagnosticLog('display', `hide taskbar failed ${formatDiagnosticError(error)}`)
+    }
   })
 
   ipcMain.handle('show-taskbar', async () => {

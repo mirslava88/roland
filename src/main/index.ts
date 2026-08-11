@@ -59,6 +59,7 @@ const auxiliaryLastMessages = new Map<AuxiliaryWindowRole, Map<string, unknown[]
 let overlayWindow: BrowserWindow | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 let wpfTimerDisplayKey: string | null = null
+let wpfTimerDisplayId: number | null = null
 let lastWpfTimerData: Record<string, unknown> = {}
 let wpfTimerPositionRevision = 0
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
@@ -67,9 +68,12 @@ let activeContentType: string | null = null // tracks what's on the external dis
 let timerActive = false // whether timer overlay is currently shown
 let presentationWindowReady = false
 let presentationWindowRequestedVisible = false
+let presentationDisplayId: number | null = null
+let overlayDisplayId: number | null = null
 const presentationReadyWaiters = new Set<() => void>()
 let overlayZOrderGuard: NodeJS.Timeout | null = null
 let overlayPlacement: 'cover' | 'underlay' = 'cover'
+let displayMetricsSyncTimer: NodeJS.Timeout | null = null
 let quitCleanupStarted = false
 let quitCleanupComplete = false
 const nativeDesktopSourceRegistry = new Map<string, NativeDesktopSourceRegistryEntry>()
@@ -209,6 +213,7 @@ function waitForPresentationWindowReady(timeoutMs = 5000): Promise<void> {
 }
 
 function createManagedPresentationWindow(display: Display): BrowserWindow {
+  presentationDisplayId = display.id
   presentationWindowReady = false
   const win = createPresentationWindow(display)
   // Keep the 4K native surface alive. On the affected PC a hidden window
@@ -242,6 +247,7 @@ function prewarmPresentationWindow(): void {
     // Once an output is attached, move that same warm surface onto it instead
     // of creating a second CaptureHub and duplicate media streams.
     if (externalDisplay) {
+      presentationDisplayId = externalDisplay.id
       presentationWindow.setBounds(externalDisplay.bounds)
       presentationWindow.setIgnoreMouseEvents(true)
       presentationWindow.setOpacity(0)
@@ -276,20 +282,19 @@ function prewarmPresentationWindow(): void {
 }
 
 function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
-  const posX = displayBounds.x + displayBounds.width - 320
-  const posY = displayBounds.y + displayBounds.height - 120
   const displayKey = `${displayBounds.x},${displayBounds.y},${displayBounds.width},${displayBounds.height}`
   if (wpfTimerProcess && !wpfTimerProcess.killed) {
-    if (wpfTimerDisplayKey !== displayKey) {
-      wpfTimerDisplayKey = displayKey
-      wpfTimerPositionRevision++
-      sendToWpfTimer({
-        windowX: posX,
-        windowY: posY,
-        windowPositionRevision: wpfTimerPositionRevision
-      })
-      diagnosticLog('window', `timer overlay relocated bounds=${displayKey} position=${posX},${posY}`)
-    }
+    const changed = wpfTimerDisplayKey !== displayKey
+    wpfTimerDisplayKey = displayKey
+    wpfTimerPositionRevision++
+    sendToWpfTimer({
+      displayX: displayBounds.x,
+      displayY: displayBounds.y,
+      displayWidth: displayBounds.width,
+      displayHeight: displayBounds.height,
+      windowPositionRevision: wpfTimerPositionRevision
+    })
+    diagnosticLog('window', `timer overlay ${changed ? 'relocated' : 'reanchored'} physicalBounds=${displayKey}`)
     return
   }
   // Create the data file before spawning so the script can find it.
@@ -307,18 +312,22 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
   wpfTimerDisplayKey = displayKey
   wpfTimerPositionRevision++
   sendToWpfTimer({
-    windowX: posX,
-    windowY: posY,
+    displayX: displayBounds.x,
+    displayY: displayBounds.y,
+    displayWidth: displayBounds.width,
+    displayHeight: displayBounds.height,
     windowPositionRevision: wpfTimerPositionRevision
   })
-  diagnosticLog('window', `timer overlay spawn bounds=${displayKey} position=${posX},${posY}`)
+  diagnosticLog('window', `timer overlay spawn physicalBounds=${displayKey}`)
   const timerProcess = spawn('powershell.exe', [
     '-ExecutionPolicy', 'Bypass',
     '-NoProfile',
     '-STA',
     '-File', timerScript,
-    '-X', String(posX),
-    '-Y', String(posY),
+    '-DisplayX', String(displayBounds.x),
+    '-DisplayY', String(displayBounds.y),
+    '-DisplayWidth', String(displayBounds.width),
+    '-DisplayHeight', String(displayBounds.height),
     '-DataFile', wpfTimerDataFile
   ], { stdio: 'ignore' })
   wpfTimerProcess = timerProcess
@@ -334,6 +343,7 @@ function hideWpfTimer(): void {
   const closingProcess = wpfTimerProcess
   wpfTimerProcess = null
   wpfTimerDisplayKey = null
+  wpfTimerDisplayId = null
   try { writeFileSync(wpfTimerDataFile, JSON.stringify({ cmd: 'exit' })) } catch {}
   setTimeout(() => {
     if (closingProcess && !closingProcess.killed) {
@@ -639,6 +649,7 @@ function createWindows(): void {
     const targetDisplay = displayId
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
+    presentationDisplayId = targetDisplay.id
 
     const raiseOverlay = (reason: string): void => {
       if (
@@ -710,6 +721,7 @@ function createWindows(): void {
     const targetDisplay = displayId
       ? displays.find((display) => display.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
+    presentationDisplayId = targetDisplay.id
     const currentBounds = presentationWindow.getBounds()
     const nextBounds = targetDisplay.bounds
     const changed =
@@ -755,6 +767,7 @@ function createWindows(): void {
     const targetDisplay = displayId
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
+    overlayDisplayId = targetDisplay.id
 
     // Hybrid mode: caller can pass a file path instead of a data URL. Read
     // the PNG from disk and inline it so the overlay renderer (sandboxed
@@ -1400,6 +1413,7 @@ function createWindows(): void {
       ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
       : externalDisplay || primaryDisplay
     if (targetDisplay) {
+      wpfTimerDisplayId = targetDisplay.id
       // WPF/SetWindowPos consume physical pixels. Electron display bounds are
       // DIP coordinates, so passing them directly moves the timer to the
       // wrong monitor in mixed 100%/150% layouts.
@@ -1609,10 +1623,103 @@ function createWindows(): void {
     }
   }
 
+  const syncWindowsAfterDisplayMetricsChange = async (reason: string): Promise<void> => {
+    const displays = screen.getAllDisplays()
+    const primary = screen.getPrimaryDisplay()
+    const byId = new Map(displays.map((display) => [display.id, display]))
+    diagnosticLog(
+      'display',
+      `metrics sync reason=${reason} displays=${JSON.stringify(displays.map((display) => ({
+        id: display.id,
+        bounds: display.bounds,
+        workArea: display.workArea,
+        scaleFactor: display.scaleFactor,
+        rotation: display.rotation
+      })))}`
+    )
+    // Notify the renderer immediately so taskbar hiding and display-dependent
+    // layout do not wait for a potentially slow native PowerPoint relocation.
+    sendDisplays()
+
+    const placeWindow = (
+      win: BrowserWindow | null,
+      target: Display | undefined,
+      label: string
+    ): void => {
+      if (!win || win.isDestroyed() || !target) return
+      const previous = win.getBounds()
+      const next = target.bounds
+      const changed = previous.x !== next.x || previous.y !== next.y ||
+        previous.width !== next.width || previous.height !== next.height
+      if (!changed) return
+      try {
+        win.setBounds(next)
+        diagnosticLog(
+          'display',
+          `${label} resized display=${target.id} from=${JSON.stringify(previous)} to=${JSON.stringify(next)}`
+        )
+      } catch (error) {
+        diagnosticLog('display', `${label} resize failed ${formatDiagnosticError(error)}`)
+      }
+    }
+
+    const fallbackOutput = displays.find((display) => display.id !== primary.id) || primary
+    const presentationTarget = byId.get(presentationDisplayId ?? -1) || fallbackOutput
+    presentationDisplayId = presentationTarget.id
+    placeWindow(presentationWindow, presentationTarget, 'presentation output')
+
+    const overlayTarget = byId.get(overlayDisplayId ?? -1) || presentationTarget
+    overlayDisplayId = overlayTarget.id
+    placeWindow(overlayWindow, overlayTarget, 'transition overlay')
+
+    for (const [displayId, entry] of auxiliaryWindows) {
+      placeWindow(entry.window, byId.get(displayId), `auxiliary role=${entry.role}`)
+    }
+
+    if (timerActive) {
+      const timerTarget = byId.get(wpfTimerDisplayId ?? -1) || presentationTarget
+      wpfTimerDisplayId = timerTarget.id
+      const physicalBounds = screen.dipToScreenRect(null, timerTarget.bounds)
+      showWpfTimer(physicalBounds)
+    }
+
+    if (activeContentType === 'presentation') {
+      const physicalBounds = screen.dipToScreenRect(null, presentationTarget.bounds)
+      try {
+        const result = await pptDaemon.send('relocate', { bounds: physicalBounds }, 5000)
+        diagnosticLog(
+          'display',
+          `PowerPoint metrics relocate display=${presentationTarget.id} ` +
+          `physical=${JSON.stringify(physicalBounds)} ok=${result.ok}`
+        )
+      } catch (error) {
+        diagnosticLog('display', `PowerPoint metrics relocate failed ${formatDiagnosticError(error)}`)
+      }
+    }
+  }
+
+  const scheduleDisplayMetricsSync = (reason: string): void => {
+    if (displayMetricsSyncTimer) clearTimeout(displayMetricsSyncTimer)
+    displayMetricsSyncTimer = setTimeout(() => {
+      displayMetricsSyncTimer = null
+      void syncWindowsAfterDisplayMetricsChange(reason)
+    }, 300)
+  }
+
+  screen.on('display-metrics-changed', (_event, display, changedMetrics) => {
+    diagnosticLog(
+      'display',
+      `metrics changed display=${display.id} metrics=${changedMetrics.join(',')} ` +
+      `bounds=${JSON.stringify(display.bounds)} workArea=${JSON.stringify(display.workArea)} scale=${display.scaleFactor}`
+    )
+    scheduleDisplayMetricsSync(`display=${display.id} metrics=${changedMetrics.join(',')}`)
+  })
+
   screen.on('display-added', () => {
     // Auto-extend display (instead of duplicate) when external monitor is connected
     ensureExtendDisplayMode()
     sendDisplays()
+    scheduleDisplayMetricsSync('display-added')
     // DisplaySwitch/Windows may need a moment to publish stable extended
     // bounds. Prewarm only after a genuine second display is visible.
     setTimeout(() => {
@@ -1622,6 +1729,7 @@ function createWindows(): void {
   })
   screen.on('display-removed', () => {
     sendDisplays()
+    scheduleDisplayMetricsSync('display-removed')
     const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
     for (const [displayId, entry] of [...auxiliaryWindows.entries()]) {
       if (!connectedIds.has(displayId)) {

@@ -547,7 +547,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/70">
         <div
           className="w-[820px] max-w-[94vw] max-h-[88vh] overflow-hidden rounded-xl border border-gray-700 bg-surface-200 shadow-2xl flex flex-col"
           onClick={(event) => event.stopPropagation()}

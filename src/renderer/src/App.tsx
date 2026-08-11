@@ -11,6 +11,7 @@ import { queueNavigationDuringTransition } from './navigation-transition'
 import type { NavigationRequest } from './navigation-transition'
 import { takeAdjacentChannel } from './channel-boundary-navigation'
 import { AuxiliaryDisplayBridge } from './components/AuxiliaryDisplays/AuxiliaryDisplayBridge'
+import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTitlesBridge'
 
 export default function App(): JSX.Element {
   const {
@@ -221,6 +222,7 @@ export default function App(): JSX.Element {
       <Toolbar />
       <NowPlaying />
       <AuxiliaryDisplayBridge />
+      <BroadcastTitlesBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="flex flex-1 overflow-hidden">
         <FileLibrary />

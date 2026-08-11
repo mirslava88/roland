@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { EventTimer } from '../EventTimer/EventTimer'
@@ -6,6 +6,7 @@ import { MusicPlayer } from './MusicPlayer'
 import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
 import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
+import { BroadcastTitles } from '../BroadcastTitles/BroadcastTitles'
 
 export function Toolbar(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -30,6 +31,12 @@ export function Toolbar(): JSX.Element {
   } = useAppStore()
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
+
+  useEffect(() => {
+    const handleOpenAuxiliaryDisplays = (): void => setAuxiliaryDisplaysOpen(true)
+    window.addEventListener('open-auxiliary-displays', handleOpenAuxiliaryDisplays)
+    return () => window.removeEventListener('open-auxiliary-displays', handleOpenAuxiliaryDisplays)
+  }, [])
 
   const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
   const selectedChannelHasContent = selectedChannel !== null && Boolean(channels[selectedChannel]?.file)
@@ -152,28 +159,30 @@ export function Toolbar(): JSX.Element {
   }
 
   return (
-    <div className="relative h-12 bg-surface-300 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-      <button
-        onClick={() => setSettingsOpen(true)}
-        className="text-xs text-gray-400 hover:text-white transition-colors px-1 flex items-center gap-1.5"
-        title="Настройки"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        <span className="text-base">⚙</span> Настройки
-      </button>
+    <div className="relative h-11 bg-surface-300 border-b border-gray-800 flex items-center px-3 gap-1.5 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+      <div className="flex shrink-0 items-center gap-1">
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="text-[11px] text-gray-400 hover:text-white transition-colors px-1 flex items-center gap-1 whitespace-nowrap"
+          title="Настройки"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          <span className="text-base">⚙</span> Настройки
+        </button>
 
-      <button
-        onClick={() => setAuxiliaryDisplaysOpen(true)}
-        className={`text-xs px-2 py-1.5 rounded-lg font-medium transition-colors border ${
-          hasAdditionalScreenOutput
-            ? 'bg-blue-600/80 border-blue-500 text-white hover:bg-blue-600'
-            : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
-        }`}
-        title="Суфлёр и информационный экран"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        🖥 Экраны
-      </button>
+        <button
+          onClick={() => setAuxiliaryDisplaysOpen(true)}
+          className={`text-[11px] px-1.5 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
+            hasAdditionalScreenOutput
+              ? 'bg-blue-600/80 border-blue-500 text-white hover:bg-blue-600'
+              : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
+          }`}
+          title="Суфлёр и информационный экран"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          🖥 Экраны
+        </button>
+      </div>
 
       <div className="flex-1" />
 
@@ -185,22 +194,24 @@ export function Toolbar(): JSX.Element {
 
       <VideoPlayer />
 
+      <BroadcastTitles />
+
       <button
         onClick={() => setChannelBoundaryNavigationEnabled(!channelBoundaryNavigationEnabled)}
-        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
+        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
           channelBoundaryNavigationEnabled
             ? 'bg-emerald-600/80 hover:bg-emerald-600 text-white border-transparent'
             : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
         }`}
-        title="По завершении презентации переключаться на следующий канал"
+        title={`По завершении презентации переключаться на следующий канал — ${channelBoundaryNavigationEnabled ? 'включено' : 'выключено'}`}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        ⇆ Автопереход: {channelBoundaryNavigationEnabled ? 'Вкл' : 'Выкл'}
+        ⇆ Авто: {channelBoundaryNavigationEnabled ? 'Вкл' : 'Выкл'}
       </button>
 
       <button
         onClick={handleSelectBackdrop}
-        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
+        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
           backdropImage
             ? 'bg-purple-600/80 hover:bg-purple-600 text-white border-transparent'
             : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
@@ -208,7 +219,7 @@ export function Toolbar(): JSX.Element {
         title={backdropImage ? 'Отключить подложку' : 'Выбрать подложку'}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        {backdropImage ? '🖼 Отключить фон' : '🖼 Подложка (Фон)'}
+        {backdropImage ? '🖼 Фон: Вкл' : '🖼 Фон'}
       </button>
 
       <button
@@ -217,7 +228,7 @@ export function Toolbar(): JSX.Element {
           const result = await window.api.toggleGlobalHook(newState)
           setGlobalHookEnabled(result)
         }}
-        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors border ${
+        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
           globalHookEnabled
             ? 'bg-yellow-600/80 hover:bg-yellow-600 text-white border-transparent'
             : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
@@ -225,13 +236,13 @@ export function Toolbar(): JSX.Element {
         title={globalHookEnabled ? 'Кликер активен — нажмите для отключения' : 'Кликер выключен — нажмите для включения'}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
-        🎮 {globalHookEnabled ? 'Кликер в эфире' : 'Кликер вне эфира'}
+        🎮 Кликер: {globalHookEnabled ? 'Вкл' : 'Выкл'}
       </button>
 
       <button
         onClick={handleTogglePresentation}
         disabled={!canTogglePresentation}
-        className={`text-xs px-3 py-1.5 rounded-lg font-medium transition-colors ${
+        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
           isOutputActive
             ? 'bg-red-600/80 hover:bg-red-600 text-white'
             : selectedChannelHasContent && !selectedPptxIsPreparing

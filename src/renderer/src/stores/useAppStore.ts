@@ -207,6 +207,139 @@ export interface InformationMediaConfig {
   capture?: CaptureSourceConfig
 }
 
+export type BroadcastTitleEffect = 'instant' | 'fade' | 'slide-left' | 'slide-right' | 'slide-up' | 'scale'
+export type BroadcastTitleStyle = 'rounded' | 'rectangle' | 'slant-right' | 'slant-left' | 'pill'
+export type BroadcastTitlePosition =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'center-left'
+  | 'center'
+  | 'center-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right'
+
+export interface BroadcastSpeaker {
+  id: string
+  name: string
+  role: string
+}
+
+function normalizeBroadcastColor(value: string | undefined, fallback: string): string {
+  return value && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : fallback
+}
+
+export interface BroadcastTitlesDraft {
+  speakers: BroadcastSpeaker[]
+  selectedSpeakerId: string | null
+  eventLabel: string
+  eventInfo: string
+  speakerEnterEffect: BroadcastTitleEffect
+  speakerExitEffect: BroadcastTitleEffect
+  speakerAutoHideSeconds: number
+  speakerStyle: BroadcastTitleStyle
+  speakerTextColor: string
+  speakerBackgroundStart: string
+  speakerBackgroundEnd: string
+  speakerAccentStart: string
+  speakerAccentEnd: string
+  eventEnterEffect: BroadcastTitleEffect
+  eventExitEffect: BroadcastTitleEffect
+  eventAutoHideSeconds: number
+  eventPosition: BroadcastTitlePosition
+  eventStyle: BroadcastTitleStyle
+  eventTextColor: string
+  eventBackgroundStart: string
+  eventBackgroundEnd: string
+  eventAccentStart: string
+  eventAccentEnd: string
+}
+
+export interface BroadcastTitlesOutput {
+  speakerId: string | null
+  speakerName: string
+  speakerRole: string
+  eventLabel: string
+  eventInfo: string
+  speakerEnterEffect: BroadcastTitleEffect
+  speakerExitEffect: BroadcastTitleEffect
+  speakerAutoHideSeconds: number
+  speakerStyle: BroadcastTitleStyle
+  speakerTextColor: string
+  speakerBackgroundStart: string
+  speakerBackgroundEnd: string
+  speakerAccentStart: string
+  speakerAccentEnd: string
+  eventEnterEffect: BroadcastTitleEffect
+  eventExitEffect: BroadcastTitleEffect
+  eventAutoHideSeconds: number
+  eventPosition: BroadcastTitlePosition
+  eventStyle: BroadcastTitleStyle
+  eventTextColor: string
+  eventBackgroundStart: string
+  eventBackgroundEnd: string
+  eventAccentStart: string
+  eventAccentEnd: string
+  speakerVisible: boolean
+  eventVisible: boolean
+}
+
+export const DEFAULT_BROADCAST_TITLES: BroadcastTitlesDraft = {
+  speakers: [],
+  selectedSpeakerId: null,
+  eventLabel: 'МЕРОПРИЯТИЕ',
+  eventInfo: '',
+  speakerEnterEffect: 'slide-left',
+  speakerExitEffect: 'slide-left',
+  speakerAutoHideSeconds: 0,
+  speakerStyle: 'rounded',
+  speakerTextColor: '#ffffff',
+  speakerBackgroundStart: '#070d18',
+  speakerBackgroundEnd: '#0f222e',
+  speakerAccentStart: '#3ee59b',
+  speakerAccentEnd: '#24b8d8',
+  eventEnterEffect: 'fade',
+  eventExitEffect: 'fade',
+  eventAutoHideSeconds: 0,
+  eventPosition: 'top-right',
+  eventStyle: 'rounded',
+  eventTextColor: '#ffffff',
+  eventBackgroundStart: '#070d18',
+  eventBackgroundEnd: '#0d1b28',
+  eventAccentStart: '#5be5b2',
+  eventAccentEnd: '#24b8d8'
+}
+
+export const DEFAULT_BROADCAST_TITLES_OUTPUT: BroadcastTitlesOutput = {
+  speakerId: null,
+  speakerName: '',
+  speakerRole: '',
+  eventLabel: DEFAULT_BROADCAST_TITLES.eventLabel,
+  eventInfo: '',
+  speakerEnterEffect: DEFAULT_BROADCAST_TITLES.speakerEnterEffect,
+  speakerExitEffect: DEFAULT_BROADCAST_TITLES.speakerExitEffect,
+  speakerAutoHideSeconds: DEFAULT_BROADCAST_TITLES.speakerAutoHideSeconds,
+  speakerStyle: DEFAULT_BROADCAST_TITLES.speakerStyle,
+  speakerTextColor: DEFAULT_BROADCAST_TITLES.speakerTextColor,
+  speakerBackgroundStart: DEFAULT_BROADCAST_TITLES.speakerBackgroundStart,
+  speakerBackgroundEnd: DEFAULT_BROADCAST_TITLES.speakerBackgroundEnd,
+  speakerAccentStart: DEFAULT_BROADCAST_TITLES.speakerAccentStart,
+  speakerAccentEnd: DEFAULT_BROADCAST_TITLES.speakerAccentEnd,
+  eventEnterEffect: DEFAULT_BROADCAST_TITLES.eventEnterEffect,
+  eventExitEffect: DEFAULT_BROADCAST_TITLES.eventExitEffect,
+  eventAutoHideSeconds: DEFAULT_BROADCAST_TITLES.eventAutoHideSeconds,
+  eventPosition: DEFAULT_BROADCAST_TITLES.eventPosition,
+  eventStyle: DEFAULT_BROADCAST_TITLES.eventStyle,
+  eventTextColor: DEFAULT_BROADCAST_TITLES.eventTextColor,
+  eventBackgroundStart: DEFAULT_BROADCAST_TITLES.eventBackgroundStart,
+  eventBackgroundEnd: DEFAULT_BROADCAST_TITLES.eventBackgroundEnd,
+  eventAccentStart: DEFAULT_BROADCAST_TITLES.eventAccentStart,
+  eventAccentEnd: DEFAULT_BROADCAST_TITLES.eventAccentEnd,
+  speakerVisible: false,
+  eventVisible: false
+}
+
 interface AppState {
   folderPath: string | null
   rootFolderPath: string | null
@@ -235,6 +368,8 @@ interface AppState {
   channelBoundaryNavigationEnabled: boolean
   eventTimer: EventTimerState
   eventTimerOutput: EventTimerState | null
+  broadcastTitles: BroadcastTitlesDraft
+  broadcastTitlesOutput: BroadcastTitlesOutput
 
   overlayState: OverlayState
   setOverlayState: (state: OverlayState) => void
@@ -294,6 +429,8 @@ interface AppState {
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
   setEventTimer: (update: Partial<EventTimerState>) => void
   setEventTimerOutput: (timer: EventTimerState | null) => void
+  setBroadcastTitles: (update: Partial<BroadcastTitlesDraft>) => void
+  setBroadcastTitlesOutput: (update: Partial<BroadcastTitlesOutput>) => void
 
   // Doc previews (Word/Excel -> temp PDF path)
   docPreviewsMap: Record<string, string>
@@ -378,6 +515,8 @@ export const useAppStore = create<AppState>()(persist(
     visibility: { ...DEFAULT_EVENT_TIMER_STATE.visibility }
   },
   eventTimerOutput: null,
+  broadcastTitles: { ...DEFAULT_BROADCAST_TITLES },
+  broadcastTitlesOutput: { ...DEFAULT_BROADCAST_TITLES_OUTPUT },
 
   overlayState: { kind: 'hidden' } as OverlayState,
 
@@ -769,6 +908,64 @@ export const useAppStore = create<AppState>()(persist(
       ? { ...timer, headings: { ...timer.headings }, visibility: { ...timer.visibility } }
       : null
   }),
+  setBroadcastTitles: (update) => set((state) => ({
+    broadcastTitles: {
+      ...state.broadcastTitles,
+      ...update,
+      speakers: (update.speakers ?? state.broadcastTitles.speakers).map((speaker) => ({
+        id: String(speaker.id).slice(0, 80),
+        name: String(speaker.name).slice(0, 120),
+        role: String(speaker.role).slice(0, 180)
+      })),
+      eventLabel: (update.eventLabel ?? state.broadcastTitles.eventLabel).replace(/[\r\n\t]+/g, ' ').slice(0, 80),
+      eventInfo: (update.eventInfo ?? state.broadcastTitles.eventInfo).replace(/\r/g, '').slice(0, 320),
+      speakerAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
+        update.speakerAutoHideSeconds ?? state.broadcastTitles.speakerAutoHideSeconds
+      ))),
+      speakerTextColor: normalizeBroadcastColor(update.speakerTextColor, state.broadcastTitles.speakerTextColor),
+      speakerBackgroundStart: normalizeBroadcastColor(update.speakerBackgroundStart, state.broadcastTitles.speakerBackgroundStart),
+      speakerBackgroundEnd: normalizeBroadcastColor(update.speakerBackgroundEnd, state.broadcastTitles.speakerBackgroundEnd),
+      speakerAccentStart: normalizeBroadcastColor(update.speakerAccentStart, state.broadcastTitles.speakerAccentStart),
+      speakerAccentEnd: normalizeBroadcastColor(update.speakerAccentEnd, state.broadcastTitles.speakerAccentEnd),
+      eventAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
+        update.eventAutoHideSeconds ?? state.broadcastTitles.eventAutoHideSeconds
+      ))),
+      eventTextColor: normalizeBroadcastColor(update.eventTextColor, state.broadcastTitles.eventTextColor),
+      eventBackgroundStart: normalizeBroadcastColor(update.eventBackgroundStart, state.broadcastTitles.eventBackgroundStart),
+      eventBackgroundEnd: normalizeBroadcastColor(update.eventBackgroundEnd, state.broadcastTitles.eventBackgroundEnd),
+      eventAccentStart: normalizeBroadcastColor(update.eventAccentStart, state.broadcastTitles.eventAccentStart),
+      eventAccentEnd: normalizeBroadcastColor(update.eventAccentEnd, state.broadcastTitles.eventAccentEnd)
+    }
+  })),
+  setBroadcastTitlesOutput: (update) => set((state) => ({
+    broadcastTitlesOutput: {
+      ...state.broadcastTitlesOutput,
+      ...update,
+      speakerId: update.speakerId === undefined
+        ? state.broadcastTitlesOutput.speakerId
+        : update.speakerId?.slice(0, 80) || null,
+      speakerName: (update.speakerName ?? state.broadcastTitlesOutput.speakerName).slice(0, 120),
+      speakerRole: (update.speakerRole ?? state.broadcastTitlesOutput.speakerRole).slice(0, 180),
+      eventLabel: (update.eventLabel ?? state.broadcastTitlesOutput.eventLabel).replace(/[\r\n\t]+/g, ' ').slice(0, 80),
+      eventInfo: (update.eventInfo ?? state.broadcastTitlesOutput.eventInfo).replace(/\r/g, '').slice(0, 320),
+      speakerAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
+        update.speakerAutoHideSeconds ?? state.broadcastTitlesOutput.speakerAutoHideSeconds
+      ))),
+      speakerTextColor: normalizeBroadcastColor(update.speakerTextColor, state.broadcastTitlesOutput.speakerTextColor),
+      speakerBackgroundStart: normalizeBroadcastColor(update.speakerBackgroundStart, state.broadcastTitlesOutput.speakerBackgroundStart),
+      speakerBackgroundEnd: normalizeBroadcastColor(update.speakerBackgroundEnd, state.broadcastTitlesOutput.speakerBackgroundEnd),
+      speakerAccentStart: normalizeBroadcastColor(update.speakerAccentStart, state.broadcastTitlesOutput.speakerAccentStart),
+      speakerAccentEnd: normalizeBroadcastColor(update.speakerAccentEnd, state.broadcastTitlesOutput.speakerAccentEnd),
+      eventAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
+        update.eventAutoHideSeconds ?? state.broadcastTitlesOutput.eventAutoHideSeconds
+      ))),
+      eventTextColor: normalizeBroadcastColor(update.eventTextColor, state.broadcastTitlesOutput.eventTextColor),
+      eventBackgroundStart: normalizeBroadcastColor(update.eventBackgroundStart, state.broadcastTitlesOutput.eventBackgroundStart),
+      eventBackgroundEnd: normalizeBroadcastColor(update.eventBackgroundEnd, state.broadcastTitlesOutput.eventBackgroundEnd),
+      eventAccentStart: normalizeBroadcastColor(update.eventAccentStart, state.broadcastTitlesOutput.eventAccentStart),
+      eventAccentEnd: normalizeBroadcastColor(update.eventAccentEnd, state.broadcastTitlesOutput.eventAccentEnd)
+    }
+  })),
 
   setOverlayState: (state) => set({ overlayState: state }),
 
@@ -891,7 +1088,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 9,
+    version: 13,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -931,6 +1128,59 @@ export const useAppStore = create<AppState>()(persist(
       if (version < 8) {
         delete migrated.timerDisplayTarget
       }
+      // v9 -> v10: a single speaker became a reusable speaker list and title
+      // animation/position settings were added. Preserve the old draft.
+      if (version < 10) {
+        const rawTitles = migrated.broadcastTitles && typeof migrated.broadcastTitles === 'object'
+          ? migrated.broadcastTitles as Record<string, unknown>
+          : {}
+        const oldName = typeof rawTitles.speakerName === 'string' ? rawTitles.speakerName.slice(0, 120) : ''
+        const oldRole = typeof rawTitles.speakerRole === 'string' ? rawTitles.speakerRole.slice(0, 180) : ''
+        const speakerId = oldName || oldRole ? 'speaker-migrated' : null
+        migrated.broadcastTitles = {
+          ...DEFAULT_BROADCAST_TITLES,
+          speakers: speakerId ? [{ id: speakerId, name: oldName, role: oldRole }] : [],
+          selectedSpeakerId: speakerId,
+          eventInfo: typeof rawTitles.eventInfo === 'string'
+            ? rawTitles.eventInfo.replace(/\r/g, '').slice(0, 320)
+            : ''
+        }
+      }
+      // v10 -> v11: the event title label became editable.
+      if (version < 11) {
+        const rawTitles = migrated.broadcastTitles && typeof migrated.broadcastTitles === 'object'
+          ? migrated.broadcastTitles as Record<string, unknown>
+          : {}
+        migrated.broadcastTitles = {
+          ...DEFAULT_BROADCAST_TITLES,
+          ...rawTitles,
+          eventLabel: typeof rawTitles.eventLabel === 'string'
+            ? rawTitles.eventLabel.replace(/[\r\n\t]+/g, ' ').slice(0, 80)
+            : DEFAULT_BROADCAST_TITLES.eventLabel
+        }
+      }
+      // v11 -> v12: add reusable title shapes and customizable colors.
+      if (version < 12) {
+        const rawTitles = migrated.broadcastTitles && typeof migrated.broadcastTitles === 'object'
+          ? migrated.broadcastTitles as Record<string, unknown>
+          : {}
+        migrated.broadcastTitles = {
+          ...DEFAULT_BROADCAST_TITLES,
+          ...rawTitles
+        }
+      }
+      // v12 -> v13: replace the single clipped corner with two full-height
+      // diagonal side variants. The old option maps to a slanted right side.
+      if (version < 13) {
+        const rawTitles = migrated.broadcastTitles && typeof migrated.broadcastTitles === 'object'
+          ? migrated.broadcastTitles as Record<string, unknown>
+          : {}
+        migrated.broadcastTitles = {
+          ...rawTitles,
+          speakerStyle: rawTitles.speakerStyle === 'cut-corner' ? 'slant-right' : rawTitles.speakerStyle,
+          eventStyle: rawTitles.eventStyle === 'cut-corner' ? 'slant-right' : rawTitles.eventStyle
+        }
+      }
       return migrated
     },
     partialize: (state) => ({
@@ -946,6 +1196,7 @@ export const useAppStore = create<AppState>()(persist(
       timerWarningTextColor: state.timerWarningTextColor,
       timerOvertimeTextColor: state.timerOvertimeTextColor,
       timerTextOpacity: state.timerTextOpacity,
+      broadcastTitles: state.broadcastTitles,
     }),
   }
 ))

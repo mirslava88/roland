@@ -6,6 +6,13 @@ import {
   CaptureHub,
   type CaptureTakeRequest
 } from './components/PresentationView/CaptureHub'
+import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
+import type {
+  BroadcastTitleEffect,
+  BroadcastTitlePosition,
+  BroadcastTitleStyle,
+  BroadcastTitlesOutput
+} from './stores/useAppStore'
 import {
   ensurePdfLiveCache,
   type PdfLivePrewarmRequest
@@ -37,6 +44,101 @@ type PendingContent =
   | { kind: 'slot'; slot: SlotIndex; revision: number; payload: ContentPayload }
   | { kind: 'capture'; sourceId: string; revision: number; payload: ContentPayload }
 
+const HIDDEN_BROADCAST_TITLES: BroadcastTitlesOutput = {
+  speakerId: null,
+  speakerName: '',
+  speakerRole: '',
+  eventLabel: 'МЕРОПРИЯТИЕ',
+  eventInfo: '',
+  speakerEnterEffect: 'slide-left',
+  speakerExitEffect: 'slide-left',
+  speakerAutoHideSeconds: 0,
+  speakerStyle: 'rounded',
+  speakerTextColor: '#ffffff',
+  speakerBackgroundStart: '#070d18',
+  speakerBackgroundEnd: '#0f222e',
+  speakerAccentStart: '#3ee59b',
+  speakerAccentEnd: '#24b8d8',
+  eventEnterEffect: 'fade',
+  eventExitEffect: 'fade',
+  eventAutoHideSeconds: 0,
+  eventPosition: 'top-right',
+  eventStyle: 'rounded',
+  eventTextColor: '#ffffff',
+  eventBackgroundStart: '#070d18',
+  eventBackgroundEnd: '#0d1b28',
+  eventAccentStart: '#5be5b2',
+  eventAccentEnd: '#24b8d8',
+  speakerVisible: false,
+  eventVisible: false
+}
+
+const BROADCAST_TITLE_EFFECTS: BroadcastTitleEffect[] = ['instant', 'fade', 'slide-left', 'slide-right', 'slide-up', 'scale']
+const BROADCAST_TITLE_STYLES: BroadcastTitleStyle[] = ['rounded', 'rectangle', 'slant-right', 'slant-left', 'pill']
+const BROADCAST_TITLE_POSITIONS: BroadcastTitlePosition[] = [
+  'top-left', 'top-center', 'top-right',
+  'center-left', 'center', 'center-right',
+  'bottom-left', 'bottom-center', 'bottom-right'
+]
+
+function normalizeBroadcastTitles(value: unknown): BroadcastTitlesOutput {
+  const raw = value && typeof value === 'object'
+    ? value as Partial<BroadcastTitlesOutput>
+    : {}
+  const effect = (candidate: unknown, fallback: BroadcastTitleEffect): BroadcastTitleEffect => (
+    typeof candidate === 'string' && BROADCAST_TITLE_EFFECTS.includes(candidate as BroadcastTitleEffect)
+      ? candidate as BroadcastTitleEffect
+      : fallback
+  )
+  const style = (candidate: unknown, fallback: BroadcastTitleStyle): BroadcastTitleStyle => (
+    candidate === 'cut-corner'
+      ? 'slant-right'
+      :
+    typeof candidate === 'string' && BROADCAST_TITLE_STYLES.includes(candidate as BroadcastTitleStyle)
+      ? candidate as BroadcastTitleStyle
+      : fallback
+  )
+  const color = (candidate: unknown, fallback: string): string => (
+    typeof candidate === 'string' && /^#[0-9a-f]{6}$/i.test(candidate) ? candidate.toLowerCase() : fallback
+  )
+  return {
+    speakerId: typeof raw.speakerId === 'string' ? raw.speakerId.slice(0, 80) : null,
+    speakerName: typeof raw.speakerName === 'string' ? raw.speakerName.slice(0, 120) : '',
+    speakerRole: typeof raw.speakerRole === 'string' ? raw.speakerRole.slice(0, 180) : '',
+    eventLabel: typeof raw.eventLabel === 'string'
+      ? raw.eventLabel.replace(/[\r\n\t]+/g, ' ').slice(0, 80)
+      : 'МЕРОПРИЯТИЕ',
+    eventInfo: typeof raw.eventInfo === 'string' ? raw.eventInfo.replace(/\r/g, '').slice(0, 320) : '',
+    speakerEnterEffect: effect(raw.speakerEnterEffect, 'slide-left'),
+    speakerExitEffect: effect(raw.speakerExitEffect, 'slide-left'),
+    speakerAutoHideSeconds: typeof raw.speakerAutoHideSeconds === 'number'
+      ? Math.max(0, Math.min(86400, Math.round(raw.speakerAutoHideSeconds)))
+      : 0,
+    speakerStyle: style(raw.speakerStyle, 'rounded'),
+    speakerTextColor: color(raw.speakerTextColor, '#ffffff'),
+    speakerBackgroundStart: color(raw.speakerBackgroundStart, '#070d18'),
+    speakerBackgroundEnd: color(raw.speakerBackgroundEnd, '#0f222e'),
+    speakerAccentStart: color(raw.speakerAccentStart, '#3ee59b'),
+    speakerAccentEnd: color(raw.speakerAccentEnd, '#24b8d8'),
+    eventEnterEffect: effect(raw.eventEnterEffect, 'fade'),
+    eventExitEffect: effect(raw.eventExitEffect, 'fade'),
+    eventAutoHideSeconds: typeof raw.eventAutoHideSeconds === 'number'
+      ? Math.max(0, Math.min(86400, Math.round(raw.eventAutoHideSeconds)))
+      : 0,
+    eventPosition: typeof raw.eventPosition === 'string' && BROADCAST_TITLE_POSITIONS.includes(raw.eventPosition as BroadcastTitlePosition)
+      ? raw.eventPosition as BroadcastTitlePosition
+      : 'top-right',
+    eventStyle: style(raw.eventStyle, 'rounded'),
+    eventTextColor: color(raw.eventTextColor, '#ffffff'),
+    eventBackgroundStart: color(raw.eventBackgroundStart, '#070d18'),
+    eventBackgroundEnd: color(raw.eventBackgroundEnd, '#0d1b28'),
+    eventAccentStart: color(raw.eventAccentStart, '#5be5b2'),
+    eventAccentEnd: color(raw.eventAccentEnd, '#24b8d8'),
+    speakerVisible: raw.speakerVisible === true,
+    eventVisible: raw.eventVisible === true
+  }
+}
+
 function otherSlot(slot: SlotIndex): SlotIndex {
   return slot === 0 ? 1 : 0
 }
@@ -49,6 +151,7 @@ export function PresentationApp(): JSX.Element {
   const [activeLayer, setActiveLayer] = useState<ActiveLayer>({ kind: 'slot', slot: 0 })
   const [captureAudioSourceId, setCaptureAudioSourceId] = useState<string | null>(null)
   const [captureTakeRequest, setCaptureTakeRequest] = useState<CaptureTakeRequest | null>(null)
+  const [broadcastTitles, setBroadcastTitles] = useState<BroadcastTitlesOutput>(HIDDEN_BROADCAST_TITLES)
   const slotsRef = useRef(slots)
   const activeLayerRef = useRef<ActiveLayer>(activeLayer)
   const activeSlotRef = useRef<SlotIndex>(0)
@@ -418,6 +521,14 @@ export function PresentationApp(): JSX.Element {
     }
   }, [commitReadyCapture, loadContent])
 
+  useEffect(() => {
+    const unsubscribe = window.api.on('broadcast-titles-update', (...args: unknown[]) => {
+      setBroadcastTitles(normalizeBroadcastTitles(args[0]))
+    })
+    window.api.sendToControl('broadcast-titles-ready')
+    return unsubscribe
+  }, [])
+
   const renderSlot = (slot: ContentSlot, index: SlotIndex): JSX.Element | null => {
     const content = slot.payload
     if (!content) return null
@@ -506,6 +617,9 @@ export function PresentationApp(): JSX.Element {
         onTakeReady={prepareCaptureTake}
         onTakeError={failCaptureTake}
       />
+      {activeLayer.kind === 'capture' && (
+        <BroadcastTitlesOverlay titles={broadcastTitles} />
+      )}
       {!hasVisibleContent && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-700 text-lg select-none">
           Waiting for content...

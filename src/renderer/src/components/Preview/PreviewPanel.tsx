@@ -1,7 +1,9 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useAppStore, ChannelState, ChannelId, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
+import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
 import {
   beginNavigationTransition,
   drainNavigationTransition,
@@ -1751,6 +1753,9 @@ function ChannelPanel({
   const [slideFocused, setSlideFocused] = useState(false)
   const [captionEditing, setCaptionEditing] = useState(false)
   const [captionDraft, setCaptionDraft] = useState(channel.caption)
+  const [titlesMenu, setTitlesMenu] = useState<{ x: number; y: number } | null>(null)
+  const [pendingSpeakerId, setPendingSpeakerId] = useState<string | null>(null)
+  const [pendingEventTitle, setPendingEventTitle] = useState(false)
   const captionInputRef = useRef<HTMLInputElement>(null)
   const cancelCaptionOnBlurRef = useRef(false)
 
@@ -1830,7 +1835,118 @@ function ChannelPanel({
     }
   }
 
-  const { isPresentationWindowOpen, activeFile: storeActiveFile } = useAppStore()
+  const {
+    isPresentationWindowOpen,
+    activeFile: storeActiveFile,
+    broadcastTitles,
+    broadcastTitlesOutput,
+    setBroadcastTitles,
+    setBroadcastTitlesOutput
+  } = useAppStore()
+
+  const publishSpeaker = (speakerId: string): void => {
+    const speaker = useAppStore.getState().broadcastTitles.speakers.find((item) => item.id === speakerId)
+    if (!speaker?.name.trim()) return
+    const titles = useAppStore.getState().broadcastTitles
+    setBroadcastTitlesOutput({
+      speakerId: speaker.id,
+      speakerName: speaker.name,
+      speakerRole: speaker.role,
+      speakerEnterEffect: titles.speakerEnterEffect,
+      speakerExitEffect: titles.speakerExitEffect,
+      speakerAutoHideSeconds: titles.speakerAutoHideSeconds,
+      speakerStyle: titles.speakerStyle,
+      speakerTextColor: titles.speakerTextColor,
+      speakerBackgroundStart: titles.speakerBackgroundStart,
+      speakerBackgroundEnd: titles.speakerBackgroundEnd,
+      speakerAccentStart: titles.speakerAccentStart,
+      speakerAccentEnd: titles.speakerAccentEnd,
+      speakerVisible: true
+    })
+  }
+
+  const publishEventTitle = (): void => {
+    const titles = useAppStore.getState().broadcastTitles
+    if (!titles.eventInfo.trim()) return
+    setBroadcastTitlesOutput({
+      eventLabel: titles.eventLabel,
+      eventInfo: titles.eventInfo,
+      eventEnterEffect: titles.eventEnterEffect,
+      eventExitEffect: titles.eventExitEffect,
+      eventAutoHideSeconds: titles.eventAutoHideSeconds,
+      eventPosition: titles.eventPosition,
+      eventStyle: titles.eventStyle,
+      eventTextColor: titles.eventTextColor,
+      eventBackgroundStart: titles.eventBackgroundStart,
+      eventBackgroundEnd: titles.eventBackgroundEnd,
+      eventAccentStart: titles.eventAccentStart,
+      eventAccentEnd: titles.eventAccentEnd,
+      eventVisible: true
+    })
+  }
+
+  useEffect(() => {
+    if (!pendingSpeakerId || channel.file?.type !== 'capture') return
+    const expectedSourceId = channel.file.capture?.sourceId
+    const activeSourceId = storeActiveFile?.type === 'capture' ? storeActiveFile.capture?.sourceId : null
+    if (!expectedSourceId || activeSourceId !== expectedSourceId) return
+    publishSpeaker(pendingSpeakerId)
+    setPendingSpeakerId(null)
+  }, [pendingSpeakerId, storeActiveFile, channel.file])
+
+  useEffect(() => {
+    if (!pendingEventTitle || channel.file?.type !== 'capture') return
+    const expectedSourceId = channel.file.capture?.sourceId
+    const activeSourceId = storeActiveFile?.type === 'capture' ? storeActiveFile.capture?.sourceId : null
+    if (!expectedSourceId || activeSourceId !== expectedSourceId) return
+    publishEventTitle()
+    setPendingEventTitle(false)
+  }, [pendingEventTitle, storeActiveFile, channel.file])
+
+  useEffect(() => {
+    if (channel.file?.type !== 'capture') {
+      setTitlesMenu(null)
+      setPendingSpeakerId(null)
+      setPendingEventTitle(false)
+    }
+  }, [channel.file])
+
+  const handleTitlesContextMenu = (event: React.MouseEvent<HTMLDivElement>): void => {
+    if (channel.file?.type !== 'capture') return
+    event.preventDefault()
+    event.stopPropagation()
+    onSelect()
+    const menuWidth = 310
+    const menuHeight = Math.min(610, 270 + broadcastTitles.speakers.length * 54)
+    setTitlesMenu({
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8))
+    })
+  }
+
+  const takeAndPublishSpeaker = (speakerId: string): void => {
+    setTitlesMenu(null)
+    setBroadcastTitles({ selectedSpeakerId: speakerId })
+    if (isLive) {
+      publishSpeaker(speakerId)
+      return
+    }
+    if (isTaking) return
+    setPendingSpeakerId(speakerId)
+    onTake()
+  }
+
+  const takeAndPublishEvent = (): void => {
+    setTitlesMenu(null)
+    if (!broadcastTitles.eventInfo.trim()) return
+    if (isLive) {
+      publishEventTitle()
+      return
+    }
+    if (isTaking) return
+    setPendingEventTitle(true)
+    onTake()
+  }
   const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation' || (storeActiveFile?.type === 'other' && !storeActiveFile.isImage)
   const showSelected = isSelected && !isOutputActive
   const pptxIsPreparing = channel.file?.type === 'presentation' &&
@@ -1848,6 +1964,7 @@ function ChannelPanel({
       onDrop={handleDrop}
       onClick={onSelect}
       onDoubleClick={isTaking || pptxIsPreparing ? undefined : onTake}
+      onContextMenu={handleTitlesContextMenu}
       aria-busy={isTaking || pptxIsPreparing}
     >
       {/* Header. min-w-0 на flex-контейнере + shrink-0 на фиксированных
@@ -1955,6 +2072,9 @@ function ChannelPanel({
             <div className={`${compact ? 'text-lg mb-0.5' : 'text-2xl mb-2'} opacity-30`}>📥</div>
             Перетащите материал сюда
           </div>
+        )}
+        {isLive && channel.file?.type === 'capture' && (
+          <BroadcastTitlesOverlay titles={broadcastTitlesOutput} />
         )}
         {isTaking && openingMessage && (
           <div
@@ -2071,6 +2191,127 @@ function ChannelPanel({
             В эфир
           </button>
         </div>
+      )}
+
+      {titlesMenu && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[240]"
+            onMouseDown={(event) => {
+              event.stopPropagation()
+              setTitlesMenu(null)
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setTitlesMenu(null)
+            }}
+          />
+          <div
+            className="fixed z-[241] w-[310px] overflow-hidden rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"
+            style={{ left: titlesMenu.x, top: titlesMenu.y }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="border-b border-gray-700 px-3 py-2.5">
+              <div className="text-xs font-semibold text-white">Титры канала</div>
+              <div className="mt-0.5 text-[10px] text-gray-500">
+                Канал {label}{isLive ? ' уже в эфире' : ' будет отправлен в эфир'}
+              </div>
+            </div>
+
+            <div className="border-b border-gray-700 p-1.5">
+              <div className="px-2 pb-1 pt-0.5 text-[9px] font-semibold uppercase tracking-[.12em] text-emerald-400">
+                Информация о мероприятии
+              </div>
+              <button
+                type="button"
+                disabled={!broadcastTitles.eventInfo.trim() || isTaking}
+                onClick={takeAndPublishEvent}
+                className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                  broadcastTitlesOutput.eventVisible ? 'bg-emerald-900/40' : 'hover:bg-gray-700/70'
+                }`}
+              >
+                <span className={`h-2 w-2 shrink-0 rounded-full ${broadcastTitlesOutput.eventVisible ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium text-gray-100">
+                    {broadcastTitles.eventLabel.trim() || 'Без заголовка'}
+                  </span>
+                  <span className="block truncate text-[10px] text-gray-500">
+                    {broadcastTitles.eventInfo.trim() || 'Заполните информацию через кнопку «▰ Титры»'}
+                  </span>
+                </span>
+                {broadcastTitlesOutput.eventVisible && <span className="text-[8px] font-semibold text-red-300">ЭФИР</span>}
+              </button>
+              {broadcastTitlesOutput.eventVisible && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTitlesMenu(null)
+                    setBroadcastTitlesOutput({ eventVisible: false })
+                  }}
+                  className="mt-1 w-full rounded-md px-2.5 py-1.5 text-left text-[10px] font-medium text-red-300 hover:bg-red-950/40"
+                >
+                  Скрыть информацию о мероприятии
+                </button>
+              )}
+            </div>
+
+            <div className="px-3 pb-1 pt-2 text-[9px] font-semibold uppercase tracking-[.12em] text-cyan-400">
+              Выступающие
+            </div>
+
+            {broadcastTitles.speakers.length > 0 ? (
+              <div className="max-h-[360px] overflow-y-auto p-1.5">
+                {broadcastTitles.speakers.map((speaker) => {
+                  const live = broadcastTitlesOutput.speakerVisible && broadcastTitlesOutput.speakerId === speaker.id
+                  return (
+                    <button
+                      key={speaker.id}
+                      type="button"
+                      disabled={!speaker.name.trim() || isTaking}
+                      onClick={() => takeAndPublishSpeaker(speaker.id)}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                        live ? 'bg-cyan-900/45' : 'hover:bg-gray-700/70'
+                      }`}
+                    >
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${live ? 'bg-red-500' : 'bg-cyan-600'}`} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-medium text-gray-100">
+                          {speaker.name.trim() || 'ФИО не заполнено'}
+                        </span>
+                        <span className="block truncate text-[10px] text-gray-500">
+                          {speaker.role.trim() || 'Должность не указана'}
+                        </span>
+                      </span>
+                      {live && <span className="text-[8px] font-semibold text-red-300">ЭФИР</span>}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="px-3 py-5 text-center text-[11px] text-gray-500">
+                Сначала добавьте выступающих через кнопку «▰ Титры».
+              </div>
+            )}
+
+            {broadcastTitlesOutput.speakerVisible && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTitlesMenu(null)
+                  setBroadcastTitlesOutput({ speakerVisible: false })
+                }}
+                className="w-full border-t border-gray-700 px-3 py-2.5 text-left text-[11px] font-medium text-red-300 hover:bg-red-950/40"
+              >
+                Скрыть титр выступающего
+              </button>
+            )}
+          </div>
+        </>,
+        document.body
       )}
       {/* Take button for video/capture/other in non-live channel */}
       {!isLive && channel.file && (channel.file.type === 'video' || channel.file.type === 'capture' || channel.file.type === 'other') && (

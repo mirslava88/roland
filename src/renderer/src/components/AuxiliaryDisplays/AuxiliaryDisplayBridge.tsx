@@ -91,7 +91,9 @@ export function AuxiliaryDisplayBridge(): null {
     .filter((display) => (
       !display.isPrimary && displayAssignments[String(display.id)] === 'program'
     )), [displayAssignments, displays])
-  const programDisplaySignature = programDisplays.map((display) => display.id).join(',')
+  const programDisplaySignature = programDisplays.map((display) => (
+    `${display.id}:${display.bounds.x},${display.bounds.y},${display.bounds.width},${display.bounds.height}@${display.scaleFactor}`
+  )).join('|')
   const programOutputActive = activeFile !== null || isPresentationWindowOpen
 
   useEffect(() => {

@@ -1,6 +1,8 @@
 param(
-    [int]$X = 100,
-    [int]$Y = 100,
+    [int]$DisplayX = 0,
+    [int]$DisplayY = 0,
+    [int]$DisplayWidth = 1920,
+    [int]$DisplayHeight = 1080,
     [string]$DataFile = ""
 )
 
@@ -36,6 +38,21 @@ public class TimerOverlay
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
@@ -49,6 +66,10 @@ public class TimerOverlay
     private string lastContent = "";
     private double scale = 1.0;
     private int lastPositionRevision = -1;
+    private int targetDisplayX;
+    private int targetDisplayY;
+    private int targetDisplayWidth;
+    private int targetDisplayHeight;
 
     public static void EnablePerMonitorDpiAwareness()
     {
@@ -59,9 +80,13 @@ public class TimerOverlay
         try { SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch {}
     }
 
-    public void Run(int x, int y, string file)
+    public void Run(int displayX, int displayY, int displayWidth, int displayHeight, string file)
     {
         dataFile = file;
+        targetDisplayX = displayX;
+        targetDisplayY = displayY;
+        targetDisplayWidth = Math.Max(1, displayWidth);
+        targetDisplayHeight = Math.Max(1, displayHeight);
 
         window = new Window
         {
@@ -72,8 +97,8 @@ public class TimerOverlay
             ShowInTaskbar = false,
             ResizeMode = ResizeMode.NoResize,
             SizeToContent = SizeToContent.WidthAndHeight,
-            Left = x,
-            Top = y
+            Left = displayX,
+            Top = displayY
         };
 
         text = new TextBlock
@@ -131,20 +156,10 @@ public class TimerOverlay
         window.SourceInitialized += (s, e) =>
         {
             windowHwnd = new WindowInteropHelper(window).Handle;
-            try
-            {
-                SetWindowPos(
-                    windowHwnd,
-                    HWND_TOPMOST,
-                    x,
-                    y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOACTIVATE
-                );
-            }
-            catch {}
+            RepositionToTarget();
         };
+        window.ContentRendered += (s, e) => { RepositionToTarget(); };
+        window.SizeChanged += (s, e) => { RepositionToTarget(); };
 
         var timer = new DispatcherTimer();
         timer.Interval = TimeSpan.FromMilliseconds(100);
@@ -192,31 +207,23 @@ public class TimerOverlay
                 return;
             }
 
-            // The main program display can be reassigned while the timer is
-            // running. Move the existing WPF window in place so the countdown
-            // and its visual state continue without a restart or a blink.
+            // The main program display can be reassigned or change DPI while
+            // the timer is running. Re-anchor using the real physical HWND
+            // size after WPF has applied per-monitor scaling.
             int positionRevision = GetJsonInt(line, "windowPositionRevision");
             if (windowHwnd != IntPtr.Zero &&
-                line.Contains("\"windowX\"") &&
-                line.Contains("\"windowY\"") &&
+                line.Contains("\"displayX\"") &&
+                line.Contains("\"displayY\"") &&
+                line.Contains("\"displayWidth\"") &&
+                line.Contains("\"displayHeight\"") &&
                 positionRevision != lastPositionRevision)
             {
-                int targetX = GetJsonInt(line, "windowX");
-                int targetY = GetJsonInt(line, "windowY");
+                targetDisplayX = GetJsonInt(line, "displayX");
+                targetDisplayY = GetJsonInt(line, "displayY");
+                targetDisplayWidth = Math.Max(1, GetJsonInt(line, "displayWidth"));
+                targetDisplayHeight = Math.Max(1, GetJsonInt(line, "displayHeight"));
                 lastPositionRevision = positionRevision;
-                try
-                {
-                    SetWindowPos(
-                        windowHwnd,
-                        HWND_TOPMOST,
-                        targetX,
-                        targetY,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOACTIVATE
-                    );
-                }
-                catch {}
+                RepositionToTarget();
             }
 
             int remaining = GetJsonInt(line, "remaining");
@@ -276,6 +283,35 @@ public class TimerOverlay
                 window.Show();
         }
         catch { }
+    }
+
+    private void RepositionToTarget()
+    {
+        if (windowHwnd == IntPtr.Zero) return;
+        try
+        {
+            RECT rect;
+            if (!GetWindowRect(windowHwnd, out rect)) return;
+            int windowWidth = Math.Max(1, rect.Right - rect.Left);
+            int windowHeight = Math.Max(1, rect.Bottom - rect.Top);
+            uint dpi = GetDpiForWindow(windowHwnd);
+            if (dpi == 0) dpi = 96;
+            int margin = Math.Max(16, (int)Math.Round(40.0 * dpi / 96.0));
+            int targetX = targetDisplayX + targetDisplayWidth - windowWidth - margin;
+            int targetY = targetDisplayY + targetDisplayHeight - windowHeight - margin;
+            targetX = Math.Max(targetDisplayX, Math.Min(targetX, targetDisplayX + targetDisplayWidth - windowWidth));
+            targetY = Math.Max(targetDisplayY, Math.Min(targetY, targetDisplayY + targetDisplayHeight - windowHeight));
+            SetWindowPos(
+                windowHwnd,
+                HWND_TOPMOST,
+                targetX,
+                targetY,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE
+            );
+        }
+        catch {}
     }
 
     private static int GetJsonInt(string json, string key)
@@ -347,4 +383,4 @@ Add-Type -TypeDefinition $code -ReferencedAssemblies PresentationFramework, Pres
 
 [TimerOverlay]::EnablePerMonitorDpiAwareness()
 $overlay = New-Object TimerOverlay
-$overlay.Run($X, $Y, $DataFile)
+$overlay.Run($DisplayX, $DisplayY, $DisplayWidth, $DisplayHeight, $DataFile)
