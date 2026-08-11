@@ -286,6 +286,7 @@ function EventTimerDisplay(): JSX.Element {
     backgroundColor: '#18c56e',
     backgroundGradientColor: '#19b9d1',
     backgroundGradientAngle: 115,
+    fontColor: '#ffffff',
     backgroundImage: null,
     centralTimeMode: 'to-end',
     visibility: {

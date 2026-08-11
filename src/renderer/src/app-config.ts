@@ -784,6 +784,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       0,
       360
     ),
+    fontColor: safeColor(rawEventTimer.fontColor, DEFAULT_EVENT_TIMER_STATE.fontColor),
     backgroundImage: restoredEventBackground,
     centralTimeMode: restoredCentralTimeMode,
     visibility: {

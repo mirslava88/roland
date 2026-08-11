@@ -149,6 +149,7 @@ export interface EventTimerState {
   backgroundColor: string
   backgroundGradientColor: string
   backgroundGradientAngle: number
+  fontColor: string
   backgroundImage: string | null
   centralTimeMode: EventTimerCentralMode
   visibility: EventTimerVisibility
@@ -174,6 +175,7 @@ export const DEFAULT_EVENT_TIMER_STATE: EventTimerState = {
   backgroundColor: '#18c56e',
   backgroundGradientColor: '#19b9d1',
   backgroundGradientAngle: 115,
+  fontColor: '#ffffff',
   backgroundImage: null,
   centralTimeMode: 'to-end',
   visibility: {

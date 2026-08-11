@@ -143,6 +143,7 @@ interface EventTimerDisplayState {
   backgroundColor: string
   backgroundGradientColor: string
   backgroundGradientAngle: number
+  fontColor: string
   backgroundImage: string | null
   centralTimeMode: 'current' | 'timer' | 'to-start' | 'to-end'
   visibility: {

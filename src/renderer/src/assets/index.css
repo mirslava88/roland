@@ -1,5 +1,13 @@
 @import 'tailwindcss';
 
+@font-face {
+  font-family: 'SB Sans Display';
+  src: url('./fonts/SBSansDisplay-Light.otf') format('opentype');
+  font-style: normal;
+  font-weight: 300;
+  font-display: block;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme {
@@ -90,12 +98,93 @@
 .event-timer-ui *,
 .event-timer-scene,
 .event-timer-scene * {
-  font-family: 'Inter', sans-serif;
+  font-family: 'SB Sans Display', sans-serif;
   font-weight: 300;
 }
 
-.event-timer-central-time {
-  font-weight: 100 !important;
+.event-scene-clock {
+  position: absolute;
+  left: 2.2cqw;
+  top: 2.7cqh;
+  font-size: min(5.2cqw, 9.3cqh);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.event-scene-schedule {
+  position: absolute;
+  right: 2.2cqw;
+  top: 2.5cqh;
+  font-size: min(2.65cqw, 5.2cqh);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.18;
+  text-align: right;
+}
+
+.event-scene-center {
+  position: absolute;
+  inset: 0;
+  text-align: center;
+  pointer-events: none;
+}
+
+.event-scene-heading {
+  position: absolute;
+  left: 50%;
+  top: 31.2cqh;
+  width: 78cqw;
+  transform: translate(-50%, -50%);
+  font-size: min(3.3cqw, 6.4cqh);
+  line-height: 1;
+}
+
+.event-scene-time {
+  position: absolute;
+  left: 50%;
+  top: 49.7cqh;
+  width: 82cqw;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+  font-size: min(14.1cqw, 26.5cqh);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.04em;
+  line-height: .9;
+}
+
+.event-scene-event-wrap {
+  position: absolute;
+  left: 50%;
+  top: 65.8cqh;
+  width: 60cqw;
+  padding-top: 4.2cqh;
+  transform: translateX(-50%);
+  border-top: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.event-scene-event {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: min(3.05cqw, 5.9cqh);
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.event-scene-remaining,
+.event-scene-cost {
+  position: absolute;
+  bottom: 3.7cqh;
+  font-size: min(2.55cqw, 4.8cqh);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.event-scene-remaining {
+  left: 2.2cqw;
+}
+
+.event-scene-cost {
+  right: 2.2cqw;
 }
 
 /*

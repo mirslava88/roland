@@ -14,6 +14,15 @@ function defaultHeading(mode: EventTimerCentralMode): string {
   return 'До конца мероприятия:'
 }
 
+function secondsUntilTime(time: string): number {
+  const match = /^(\d{2}):(\d{2})$/.exec(time)
+  if (!match) return 0
+  const now = new Date()
+  const target = new Date(now)
+  target.setHours(Number(match[1]), Number(match[2]), 0, 0)
+  return Math.round((target.getTime() - now.getTime()) / 1000)
+}
+
 function nextTimerTick(timer: EventTimerState): Pick<EventTimerState, 'remaining' | 'overtimeCostTotal'> {
   const remaining = timer.remaining - 1
   const overtimeIncrement = remaining < 0 && timer.costPerMinute > 0
@@ -56,7 +65,7 @@ const visibilityLabels: Array<[keyof EventTimerVisibility, string]> = [
   ['schedule', 'Начало / конец'],
   ['heading', 'Заголовок'],
   ['eventName', 'Название мероприятия'],
-  ['remaining', 'Осталось времени'],
+  ['remaining', 'До завершения'],
   ['cost', 'Стоимость']
 ]
 
@@ -165,6 +174,14 @@ export function EventTimer(): JSX.Element {
     })
   }
 
+  const syncTimerToNow = (): void => {
+    const remaining = secondsUntilTime(eventTimer.endTime)
+    updateTimerControl({
+      duration: Math.max(0, remaining),
+      remaining
+    })
+  }
+
   const toggleVisibility = (key: keyof EventTimerVisibility): void => {
     updateDraft({
       visibility: { ...eventTimer.visibility, [key]: !eventTimer.visibility[key] }
@@ -215,34 +232,8 @@ export function EventTimer(): JSX.Element {
                 <h3 className="text-center text-sm font-semibold text-white">Настройка таймера</h3>
                 <div className="grid shrink-0 grid-cols-2 gap-x-4 gap-y-2">
                   <label className="space-y-1 text-[11px] text-gray-400">
-                    <span>Название мероприятия:</span>
-                    <input
-                      value={eventTimer.eventName}
-                      maxLength={120}
-                      onChange={(event) => updateDraft({ eventName: event.target.value })}
-                      className="w-full rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs text-white outline-hidden focus:border-emerald-500"
-                    />
-                  </label>
-                  <div className="space-y-1 text-[11px] text-gray-400">
-                    <span>Время мероприятия:</span>
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        type="time"
-                        value={eventTimer.startTime}
-                        onChange={(event) => updateSchedule('startTime', event.target.value)}
-                        className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-center text-xs text-white outline-hidden focus:border-emerald-500"
-                      />
-                      <input
-                        type="time"
-                        value={eventTimer.endTime}
-                        onChange={(event) => updateSchedule('endTime', event.target.value)}
-                        className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-center text-xs text-white outline-hidden focus:border-emerald-500"
-                      />
-                    </div>
-                  </div>
-                  <label className="space-y-1 text-[11px] text-gray-400">
                     <span className="flex items-center justify-between gap-2">
-                      <span>Текст заголовка:</span>
+                      <span>Заголовок:</span>
                       {eventTimer.headings[eventTimer.centralTimeMode] !== defaultHeading(eventTimer.centralTimeMode) && (
                         <button
                           type="button"
@@ -268,6 +259,32 @@ export function EventTimer(): JSX.Element {
                           [eventTimer.centralTimeMode]: event.target.value
                         }
                       })}
+                      className="w-full rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs text-white outline-hidden focus:border-emerald-500"
+                    />
+                  </label>
+                  <div className="space-y-1 text-[11px] text-gray-400">
+                    <span>Время мероприятия:</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="time"
+                        value={eventTimer.startTime}
+                        onChange={(event) => updateSchedule('startTime', event.target.value)}
+                        className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-center text-xs text-white outline-hidden focus:border-emerald-500"
+                      />
+                      <input
+                        type="time"
+                        value={eventTimer.endTime}
+                        onChange={(event) => updateSchedule('endTime', event.target.value)}
+                        className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-center text-xs text-white outline-hidden focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+                  <label className="space-y-1 text-[11px] text-gray-400">
+                    <span>Название мероприятия:</span>
+                    <input
+                      value={eventTimer.eventName}
+                      maxLength={120}
+                      onChange={(event) => updateDraft({ eventName: event.target.value })}
                       className="w-full rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs text-white outline-hidden focus:border-emerald-500"
                     />
                   </label>
@@ -341,6 +358,15 @@ export function EventTimer(): JSX.Element {
                       type="color"
                       value={eventTimer.backgroundColor}
                       onChange={(event) => updateDraft({ backgroundColor: event.target.value })}
+                      className="h-5 w-8 cursor-pointer border-0 bg-transparent p-0"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 rounded-lg border border-gray-700 bg-surface-100 px-2 py-1 text-gray-200">
+                    Цвет шрифта
+                    <input
+                      type="color"
+                      value={eventTimer.fontColor}
+                      onChange={(event) => updateDraft({ fontColor: event.target.value })}
                       className="h-5 w-8 cursor-pointer border-0 bg-transparent p-0"
                     />
                   </label>
@@ -492,16 +518,19 @@ export function EventTimer(): JSX.Element {
                       <button
                         key={minutes}
                         type="button"
-                        onClick={() => minutes !== 0 && adjustMinutes(minutes)}
+                        onClick={() => minutes === 0 ? syncTimerToNow() : adjustMinutes(minutes)}
+                        title={minutes === 0
+                          ? 'Синхронизировать таймер с оставшимся временем до конца мероприятия'
+                          : undefined}
                         className={`rounded-full px-1 py-1.5 text-[8px] transition-colors ${
                           minutes < 0
                             ? 'bg-red-950/70 text-red-300 hover:bg-red-900'
                             : minutes > 0
                               ? 'bg-emerald-950/70 text-emerald-300 hover:bg-emerald-900'
-                              : 'bg-surface-100 text-gray-500'
+                              : 'bg-surface-100 text-gray-300 hover:bg-gray-700'
                         }`}
                       >
-                        {minutes === 0 ? 'Не менять' : `${minutes > 0 ? '+' : ''}${minutes} мин`}
+                        {minutes === 0 ? 'Сейчас' : `${minutes > 0 ? '+' : ''}${minutes} мин`}
                       </button>
                     ))}
                   </div>

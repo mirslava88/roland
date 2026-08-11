@@ -64,7 +64,6 @@ export function EventTimerScene({ timer, className = '' }: {
   const centralText = timer.centralTimeMode === 'current'
     ? currentClockWithSeconds(now)
     : formatEventTimer(centralSeconds ?? 0)
-  const foreground = '#ffffff'
   const alertColor = '#ef1717'
   const background = timer.backgroundMode === 'gradient'
     ? `linear-gradient(${timer.backgroundGradientAngle}deg, ${timer.backgroundColor} 0%, ${timer.backgroundGradientColor} 100%)`
@@ -73,7 +72,7 @@ export function EventTimerScene({ timer, className = '' }: {
   return (
     <div
       className={`event-timer-scene relative h-full w-full overflow-hidden bg-black font-sans select-none ${className}`}
-      style={{ containerType: 'size', color: foreground, background }}
+      style={{ containerType: 'size', color: timer.fontColor, background }}
     >
       {timer.backgroundImage && (
         <img
@@ -84,30 +83,21 @@ export function EventTimerScene({ timer, className = '' }: {
       )}
 
       {timer.visibility.clock && (
-        <div
-          className="absolute left-[1.45cqw] top-[1.1cqh] font-light tabular-nums leading-none"
-          style={{ fontSize: 'min(6.5cqw, 12cqh)' }}
-        >
+        <div className="event-scene-clock">
           {currentClock(now)}
         </div>
       )}
 
       {timer.visibility.schedule && (
-        <div
-          className="absolute right-[2.1cqw] top-[2.3cqh] text-right font-light leading-[1.18] tabular-nums"
-          style={{ fontSize: 'min(2.65cqw, 5.2cqh)' }}
-        >
+        <div className="event-scene-schedule">
           <div>Начало:&nbsp; {timer.startTime}</div>
           <div>Конец:&nbsp; {timer.endTime}</div>
         </div>
       )}
 
-      <div className="absolute left-1/2 top-[50.5%] w-[58cqw] -translate-x-1/2 -translate-y-1/2 text-center">
+      <div className="event-scene-center">
         {timer.visibility.heading && (
-          <div
-            className="mb-[2.2cqh] font-light leading-none"
-            style={{ fontSize: 'min(3.3cqw, 6.4cqh)' }}
-          >
+          <div className="event-scene-heading">
             {timer.headings[timer.centralTimeMode] || (
               timer.centralTimeMode === 'current'
                 ? 'Текущее время:'
@@ -120,19 +110,15 @@ export function EventTimerScene({ timer, className = '' }: {
           </div>
         )}
         <div
-          className="event-timer-central-time tabular-nums leading-[0.9] tracking-[-0.055em]"
-          style={{
-            color: overtime ? alertColor : foreground,
-            fontSize: 'min(13.4cqw, 25cqh)'
-          }}
+          className="event-scene-time"
+          style={{ color: overtime ? alertColor : undefined }}
         >
           {centralText}
         </div>
         {timer.visibility.eventName && (
-          <div className="mx-auto mt-[4cqh] w-[76%] border-t border-white/35 pt-[3.1cqh]">
+          <div className="event-scene-event-wrap">
             <div
-              className="truncate font-light uppercase leading-none"
-              style={{ fontSize: 'min(3.05cqw, 5.9cqh)' }}
+              className="event-scene-event"
               title={timer.eventName}
             >
               {timer.eventName || 'МЕРОПРИЯТИЕ'}
@@ -142,21 +128,15 @@ export function EventTimerScene({ timer, className = '' }: {
       </div>
 
       {timer.visibility.remaining && (
-        <div
-          className="absolute bottom-[2.4cqh] left-[1.45cqw] font-light tabular-nums leading-none"
-          style={{ fontSize: 'min(2.55cqw, 4.8cqh)' }}
-        >
-          Осталось времени: {formatEventTimer(scheduledRemaining)}
+        <div className="event-scene-remaining">
+          До завершения: {formatEventTimer(scheduledRemaining)}
         </div>
       )}
 
       {timer.visibility.cost && (
         <div
-          className="absolute bottom-[2.4cqh] right-[2.1cqw] font-light tabular-nums leading-none"
-          style={{
-            color: overtime ? alertColor : foreground,
-            fontSize: 'min(2.55cqw, 4.8cqh)'
-          }}
+          className="event-scene-cost"
+          style={{ color: overtime ? alertColor : undefined }}
         >
           Итого: {formattedCost}₽
         </div>
