@@ -52,6 +52,65 @@ export default function App(): JSX.Element {
     }
   }, [])
 
+  // Validate the synchronously restored crash-recovery snapshot. Missing or
+  // renamed files are cleared from their channels, while capture:// sources
+  // stay available and can reconnect when their device returns.
+  useEffect(() => {
+    let cancelled = false
+    const state = useAppStore.getState()
+    const filePaths = [...new Set(state.channelIds
+      .map((id) => state.channels[id]?.file)
+      .filter((file): file is FileEntry => !!file && file.type !== 'capture')
+      .map((file) => file.path)
+      .filter(Boolean))]
+
+    window.api.dbgLog(
+      `workspace recovery: channels=${state.channelIds.length} files=${filePaths.length} captures=${state.captureSources.length}`
+    )
+    if (filePaths.length === 0) return () => { cancelled = true }
+
+    void window.api.validateConfigPaths(filePaths).then((results) => {
+      if (cancelled) return
+      const missingPaths = new Set(results
+        .filter((result) => !result.exists || result.isDirectory)
+        .map((result) => result.path))
+      if (missingPaths.size === 0) {
+        window.api.dbgLog(`workspace recovery: validated=${filePaths.length} missing=0`)
+        return
+      }
+
+      const latest = useAppStore.getState()
+      const nextChannels = { ...latest.channels }
+      let cleared = 0
+      for (const id of latest.channelIds) {
+        const channel = nextChannels[id]
+        if (!channel?.file || !missingPaths.has(channel.file.path)) continue
+        nextChannels[id] = {
+          ...channel,
+          file: null,
+          slide: 1,
+          totalSlides: 0,
+          videoEndChannel: null
+        }
+        cleared++
+      }
+      for (const id of latest.channelIds) {
+        const channel = nextChannels[id]
+        if (channel?.videoEndChannel && !nextChannels[channel.videoEndChannel]?.file) {
+          nextChannels[id] = { ...channel, videoEndChannel: null }
+        }
+      }
+      useAppStore.setState({ channels: nextChannels })
+      window.api.dbgLog(
+        `workspace recovery: validated=${filePaths.length} missing=${missingPaths.size} clearedChannels=${cleared}`
+      )
+    }).catch((error: unknown) => {
+      window.api.dbgLog(`workspace recovery: validation failed; keeping snapshot error=${String(error)}`)
+    })
+
+    return () => { cancelled = true }
+  }, [])
+
   useEffect(() => {
     window.api.getDisplays().then(setDisplays)
 

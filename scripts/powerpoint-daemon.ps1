@@ -32,6 +32,8 @@ public static extern int GetClassName(System.IntPtr hWnd, System.Text.StringBuil
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool IsWindowVisible(System.IntPtr hWnd);
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern int GetWindowLong(System.IntPtr hWnd, int nIndex);
 public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -102,6 +104,67 @@ public static System.Collections.Generic.List<long> FindPowerPointEditorHwnds() 
         return true;
     }, System.IntPtr.Zero);
     return result;
+}
+
+// Hide PDM's editor frames before DWM can paint them. New-Object -ComObject
+// PowerPoint.Application can create and show PPTFrameClass before PowerShell
+// gets the COM object back, so setting WindowState/Visible afterwards is too
+// late on slower machines. During creation processId=0 and existingHwnds are
+// protected; once the PDM PowerPoint PID is known the guard filters by PID and
+// can safely stay active without touching a user's independent PowerPoint.
+private static volatile bool _editorGuardStop = true;
+private static System.Threading.Thread _editorGuardThread;
+public static long EditorGuardFoundHwnd = 0;
+public static int EditorGuardHideCount = 0;
+public static string EditorGuardError = "";
+
+public static long GetWindowProcessId(long hwnd) {
+    uint pid;
+    GetWindowThreadProcessId((System.IntPtr)hwnd, out pid);
+    return pid;
+}
+
+public static void StartPowerPointEditorGuard(long processId, long[] existingHwnds) {
+    StopPowerPointEditorGuard();
+    var protectedWindows = new System.Collections.Generic.HashSet<long>(existingHwnds ?? new long[0]);
+    EditorGuardFoundHwnd = 0;
+    EditorGuardHideCount = 0;
+    EditorGuardError = "";
+    _editorGuardStop = false;
+    _editorGuardThread = new System.Threading.Thread(() => {
+        try { SetThreadDpiAwarenessContext((System.IntPtr)(-4)); } catch {}
+        while (!_editorGuardStop) {
+            try {
+                foreach (var hwnd in FindPowerPointEditorHwnds()) {
+                    if (processId > 0) {
+                        if (GetWindowProcessId(hwnd) != processId) continue;
+                    } else if (protectedWindows.Contains(hwnd)) {
+                        continue;
+                    }
+                    EditorGuardFoundHwnd = hwnd;
+                    if (IsWindowVisible((System.IntPtr)hwnd)) {
+                        ShowWindow((System.IntPtr)hwnd, 0);
+                        EditorGuardHideCount++;
+                    }
+                }
+            } catch (System.Exception ex) {
+                EditorGuardError = ex.Message;
+            }
+            System.Threading.Thread.Sleep(1);
+        }
+    });
+    _editorGuardThread.IsBackground = true;
+    _editorGuardThread.Priority = System.Threading.ThreadPriority.Highest;
+    _editorGuardThread.Start();
+}
+
+public static void StopPowerPointEditorGuard() {
+    _editorGuardStop = true;
+    var thread = _editorGuardThread;
+    if (thread != null && thread != System.Threading.Thread.CurrentThread && thread.IsAlive) {
+        try { thread.Join(100); } catch {}
+    }
+    _editorGuardThread = null;
 }
 
 // A dedicated CLR thread starts synchronously before the blocking COM Run().
@@ -675,6 +738,7 @@ function Close-ManagedPresentation($presentation) {
 }
 
 function Reset-PowerPointSessionTracking {
+    try { [PptDaemon.Native]::StopPowerPointEditorGuard() } catch {}
     $script:pptApplication = $null
     $script:pptSessionInitialized = $false
     $script:pptOwnedByRoland = $false
@@ -753,9 +817,59 @@ function Get-PPT {
 function Get-OrCreatePPT {
     $ppt = Get-PPT
     if ($ppt) { return $ppt }
-    $ppt = New-Object -ComObject PowerPoint.Application
-    Initialize-PowerPointSession $ppt $true
-    return $ppt
+    $existingEditorHwnds = @([PptDaemon.Native]::FindPowerPointEditorHwnds())
+    $existingPowerPointPids = @{}
+    try {
+        foreach ($process in @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)) {
+            $existingPowerPointPids[[long]$process.Id] = $true
+        }
+    } catch {}
+    [PptDaemon.Native]::StartPowerPointEditorGuard(0, [long[]]$existingEditorHwnds)
+    try {
+        $ppt = New-Object -ComObject PowerPoint.Application
+        Initialize-PowerPointSession $ppt $true
+        $editorHwnd = 0
+        try { $editorHwnd = [long]$ppt.HWND } catch {}
+        if ($editorHwnd -eq 0) {
+            try { $editorHwnd = [long][PptDaemon.Native]::EditorGuardFoundHwnd } catch {}
+        }
+        $powerPointPid = 0
+        if ($editorHwnd -ne 0) {
+            try { $powerPointPid = [long][PptDaemon.Native]::GetWindowProcessId($editorHwnd) } catch {}
+        }
+        if ($powerPointPid -eq 0) {
+            # A newly created invisible COM instance may not have an editor
+            # HWND yet. Resolve its process by diffing POWERPNT PIDs so the
+            # guard can still be scoped before Visible=true creates the frame.
+            $pidDeadline = [DateTime]::UtcNow.AddMilliseconds(1000)
+            while ($powerPointPid -eq 0 -and [DateTime]::UtcNow -lt $pidDeadline) {
+                try {
+                    foreach ($process in @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)) {
+                        $candidatePid = [long]$process.Id
+                        if (-not $existingPowerPointPids.ContainsKey($candidatePid)) {
+                            $powerPointPid = $candidatePid
+                            break
+                        }
+                    }
+                } catch {}
+                if ($powerPointPid -eq 0) { Start-Sleep -Milliseconds 10 }
+            }
+        }
+        if ($powerPointPid -gt 0) {
+            [PptDaemon.Native]::StartPowerPointEditorGuard($powerPointPid, [long[]]@())
+            Log "PowerPoint editor guard attached pid=$powerPointPid hwnd=$editorHwnd"
+        } else {
+            # Do not leave an unscoped guard running: a user may open another
+            # PowerPoint while PDM is idle and that window must stay visible.
+            [PptDaemon.Native]::StopPowerPointEditorGuard()
+            Log "PowerPoint editor guard could not resolve owned PID hwnd=$editorHwnd"
+        }
+        Hide-PPEditor $ppt
+        return $ppt
+    } catch {
+        try { [PptDaemon.Native]::StopPowerPointEditorGuard() } catch {}
+        throw
+    }
 }
 
 function Restore-PowerPointSession {
@@ -786,6 +900,10 @@ function Restore-PowerPointSession {
             # the registry snapshot immediately afterwards so the next normal
             # user launch cannot inherit Roland's minimized/off-screen editor.
             try { $ppt.Quit() } catch { Log "PowerPoint Quit failed: $($_.Exception.Message)" }
+            try {
+                Log "PowerPoint editor guard hidden=$([PptDaemon.Native]::EditorGuardHideCount) error='$([PptDaemon.Native]::EditorGuardError)'"
+                [PptDaemon.Native]::StopPowerPointEditorGuard()
+            } catch {}
             Start-Sleep -Milliseconds 150
             Log 'Roland-owned PowerPoint instance quit'
         } else {
@@ -1032,9 +1150,12 @@ while ($true) {
                 if ($underlayHwnd -ne 0) { Log "open: persistent output HWND=$underlayHwnd" }
 
                 $ppt = Get-OrCreatePPT
-                # Hint PP to create its editor window already minimized, BEFORE
-                # making it visible. The pair `WindowState=2 → Visible=1` gives
-                # PP the chance to skip the "show at normal size" stage.
+                # Hide an existing editor synchronously BEFORE changing its COM
+                # WindowState. Otherwise Windows can visibly animate it from the
+                # operator desktop into the taskbar on the first TAKE. A
+                # user-owned editor is restored to its captured state on exit.
+                Hide-PPEditor $ppt
+                # Hint PP to keep/create its editor minimized before Visible=true.
                 try { $ppt.WindowState = 2 } catch {}  # ppWindowMinimized
                 $ppt.Visible = -1  # Microsoft.Office.Core.MsoTriState.msoTrue
                 # IMMEDIATELY hide editor HWND via Win32 SW_HIDE. Without this,

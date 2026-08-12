@@ -269,6 +269,72 @@ function TimerValue({ timer }: { timer: TimerDisplayState }): JSX.Element {
   )
 }
 
+interface ProgramTimerOverlayState extends TimerDisplayState {
+  visible: boolean
+  x: number
+  y: number
+  scale: number
+}
+
+const EMPTY_PROGRAM_TIMER: ProgramTimerOverlayState = {
+  visible: false,
+  remaining: 0,
+  running: false,
+  duration: 0,
+  textColor: '#ffffff',
+  warningTextColor: '#facc15',
+  overtimeTextColor: '#ef4444',
+  textOpacity: 1,
+  x: 0.976,
+  y: 0.96,
+  scale: 1
+}
+
+function ProgramTimerOverlay({
+  timer,
+  sourceDipHeight
+}: {
+  timer: ProgramTimerOverlayState
+  sourceDipHeight: number | null
+}): JSX.Element | null {
+  if (!timer.visible || timer.duration <= 0) return null
+  const color = timer.remaining < 0
+    ? timer.overtimeTextColor
+    : timer.remaining <= 60 && timer.remaining >= 0 && timer.running
+      ? timer.warningTextColor
+      : timer.textColor
+  const background = timer.remaining < 0
+    ? 'rgba(60, 0, 0, 0.71)'
+    : timer.remaining <= 60 && timer.remaining >= 0 && timer.running
+      ? 'rgba(60, 20, 0, 0.63)'
+      : 'rgba(0, 0, 0, 0.5)'
+  const sourceHeight = Math.max(1, sourceDipHeight || 1080)
+  const fontVh = 100 * 48 * timer.scale / sourceHeight
+  const horizontalPaddingVh = 100 * 24 * timer.scale / sourceHeight
+  const verticalPaddingVh = 100 * 8 * timer.scale / sourceHeight
+  const radiusVh = 100 * 10 * timer.scale / sourceHeight
+  const x = Math.max(0, Math.min(1, timer.x))
+  const y = Math.max(0, Math.min(1, timer.y))
+  return (
+    <div
+      className="absolute z-30 select-none whitespace-nowrap font-mono font-black tabular-nums leading-none tracking-tight"
+      style={{
+        left: `${x * 100}%`,
+        top: `${y * 100}%`,
+        transform: `translate(-${x * 100}%, -${y * 100}%)`,
+        color,
+        background,
+        fontSize: `${fontVh}vh`,
+        padding: `${verticalPaddingVh}vh ${horizontalPaddingVh}vh`,
+        borderRadius: `${radiusVh}vh`,
+        textShadow: '0 2px 8px rgba(0,0,0,0.8)'
+      }}
+    >
+      <span style={{ opacity: timer.textOpacity }}>{formatTime(timer.remaining)}</span>
+    </div>
+  )
+}
+
 function EventTimerDisplay(): JSX.Element {
   const [timer, setTimer] = useState<EventTimerDisplayState>({
     eventName: 'Оперативное совещание',
@@ -789,6 +855,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     sourceDisplayId: number | null
     sourcePixelWidth: number | null
     sourcePixelHeight: number | null
+    sourceDipHeight: number | null
     contentType: string | null
     directContent: ProgramDirectContent | null
     active: boolean
@@ -797,6 +864,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     sourceDisplayId: null,
     sourcePixelWidth: null,
     sourcePixelHeight: null,
+    sourceDipHeight: null,
     contentType: null,
     directContent: null,
     active: false,
@@ -805,12 +873,14 @@ function ProgramMirrorDisplay(): JSX.Element {
   const [status, setStatus] = useState('Ожидание основного эфира…')
   const [reconnectRevision, setReconnectRevision] = useState(0)
   const [nativeReady, setNativeReady] = useState(false)
+  const [programTimer, setProgramTimer] = useState<ProgramTimerOverlayState>(EMPTY_PROGRAM_TIMER)
 
   useEffect(() => window.api.on('mirror-state', (...args: unknown[]) => {
     const data = args[0] as {
       sourceDisplayId?: number | null
       sourcePixelWidth?: number | null
       sourcePixelHeight?: number | null
+      sourceDipHeight?: number | null
       contentType?: string | null
       directContent?: ProgramDirectContent | null
       active?: boolean
@@ -820,12 +890,22 @@ function ProgramMirrorDisplay(): JSX.Element {
       sourceDisplayId: typeof data?.sourceDisplayId === 'number' ? data.sourceDisplayId : null,
       sourcePixelWidth: typeof data?.sourcePixelWidth === 'number' ? data.sourcePixelWidth : null,
       sourcePixelHeight: typeof data?.sourcePixelHeight === 'number' ? data.sourcePixelHeight : null,
+      sourceDipHeight: typeof data?.sourceDipHeight === 'number' ? data.sourceDipHeight : null,
       contentType: typeof data?.contentType === 'string' ? data.contentType : null,
       directContent: data?.directContent && typeof data.directContent.path === 'string'
         ? data.directContent
         : null,
       active: data?.active === true,
       backdropImage: data?.backdropImage || null
+    })
+  }), [])
+
+  useEffect(() => window.api.on('program-timer-overlay', (...args: unknown[]) => {
+    const data = args[0] as Partial<ProgramTimerOverlayState> | undefined
+    setProgramTimer({
+      ...EMPTY_PROGRAM_TIMER,
+      ...data,
+      visible: data?.visible === true
     })
   }), [])
 
@@ -1004,6 +1084,9 @@ function ProgramMirrorDisplay(): JSX.Element {
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black text-xl text-gray-400">
           {status}
         </div>
+      )}
+      {mirrorState.active && hasDirectContent && nativeReady && (
+        <ProgramTimerOverlay timer={programTimer} sourceDipHeight={mirrorState.sourceDipHeight} />
       )}
     </div>
   )

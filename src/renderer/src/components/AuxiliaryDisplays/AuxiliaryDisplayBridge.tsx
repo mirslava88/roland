@@ -195,6 +195,7 @@ export function AuxiliaryDisplayBridge(): null {
       sourcePixelHeight: sourceDisplay
         ? Math.round(sourceDisplay.bounds.height * sourceDisplay.scaleFactor)
         : null,
+      sourceDipHeight: sourceDisplay?.bounds.height ?? null,
       contentType: activeFile?.type ?? null,
       directContent,
       active: activeFile !== null || isPresentationWindowOpen,

@@ -3,7 +3,8 @@ param(
     [int]$DisplayY = 0,
     [int]$DisplayWidth = 1920,
     [int]$DisplayHeight = 1080,
-    [string]$DataFile = ""
+    [string]$DataFile = "",
+    [string]$StateFile = ""
 )
 
 if (-not $DataFile) {
@@ -19,6 +20,7 @@ Add-Type -AssemblyName System.Windows.Forms
 $code = @"
 using System;
 using System.IO;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -63,8 +65,12 @@ public class TimerOverlay
     private TextBlock text;
     private Border border;
     private string dataFile;
+    private string stateFile;
     private string lastContent = "";
     private double scale = 1.0;
+    private double positionX = 1.0;
+    private double positionY = 1.0;
+    private bool hasSavedPosition = false;
     private int lastPositionRevision = -1;
     private int targetDisplayX;
     private int targetDisplayY;
@@ -80,13 +86,15 @@ public class TimerOverlay
         try { SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch {}
     }
 
-    public void Run(int displayX, int displayY, int displayWidth, int displayHeight, string file)
+    public void Run(int displayX, int displayY, int displayWidth, int displayHeight, string file, string savedStateFile)
     {
         dataFile = file;
+        stateFile = savedStateFile;
         targetDisplayX = displayX;
         targetDisplayY = displayY;
         targetDisplayWidth = Math.Max(1, displayWidth);
         targetDisplayHeight = Math.Max(1, displayHeight);
+        LoadState();
 
         window = new Window
         {
@@ -132,18 +140,27 @@ public class TimerOverlay
         };
 
         window.Content = border;
+        ApplyScale();
 
-        window.MouseLeftButtonDown += (s, e) => { window.DragMove(); };
+        window.MouseLeftButtonDown += (s, e) =>
+        {
+            if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+            try { window.DragMove(); } catch {}
+            SaveState();
+        };
 
         window.MouseWheel += (s, e) =>
         {
+            CapturePosition();
             scale += e.Delta > 0 ? 0.1 : -0.1;
             if (scale < 0.5) scale = 0.5;
             if (scale > 8.0) scale = 8.0;
-            text.FontSize = Math.Round(48 * scale);
-            border.Padding = new Thickness(
-                Math.Round(24 * scale), Math.Round(8 * scale),
-                Math.Round(24 * scale), Math.Round(8 * scale));
+            ApplyScale();
+            window.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                RepositionToTarget();
+                SaveState();
+            }), DispatcherPriority.Loaded);
         };
 
         // Get HWND once window is loaded — нужен для SetWindowPos
@@ -158,7 +175,11 @@ public class TimerOverlay
             windowHwnd = new WindowInteropHelper(window).Handle;
             RepositionToTarget();
         };
-        window.ContentRendered += (s, e) => { RepositionToTarget(); };
+        window.ContentRendered += (s, e) =>
+        {
+            RepositionToTarget();
+            SaveState();
+        };
         window.SizeChanged += (s, e) => { RepositionToTarget(); };
 
         var timer = new DispatcherTimer();
@@ -296,9 +317,21 @@ public class TimerOverlay
             int windowHeight = Math.Max(1, rect.Bottom - rect.Top);
             uint dpi = GetDpiForWindow(windowHwnd);
             if (dpi == 0) dpi = 96;
-            int margin = Math.Max(16, (int)Math.Round(40.0 * dpi / 96.0));
-            int targetX = targetDisplayX + targetDisplayWidth - windowWidth - margin;
-            int targetY = targetDisplayY + targetDisplayHeight - windowHeight - margin;
+            int targetX;
+            int targetY;
+            if (hasSavedPosition)
+            {
+                int travelX = Math.Max(0, targetDisplayWidth - windowWidth);
+                int travelY = Math.Max(0, targetDisplayHeight - windowHeight);
+                targetX = targetDisplayX + (int)Math.Round(travelX * Math.Max(0.0, Math.Min(1.0, positionX)));
+                targetY = targetDisplayY + (int)Math.Round(travelY * Math.Max(0.0, Math.Min(1.0, positionY)));
+            }
+            else
+            {
+                int margin = Math.Max(16, (int)Math.Round(40.0 * dpi / 96.0));
+                targetX = targetDisplayX + targetDisplayWidth - windowWidth - margin;
+                targetY = targetDisplayY + targetDisplayHeight - windowHeight - margin;
+            }
             targetX = Math.Max(targetDisplayX, Math.Min(targetX, targetDisplayX + targetDisplayWidth - windowWidth));
             targetY = Math.Max(targetDisplayY, Math.Min(targetY, targetDisplayY + targetDisplayHeight - windowHeight));
             SetWindowPos(
@@ -310,6 +343,68 @@ public class TimerOverlay
                 0,
                 SWP_NOSIZE | SWP_NOACTIVATE
             );
+        }
+        catch {}
+    }
+
+    private void ApplyScale()
+    {
+        text.FontSize = Math.Round(48 * scale);
+        border.Padding = new Thickness(
+            Math.Round(24 * scale), Math.Round(8 * scale),
+            Math.Round(24 * scale), Math.Round(8 * scale));
+    }
+
+    private void LoadState()
+    {
+        if (string.IsNullOrWhiteSpace(stateFile) || !File.Exists(stateFile)) return;
+        try
+        {
+            string json = File.ReadAllText(stateFile);
+            if (json.Contains("\"x\"") && json.Contains("\"y\""))
+            {
+                positionX = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(json, "x", 1.0)));
+                positionY = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(json, "y", 1.0)));
+                hasSavedPosition = true;
+            }
+            scale = Math.Max(0.5, Math.Min(8.0, GetJsonDouble(json, "scale", 1.0)));
+        }
+        catch {}
+    }
+
+    private void CapturePosition()
+    {
+        if (windowHwnd == IntPtr.Zero) return;
+        try
+        {
+            RECT rect;
+            if (!GetWindowRect(windowHwnd, out rect)) return;
+            int windowWidth = Math.Max(1, rect.Right - rect.Left);
+            int windowHeight = Math.Max(1, rect.Bottom - rect.Top);
+            int travelX = Math.Max(0, targetDisplayWidth - windowWidth);
+            int travelY = Math.Max(0, targetDisplayHeight - windowHeight);
+            positionX = travelX == 0 ? 0.0 : (double)(rect.Left - targetDisplayX) / travelX;
+            positionY = travelY == 0 ? 0.0 : (double)(rect.Top - targetDisplayY) / travelY;
+            positionX = Math.Max(0.0, Math.Min(1.0, positionX));
+            positionY = Math.Max(0.0, Math.Min(1.0, positionY));
+            hasSavedPosition = true;
+        }
+        catch {}
+    }
+
+    private void SaveState()
+    {
+        if (string.IsNullOrWhiteSpace(stateFile)) return;
+        try
+        {
+            CapturePosition();
+            string directory = Path.GetDirectoryName(stateFile);
+            if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+            string json = string.Format(
+                CultureInfo.InvariantCulture,
+                "{{\"x\":{0:0.######},\"y\":{1:0.######},\"scale\":{2:0.###}}}",
+                positionX, positionY, scale);
+            File.WriteAllText(stateFile, json);
         }
         catch {}
     }
@@ -383,4 +478,4 @@ Add-Type -TypeDefinition $code -ReferencedAssemblies PresentationFramework, Pres
 
 [TimerOverlay]::EnablePerMonitorDpiAwareness()
 $overlay = New-Object TimerOverlay
-$overlay.Run($DisplayX, $DisplayY, $DisplayWidth, $DisplayHeight, $DataFile)
+$overlay.Run($DisplayX, $DisplayY, $DisplayWidth, $DisplayHeight, $DataFile, $StateFile)

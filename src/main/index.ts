@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, crashReporter } from 'electron'
 import type { DesktopCapturerSource, Display } from 'electron'
 import {
   createAuxiliaryWindow,
@@ -9,7 +9,7 @@ import {
 } from './windows'
 import type { AuxiliaryWindowRole } from './windows'
 import { ChildProcess, spawn } from 'child_process'
-import { writeFileSync, unlinkSync, existsSync, createReadStream } from 'fs'
+import { writeFileSync, unlinkSync, existsSync, createReadStream, readFileSync } from 'fs'
 import { readFile, stat } from 'fs/promises'
 import { Readable } from 'stream'
 import { tmpdir } from 'os'
@@ -62,6 +62,8 @@ let wpfTimerDisplayKey: string | null = null
 let wpfTimerDisplayId: number | null = null
 let lastWpfTimerData: Record<string, unknown> = {}
 let wpfTimerPositionRevision = 0
+let wpfTimerMirrorSyncTimer: NodeJS.Timeout | null = null
+let lastWpfTimerMirrorSignature = ''
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
 let musicPlayerWindow: BrowserWindow | null = null
 let activeContentType: string | null = null // tracks what's on the external display
@@ -76,10 +78,83 @@ let overlayPlacement: 'cover' | 'underlay' = 'cover'
 let displayMetricsSyncTimer: NodeJS.Timeout | null = null
 let quitCleanupStarted = false
 let quitCleanupComplete = false
+let shutdownTrigger = 'unknown'
+let controlRendererRecoveryAttempts = 0
+let controlRendererLastRecoveryAt = 0
 const nativeDesktopSourceRegistry = new Map<string, NativeDesktopSourceRegistryEntry>()
 const nativeAppIconCache = new Map<string, Promise<string | undefined>>()
 const fullscreenBrowserWindows = new Map<string, { sourceKey: string; processName: string }>()
 let lastDesktopWindowInventorySignature = ''
+
+function sendToAuxiliaryRole(
+  role: AuxiliaryWindowRole,
+  channel: string,
+  ...args: unknown[]
+): void {
+  let roleMessages = auxiliaryLastMessages.get(role)
+  if (!roleMessages) {
+    roleMessages = new Map()
+    auxiliaryLastMessages.set(role, roleMessages)
+  }
+  roleMessages.set(channel, args)
+  for (const entry of auxiliaryWindows.values()) {
+    if (entry.role === role && !entry.window.isDestroyed()) {
+      entry.window.webContents.send(channel, ...args)
+    }
+  }
+}
+
+function getWpfTimerStateFile(): string {
+  return join(app.getPath('userData'), 'timer-overlay-state.json')
+}
+
+function readWpfTimerLayout(): { x: number; y: number; scale: number } {
+  try {
+    const raw = JSON.parse(readFileSync(getWpfTimerStateFile(), 'utf8')) as {
+      x?: unknown
+      y?: unknown
+      scale?: unknown
+    }
+    return {
+      x: typeof raw.x === 'number' ? Math.max(0, Math.min(1, raw.x)) : 0.976,
+      y: typeof raw.y === 'number' ? Math.max(0, Math.min(1, raw.y)) : 0.96,
+      scale: typeof raw.scale === 'number' ? Math.max(0.5, Math.min(8, raw.scale)) : 1
+    }
+  } catch {
+    return { x: 0.976, y: 0.96, scale: 1 }
+  }
+}
+
+function broadcastWpfTimerToMirrors(force = false): void {
+  const payload = {
+    visible: timerActive && Number(lastWpfTimerData.duration || 0) > 0,
+    remaining: Number(lastWpfTimerData.remaining || 0),
+    running: lastWpfTimerData.running === true,
+    duration: Number(lastWpfTimerData.duration || 0),
+    textColor: String(lastWpfTimerData.textColor || '#ffffff'),
+    warningTextColor: String(lastWpfTimerData.warningTextColor || '#facc15'),
+    overtimeTextColor: String(lastWpfTimerData.overtimeTextColor || '#ef4444'),
+    textOpacity: Math.max(0.1, Math.min(1, Number(lastWpfTimerData.textOpacity || 1))),
+    ...readWpfTimerLayout()
+  }
+  const signature = JSON.stringify(payload)
+  if (!force && signature === lastWpfTimerMirrorSignature) return
+  lastWpfTimerMirrorSignature = signature
+  sendToAuxiliaryRole('mirror', 'program-timer-overlay', payload)
+}
+
+function startWpfTimerMirrorSync(): void {
+  if (wpfTimerMirrorSyncTimer) clearInterval(wpfTimerMirrorSyncTimer)
+  broadcastWpfTimerToMirrors(true)
+  wpfTimerMirrorSyncTimer = setInterval(() => broadcastWpfTimerToMirrors(), 250)
+}
+
+function stopWpfTimerMirrorSync(): void {
+  if (wpfTimerMirrorSyncTimer) clearInterval(wpfTimerMirrorSyncTimer)
+  wpfTimerMirrorSyncTimer = null
+  lastWpfTimerMirrorSignature = ''
+  broadcastWpfTimerToMirrors(true)
+}
 
 function closeAuxiliaryWindow(
   role: AuxiliaryWindowRole,
@@ -158,6 +233,17 @@ async function releaseBrowserFullscreenWindows(
 // window never receives a mouse click of its own. This affects only media
 // playback policy; camera/microphone access is still guarded explicitly below.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
+// Keep native minidumps locally. Nothing is uploaded: the dump is available
+// alongside Electron's crash data if a future main/GPU/renderer process dies
+// before the text logger can record an exception.
+crashReporter.start({
+  productName: 'Presentation Display Manager',
+  uploadToServer: false,
+  rateLimit: false,
+  compress: false,
+  globalExtra: { appVersion: app.getVersion() }
+})
 
 function stopOverlayZOrderGuard(): void {
   if (!overlayZOrderGuard) return
@@ -309,6 +395,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     }
   } catch {}
   const timerScript = scriptPath('timer-overlay.ps1')
+  const timerStateFile = getWpfTimerStateFile()
   wpfTimerDisplayKey = displayKey
   wpfTimerPositionRevision++
   sendToWpfTimer({
@@ -328,7 +415,8 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     '-DisplayY', String(displayBounds.y),
     '-DisplayWidth', String(displayBounds.width),
     '-DisplayHeight', String(displayBounds.height),
-    '-DataFile', wpfTimerDataFile
+    '-DataFile', wpfTimerDataFile,
+    '-StateFile', timerStateFile
   ], { stdio: 'ignore' })
   wpfTimerProcess = timerProcess
   timerProcess.on('exit', () => {
@@ -340,6 +428,8 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
 }
 
 function hideWpfTimer(): void {
+  if (wpfTimerMirrorSyncTimer) clearInterval(wpfTimerMirrorSyncTimer)
+  wpfTimerMirrorSyncTimer = null
   const closingProcess = wpfTimerProcess
   wpfTimerProcess = null
   wpfTimerDisplayKey = null
@@ -495,6 +585,9 @@ async function nativeWindowAppIcon(window: NativeTopLevelWindow): Promise<string
 
 function createWindows(): void {
   controlWindow = createControlWindow()
+  const thisControlWindow = controlWindow
+  let allowControlWindowClose = false
+  let closeConfirmationOpen = false
   registerIpcHandlers(controlWindow, () => presentationWindow)
 
   ipcMain.handle('open-auxiliary-window', async (
@@ -564,17 +657,7 @@ function createWindows(): void {
     channel: string,
     ...args: unknown[]
   ) => {
-    let roleMessages = auxiliaryLastMessages.get(role)
-    if (!roleMessages) {
-      roleMessages = new Map()
-      auxiliaryLastMessages.set(role, roleMessages)
-    }
-    roleMessages.set(channel, args)
-    for (const entry of auxiliaryWindows.values()) {
-      if (entry.role === role && !entry.window.isDestroyed()) {
-        entry.window.webContents.send(channel, ...args)
-      }
-    }
+    sendToAuxiliaryRole(role, channel, ...args)
   })
 
   ipcMain.handle('get-screen-capture-source', async (
@@ -603,7 +686,56 @@ function createWindows(): void {
     return source?.id ?? null
   })
 
+  controlWindow.on('query-session-end', () => {
+    shutdownTrigger = 'windows-session-end'
+    allowControlWindowClose = true
+    diagnosticLog('lifecycle', 'Windows session end requested')
+  })
+
+  controlWindow.on('close', (event) => {
+    if (allowControlWindowClose || quitCleanupStarted || quitCleanupComplete) {
+      diagnosticLog(
+        'lifecycle',
+        `control window close accepted trigger=${shutdownTrigger} ` +
+        `liveType=${activeContentType ?? 'none'} cleanupStarted=${quitCleanupStarted}`
+      )
+      return
+    }
+
+    event.preventDefault()
+    diagnosticLog(
+      'lifecycle',
+      `control window close confirmation requested liveType=${activeContentType ?? 'none'}`
+    )
+    if (closeConfirmationOpen) return
+    closeConfirmationOpen = true
+    void dialog.showMessageBox(thisControlWindow, {
+      type: 'warning',
+      title: 'Закрыть PDM?',
+      message: 'Закрыть Presentation Display Manager?',
+      detail: 'Текущий эфир будет остановлен. Подготовленные каналы сохранятся автоматически.',
+      buttons: ['Отмена', 'Закрыть PDM'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    }).then(({ response }) => {
+      closeConfirmationOpen = false
+      if (response !== 1) {
+        diagnosticLog('lifecycle', 'control window close canceled by operator')
+        return
+      }
+      shutdownTrigger = 'operator-confirmed-close'
+      allowControlWindowClose = true
+      diagnosticLog('lifecycle', 'control window close confirmed by operator')
+      if (!thisControlWindow.isDestroyed()) thisControlWindow.close()
+    }).catch((error) => {
+      closeConfirmationOpen = false
+      diagnosticLog('lifecycle', `close confirmation failed ${formatDiagnosticError(error)}`)
+    })
+  })
+
   controlWindow.on('closed', () => {
+    diagnosticLog('lifecycle', `control window closed trigger=${shutdownTrigger}`)
     controlWindow = null
     if (presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindow.close()
@@ -622,6 +754,13 @@ function createWindows(): void {
     musicPlayerWindow = null
     globalShortcut.unregisterAll()
     app.quit()
+  })
+
+  thisControlWindow.webContents.on('unresponsive', () => {
+    diagnosticLog('renderer-failure', `control renderer unresponsive wc=${thisControlWindow.webContents.id}`)
+  })
+  thisControlWindow.webContents.on('responsive', () => {
+    diagnosticLog('renderer-failure', `control renderer responsive wc=${thisControlWindow.webContents.id}`)
   })
 
   // dbg-log: renderer processes (control + presentation) forward debug strings
@@ -1402,6 +1541,7 @@ function createWindows(): void {
     textOpacity: number
   }) => {
     sendToWpfTimer(data)
+    broadcastWpfTimerToMirrors()
   })
 
   ipcMain.handle('show-timer-overlay', async (_event, displayId?: number) => {
@@ -1419,11 +1559,13 @@ function createWindows(): void {
       // wrong monitor in mixed 100%/150% layouts.
       const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
       showWpfTimer(physicalBounds)
+      startWpfTimerMirrorSync()
     }
   })
 
   ipcMain.handle('hide-timer-overlay', () => {
     timerActive = false
+    stopWpfTimerMirrorSync()
     hideWpfTimer()
   })
 
@@ -1965,6 +2107,11 @@ function isAllowedNavigation(url: string): boolean {
 
 app.whenReady().then(() => {
   initDiagnosticLog()
+  diagnosticLog('session', `crashDumps=${app.getPath('crashDumps')} localOnly=true`)
+  powerMonitor.on('shutdown', () => {
+    if (shutdownTrigger === 'unknown') shutdownTrigger = 'windows-shutdown'
+    diagnosticLog('lifecycle', 'Windows shutdown requested')
+  })
   diagnosticLog('display', JSON.stringify(screen.getAllDisplays().map((d) => ({
     id: d.id,
     bounds: d.bounds,
@@ -2104,6 +2251,29 @@ app.whenReady().then(() => {
     // Deny window.open by default. The control window installs its own handler
     // (with an http/https/mailto allow-list) that overrides this for itself.
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    contents.on('render-process-gone', (_event, details) => {
+      const isControl = controlWindow?.webContents.id === contents.id
+      diagnosticLog(
+        'renderer-failure',
+        `gone wc=${contents.id} type=${contents.getType()} control=${isControl} ` +
+        `reason=${details.reason} exitCode=${details.exitCode}`
+      )
+      if (!isControl || quitCleanupStarted || details.reason === 'clean-exit') return
+
+      const now = Date.now()
+      if (now - controlRendererLastRecoveryAt > 60_000) controlRendererRecoveryAttempts = 0
+      controlRendererLastRecoveryAt = now
+      controlRendererRecoveryAttempts++
+      if (controlRendererRecoveryAttempts > 2) {
+        diagnosticLog('renderer-failure', 'control renderer automatic recovery stopped after 2 attempts')
+        return
+      }
+      setTimeout(() => {
+        if (!controlWindow || controlWindow.isDestroyed() || controlWindow.webContents.id !== contents.id) return
+        diagnosticLog('renderer-failure', `reloading control renderer attempt=${controlRendererRecoveryAttempts}`)
+        controlWindow.webContents.reload()
+      }, 500)
+    })
     // Permission policy is installed once on defaultSession above. It allows
     // only media for the two trusted app renderers and denies everything else.
   })
@@ -2129,6 +2299,8 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  if (shutdownTrigger === 'unknown') shutdownTrigger = 'window-all-closed'
+  diagnosticLog('lifecycle', `window-all-closed trigger=${shutdownTrigger}`)
   globalShortcut.unregisterAll()
   if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
     musicPlayerWindow.close()
@@ -2140,6 +2312,11 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
+  if (shutdownTrigger === 'unknown') shutdownTrigger = 'app-quit-or-system'
+  diagnosticLog(
+    'lifecycle',
+    `before-quit trigger=${shutdownTrigger} cleanupStarted=${quitCleanupStarted} cleanupComplete=${quitCleanupComplete}`
+  )
   if (quitCleanupComplete) return
   event.preventDefault()
   if (quitCleanupStarted) return
@@ -2166,4 +2343,32 @@ app.on('before-quit', (event) => {
       diagnosticLog('shutdown', 'helper cleanup complete')
       app.quit()
     })
+})
+
+app.on('will-quit', () => {
+  diagnosticLog('lifecycle', `will-quit trigger=${shutdownTrigger}`)
+})
+
+app.on('quit', (_event, exitCode) => {
+  diagnosticLog('lifecycle', `quit trigger=${shutdownTrigger} exitCode=${exitCode}`)
+})
+
+app.on('child-process-gone', (_event, details) => {
+  diagnosticLog(
+    'process-failure',
+    `child gone type=${details.type} reason=${details.reason} exitCode=${details.exitCode} ` +
+    `service=${details.serviceName || '-'} name=${details.name || '-'}`
+  )
+})
+
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  diagnosticLog('fatal', `uncaught exception origin=${origin} ${formatDiagnosticError(error)}`)
+})
+
+process.on('unhandledRejection', (reason) => {
+  diagnosticLog('fatal', `unhandled rejection ${formatDiagnosticError(reason)}`)
+})
+
+process.on('exit', (code) => {
+  diagnosticLog('lifecycle', `node process exit code=${code} trigger=${shutdownTrigger}`)
 })

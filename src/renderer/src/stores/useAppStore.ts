@@ -1075,8 +1075,9 @@ export const useAppStore = create<AppState>()(persist(
   }
   },
   {
-    // Сохраняем в localStorage только user-preferences (не runtime state).
-    // Файлы/слайды/live-channel начинаются заново на каждый запуск.
+    // Сохраняем user-preferences и подготовленную сетку каналов. Это локальный
+    // recovery-снимок: после сбоя файлы и выбранные слайды восстанавливаются,
+    // но live-channel/activeFile не сохраняются и эфир сам не запускается.
     //
     // NOT persist-ится:
     // - backdropImage — подложка относится только к текущему эфиру. Каждая
@@ -1088,7 +1089,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 13,
+    version: 14,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1181,9 +1182,18 @@ export const useAppStore = create<AppState>()(persist(
           eventStyle: rawTitles.eventStyle === 'cut-corner' ? 'slant-right' : rawTitles.eventStyle
         }
       }
+      // v13 -> v14: the prepared channel workspace is now included in the
+      // automatic crash-recovery snapshot. Runtime/live output stays omitted.
       return migrated
     },
     partialize: (state) => ({
+      channels: state.channels,
+      channelIds: state.channelIds,
+      channelGridSize: state.channelGridSize,
+      currentChannelPage: state.currentChannelPage,
+      selectedChannel: state.selectedChannel,
+      captureSources: state.captureSources,
+      slidePositions: state.slidePositions,
       selectedDisplayId: state.selectedDisplayId,
       displayAssignments: state.displayAssignments,
       displayNames: state.displayNames,
