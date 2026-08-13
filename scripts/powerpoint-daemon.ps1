@@ -752,6 +752,46 @@ function Reset-PowerPointSessionTracking {
     $script:preparedPresentationKeys = @{}
 }
 
+function Test-FatalPowerPointComError($errorRecord) {
+    $message = ''
+    try { $message = [string]$errorRecord.Exception.ToString() } catch {
+        try { $message = [string]$errorRecord } catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($message)) { return $false }
+
+    # These HRESULTs mean that the cached Office COM proxy can no longer be
+    # used. Retrying a command through the same proxy only repeats the failure:
+    # 0x800706BA RPC_S_SERVER_UNAVAILABLE
+    # 0x800706BE RPC_S_CALL_FAILED
+    # 0x80010108 RPC_E_DISCONNECTED
+    # 0x80010105 RPC_E_SERVERFAULT
+    # HRESULT matching is locale-independent; keep the source ASCII here so
+    # Windows PowerShell 5.1 can parse the script even when UTF-8 is read using
+    # the machine's legacy code page.
+    return $message -match '(?i)(0x800706BA|0x800706BE|0x80010108|0x80010105|RPC server is unavailable|RPC server.*failed)'
+}
+
+function Invalidate-PowerPointSession([string]$reason) {
+    Log "PowerPoint COM session invalidated reason='$reason'"
+    Reset-SlideVideoClickState
+    $staleApplication = $script:pptApplication
+    $script:activeSlideShowHwnd = 0
+    $script:activeSlideShowWindow = $null
+    $script:activePresentation = $null
+    $script:activePresentationPath = ''
+
+    # PowerPoint can persist the temporary minimized editor placement even when
+    # its COM server crashes. Restore the pre-PDM registry snapshot before a new
+    # Application object is acquired.
+    try { Restore-PowerPointRegistryWindowState } catch {}
+    try {
+        if ($staleApplication) {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($staleApplication)
+        }
+    } catch {}
+    Reset-PowerPointSessionTracking
+}
+
 function Initialize-PowerPointSession($ppt, [bool]$ownedByRoland) {
     if ($script:pptSessionInitialized) { return }
     Capture-PowerPointRegistryWindowState
@@ -1699,13 +1739,19 @@ while ($true) {
                             }
                         }
                     } catch {}
-                    # Visible=1 был выставлен в 'open' для Run() слайдшоу. После
-                    # закрытия презентации остаётся пустой PP editor-фрейм,
-                    # который виден на доп. дисплее, когда сверху ничего не
-                    # рендерится (например, юзер закрыл PDF в live-канале —
-                    # Electron-окно уходит, и PP проглядывает снизу).
-                    # Следующий 'open' сам восстановит Visible=1 для Run().
-                    try { $ppt.Visible = 0 } catch {}
+                    # Visible=1 был выставлен в 'open' для Run() слайдшоу. A
+                    # PDM-owned instance can be returned to COM-invisible mode.
+                    # Never do this to a user-owned PowerPoint instance: on some
+                    # Office builds Visible=0 after View.Exit() disconnects the
+                    # automation server (0x800706BA), so every following TAKE
+                    # retries through a dead proxy and falls back to the PDF.
+                    if ($script:pptOwnedByRoland) {
+                        try { $ppt.Visible = 0 } catch {}
+                    } else {
+                        # Win32 hiding prevents an empty editor frame from
+                        # flashing without changing the user's COM lifecycle.
+                        Hide-PPEditor $ppt
+                    }
                 }
                 $script:activeSlideShowHwnd = 0
                 $script:activeSlideShowWindow = $null
@@ -2082,8 +2128,17 @@ while ($true) {
             }
         }
     } catch {
-        Log "cmd '$cmd' failed: $($_.Exception.Message)"
-        Reply @{ id = $id; ok = $false; error = $_.Exception.Message }
+        $commandError = $_
+        $commandErrorMessage = [string]$commandError.Exception.Message
+        Log "cmd '$cmd' failed: $commandErrorMessage"
+        if (Test-FatalPowerPointComError $commandError) {
+            # The Electron side already retries TAKE up to three times. Clear
+            # the dead COM proxy before replying so its next attempt obtains a
+            # genuinely fresh PowerPoint session instead of repeating the same
+            # RPC failure.
+            Invalidate-PowerPointSession "cmd=$cmd error=$commandErrorMessage"
+        }
+        Reply @{ id = $id; ok = $false; error = $commandErrorMessage }
     }
 }
 
