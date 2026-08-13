@@ -65,10 +65,14 @@ namespace Pdm.NativeWindows
     {
         public string hwnd { get; set; }
         public bool valid { get; set; }
+        public bool identityMatched { get; set; }
         public bool wasFullscreen { get; set; }
         public bool requested { get; set; }
         public bool fullscreen { get; set; }
         public bool foreground { get; set; }
+        public bool ownershipHeld { get; set; }
+        public bool ownershipMissing { get; set; }
+        public bool placementRestored { get; set; }
     }
 
     public static class WindowApi
@@ -94,7 +98,16 @@ namespace Pdm.NativeWindows
         private const byte VK_F11 = 0x7A;
         private const uint KEYEVENTF_KEYUP = 0x0002;
         private const uint LWA_ALPHA = 0x00000002;
-        private const int SW_MINIMIZE = 6;
+        private sealed class FullscreenOwnership
+        {
+            public uint pid;
+            public uint threadId;
+            public WINDOWPLACEMENT placement;
+            public bool f11Requested;
+        }
+
+        private static readonly Dictionary<ulong, FullscreenOwnership> OwnedFullscreenPlacements =
+            new Dictionary<ulong, FullscreenOwnership>();
 
         [return: MarshalAs(UnmanagedType.Bool)]
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
@@ -181,6 +194,10 @@ namespace Pdm.NativeWindows
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT placement);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT placement);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -289,6 +306,57 @@ namespace Pdm.NativeWindows
         private static IntPtr ToIntPtr(ulong value)
         {
             return new IntPtr(unchecked((long)value));
+        }
+
+        private static bool MatchesWindow(
+            IntPtr hwnd,
+            uint expectedPid,
+            uint expectedThreadId)
+        {
+            if (!IsWindow(hwnd) || expectedPid == 0 || expectedThreadId == 0) return false;
+            uint actualPid;
+            uint actualThreadId = GetWindowThreadProcessId(hwnd, out actualPid);
+            return actualPid != 0 && actualPid == expectedPid &&
+                actualThreadId != 0 && actualThreadId == expectedThreadId;
+        }
+
+        private static FullscreenOwnership GetFullscreenOwnership(ulong handle)
+        {
+            lock (OwnedFullscreenPlacements)
+            {
+                FullscreenOwnership ownership;
+                return OwnedFullscreenPlacements.TryGetValue(handle, out ownership)
+                    ? ownership
+                    : null;
+            }
+        }
+
+        private static void ForgetFullscreenOwnership(ulong handle, FullscreenOwnership expected)
+        {
+            lock (OwnedFullscreenPlacements)
+            {
+                FullscreenOwnership current;
+                if (OwnedFullscreenPlacements.TryGetValue(handle, out current) &&
+                    Object.ReferenceEquals(current, expected))
+                    OwnedFullscreenPlacements.Remove(handle);
+            }
+        }
+
+        private static bool RestoreOwnedPlacement(
+            ulong handle,
+            IntPtr hwnd,
+            FullscreenOwnership ownership)
+        {
+            if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId))
+            {
+                ForgetFullscreenOwnership(handle, ownership);
+                return false;
+            }
+            WINDOWPLACEMENT placement = ownership.placement;
+            placement.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+            bool restored = SetWindowPlacement(hwnd, ref placement);
+            if (restored) ForgetFullscreenOwnership(handle, ownership);
+            return restored;
         }
 
         private static long GetExtendedStyle(IntPtr hwnd)
@@ -541,69 +609,169 @@ namespace Pdm.NativeWindows
             return result;
         }
 
-        public static FullscreenResult EnsureFullscreen(ulong handle)
+        public static FullscreenResult EnsureFullscreen(
+            ulong handle,
+            uint expectedPid,
+            uint expectedThreadId)
         {
             IntPtr hwnd = ToIntPtr(handle);
             FullscreenResult result = new FullscreenResult
             {
                 hwnd = handle.ToString(),
-                valid = IsWindow(hwnd)
+                valid = IsWindow(hwnd),
+                identityMatched = MatchesWindow(hwnd, expectedPid, expectedThreadId)
             };
-            if (!result.valid) return result;
+            if (!result.valid || !result.identityMatched) return result;
+
+            FullscreenOwnership existing = GetFullscreenOwnership(handle);
+            if (existing != null &&
+                (existing.pid != expectedPid || existing.threadId != expectedThreadId))
+            {
+                // The numeric HWND was recycled for another process. Discard
+                // only the stale snapshot; never mutate the new window.
+                ForgetFullscreenOwnership(handle, existing);
+                existing = null;
+            }
+            if (existing != null)
+            {
+                result.wasFullscreen = IsFullscreen(hwnd);
+                result.fullscreen = result.wasFullscreen;
+                result.ownershipHeld = true;
+                if (result.fullscreen && MatchesWindow(hwnd, expectedPid, expectedThreadId))
+                {
+                    result.foreground = ForceForeground(hwnd);
+                    Thread.Sleep(50);
+                    result.foreground = MatchesWindow(hwnd, expectedPid, expectedThreadId) &&
+                        GetForegroundWindow() == hwnd;
+                }
+                // When the transition is still settling, let main call Exit on
+                // this same ownership instead of starting a second F11 cycle.
+                return result;
+            }
 
             result.wasFullscreen = IsFullscreen(hwnd);
             result.fullscreen = result.wasFullscreen;
-            if (result.wasFullscreen) return result;
-
-            if (IsIconic(hwnd))
+            if (result.wasFullscreen)
             {
-                ShowWindowAsync(hwnd, SW_RESTORE);
-                for (int attempt = 0; attempt < 30 && IsWindow(hwnd) && IsIconic(hwnd); attempt++)
-                    Thread.Sleep(25);
+                // This fullscreen state predates PDM and remains user-owned.
+                if (MatchesWindow(hwnd, expectedPid, expectedThreadId))
+                {
+                    result.foreground = ForceForeground(hwnd);
+                    Thread.Sleep(50);
+                    result.foreground = MatchesWindow(hwnd, expectedPid, expectedThreadId) &&
+                        GetForegroundWindow() == hwnd;
+                }
+                return result;
             }
 
-            result.foreground = ForceForeground(hwnd);
-            Thread.Sleep(75);
-            result.foreground = GetForegroundWindow() == hwnd;
-            // Never let F11 leak into PDM or another application when Windows
-            // refuses to foreground the selected browser.
-            if (!result.foreground) return result;
-            // F11 is intentionally emitted only after checking the monitor
-            // bounds, so taking an already-fullscreen browser never toggles it
-            // back to windowed mode.
-            keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(30);
-            keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            result.requested = true;
+            WINDOWPLACEMENT originalPlacement = new WINDOWPLACEMENT();
+            originalPlacement.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+            if (!GetWindowPlacement(hwnd, ref originalPlacement) ||
+                !MatchesWindow(hwnd, expectedPid, expectedThreadId)) return result;
 
-            for (int attempt = 0; attempt < 20 && IsWindow(hwnd) && !IsFullscreen(hwnd); attempt++)
-                Thread.Sleep(50);
-            result.valid = IsWindow(hwnd);
-            result.fullscreen = result.valid && IsFullscreen(hwnd);
-            result.foreground = result.valid && GetForegroundWindow() == hwnd;
-            return result;
+            FullscreenOwnership ownership = new FullscreenOwnership
+            {
+                pid = expectedPid,
+                threadId = expectedThreadId,
+                placement = originalPlacement,
+                f11Requested = false
+            };
+            lock (OwnedFullscreenPlacements)
+                OwnedFullscreenPlacements[handle] = ownership;
+            result.ownershipHeld = true;
+
+            try
+            {
+                if (IsIconic(hwnd))
+                {
+                    if (!MatchesWindow(hwnd, expectedPid, expectedThreadId)) return result;
+                    ShowWindowAsync(hwnd, SW_RESTORE);
+                    for (int attempt = 0;
+                        attempt < 30 && MatchesWindow(hwnd, expectedPid, expectedThreadId) && IsIconic(hwnd);
+                        attempt++) Thread.Sleep(25);
+                }
+
+                if (!MatchesWindow(hwnd, expectedPid, expectedThreadId)) return result;
+                result.foreground = ForceForeground(hwnd);
+                Thread.Sleep(75);
+                result.foreground = MatchesWindow(hwnd, expectedPid, expectedThreadId) &&
+                    GetForegroundWindow() == hwnd;
+                if (!result.foreground) return result;
+
+                // Recheck HWND+PID and focus immediately before keyboard input.
+                if (!MatchesWindow(hwnd, expectedPid, expectedThreadId) || GetForegroundWindow() != hwnd)
+                    return result;
+                keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
+                Thread.Sleep(30);
+                keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                ownership.f11Requested = true;
+                result.requested = true;
+
+                for (int attempt = 0;
+                    attempt < 40 && MatchesWindow(hwnd, expectedPid, expectedThreadId) && !IsFullscreen(hwnd);
+                    attempt++) Thread.Sleep(50);
+                result.valid = IsWindow(hwnd);
+                result.identityMatched = MatchesWindow(hwnd, expectedPid, expectedThreadId);
+                result.fullscreen = result.identityMatched && IsFullscreen(hwnd);
+                result.foreground = result.identityMatched && GetForegroundWindow() == hwnd;
+                return result;
+            }
+            finally
+            {
+                // Before F11 is emitted, any failed activation is completely
+                // reversible here. Once emitted, retain ownership so Exit can
+                // safely clean up even if fullscreen confirmation was late.
+                if (!ownership.f11Requested)
+                {
+                    result.placementRestored = RestoreOwnedPlacement(handle, hwnd, ownership);
+                    result.ownershipHeld = !result.placementRestored &&
+                        Object.ReferenceEquals(GetFullscreenOwnership(handle), ownership);
+                }
+                else
+                {
+                    result.ownershipHeld = Object.ReferenceEquals(
+                        GetFullscreenOwnership(handle), ownership);
+                }
+            }
         }
 
-        public static FullscreenResult ExitFullscreen(ulong handle, ulong returnFocusHandle)
+        public static FullscreenResult ExitFullscreen(
+            ulong handle,
+            uint expectedPid,
+            uint expectedThreadId,
+            ulong returnFocusHandle)
         {
             IntPtr hwnd = ToIntPtr(handle);
             IntPtr requestedReturnFocus = ToIntPtr(returnFocusHandle);
             FullscreenResult result = new FullscreenResult
             {
                 hwnd = handle.ToString(),
-                valid = IsWindow(hwnd)
+                valid = IsWindow(hwnd),
+                identityMatched = MatchesWindow(hwnd, expectedPid, expectedThreadId)
             };
-            if (!result.valid) return result;
-            // Keep the tracked fullscreen state on any masking/focus failure;
-            // the caller will retry on the next cleanup instead of assuming a
-            // failed operation succeeded.
-            result.fullscreen = true;
+            FullscreenOwnership ownership = GetFullscreenOwnership(handle);
+            if (ownership == null || ownership.pid != expectedPid ||
+                ownership.threadId != expectedThreadId)
+            {
+                result.ownershipMissing = true;
+                return result;
+            }
+            if (!result.valid || !result.identityMatched ||
+                !MatchesWindow(hwnd, ownership.pid, ownership.threadId))
+            {
+                // The owned HWND disappeared or was recycled. Forget its
+                // snapshot without ever touching the replacement window.
+                ForgetFullscreenOwnership(handle, ownership);
+                result.ownershipMissing = true;
+                return result;
+            }
 
+            result.ownershipHeld = true;
+            result.fullscreen = IsFullscreen(hwnd);
             IntPtr previousForeground = GetForegroundWindow();
             IntPtr returnFocus = IsWindow(requestedReturnFocus)
                 ? requestedReturnFocus
                 : previousForeground;
-            bool wasMinimized = IsIconic(hwnd);
             long originalExStyle = GetExtendedStyle(hwnd);
             bool originallyLayered = (originalExStyle & WS_EX_LAYERED) != 0;
             uint originalColorKey = 0;
@@ -618,82 +786,144 @@ namespace Pdm.NativeWindows
 
             try
             {
-                // A foreign window cannot be DWM-cloaked, so make its complete
-                // top-level surface transparent before it receives focus.
-                // This preserves real keyboard F11 semantics in Chromium while
-                // preventing even one browser frame from appearing over PDM.
+                if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId)) return result;
                 if (!originallyLayered)
-                    SetExtendedStyle(hwnd, originalExStyle | WS_EX_LAYERED);
-                maskApplied = SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
-                if (!maskApplied) return result;
-                try { DwmFlush(); } catch { /* DWM is always present on supported Windows */ }
-
-                // A minimized browser retains its F11 state internally. It can
-                // be restored safely while fully transparent, then returned to
-                // the taskbar after the state change.
-                if (wasMinimized)
                 {
+                    SetExtendedStyle(hwnd, originalExStyle | WS_EX_LAYERED);
+                    if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId)) return result;
+                    // Mark the temporary style as applied immediately so every
+                    // early return restores it, even if opacity masking fails.
+                    maskApplied = true;
+                }
+                if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId)) return result;
+                maskApplied = SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+                if (!maskApplied)
+                {
+                    // Keep finally responsible for reverting a style that PDM
+                    // may already have added above.
+                    maskApplied = !originallyLayered;
+                    return result;
+                }
+                try { DwmFlush(); } catch { }
+
+                if (IsIconic(hwnd))
+                {
+                    if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId)) return result;
                     ShowWindowAsync(hwnd, SW_RESTORE);
-                    for (int attempt = 0; attempt < 30 && IsWindow(hwnd) && IsIconic(hwnd); attempt++)
-                        Thread.Sleep(25);
+                    for (int attempt = 0;
+                        attempt < 30 && MatchesWindow(hwnd, ownership.pid, ownership.threadId) && IsIconic(hwnd);
+                        attempt++) Thread.Sleep(25);
                 }
 
                 result.wasFullscreen = IsFullscreen(hwnd);
                 result.fullscreen = result.wasFullscreen;
-                if (!result.wasFullscreen) return result;
+                if (result.wasFullscreen)
+                {
+                    if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId)) return result;
+                    result.foreground = ForceForeground(hwnd);
+                    Thread.Sleep(75);
+                    result.foreground = MatchesWindow(hwnd, ownership.pid, ownership.threadId) &&
+                        GetForegroundWindow() == hwnd;
+                    if (!result.foreground) return result;
+                    if (!MatchesWindow(hwnd, ownership.pid, ownership.threadId) || GetForegroundWindow() != hwnd)
+                        return result;
 
-                result.foreground = ForceForeground(hwnd);
-                Thread.Sleep(75);
-                result.foreground = GetForegroundWindow() == hwnd;
-                if (!result.foreground) return result;
+                    keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
+                    Thread.Sleep(30);
+                    keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    result.requested = true;
+                    for (int attempt = 0;
+                        attempt < 40 && MatchesWindow(hwnd, ownership.pid, ownership.threadId) && IsFullscreen(hwnd);
+                        attempt++) Thread.Sleep(50);
+                    result.valid = IsWindow(hwnd);
+                    result.identityMatched = MatchesWindow(hwnd, ownership.pid, ownership.threadId);
+                    result.fullscreen = result.identityMatched && IsFullscreen(hwnd);
+                    if (!result.identityMatched || result.fullscreen) return result;
+                }
 
-                keybd_event(VK_F11, 0, 0, UIntPtr.Zero);
-                Thread.Sleep(30);
-                keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                result.requested = true;
-
-                for (int attempt = 0; attempt < 20 && IsWindow(hwnd) && IsFullscreen(hwnd); attempt++)
-                    Thread.Sleep(50);
-                result.valid = IsWindow(hwnd);
-                result.fullscreen = result.valid && IsFullscreen(hwnd);
+                result.placementRestored = RestoreOwnedPlacement(handle, hwnd, ownership);
+                result.ownershipHeld = !result.placementRestored &&
+                    Object.ReferenceEquals(GetFullscreenOwnership(handle), ownership);
             }
             finally
             {
-                // Move focus away while the browser is still invisible. Only
-                // then restore its native style/opacity, leaving it behind PDM.
-                if (IsWindow(returnFocus) && returnFocus != hwnd)
-                    ForceForeground(returnFocus);
-                if (wasMinimized && IsWindow(hwnd))
-                    ShowWindowAsync(hwnd, SW_MINIMIZE);
-                try { DwmFlush(); } catch { }
-
-                if (maskApplied && IsWindow(hwnd))
+                // Do not apply styles or focus to a recycled HWND.
+                if (MatchesWindow(hwnd, ownership.pid, ownership.threadId))
                 {
-                    if (hadLayerAttributes)
-                        SetLayeredWindowAttributes(
-                            hwnd,
-                            originalColorKey,
-                            originalAlpha,
-                            originalLayerFlags);
-                    else
-                        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-                    if (!originallyLayered)
-                        SetExtendedStyle(hwnd, originalExStyle);
-                    SetWindowPos(
-                        hwnd,
-                        IntPtr.Zero,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                    if (IsWindow(returnFocus) && returnFocus != hwnd)
+                        ForceForeground(returnFocus);
                     try { DwmFlush(); } catch { }
+                    if (maskApplied)
+                    {
+                        if (hadLayerAttributes)
+                            SetLayeredWindowAttributes(
+                                hwnd,
+                                originalColorKey,
+                                originalAlpha,
+                                originalLayerFlags);
+                        else
+                            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                        if (!originallyLayered)
+                            SetExtendedStyle(hwnd, originalExStyle);
+                        SetWindowPos(
+                            hwnd,
+                            IntPtr.Zero,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                                SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                        try { DwmFlush(); } catch { }
+                    }
                 }
             }
 
             result.valid = IsWindow(hwnd);
-            result.foreground = result.valid && GetForegroundWindow() == hwnd;
+            result.identityMatched = MatchesWindow(hwnd, ownership.pid, ownership.threadId);
+            result.foreground = result.identityMatched && GetForegroundWindow() == hwnd;
             return result;
+        }
+
+        public static FullscreenResult[] RestoreAllOwnedFullscreenWindows()
+        {
+            List<FullscreenResult> results = new List<FullscreenResult>();
+            // Focus/DWM can transiently reject the first F11 hand-off during
+            // app shutdown. Retry owned entries, but stop as soon as no
+            // snapshots remain or a pass makes no progress.
+            for (int pass = 0; pass < 3; pass++)
+            {
+                List<KeyValuePair<ulong, FullscreenOwnership>> snapshot;
+                lock (OwnedFullscreenPlacements)
+                    snapshot = new List<KeyValuePair<ulong, FullscreenOwnership>>(
+                        OwnedFullscreenPlacements);
+                if (snapshot.Count == 0) break;
+
+                int remainingBefore = snapshot.Count;
+                foreach (KeyValuePair<ulong, FullscreenOwnership> entry in snapshot)
+                {
+                    try
+                    {
+                        results.Add(ExitFullscreen(
+                            entry.Key,
+                            entry.Value.pid,
+                            entry.Value.threadId,
+                            0));
+                    }
+                    catch
+                    {
+                        // Continue restoring independent browser windows. The
+                        // individual ownership remains for the next pass.
+                    }
+                }
+
+                int remainingAfter;
+                lock (OwnedFullscreenPlacements)
+                    remainingAfter = OwnedFullscreenPlacements.Count;
+                if (remainingAfter == 0 || remainingAfter >= remainingBefore) break;
+                Thread.Sleep(100);
+            }
+            return results.ToArray();
         }
     }
 }
@@ -753,7 +983,16 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             }
             'ensure-fullscreen' {
                 $handle = ConvertTo-WindowHandle $request.hwnd
-                $fullscreenResult = [Pdm.NativeWindows.WindowApi]::EnsureFullscreen($handle)
+                [UInt32]$expectedProcessId = [Convert]::ToUInt32(
+                    $request.pid,
+                    [Globalization.CultureInfo]::InvariantCulture)
+                [UInt32]$expectedThreadId = [Convert]::ToUInt32(
+                    $request.threadId,
+                    [Globalization.CultureInfo]::InvariantCulture)
+                $fullscreenResult = [Pdm.NativeWindows.WindowApi]::EnsureFullscreen(
+                    $handle,
+                    $expectedProcessId,
+                    $expectedThreadId)
                 Write-JsonLine ([ordered]@{
                     id = $requestId
                     ok = $true
@@ -762,12 +1001,20 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             }
             'exit-fullscreen' {
                 $handle = ConvertTo-WindowHandle $request.hwnd
+                [UInt32]$expectedProcessId = [Convert]::ToUInt32(
+                    $request.pid,
+                    [Globalization.CultureInfo]::InvariantCulture)
+                [UInt32]$expectedThreadId = [Convert]::ToUInt32(
+                    $request.threadId,
+                    [Globalization.CultureInfo]::InvariantCulture)
                 [UInt64]$returnFocusHandle = 0
                 if ($null -ne $request.returnFocusHwnd) {
                     $returnFocusHandle = ConvertTo-WindowHandle $request.returnFocusHwnd
                 }
                 $fullscreenResult = [Pdm.NativeWindows.WindowApi]::ExitFullscreen(
                     $handle,
+                    $expectedProcessId,
+                    $expectedThreadId,
                     $returnFocusHandle)
                 Write-JsonLine ([ordered]@{
                     id = $requestId
@@ -779,7 +1026,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 Write-JsonLine ([ordered]@{ id = $requestId; ok = $true })
             }
             'exit' {
-                Write-JsonLine ([ordered]@{ id = $requestId; ok = $true })
+                $cleanupResults = [Pdm.NativeWindows.WindowApi]::RestoreAllOwnedFullscreenWindows()
+                Write-JsonLine ([ordered]@{
+                    id = $requestId
+                    ok = $true
+                    fullscreenCleanup = $cleanupResults
+                })
                 exit 0
             }
             default {

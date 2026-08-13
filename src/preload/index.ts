@@ -51,6 +51,17 @@ const api = {
     ipcRenderer.send('send-to-auxiliary', role, channel, ...args)
   },
 
+  freezeProgramMirrors: (transitionId: string): Promise<{ armed: number }> =>
+    ipcRenderer.invoke('freeze-program-mirrors', transitionId),
+
+  completeProgramMirrorTransition: (
+    transitionId: string
+  ): Promise<{ released: number; remaining: number }> =>
+    ipcRenderer.invoke('complete-program-mirror-transition', transitionId),
+
+  releaseProgramMirrorHold: (transitionId: string): Promise<boolean> =>
+    ipcRenderer.invoke('release-program-mirror-hold', transitionId),
+
   getScreenCaptureSource: (displayId: number): Promise<string | null> =>
     ipcRenderer.invoke('get-screen-capture-source', displayId),
 

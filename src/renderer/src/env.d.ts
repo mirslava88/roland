@@ -158,6 +158,8 @@ interface EventTimerDisplayState {
   remaining: number
   running: boolean
   live: boolean
+  /** Session backdrop shown while the event timer itself is not on air. */
+  fallbackBackdropImage?: string | null
 }
 
 interface MusicState {
@@ -206,6 +208,9 @@ interface Api {
   openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>
   closeAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId?: number): Promise<void>
   sendToAuxiliary(role: AuxiliaryDisplayRole, channel: string, ...args: unknown[]): void
+  freezeProgramMirrors(transitionId: string): Promise<{ armed: number }>
+  completeProgramMirrorTransition(transitionId: string): Promise<{ released: number; remaining: number }>
+  releaseProgramMirrorHold(transitionId: string): Promise<boolean>
   getScreenCaptureSource(displayId: number): Promise<string | null>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>

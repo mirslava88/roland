@@ -14,6 +14,7 @@ import { readFile, stat } from 'fs/promises'
 import { Readable } from 'stream'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
+import { showAllTaskbars } from './taskbar-manager'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { scriptPath } from './paths'
@@ -56,6 +57,16 @@ const auxiliaryWindows = new Map<number, {
   window: BrowserWindow
 }>()
 const auxiliaryLastMessages = new Map<AuxiliaryWindowRole, Map<string, unknown[]>>()
+const programMirrorHolds = new Map<number, {
+  transitionId: string
+  displayId: number
+  window: BrowserWindow
+}>()
+const programMirrorHoldIntents = new Map<number, {
+  transitionId: string
+  revision: number
+}>()
+let programMirrorHoldRevision = 0
 let overlayWindow: BrowserWindow | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 let wpfTimerDisplayKey: string | null = null
@@ -83,8 +94,33 @@ let controlRendererRecoveryAttempts = 0
 let controlRendererLastRecoveryAt = 0
 const nativeDesktopSourceRegistry = new Map<string, NativeDesktopSourceRegistryEntry>()
 const nativeAppIconCache = new Map<string, Promise<string | undefined>>()
-const fullscreenBrowserWindows = new Map<string, { sourceKey: string; processName: string }>()
+interface BrowserFullscreenConsumer {
+  sourceKey: string
+  /** Distinguishes a stale prepare rollback from this renderer's latest use. */
+  token: symbol
+}
+
+const fullscreenBrowserWindows = new Map<string, {
+  sourceKey: string
+  processName: string
+  pid: number
+  threadId: number
+  consumers: Map<number, BrowserFullscreenConsumer>
+}>()
+let browserFullscreenOperationTail: Promise<void> = Promise.resolve()
 let lastDesktopWindowInventorySignature = ''
+
+async function withBrowserFullscreenLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = browserFullscreenOperationTail
+  let unlock!: () => void
+  browserFullscreenOperationTail = new Promise<void>((resolve) => { unlock = resolve })
+  await previous
+  try {
+    return await operation()
+  } finally {
+    unlock()
+  }
+}
 
 function sendToAuxiliaryRole(
   role: AuxiliaryWindowRole,
@@ -104,9 +140,149 @@ function sendToAuxiliaryRole(
   }
 }
 
+async function armProgramMirrorHold(
+  displayId: number,
+  win: BrowserWindow,
+  transitionId: string,
+  revision: number,
+  deadline: number
+): Promise<boolean> {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return false
+  const senderId = win.webContents.id
+  const startedAt = Date.now()
+  try {
+    // The renderer-side generation closes A -> B races even if capturePage for
+    // A resolves after B has already started.
+    await win.webContents.executeJavaScript(`(() => {
+      const next = { id: ${JSON.stringify(transitionId)}, revision: ${revision} };
+      const current = window.__pdmProgramMirrorHoldIntent;
+      if (!current || Number(current.revision || 0) <= next.revision) {
+        window.__pdmProgramMirrorHoldIntent = next;
+      }
+    })()`)
+    const frame = await win.webContents.capturePage()
+    const currentIntent = programMirrorHoldIntents.get(senderId)
+    if (
+      Date.now() > deadline ||
+      currentIntent?.transitionId !== transitionId ||
+      currentIntent.revision !== revision ||
+      frame.isEmpty() ||
+      win.isDestroyed() ||
+      win.webContents.isDestroyed()
+    ) return false
+    const dataUrl = `data:image/png;base64,${frame.toPNG().toString('base64')}`
+    if (Date.now() > deadline) return false
+    const armed = await win.webContents.executeJavaScript(`(async () => {
+      const transitionId = ${JSON.stringify(transitionId)};
+      const revision = ${revision};
+      const deadline = ${deadline};
+      const elementId = 'pdm-program-mirror-hold';
+      const currentIntent = () => window.__pdmProgramMirrorHoldIntent;
+      const isCurrent = () => {
+        const intent = currentIntent();
+        return Date.now() <= deadline && intent &&
+          intent.id === transitionId && Number(intent.revision) === revision;
+      };
+      if (!isCurrent()) return false;
+      const image = new Image();
+      image.id = elementId + '-pending-' + revision;
+      image.alt = '';
+      image.draggable = false;
+      image.src = ${JSON.stringify(dataUrl)};
+      try { await image.decode(); } catch { return false; }
+      if (!isCurrent()) return false;
+      image.dataset.transitionId = transitionId;
+      image.style.cssText = [
+        'position:fixed', 'inset:0', 'width:100vw', 'height:100vh',
+        'max-width:none', 'max-height:none', 'object-fit:fill',
+        'background:#000', 'z-index:2147483647', 'pointer-events:none',
+        'user-select:none'
+      ].join(';');
+      document.body.appendChild(image);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (!isCurrent() || !image.isConnected) {
+        image.remove();
+        return false;
+      }
+      const previous = document.getElementById(elementId);
+      if (previous && previous !== image) previous.remove();
+      image.id = elementId;
+      return true;
+    })()`)
+    const latestIntent = programMirrorHoldIntents.get(senderId)
+    if (
+      armed !== true ||
+      win.isDestroyed() ||
+      latestIntent?.transitionId !== transitionId ||
+      latestIntent.revision !== revision
+    ) {
+      if (armed === true && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        void win.webContents.executeJavaScript(`(() => {
+          const image = document.getElementById('pdm-program-mirror-hold');
+          if (image?.dataset.transitionId === ${JSON.stringify(transitionId)}) image.remove();
+        })()`)
+      }
+      return false
+    }
+    programMirrorHolds.set(senderId, { transitionId, displayId, window: win })
+    diagnosticLog(
+      'display',
+      `program mirror hold armed transition=${transitionId} display=${displayId} ` +
+      `wc=${win.webContents.id} dur=${Date.now() - startedAt}ms`
+    )
+    return true
+  } catch (error) {
+    diagnosticLog(
+      'display',
+      `program mirror hold failed transition=${transitionId} display=${displayId} ` +
+      `error=${formatDiagnosticError(error)}`
+    )
+    return false
+  }
+}
+
+async function removeProgramMirrorHold(
+  senderId: number,
+  transitionId: string
+): Promise<boolean> {
+  const hold = programMirrorHolds.get(senderId)
+  if (!hold || hold.transitionId !== transitionId) return false
+  const win = hold.window
+  try {
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+      await win.webContents.executeJavaScript(`(() => {
+        const image = document.getElementById('pdm-program-mirror-hold');
+        if (!image || image.dataset.transitionId !== ${JSON.stringify(transitionId)}) return false;
+        image.remove();
+        return true;
+      })()`)
+    }
+  } catch (error) {
+    diagnosticLog(
+      'display',
+      `program mirror hold remove failed transition=${transitionId} display=${hold.displayId} ` +
+      `error=${formatDiagnosticError(error)}`
+    )
+    return false
+  }
+  if (programMirrorHolds.get(senderId)?.transitionId === transitionId) {
+    programMirrorHolds.delete(senderId)
+  }
+  if (programMirrorHoldIntents.get(senderId)?.transitionId === transitionId) {
+    programMirrorHoldIntents.delete(senderId)
+  }
+  diagnosticLog(
+    'display',
+    `program mirror hold released transition=${transitionId} display=${hold.displayId} wc=${senderId}`
+  )
+  return true
+}
+
 function getWpfTimerStateFile(): string {
   return join(app.getPath('userData'), 'timer-overlay-state.json')
 }
+
+let lastGoodWpfTimerLayout = { x: 0.976, y: 0.96, scale: 1 }
 
 function readWpfTimerLayout(): { x: number; y: number; scale: number } {
   try {
@@ -115,13 +291,16 @@ function readWpfTimerLayout(): { x: number; y: number; scale: number } {
       y?: unknown
       scale?: unknown
     }
-    return {
+    lastGoodWpfTimerLayout = {
       x: typeof raw.x === 'number' ? Math.max(0, Math.min(1, raw.x)) : 0.976,
       y: typeof raw.y === 'number' ? Math.max(0, Math.min(1, raw.y)) : 0.96,
       scale: typeof raw.scale === 'number' ? Math.max(0.5, Math.min(8, raw.scale)) : 1
     }
+    return lastGoodWpfTimerLayout
   } catch {
-    return { x: 0.976, y: 0.96, scale: 1 }
+    // WPF replaces this file while the mirror sync polls it. Keep the last
+    // valid layout instead of flashing the timer at its defaults for one tick.
+    return lastGoodWpfTimerLayout
   }
 }
 
@@ -165,6 +344,12 @@ function closeAuxiliaryWindow(
     entry.role === role && (displayId === undefined || id === displayId)
   ))
   for (const [id, entry] of entries) {
+    const consumerId = entry.window.webContents.id
+    programMirrorHolds.delete(consumerId)
+    programMirrorHoldIntents.delete(consumerId)
+    // React cleanup is best-effort during window teardown. Release the native
+    // browser lease from main as well, while this renderer identity is known.
+    void releaseBrowserFullscreenWindows(undefined, false, consumerId)
     auxiliaryWindows.delete(id)
     if (!entry.window.isDestroyed()) entry.window.close()
     if (notify && controlWindow && !controlWindow.isDestroyed()) {
@@ -192,41 +377,193 @@ function isBrowserProcess(processName: string): boolean {
   return BROWSER_PROCESS_NAMES.has(processName.trim().replace(/\.exe$/i, '').toLowerCase())
 }
 
-async function releaseBrowserFullscreenWindows(
-  keepSourceKey?: string,
-  restoreControlFocus = true
-): Promise<{ released: number; remaining: number }> {
-  let released = 0
-  const returnFocusHwnd = restoreControlFocus && controlWindow && !controlWindow.isDestroyed()
-    ? browserWindowNativeHwnd(controlWindow)
-    : undefined
-  for (const [hwnd, entry] of [...fullscreenBrowserWindows]) {
-    if (keepSourceKey && entry.sourceKey === keepSourceKey) continue
+type BrowserFullscreenEntry = (typeof fullscreenBrowserWindows extends Map<string, infer Entry>
+  ? Entry
+  : never)
+
+async function addBrowserFullscreenConsumer(
+  hwnd: string,
+  pid: number,
+  threadId: number,
+  processName: string,
+  sourceKey: string,
+  consumerId: number,
+  consumerToken: symbol
+): Promise<{
+  fullscreen: import('./native-window-daemon').NativeWindowFullscreenResult
+  consumerAdded: boolean
+}> {
+  return withBrowserFullscreenLock(async () => {
+    let fullscreen: import('./native-window-daemon').NativeWindowFullscreenResult
     try {
-      const result = await nativeWindowDaemon.exitBrowserFullscreen(hwnd, returnFocusHwnd)
+      fullscreen = await nativeWindowDaemon.ensureBrowserFullscreen(hwnd, pid, threadId)
+    } catch (error) {
+      // A timeout can happen after the helper captured WINDOWPLACEMENT. Ensure
+      // is idempotent for an owned HWND, so retry while still holding the same
+      // lock before any release is allowed to run.
+      diagnosticLog('capture', `browser fullscreen ensure retry hwnd=${hwnd} ${formatDiagnosticError(error)}`)
+      fullscreen = await nativeWindowDaemon.ensureBrowserFullscreen(hwnd, pid, threadId)
+    }
+      if (!fullscreen.ownershipHeld) return { fullscreen, consumerAdded: false }
+
+    const existingOwnership = fullscreenBrowserWindows.get(hwnd)
+    const sameNativeWindow = existingOwnership?.pid === pid &&
+      existingOwnership.threadId === threadId
+    const consumers = sameNativeWindow
+      ? existingOwnership.consumers
+      : new Map<number, BrowserFullscreenConsumer>()
+    const existingConsumer = consumers.get(consumerId)
+    // Repeated prepare of a stream already used by this renderer is
+    // idempotent. Preserve its acquisition token so a failed retry cannot
+    // release the still-live stream.
+    if (existingConsumer?.sourceKey === sourceKey) {
+      return { fullscreen, consumerAdded: false }
+    }
+    if (existingConsumer) {
+      // One renderer owns one live desktop stream. Moving that renderer to a
+      // different HWND is finalized by its normal release-after-transition;
+      // never silently overwrite an unrelated acquisition on the same HWND.
       diagnosticLog(
         'capture',
-        `browser fullscreen exit hwnd=${hwnd} process=${entry.processName} ` +
-        `wasFullscreen=${result.wasFullscreen} requested=${result.requested} ` +
-        `fullscreen=${result.fullscreen} foreground=${result.foreground}`
+        `browser consumer source updated wc=${consumerId} from=${existingConsumer.sourceKey} to=${sourceKey}`
       )
-      if (!result.valid || !result.fullscreen) {
-        fullscreenBrowserWindows.delete(hwnd)
-        released++
-      }
-    } catch (error) {
-      diagnosticLog('capture', `browser fullscreen exit failed hwnd=${hwnd} ${formatDiagnosticError(error)}`)
     }
-  }
+    consumers.set(consumerId, { sourceKey, token: consumerToken })
+    fullscreenBrowserWindows.set(hwnd, {
+      sourceKey,
+      processName,
+      pid,
+      threadId,
+      consumers
+    })
+    return { fullscreen, consumerAdded: true }
+  })
+}
 
-  if (released > 0 && restoreControlFocus && controlWindow && !controlWindow.isDestroyed()) {
-    try {
-      if (controlWindow.isMinimized()) controlWindow.restore()
-      controlWindow.show()
-      controlWindow.focus()
-    } catch { /* window may be closing */ }
+async function exitTrackedBrowserFullscreenLocked(
+  hwnd: string,
+  entry: BrowserFullscreenEntry,
+  returnFocusHwnd?: string
+): Promise<boolean> {
+  try {
+    const result = await nativeWindowDaemon.exitBrowserFullscreen(
+      hwnd,
+      entry.pid,
+      entry.threadId,
+      returnFocusHwnd
+    )
+    diagnosticLog(
+      'capture',
+      `browser fullscreen exit hwnd=${hwnd} process=${entry.processName} ` +
+      `wasFullscreen=${result.wasFullscreen} requested=${result.requested} ` +
+      `fullscreen=${result.fullscreen} foreground=${result.foreground} ` +
+      `identityMatched=${result.identityMatched} ownershipHeld=${result.ownershipHeld} ` +
+      `ownershipMissing=${result.ownershipMissing} placementRestored=${result.placementRestored}`
+    )
+    if (!result.valid || !result.identityMatched || result.ownershipMissing || result.placementRestored) {
+      if (fullscreenBrowserWindows.get(hwnd) === entry) fullscreenBrowserWindows.delete(hwnd)
+      return true
+    }
+  } catch (error) {
+    diagnosticLog('capture', `browser fullscreen exit failed hwnd=${hwnd} ${formatDiagnosticError(error)}`)
   }
-  return { released, remaining: fullscreenBrowserWindows.size }
+  return false
+}
+
+async function releaseBrowserFullscreenWindows(
+  keepSourceKey?: string,
+  restoreControlFocus = true,
+  consumerId?: number,
+  releaseSourceKey?: string,
+  consumerToken?: symbol
+): Promise<{ released: number; remaining: number }> {
+  return withBrowserFullscreenLock(async () => {
+    let released = 0
+    const returnFocusHwnd = restoreControlFocus && controlWindow && !controlWindow.isDestroyed()
+      ? browserWindowNativeHwnd(controlWindow)
+      : undefined
+    for (const [hwnd, entry] of [...fullscreenBrowserWindows]) {
+      if (consumerId !== undefined) {
+        const consumer = entry.consumers.get(consumerId)
+        if (!consumer) continue
+        if (consumerToken && consumer.token !== consumerToken) continue
+        if (keepSourceKey && consumer.sourceKey === keepSourceKey) continue
+        if (releaseSourceKey && consumer.sourceKey !== releaseSourceKey) continue
+        if (entry.consumers.size > 1) {
+          entry.consumers.delete(consumerId)
+          continue
+        }
+        // Keep the last consumer as a retry tombstone until native restore
+        // succeeds. A transient Windows focus refusal must not make cleanup
+        // impossible on the next renderer/destroyed notification.
+      } else {
+        // Shutdown is the only caller without a consumer. No renderer can keep
+        // the ownership alive once PDM itself is closing.
+        entry.consumers.clear()
+      }
+      if (await exitTrackedBrowserFullscreenLocked(hwnd, entry, returnFocusHwnd)) released++
+    }
+
+    if (released > 0 && restoreControlFocus && controlWindow && !controlWindow.isDestroyed()) {
+      try {
+        if (controlWindow.isMinimized()) controlWindow.restore()
+        controlWindow.show()
+        controlWindow.focus()
+      } catch { /* window may be closing */ }
+    }
+    return { released, remaining: fullscreenBrowserWindows.size }
+  })
+}
+
+async function rollbackBrowserFullscreenPrepare(
+  hwnd: string | null,
+  pid: number | null,
+  threadId: number | null,
+  consumerId: number,
+  consumerToken: symbol,
+  ensureAttempted: boolean,
+  restoreControlFocus = true
+): Promise<void> {
+  if (!hwnd || !pid || !threadId || !ensureAttempted) return
+  await withBrowserFullscreenLock(async () => {
+    const entry = fullscreenBrowserWindows.get(hwnd)
+    if (entry) {
+      const consumer = entry.consumers.get(consumerId)
+      // A newer prepare by the same renderer replaced this acquisition. Its
+      // stream is still entitled to keep the shared browser fullscreen.
+      if (!consumer || consumer.token !== consumerToken) return
+      if (entry.consumers.size > 1) {
+        entry.consumers.delete(consumerId)
+        return
+      }
+      const returnFocusHwnd = restoreControlFocus && controlWindow && !controlWindow.isDestroyed()
+        ? browserWindowNativeHwnd(controlWindow)
+        : undefined
+      await exitTrackedBrowserFullscreenLocked(hwnd, entry, returnFocusHwnd)
+      return
+    }
+
+    // The helper may have captured placement before its response was lost or
+    // the renderer disappeared. Exit is safe: without a matching native
+    // ownership snapshot it is a no-op and never sends F11 blindly.
+    try {
+      const result = await nativeWindowDaemon.exitBrowserFullscreen(
+        hwnd,
+        pid,
+        threadId,
+        restoreControlFocus && controlWindow && !controlWindow.isDestroyed()
+          ? browserWindowNativeHwnd(controlWindow)
+          : undefined
+      )
+      diagnosticLog(
+        'capture',
+        `browser prepare rollback untracked hwnd=${hwnd} identityMatched=${result.identityMatched} ` +
+        `ownershipMissing=${result.ownershipMissing} placementRestored=${result.placementRestored}`
+      )
+    } catch (error) {
+      diagnosticLog('capture', `browser prepare rollback failed hwnd=${hwnd} ${formatDiagnosticError(error)}`)
+    }
+  })
 }
 
 // Live capture sources must start rendering even though the prewarmed output
@@ -369,11 +706,16 @@ function prewarmPresentationWindow(): void {
 
 function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
   const displayKey = `${displayBounds.x},${displayBounds.y},${displayBounds.width},${displayBounds.height}`
-  if (wpfTimerProcess && !wpfTimerProcess.killed) {
+  const timerProcessAlive = !!wpfTimerProcess &&
+    !wpfTimerProcess.killed &&
+    wpfTimerProcess.exitCode === null &&
+    wpfTimerProcess.signalCode === null
+  if (timerProcessAlive) {
     const changed = wpfTimerDisplayKey !== displayKey
     wpfTimerDisplayKey = displayKey
     wpfTimerPositionRevision++
     sendToWpfTimer({
+      cmd: 'show',
       displayX: displayBounds.x,
       displayY: displayBounds.y,
       displayWidth: displayBounds.width,
@@ -399,6 +741,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
   wpfTimerDisplayKey = displayKey
   wpfTimerPositionRevision++
   sendToWpfTimer({
+    cmd: 'show',
     displayX: displayBounds.x,
     displayY: displayBounds.y,
     displayWidth: displayBounds.width,
@@ -427,9 +770,26 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
   })
 }
 
-function hideWpfTimer(): void {
+function hideWpfTimer(destroy = false): void {
   if (wpfTimerMirrorSyncTimer) clearInterval(wpfTimerMirrorSyncTimer)
   wpfTimerMirrorSyncTimer = null
+  if (!destroy) {
+    const timerProcessAlive = !!wpfTimerProcess &&
+      !wpfTimerProcess.killed &&
+      wpfTimerProcess.exitCode === null &&
+      wpfTimerProcess.signalCode === null
+    if (timerProcessAlive) {
+      // Keep the exact same HWND, measured size and per-monitor DPI context.
+      // Recreating a SizeToContent WPF window on every Stop made its initial
+      // placeholder width overwrite the operator's saved pixel position.
+      sendToWpfTimer({ cmd: 'hide' })
+      diagnosticLog(
+        'window',
+        `timer overlay parked display=${wpfTimerDisplayId ?? 'unknown'} key=${wpfTimerDisplayKey ?? 'unknown'}`
+      )
+    }
+    return
+  }
   const closingProcess = wpfTimerProcess
   wpfTimerProcess = null
   wpfTimerDisplayKey = null
@@ -452,30 +812,6 @@ function sendToWpfTimer(data: unknown): void {
   try { writeFileSync(wpfTimerDataFile, JSON.stringify(lastWpfTimerData)) } catch {}
 }
 
-
-function ensureExtendDisplayMode(): void {
-  if (process.platform !== 'win32') return
-  // Run multiple times — Windows sometimes ignores the first call if the
-  // display is still being registered
-  const run = (): void => {
-    try { spawn('DisplaySwitch.exe', ['/extend'], { stdio: 'ignore', detached: true }) } catch { /* ignore */ }
-  }
-  run()
-  setTimeout(run, 800)
-  setTimeout(run, 2000)
-}
-
-function restoreTaskbar(): void {
-  try {
-    const mwScript = scriptPath('manage-window.ps1')
-    spawn('powershell.exe', [
-      '-ExecutionPolicy', 'Bypass',
-      '-NoProfile',
-      '-File', mwScript,
-      '-Action', 'show-taskbar'
-    ], { stdio: 'ignore', detached: true })
-  } catch { /* ignore */ }
-}
 
 function nativeSourceKey(window: Pick<NativeTopLevelWindow, 'hwnd' | 'pid'>): string {
   return `native-window:${window.hwnd}:${window.pid}`
@@ -652,6 +988,12 @@ function createWindows(): void {
     if (!win || win.isDestroyed()) {
       win = createAuxiliaryWindow(target, role)
       auxiliaryWindows.set(target.id, { role, window: win })
+      const auxiliaryConsumerId = win.webContents.id
+      win.webContents.once('destroyed', () => {
+        programMirrorHolds.delete(auxiliaryConsumerId)
+        programMirrorHoldIntents.delete(auxiliaryConsumerId)
+        void releaseBrowserFullscreenWindows(undefined, false, auxiliaryConsumerId)
+      })
       win.on('closed', () => {
         if (auxiliaryWindows.get(target.id)?.window === win) {
           auxiliaryWindows.delete(target.id)
@@ -713,6 +1055,122 @@ function createWindows(): void {
     ...args: unknown[]
   ) => {
     sendToAuxiliaryRole(role, channel, ...args)
+  })
+
+  ipcMain.handle('freeze-program-mirrors', async (
+    event,
+    transitionId: string
+  ): Promise<{ armed: number }> => {
+    if (
+      !controlWindow ||
+      controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id ||
+      typeof transitionId !== 'string' ||
+      transitionId.length < 1 ||
+      transitionId.length > 100
+    ) {
+      return { armed: 0 }
+    }
+    const mirrors = [...auxiliaryWindows.entries()].filter(([, entry]) => (
+      entry.role === 'mirror' &&
+      !entry.window.isDestroyed() &&
+      !entry.window.webContents.isDestroyed()
+    ))
+    const revision = ++programMirrorHoldRevision
+    const deadline = Date.now() + 1000
+    for (const [, entry] of mirrors) {
+      programMirrorHoldIntents.set(entry.window.webContents.id, { transitionId, revision })
+    }
+    const results = await Promise.all(mirrors.map(async ([displayId, entry]) => {
+      const arm = armProgramMirrorHold(displayId, entry.window, transitionId, revision, deadline)
+      const remaining = Math.max(0, deadline - Date.now())
+      const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), remaining))
+      return Promise.race([arm, timeout])
+    }))
+    const armed = results.filter(Boolean).length
+    for (const [, entry] of mirrors) {
+      const senderId = entry.window.webContents.id
+      const intent = programMirrorHoldIntents.get(senderId)
+      if (
+        intent?.transitionId === transitionId &&
+        intent.revision === revision &&
+        programMirrorHolds.get(senderId)?.transitionId !== transitionId
+      ) {
+        programMirrorHoldIntents.delete(senderId)
+      }
+    }
+    diagnosticLog(
+      'display',
+      `program mirror freeze complete transition=${transitionId} armed=${armed}/${mirrors.length}`
+    )
+    return { armed }
+  })
+
+  ipcMain.handle('complete-program-mirror-transition', async (
+    event,
+    transitionId: string
+  ): Promise<{ released: number; remaining: number }> => {
+    if (
+      !controlWindow ||
+      controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id ||
+      typeof transitionId !== 'string' ||
+      transitionId.length < 1 ||
+      transitionId.length > 100
+    ) {
+      return { released: 0, remaining: 0 }
+    }
+    const matching = [...programMirrorHolds.entries()].filter(([, hold]) => (
+      hold.transitionId === transitionId &&
+      !hold.window.isDestroyed() &&
+      !hold.window.webContents.isDestroyed()
+    ))
+    for (const [senderId, hold] of matching) {
+      hold.window.webContents.send('program-mirror-transition-complete', { transitionId })
+      // Completion must never block the TAKE/navigation pipeline. Normally the
+      // mirror drops the frozen frame as soon as the new target has painted.
+      // This guard only prevents a dead/static capture stream or a lost IPC
+      // event from leaving the previous slide pinned forever.
+      setTimeout(() => {
+        const current = programMirrorHolds.get(senderId)
+        if (!current || current.transitionId !== transitionId) return
+        diagnosticLog(
+          'display',
+          `program mirror hold watchdog transition=${transitionId} ` +
+          `display=${current.displayId} wc=${senderId}`
+        )
+        void removeProgramMirrorHold(senderId, transitionId).then((released) => {
+          if (released) return
+          setTimeout(() => {
+            if (programMirrorHolds.get(senderId)?.transitionId === transitionId) {
+              void removeProgramMirrorHold(senderId, transitionId)
+            }
+          }, 200)
+        })
+      }, 2500)
+    }
+    diagnosticLog(
+      'display',
+      `program mirror transition notified id=${transitionId} mirrors=${matching.length}`
+    )
+    return { released: 0, remaining: matching.length }
+  })
+
+  ipcMain.handle('release-program-mirror-hold', async (
+    event,
+    transitionId: string
+  ): Promise<boolean> => {
+    if (typeof transitionId !== 'string' || transitionId.length < 1 || transitionId.length > 100) {
+      return false
+    }
+    const trustedMirror = [...auxiliaryWindows.values()].some((entry) => (
+      entry.role === 'mirror' &&
+      !entry.window.isDestroyed() &&
+      !entry.window.webContents.isDestroyed() &&
+      entry.window.webContents.id === event.sender.id
+    ))
+    if (!trustedMirror) return false
+    return removeProgramMirrorHold(event.sender.id, transitionId)
   })
 
   ipcMain.handle('get-screen-capture-source', async (
@@ -800,10 +1258,8 @@ function createWindows(): void {
     for (const role of ['mirror', 'speaker', 'info', 'timer', 'event-timer', 'backdrop'] as AuxiliaryWindowRole[]) {
       closeAuxiliaryWindow(role)
     }
-    hideWpfTimer()
+    hideWpfTimer(true)
     closeAllExternalFiles()
-    // Restore taskbar visibility on exit
-    restoreTaskbar()
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       musicPlayerWindow.close()
     }
@@ -1282,8 +1738,12 @@ function createWindows(): void {
     }
 
     let browserFullscreenHwnd: string | null = null
-    let browserFullscreenRequested = false
-    let browserFullscreenActive = false
+    let browserFullscreenOwned = false
+    let browserPid: number | null = null
+    let browserThreadId: number | null = null
+    let browserEnsureAttempted = false
+    let browserConsumerAdded = false
+    const browserConsumerToken = Symbol(`desktop-prepare-${event.sender.id}`)
     try {
       const ownWindowHwnds = getOwnWindowHwnds()
       const registryEntry = nativeDesktopSourceRegistry.get(sourceKey)
@@ -1329,18 +1789,65 @@ function createWindows(): void {
       let targetWasActivated = false
       const browserTarget = !!targetWindow && isBrowserProcess(targetWindow.processName)
       if (targetWindow && browserTarget) {
-        const restored = await nativeWindowDaemon.restoreWindow(targetWindow.hwnd, true)
+        // The native helper captures WINDOWPLACEMENT before it restores or
+        // fullscreens the browser. That snapshot is applied when the source
+        // leaves air, so Chromium cannot move its normal/maximized position to
+        // the output monitor. Do not restore it separately before the snapshot.
         targetWasActivated = true
-        const fullscreen = await nativeWindowDaemon.ensureBrowserFullscreen(targetWindow.hwnd)
         browserFullscreenHwnd = targetWindow.hwnd
-        browserFullscreenRequested = fullscreen.requested
-        browserFullscreenActive = fullscreen.fullscreen
+        browserPid = targetWindow.pid
+        browserThreadId = targetWindow.threadId
+        browserEnsureAttempted = true
+        const browserAcquisition = await addBrowserFullscreenConsumer(
+          targetWindow.hwnd,
+          targetWindow.pid,
+          targetWindow.threadId,
+          targetWindow.processName,
+          sourceKey,
+          event.sender.id,
+          browserConsumerToken
+        )
+        const fullscreen = browserAcquisition.fullscreen
+        browserConsumerAdded = browserAcquisition.consumerAdded
+        browserFullscreenOwned = fullscreen.ownershipHeld
+        if (event.sender.isDestroyed()) {
+          if (browserConsumerAdded) {
+            await rollbackBrowserFullscreenPrepare(
+              browserFullscreenHwnd,
+              browserPid,
+              browserThreadId,
+              event.sender.id,
+              browserConsumerToken,
+              browserEnsureAttempted,
+              false
+            )
+          }
+          return { success: false, error: 'РћРєРЅРѕ РґРёСЃРїР»РµСЏ Р±С‹Р»Рѕ Р·Р°РєСЂС‹С‚Рѕ РІРѕ РІСЂРµРјСЏ РїРѕРґРіРѕС‚РѕРІРєРё.' }
+        }
         diagnosticLog(
           'capture',
           `browser fullscreen hwnd=${targetWindow.hwnd} process=${targetWindow.processName} ` +
-          `restoreForeground=${restored.foreground} wasFullscreen=${fullscreen.wasFullscreen} ` +
-          `requested=${fullscreen.requested} fullscreen=${fullscreen.fullscreen} foreground=${fullscreen.foreground}`
+          `wasFullscreen=${fullscreen.wasFullscreen} ` +
+          `requested=${fullscreen.requested} fullscreen=${fullscreen.fullscreen} foreground=${fullscreen.foreground} ` +
+          `identityMatched=${fullscreen.identityMatched} ownershipHeld=${fullscreen.ownershipHeld}`
         )
+        if (!fullscreen.fullscreen) {
+          if (fullscreen.ownershipHeld && browserConsumerAdded) {
+            await rollbackBrowserFullscreenPrepare(
+              browserFullscreenHwnd,
+              browserPid,
+              browserThreadId,
+              event.sender.id,
+              browserConsumerToken,
+              browserEnsureAttempted
+            )
+            browserFullscreenOwned = false
+          }
+          return {
+            success: false,
+            error: 'Браузер не успел перейти в полноэкранный режим. Повторите «В эфир».'
+          }
+        }
         // F11 changes the browser's native surface. Resolve Chromium's source
         // again only after the fullscreen transition has completed.
         electronSource = undefined
@@ -1379,10 +1886,17 @@ function createWindows(): void {
         diagnosticLog('capture', `foreground handed to captured window hwnd=${targetHwnd}`)
       }
       if (!electronSource) {
-        if (browserFullscreenHwnd && browserFullscreenRequested) {
-          await nativeWindowDaemon.exitBrowserFullscreen(
+        if (
+          browserFullscreenHwnd && browserFullscreenOwned && browserConsumerAdded &&
+          browserPid && browserThreadId
+        ) {
+          await rollbackBrowserFullscreenPrepare(
             browserFullscreenHwnd,
-            controlWindow ? browserWindowNativeHwnd(controlWindow) : undefined
+            browserPid,
+            browserThreadId,
+            event.sender.id,
+            browserConsumerToken,
+            browserEnsureAttempted
           )
           if (controlWindow && !controlWindow.isDestroyed()) controlWindow.focus()
         }
@@ -1410,19 +1924,17 @@ function createWindows(): void {
         'capture',
         `desktop source prepared key=${sourceKey} captureId=${electronSource.id} label=${name}`
       )
-      if (targetWindow && browserTarget && browserFullscreenHwnd && browserFullscreenActive) {
-        fullscreenBrowserWindows.set(browserFullscreenHwnd, {
-          sourceKey,
-          processName: targetWindow.processName
-        })
-      }
       return { success: true, source: prepared }
     } catch (error) {
-      if (browserFullscreenHwnd && browserFullscreenRequested) {
+      if (browserFullscreenHwnd && browserConsumerAdded && browserPid && browserThreadId) {
         try {
-          await nativeWindowDaemon.exitBrowserFullscreen(
+          await rollbackBrowserFullscreenPrepare(
             browserFullscreenHwnd,
-            controlWindow ? browserWindowNativeHwnd(controlWindow) : undefined
+            browserPid,
+            browserThreadId,
+            event.sender.id,
+            browserConsumerToken,
+            browserEnsureAttempted
           )
           if (controlWindow && !controlWindow.isDestroyed()) controlWindow.focus()
         } catch { /* original prepare error is more useful */ }
@@ -1436,17 +1948,27 @@ function createWindows(): void {
     event,
     keepSourceKey?: string
   ): Promise<{ released: number; remaining: number }> => {
+    const isInformationDisplay = [...auxiliaryWindows.values()].some((entry) => (
+      entry.role === 'info' &&
+      !entry.window.isDestroyed() &&
+      entry.window.webContents.id === event.sender.id
+    ))
     if (
-      !controlWindow ||
-      controlWindow.isDestroyed() ||
-      event.sender.id !== controlWindow.webContents.id
+      (!controlWindow || controlWindow.isDestroyed() ||
+        event.sender.id !== controlWindow.webContents.id) &&
+      !isInformationDisplay
     ) {
       return { released: 0, remaining: fullscreenBrowserWindows.size }
     }
-    const keep = typeof keepSourceKey === 'string' && keepSourceKey.length <= 200
+    const requestedSourceKey = typeof keepSourceKey === 'string' && keepSourceKey.length <= 200
       ? keepSourceKey
       : undefined
-    return releaseBrowserFullscreenWindows(keep)
+    return releaseBrowserFullscreenWindows(
+      isInformationDisplay ? undefined : requestedSourceKey,
+      !isInformationDisplay,
+      event.sender.id,
+      isInformationDisplay ? requestedSourceKey : undefined
+    )
   })
 
   // Capture the Electron output window itself, not a desktop thumbnail. This
@@ -1920,12 +2442,12 @@ function createWindows(): void {
   })
 
   screen.on('display-added', () => {
-    // Auto-extend display (instead of duplicate) when external monitor is connected
-    ensureExtendDisplayMode()
+    // Observe the topology selected in Windows without changing it. Running
+    // DisplaySwitch automatically can make Windows migrate third-party windows
+    // (notably Chromium browsers) to another monitor.
     sendDisplays()
     scheduleDisplayMetricsSync('display-added')
-    // DisplaySwitch/Windows may need a moment to publish stable extended
-    // bounds. Prewarm only after a genuine second display is visible.
+    // Windows may need a moment to publish stable bounds for a new display.
     setTimeout(() => {
       sendDisplays()
       prewarmPresentationWindow()
@@ -2340,14 +2862,6 @@ app.whenReady().then(() => {
     // only media for the two trusted app renderers and denies everything else.
   })
 
-  // Ensure extended display mode on startup if external monitor is connected
-  if (process.platform === 'win32') {
-    const displays = screen.getAllDisplays()
-    if (displays.length > 1) {
-      ensureExtendDisplayMode()
-    }
-  }
-
   createWindows()
   prewarmPresentationWindow()
   pptDaemon.warmup()
@@ -2390,7 +2904,11 @@ app.on('before-quit', (event) => {
     (async () => {
       await releaseBrowserFullscreenWindows(undefined, false)
       await nativeWindowDaemon.shutdown()
-    })()
+    })(),
+    // This final restore shares the same main-process queue as every runtime
+    // hide/show request. It is therefore guaranteed to run after an in-flight
+    // hide, and all later hides become no-ops during shutdown.
+    showAllTaskbars(true)
   ])
     .then((results) => {
       if (results[0].status === 'rejected') {
@@ -2398,6 +2916,9 @@ app.on('before-quit', (event) => {
       }
       if (results[1].status === 'rejected') {
         diagnosticLog('shutdown', `Window enumerator cleanup failed: ${formatDiagnosticError(results[1].reason)}`)
+      }
+      if (results[2].status === 'rejected') {
+        diagnosticLog('shutdown', `Taskbar restore failed: ${formatDiagnosticError(results[2].reason)}`)
       }
     })
     .finally(() => {

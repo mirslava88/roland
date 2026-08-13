@@ -13,6 +13,7 @@ import {
   formatDiagnosticError,
   getDiagnosticLogDirectory
 } from './diagnostic-log'
+import { hideTaskbarForDisplay, showAllTaskbars } from './taskbar-manager'
 
 const execFileAsync = promisify(execFile)
 
@@ -1083,45 +1084,11 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('hide-taskbar', async (_event, displayBounds: { x: number; y: number; width: number; height: number }) => {
-    if (process.platform !== 'win32') return
-    const scriptPath = resolveScript('manage-window.ps1')
-    try {
-      // Renderer display bounds are DIP coordinates, while GetWindowRect in
-      // manage-window.ps1 returns physical pixels. Match the authoritative
-      // display and convert its complete bounds before comparing taskbars.
-      const targetDisplay = screen.getDisplayMatching(displayBounds)
-      const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
-      diagnosticLog(
-        'display',
-        `hide taskbar display=${targetDisplay.id} dip=${JSON.stringify(targetDisplay.bounds)} ` +
-        `physical=${JSON.stringify(physicalBounds)}`
-      )
-      await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'hide-taskbar',
-        '-X', String(physicalBounds.x),
-        '-Y', String(physicalBounds.y),
-        '-Width', String(physicalBounds.width),
-        '-Height', String(physicalBounds.height)
-      ], { timeout: 5000 })
-    } catch (error) {
-      diagnosticLog('display', `hide taskbar failed ${formatDiagnosticError(error)}`)
-    }
+    await hideTaskbarForDisplay(displayBounds)
   })
 
   ipcMain.handle('show-taskbar', async () => {
-    if (process.platform !== 'win32') return
-    const scriptPath = resolveScript('manage-window.ps1')
-    try {
-      await execFileAsync('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-NoProfile',
-        '-File', scriptPath,
-        '-Action', 'show-taskbar'
-      ], { timeout: 5000 })
-    } catch { /* ignore */ }
+    await showAllTaskbars()
   })
 
   ipcMain.handle('get-drives', async () => {

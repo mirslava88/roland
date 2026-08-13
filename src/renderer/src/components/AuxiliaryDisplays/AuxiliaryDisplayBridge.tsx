@@ -3,6 +3,71 @@ import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
 
 const notesCache = new Map<string, string>()
 
+function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>): void {
+  const {
+    activeFile,
+    backdropImage,
+    currentSlide,
+    displays,
+    isPlaying,
+    isPresentationWindowOpen,
+    pptxAspectRatios,
+    selectedDisplayId,
+    videoLoopTrack,
+    videoPlayback
+  } = state
+  const sourceDisplay = displays.find((display) => display.id === selectedDisplayId)
+  const presentationAspectRatio = activeFile?.type === 'presentation'
+    ? pptxAspectRatios[activeFile.path] ?? null
+    : null
+  const playback = activeFile?.type === 'video'
+    ? videoPlayback[activeFile.path]
+    : undefined
+  let directContent: ProgramDirectContent | null = null
+  if (activeFile?.type === 'pdf') {
+    directContent = {
+      type: 'pdf',
+      path: activeFile.path,
+      currentSlide
+    }
+  } else if (activeFile?.type === 'video') {
+    directContent = {
+      type: 'video',
+      path: activeFile.path,
+      currentTime: playback?.currentTime ?? 0,
+      playing: playback?.playing ?? isPlaying,
+      loop: videoLoopTrack
+    }
+  } else if (activeFile?.type === 'other' && activeFile.isImage) {
+    directContent = { type: 'image', path: activeFile.path }
+  } else if (backdropImage && (!activeFile || activeFile.isAudio)) {
+    directContent = { type: 'backdrop', path: backdropImage }
+  }
+  const mirrorActive = activeFile !== null || isPresentationWindowOpen || directContent !== null
+  window.api.sendToAuxiliary('mirror', 'mirror-state', {
+    sourceDisplayId: selectedDisplayId,
+    sourcePixelWidth: sourceDisplay
+      ? Math.round(sourceDisplay.bounds.width * sourceDisplay.scaleFactor)
+      : null,
+    sourcePixelHeight: sourceDisplay
+      ? Math.round(sourceDisplay.bounds.height * sourceDisplay.scaleFactor)
+      : null,
+    sourceDipHeight: sourceDisplay?.bounds.height ?? null,
+    contentType: activeFile?.type ?? null,
+    contentAspectRatio: presentationAspectRatio,
+    directContent,
+    active: mirrorActive,
+    backdropImage
+  })
+  if (activeFile?.type === 'presentation') {
+    window.api.dbgLog(
+      `program mirror state source=${sourceDisplay?.id ?? 'none'} ` +
+      `size=${sourceDisplay ? `${sourceDisplay.bounds.width}x${sourceDisplay.bounds.height}` : 'none'} ` +
+      `pptxAspect=${presentationAspectRatio ?? 'missing'} file=${activeFile.path}`
+    )
+  }
+}
+
 function useAuxiliaryWindows(
   role: AuxiliaryDisplayRole,
   ids: number[],
@@ -29,6 +94,7 @@ function useAuxiliaryWindows(
 
 export function AuxiliaryDisplayBridge(): null {
   const taskbarSyncChainRef = useRef<Promise<void>>(Promise.resolve())
+  const taskbarSyncRevisionRef = useRef(0)
   const {
     activeFile,
     isPlaying,
@@ -88,31 +154,62 @@ export function AuxiliaryDisplayBridge(): null {
   useAuxiliaryWindows('event-timer', roleIds.eventTimer, setDisplayAssignment)
   useAuxiliaryWindows('backdrop', roleIds.backdrop, setDisplayAssignment)
 
-  const programDisplays = useMemo(() => displays
-    .filter((display) => (
-      !display.isPrimary && displayAssignments[String(display.id)] === 'program'
-    )), [displayAssignments, displays])
-  const programDisplaySignature = programDisplays.map((display) => (
+  const externalDisplays = useMemo(() => displays
+    .filter((display) => !display.isPrimary), [displays])
+  const externalDisplaySignature = externalDisplays.map((display) => (
     `${display.id}:${display.bounds.x},${display.bounds.y},${display.bounds.width},${display.bounds.height}@${display.scaleFactor}`
   )).join('|')
-  const programOutputActive = activeFile !== null || isPresentationWindowOpen
+  const hasInformationOutput = informationMedia !== null &&
+    Object.values(displayAssignments).includes('information')
+  const hasTimerOutput = timerDuration > 0 &&
+    Object.values(displayAssignments).includes('timer')
+  const hasEventTimerOutput = eventTimerOutput?.live === true &&
+    Object.values(displayAssignments).includes('event-timer')
+  const taskbarSuppressionActive =
+    externalDisplays.length > 0 && (
+      backdropImage !== null ||
+      activeFile !== null ||
+      isPresentationWindowOpen ||
+      hasInformationOutput ||
+      hasTimerOutput ||
+      hasEventTimerOutput
+    )
+  const taskbarOutputPhase = backdropImage && !activeFile
+    ? 'idle-backdrop'
+    : activeFile
+      ? `live-${activeFile.type}`
+      : hasInformationOutput
+        ? 'information'
+        : hasTimerOutput
+          ? 'timer'
+          : hasEventTimerOutput
+            ? 'event-timer'
+            : isPresentationWindowOpen
+              ? 'program-window'
+              : 'none'
 
   useEffect(() => {
+    const revision = ++taskbarSyncRevisionRef.current
     // Serialize PowerShell taskbar operations. If the operator exits while a
     // hide request is still running, the queued show request must always be
     // the final operation so Windows is restored reliably.
     taskbarSyncChainRef.current = taskbarSyncChainRef.current
       .catch(() => {})
       .then(async () => {
-        if (!programOutputActive) {
+        if (revision !== taskbarSyncRevisionRef.current) return
+        if (!taskbarSuppressionActive) {
           await window.api.showTaskbar()
           return
         }
-        for (const display of programDisplays) {
+        // A selected backdrop is the idle output of every external display,
+        // regardless of its assigned role. Hide every secondary taskbar so it
+        // cannot sit over the backdrop, speaker view or independent media.
+        for (const display of externalDisplays) {
+          if (revision !== taskbarSyncRevisionRef.current) return
           await window.api.hideTaskbar(display.bounds)
         }
       })
-  }, [programDisplaySignature, programOutputActive])
+  }, [externalDisplaySignature, taskbarOutputPhase, taskbarSuppressionActive])
 
   useEffect(() => window.api.on('auxiliary-window-closed', (...args: unknown[]) => {
     const data = args[0] as { role?: AuxiliaryDisplayRole; displayId?: number }
@@ -124,7 +221,18 @@ export function AuxiliaryDisplayBridge(): null {
     const state = useAppStore.getState()
     const current = state.eventTimerOutput || { ...state.eventTimer, running: false, live: false }
     window.api.dbgLog(`event timer ready acknowledged display=${data?.displayId ?? 'unknown'} live=${current.live}`)
-    window.api.sendToAuxiliary('event-timer', 'event-timer-state', current)
+    window.api.sendToAuxiliary('event-timer', 'event-timer-state', {
+      ...current,
+      fallbackBackdropImage: state.backdropImage
+    } satisfies EventTimerDisplayState)
+  }), [])
+
+  useEffect(() => window.api.on('program-mirror-state-ready', (...args: unknown[]) => {
+    const data = args[0] as { displayId?: number | null } | undefined
+    window.api.dbgLog(`program mirror state listener ready display=${data?.displayId ?? 'unknown'}`)
+    // The auxiliary renderer installs its React listener after did-finish-load.
+    // Re-send a fresh snapshot now so it cannot miss main's earlier cache replay.
+    sendProgramMirrorState(useAppStore.getState())
   }), [])
 
   useEffect(() => window.api.on('information-video-ended', (...args: unknown[]) => {
@@ -161,58 +269,7 @@ export function AuxiliaryDisplayBridge(): null {
   }), [setInformationMedia])
 
   useEffect(() => {
-    const sourceDisplay = displays.find((display) => display.id === selectedDisplayId)
-    const presentationAspectRatio = activeFile?.type === 'presentation'
-      ? pptxAspectRatios[activeFile.path] ?? null
-      : null
-    const playback = activeFile?.type === 'video'
-      ? videoPlayback[activeFile.path]
-      : undefined
-    let directContent: ProgramDirectContent | null = null
-    if (activeFile?.type === 'pdf') {
-      directContent = {
-        type: 'pdf',
-        path: activeFile.path,
-        currentSlide
-      }
-    } else if (activeFile?.type === 'video') {
-      directContent = {
-        type: 'video',
-        path: activeFile.path,
-        currentTime: playback?.currentTime ?? 0,
-        playing: playback?.playing ?? isPlaying,
-        loop: videoLoopTrack
-      }
-    } else if (activeFile?.type === 'other' && activeFile.isImage) {
-      directContent = { type: 'image', path: activeFile.path }
-    } else if (
-      backdropImage &&
-      ((!activeFile && isPresentationWindowOpen) || activeFile?.isAudio)
-    ) {
-      directContent = { type: 'backdrop', path: backdropImage }
-    }
-    window.api.sendToAuxiliary('mirror', 'mirror-state', {
-      sourceDisplayId: selectedDisplayId,
-      sourcePixelWidth: sourceDisplay
-        ? Math.round(sourceDisplay.bounds.width * sourceDisplay.scaleFactor)
-        : null,
-      sourcePixelHeight: sourceDisplay
-        ? Math.round(sourceDisplay.bounds.height * sourceDisplay.scaleFactor)
-        : null,
-      sourceDipHeight: sourceDisplay?.bounds.height ?? null,
-      contentType: activeFile?.type ?? null,
-      contentAspectRatio: presentationAspectRatio,
-      directContent,
-      active: activeFile !== null || isPresentationWindowOpen,
-      backdropImage
-    })
-    if (activeFile?.type === 'presentation') {
-      window.api.dbgLog(
-        `program mirror state source=${sourceDisplay?.id ?? 'none'} ` +
-        `size=${sourceDisplay ? `${sourceDisplay.bounds.width}x${sourceDisplay.bounds.height}` : 'none'} ` +
-        `pptxAspect=${presentationAspectRatio ?? 'missing'} file=${activeFile.path}`
-      )
-    }
+    sendProgramMirrorState(useAppStore.getState())
   }, [
     activeFile,
     backdropImage,
@@ -338,9 +395,12 @@ export function AuxiliaryDisplayBridge(): null {
     window.api.sendToAuxiliary(
       'event-timer',
       'event-timer-state',
-      eventTimerOutput || { ...eventTimer, running: false, live: false }
+      {
+        ...(eventTimerOutput || { ...eventTimer, running: false, live: false }),
+        fallbackBackdropImage: backdropImage
+      } satisfies EventTimerDisplayState
     )
-  }, [eventTimerOutput])
+  }, [backdropImage, eventTimer, eventTimerOutput])
 
   return null
 }

@@ -107,6 +107,7 @@ public class TimerOverlay
             AllowsTransparency = true,
             Background = Brushes.Transparent,
             Topmost = true,
+            ShowActivated = false,
             ShowInTaskbar = false,
             ResizeMode = ResizeMode.NoResize,
             SizeToContent = SizeToContent.WidthAndHeight,
@@ -114,9 +115,24 @@ public class TimerOverlay
             Top = displayY
         };
 
+        string initialText = "--:--";
+        try
+        {
+            if (File.Exists(dataFile))
+            {
+                string initialPayload = File.ReadAllText(dataFile).Trim();
+                if (!string.IsNullOrWhiteSpace(initialPayload))
+                    initialText = FormatTime(GetJsonInt(initialPayload, "remaining"));
+            }
+        }
+        catch {}
+
         text = new TextBlock
         {
-            Text = " --:-- ",
+            // Measure the real first value, not a wider placeholder. Otherwise
+            // SizeToContent clamps an edge-anchored timer and saves a shifted
+            // position before the first 100 ms data poll.
+            Text = initialText,
             FontFamily = new FontFamily("Consolas"),
             FontSize = 48,
             FontWeight = FontWeights.Bold,
@@ -183,17 +199,23 @@ public class TimerOverlay
         window.ContentRendered += (s, e) =>
         {
             RepositionToTarget();
-            SaveState();
         };
         window.SizeChanged += (s, e) => { RepositionToTarget(); };
         window.Closing += (s, e) => { SaveState(); };
+
+        // A modal ShowDialog loop ends when Hide() is called. Use the normal
+        // dispatcher loop so Stop can park this very same HWND and Start can
+        // show it again without recreating or remeasuring the overlay window.
+        Dispatcher ownerDispatcher = Dispatcher.CurrentDispatcher;
+        window.Closed += (s, e) => { ownerDispatcher.BeginInvokeShutdown(DispatcherPriority.Normal); };
 
         var timer = new DispatcherTimer();
         timer.Interval = TimeSpan.FromMilliseconds(100);
         timer.Tick += OnTick;
         timer.Start();
 
-        window.ShowDialog();
+        window.Show();
+        Dispatcher.Run();
     }
 
     private void OnTick(object sender, EventArgs e)
@@ -233,6 +255,14 @@ public class TimerOverlay
                 window.Close();
                 return;
             }
+            if (line.Contains("\"cmd\"") && line.Contains("\"hide\""))
+            {
+                // Stop only parks this exact HWND. Its pixel position, measured
+                // size and DPI context are therefore reused by the next Start.
+                SaveState();
+                if (window.Visibility == Visibility.Visible) window.Hide();
+                return;
+            }
 
             // The main program display can be reassigned or change DPI while
             // the timer is running. Re-anchor using the real physical HWND
@@ -256,17 +286,7 @@ public class TimerOverlay
             int remaining = GetJsonInt(line, "remaining");
             int duration = GetJsonInt(line, "duration");
 
-            bool negative = remaining < 0;
-            int abs = Math.Abs(remaining);
-            int h = abs / 3600;
-            int m = (abs % 3600) / 60;
-            int s = abs % 60;
-            string time = h > 0
-                ? string.Format("{0:D2}:{1:D2}:{2:D2}", h, m, s)
-                : string.Format("{0:D2}:{1:D2}", m, s);
-            if (negative) time = "-" + time;
-
-            text.Text = time;
+            text.Text = FormatTime(remaining);
 
             bool running = line.Contains("\"running\":true");
             string colorKey;
@@ -370,6 +390,19 @@ public class TimerOverlay
         border.Padding = new Thickness(
             Math.Round(24 * scale), Math.Round(8 * scale),
             Math.Round(24 * scale), Math.Round(8 * scale));
+    }
+
+    private static string FormatTime(int remaining)
+    {
+        bool negative = remaining < 0;
+        int abs = Math.Abs(remaining);
+        int h = abs / 3600;
+        int m = (abs % 3600) / 60;
+        int s = abs % 60;
+        string value = h > 0
+            ? string.Format("{0:D2}:{1:D2}:{2:D2}", h, m, s)
+            : string.Format("{0:D2}:{1:D2}", m, s);
+        return negative ? "-" + value : value;
     }
 
     private void LoadState()

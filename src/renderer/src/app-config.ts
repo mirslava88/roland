@@ -998,6 +998,37 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     broadcastTitlesOutput: { ...DEFAULT_BROADCAST_TITLES_OUTPUT }
   })
 
+  // Loading a configuration is allowed only while no channel is on air. If
+  // that configuration contains a backdrop, restore the idle program output
+  // immediately as well as the stored path. Auxiliary roles receive the same
+  // image from AuxiliaryDisplayBridge, so every otherwise-empty external
+  // display returns to one consistent background.
+  const restoredProgramDisplayId = displays.selectedDisplayId !== null &&
+    displays.assignments[String(displays.selectedDisplayId)] === 'program'
+    ? displays.selectedDisplayId
+    : null
+  if (restoredBackdrop && restoredProgramDisplayId !== null) {
+    try {
+      await window.api.openPresentationWindow(restoredProgramDisplayId)
+      const latest = useAppStore.getState()
+      if (
+        !latest.activeFile &&
+        latest.backdropImage === restoredBackdrop &&
+        latest.selectedDisplayId === restoredProgramDisplayId &&
+        latest.displayAssignments[String(restoredProgramDisplayId)] === 'program'
+      ) {
+        window.api.sendToPresentation('load-content', {
+          type: 'backdrop',
+          path: restoredBackdrop,
+          name: 'Backdrop'
+        })
+        latest.setPresentationWindowOpen(true)
+      }
+    } catch (error) {
+      warnings.push(`Не удалось вывести подложку после загрузки конфигурации: ${String(error)}`)
+    }
+  }
+
   await window.api.watchFolder(folderPath).catch(() => undefined)
   for (const entry of restoredCaptureSources.values()) {
     if (entry.capture) window.api.sendToPresentation('capture-source-register', entry.capture)

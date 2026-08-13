@@ -422,15 +422,12 @@ export function PreviewPanel(): JSX.Element {
       // Close underlying content (hidden behind overlay)
       if (isPptx) {
         await window.api.powerpointCommand('close')
-        // Restore taskbar hidden на take PPTX
-        await window.api.showTaskbar()
       }
       if (isAudio) {
         await window.api.musicStop()
       }
       if (isExternalDoc) {
         await window.api.closeExternalFile(channel.file.path)
-        await window.api.showTaskbar()
       }
 
       // Decide final state of the presentation window:
@@ -550,6 +547,15 @@ export function PreviewPanel(): JSX.Element {
         setOverlayState({ kind: 'hidden' })
       }
     } finally {
+      try {
+        const mirrorResult = await window.api.completeProgramMirrorTransition(takeId)
+        window.api.dbgLog(
+          `TAKE mirror transition complete id=${takeId} ` +
+          `released=${mirrorResult.released} remaining=${mirrorResult.remaining}`
+        )
+      } catch (error) {
+        window.api.dbgLog(`TAKE mirror transition completion failed id=${takeId}: ${String(error)}`)
+      }
       const queuedNavigation = finishNavigationTransition()
       if (takeInFlightRef.current === ch) {
         takeInFlightRef.current = null
@@ -597,7 +603,6 @@ export function PreviewPanel(): JSX.Element {
         window.api.sendToPresentation('capture-audio-live', null)
         if (prevActiveFile?.type === 'presentation' || channel.file?.type === 'presentation') {
           try { await window.api.powerpointCommand('close') } catch { /* already closed */ }
-          try { await window.api.showTaskbar() } catch { /* best effort */ }
         }
         try { await window.api.musicStop() } catch { /* already stopped */ }
         if (channel.file?.type === 'other' && !channel.file.isImage && !channel.file.isAudio) {
@@ -662,6 +667,7 @@ export function PreviewPanel(): JSX.Element {
       const prepared = await window.api.prepareDesktopCaptureSource(sourceKey)
       if (isTakeCancelled()) {
         log('desktop window prepare cancelled before output changes')
+        await finishCancelledTake()
         return
       }
 
@@ -671,6 +677,7 @@ export function PreviewPanel(): JSX.Element {
       const currentChannel = currentState.channels[ch]
       if (currentChannel?.file?.capture?.sourceId !== captureSourceId) {
         log('desktop window prepare ignored: channel source changed')
+        await window.api.releaseBrowserFullscreen(desktopWindowSourceKey(prevActiveFile))
         return
       }
 
@@ -961,6 +968,25 @@ export function PreviewPanel(): JSX.Element {
         log(`PPTX aspect ready before TAKE ratio=${preparedGeometry.aspectRatio.toFixed(6)}`)
       } else {
         log(`PPTX aspect unavailable before TAKE error=${preparedGeometry.error || 'missing geometry'}`)
+      }
+    }
+
+    // The main output already keeps its old layer until the target is ready.
+    // Give every live-copy window the same transaction boundary: capture its
+    // exact last composed frame (including letterbox and timer) before the
+    // store publishes the next activeFile. The mirror releases this hold only
+    // after this TAKE finishes and its own target frame has painted.
+    if (
+      prevActiveFile !== null ||
+      freshState.backdropImage !== null ||
+      freshState.isPresentationWindowOpen
+    ) {
+      log('program mirror freeze BEGIN')
+      const mirrorFreeze = await window.api.freezeProgramMirrors(takeId)
+      log(`program mirror freeze END armed=${mirrorFreeze.armed}`)
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
       }
     }
 

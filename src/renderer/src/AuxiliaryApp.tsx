@@ -8,6 +8,7 @@ const requestedDisplayId = Number(new URLSearchParams(window.location.search).ge
 const auxiliaryDisplayId = Number.isFinite(requestedDisplayId) ? requestedDisplayId : null
 const MIRROR_PDF_SAFE_WIDTH_RATIO = 0.96
 const MIRROR_PDF_MAX_HORIZONTAL_STRETCH = 1.08
+const PROGRAM_MIRROR_CONNECTING_STATUS = 'Подключение к основному эфиру…'
 const role: AuxiliaryDisplayRole = requestedRole === 'mirror' ||
   requestedRole === 'info' ||
   requestedRole === 'timer' ||
@@ -366,7 +367,8 @@ function EventTimerDisplay(): JSX.Element {
     duration: 90 * 60,
     remaining: 90 * 60,
     running: false,
-    live: false
+    live: false,
+    fallbackBackdropImage: null
   })
 
   useEffect(() => {
@@ -390,7 +392,17 @@ function EventTimerDisplay(): JSX.Element {
           <EventTimerScene timer={timer} />
         </div>
       )
-    : <div className="h-screen w-screen bg-black" />
+    : (
+        <div className="relative h-screen w-screen overflow-hidden bg-black select-none">
+          {timer.fallbackBackdropImage && (
+            <img
+              src={mediaUrl(timer.fallbackBackdropImage)}
+              className="absolute inset-0 h-full w-full object-cover"
+              draggable={false}
+            />
+          )}
+        </div>
+      )
 }
 
 function InformationVideo({
@@ -632,6 +644,15 @@ function InformationCapture({ config }: { config: CaptureSourceConfig }): JSX.El
       if (retryTimer) clearTimeout(retryTimer)
       stopStream()
       if (videoRef.current) videoRef.current.srcObject = null
+      if (
+        desktop &&
+        (config.desktopSourceType === 'window' ||
+          (!config.desktopSourceType && config.desktopSourceId?.startsWith('window:')))
+      ) {
+        void window.api.releaseBrowserFullscreen(
+          config.desktopSourceKey || config.desktopSourceId
+        )
+      }
     }
   }, [
     config.captureKind,
@@ -851,6 +872,7 @@ function ProgramDirectLayer({
 
 function ProgramMirrorDisplay(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const directIdentityRef = useRef('')
   const [mirrorState, setMirrorState] = useState<{
     sourceDisplayId: number | null
     sourcePixelWidth: number | null
@@ -876,45 +898,63 @@ function ProgramMirrorDisplay(): JSX.Element {
   const [reconnectRevision, setReconnectRevision] = useState(0)
   const [nativeReady, setNativeReady] = useState(false)
   const [programTimer, setProgramTimer] = useState<ProgramTimerOverlayState>(EMPTY_PROGRAM_TIMER)
+  const [completedMirrorTransitionId, setCompletedMirrorTransitionId] = useState<string | null>(null)
 
-  useEffect(() => window.api.on('mirror-state', (...args: unknown[]) => {
-    const data = args[0] as {
-      sourceDisplayId?: number | null
-      sourcePixelWidth?: number | null
-      sourcePixelHeight?: number | null
-      sourceDipHeight?: number | null
-      contentType?: string | null
-      contentAspectRatio?: number | null
-      directContent?: ProgramDirectContent | null
-      active?: boolean
-      backdropImage?: string | null
-    }
-    const nextContentAspectRatio = typeof data?.contentAspectRatio === 'number' &&
-      Number.isFinite(data.contentAspectRatio) && data.contentAspectRatio > 0
-      ? data.contentAspectRatio
-      : null
-    setMirrorState({
-      sourceDisplayId: typeof data?.sourceDisplayId === 'number' ? data.sourceDisplayId : null,
-      sourcePixelWidth: typeof data?.sourcePixelWidth === 'number' ? data.sourcePixelWidth : null,
-      sourcePixelHeight: typeof data?.sourcePixelHeight === 'number' ? data.sourcePixelHeight : null,
-      sourceDipHeight: typeof data?.sourceDipHeight === 'number' ? data.sourceDipHeight : null,
-      contentType: typeof data?.contentType === 'string' ? data.contentType : null,
-      contentAspectRatio: nextContentAspectRatio,
-      directContent: data?.directContent && typeof data.directContent.path === 'string'
+  useEffect(() => {
+    const unsubscribe = window.api.on('mirror-state', (...args: unknown[]) => {
+      const data = args[0] as {
+        sourceDisplayId?: number | null
+        sourcePixelWidth?: number | null
+        sourcePixelHeight?: number | null
+        sourceDipHeight?: number | null
+        contentType?: string | null
+        contentAspectRatio?: number | null
+        directContent?: ProgramDirectContent | null
+        active?: boolean
+        backdropImage?: string | null
+      }
+      const nextContentAspectRatio = typeof data?.contentAspectRatio === 'number' &&
+        Number.isFinite(data.contentAspectRatio) && data.contentAspectRatio > 0
+        ? data.contentAspectRatio
+        : null
+      const nextDirectContent = data?.directContent && typeof data.directContent.path === 'string'
         ? data.directContent
-        : null,
-      active: data?.active === true,
-      backdropImage: data?.backdropImage || null
-    })
-    if (data?.contentType === 'presentation') {
+        : null
+      const nextDirectIdentity = nextDirectContent
+        ? `${nextDirectContent.type}|${nextDirectContent.path}`
+        : ''
+      if (nextDirectIdentity !== directIdentityRef.current) {
+        directIdentityRef.current = nextDirectIdentity
+        setNativeReady(false)
+      }
+      setMirrorState({
+        sourceDisplayId: typeof data?.sourceDisplayId === 'number' ? data.sourceDisplayId : null,
+        sourcePixelWidth: typeof data?.sourcePixelWidth === 'number' ? data.sourcePixelWidth : null,
+        sourcePixelHeight: typeof data?.sourcePixelHeight === 'number' ? data.sourcePixelHeight : null,
+        sourceDipHeight: typeof data?.sourceDipHeight === 'number' ? data.sourceDipHeight : null,
+        contentType: typeof data?.contentType === 'string' ? data.contentType : null,
+        contentAspectRatio: nextContentAspectRatio,
+        directContent: nextDirectContent,
+        active: data?.active === true,
+        backdropImage: data?.backdropImage || null
+      })
       window.api.dbgLog(
-        `program mirror geometry display=${auxiliaryDisplayId} ` +
-        `source=${data.sourcePixelWidth ?? 0}x${data.sourcePixelHeight ?? 0} ` +
-        `target=${window.innerWidth}x${window.innerHeight} ` +
-        `pptxAspect=${nextContentAspectRatio ?? 'missing'}`
+        `program mirror state received display=${auxiliaryDisplayId ?? 'unknown'} ` +
+        `active=${data?.active === true} direct=${nextDirectContent?.type || 'none'} ` +
+        `backdrop=${data?.backdropImage ? 'yes' : 'no'}`
       )
-    }
-  }), [])
+      if (data?.contentType === 'presentation') {
+        window.api.dbgLog(
+          `program mirror geometry display=${auxiliaryDisplayId} ` +
+          `source=${data.sourcePixelWidth ?? 0}x${data.sourcePixelHeight ?? 0} ` +
+          `target=${window.innerWidth}x${window.innerHeight} ` +
+          `pptxAspect=${nextContentAspectRatio ?? 'missing'}`
+        )
+      }
+    })
+    window.api.sendToControl('program-mirror-state-ready', { displayId: auxiliaryDisplayId })
+    return unsubscribe
+  }, [])
 
   useEffect(() => window.api.on('program-timer-overlay', (...args: unknown[]) => {
     const data = args[0] as Partial<ProgramTimerOverlayState> | undefined
@@ -923,6 +963,16 @@ function ProgramMirrorDisplay(): JSX.Element {
       ...data,
       visible: data?.visible === true
     })
+  }), [])
+
+  useEffect(() => window.api.on('program-mirror-transition-complete', (...args: unknown[]) => {
+    const data = args[0] as { transitionId?: string } | undefined
+    if (!data?.transitionId) return
+    window.api.dbgLog(
+      `program mirror transition commit received display=${auxiliaryDisplayId ?? 'unknown'} ` +
+      `id=${data.transitionId}`
+    )
+    setCompletedMirrorTransitionId(data.transitionId)
   }), [])
 
   useEffect(() => {
@@ -949,7 +999,10 @@ function ProgramMirrorDisplay(): JSX.Element {
     ? `${mirrorState.directContent.type}|${mirrorState.directContent.path}`
     : ''
   const hasDirectContent = mirrorState.directContent !== null
-  useEffect(() => setNativeReady(false), [directIdentity])
+  const isDirectBackdrop = mirrorState.directContent?.type === 'backdrop'
+  const showBackdropWhileConnecting = Boolean(
+    mirrorState.backdropImage && status === PROGRAM_MIRROR_CONNECTING_STATUS
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -957,6 +1010,10 @@ function ProgramMirrorDisplay(): JSX.Element {
 
     const connect = async (): Promise<void> => {
       if (!mirrorState.active) {
+        setStatus('')
+        return
+      }
+      if (isDirectBackdrop) {
         setStatus('')
         return
       }
@@ -972,7 +1029,7 @@ function ProgramMirrorDisplay(): JSX.Element {
         setStatus('Основной эфирный дисплей не назначен')
         return
       }
-      setStatus('Подключение к основному эфиру…')
+      setStatus(PROGRAM_MIRROR_CONNECTING_STATUS)
       try {
         let sourceId: string | null = null
         for (let attempt = 0; attempt < 6 && !cancelled && !sourceId; attempt++) {
@@ -1076,7 +1133,90 @@ function ProgramMirrorDisplay(): JSX.Element {
     mirrorState.sourcePixelWidth,
     mirrorState.contentAspectRatio,
     mirrorState.contentType,
+    isDirectBackdrop,
     reconnectRevision
+  ])
+
+  useEffect(() => {
+    const transitionId = completedMirrorTransitionId
+    if (!transitionId) return
+    let cancelled = false
+    let videoFrameHandle: number | null = null
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null
+    let firstAnimationFrame: number | null = null
+    let secondAnimationFrame: number | null = null
+    let releaseQueued = false
+
+    const releaseAfterPaint = (): void => {
+      if (releaseQueued || cancelled) return
+      releaseQueued = true
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer)
+        fallbackTimer = null
+      }
+      if (videoFrameHandle !== null && typeof videoRef.current?.cancelVideoFrameCallback === 'function') {
+        videoRef.current.cancelVideoFrameCallback(videoFrameHandle)
+        videoFrameHandle = null
+      }
+      firstAnimationFrame = requestAnimationFrame(() => {
+        secondAnimationFrame = requestAnimationFrame(() => {
+          if (cancelled) return
+          void window.api.releaseProgramMirrorHold(transitionId).then((released) => {
+            if (!released || cancelled) return
+            window.api.dbgLog(
+              `program mirror transition promoted display=${auxiliaryDisplayId ?? 'unknown'} ` +
+              `id=${transitionId} direct=${mirrorState.directContent?.type || 'capture'}`
+            )
+            setCompletedMirrorTransitionId((current) => current === transitionId ? null : current)
+          }).catch((error) => {
+            if (cancelled) return
+            window.api.dbgLog(
+              `program mirror transition release failed display=${auxiliaryDisplayId ?? 'unknown'} ` +
+              `id=${transitionId} error=${String(error)}`
+            )
+            // Let a subsequent state/ready update retry; main also has a final
+            // watchdog so the frozen frame can never remain indefinitely.
+            releaseQueued = false
+          })
+        })
+      })
+    }
+
+    if (mirrorState.directContent) {
+      if (!nativeReady) return
+      releaseAfterPaint()
+    } else if (!mirrorState.active) {
+      releaseAfterPaint()
+    } else {
+      const video = videoRef.current
+      if (!video || !video.srcObject || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        videoFrameHandle = video.requestVideoFrameCallback(() => releaseAfterPaint())
+      }
+      // A static first PowerPoint slide may not produce a damage frame after
+      // TAKE commit. RVFC then waits until the operator presses Next/Prev and
+      // the previous PDF hold appears stuck. The PowerPoint daemon has already
+      // positioned the slideshow and flushed DWM before commit, so use a short
+      // bounded fallback even when RVFC exists.
+      fallbackTimer = setTimeout(releaseAfterPaint, 140)
+    }
+
+    return () => {
+      cancelled = true
+      if (videoFrameHandle !== null && typeof videoRef.current?.cancelVideoFrameCallback === 'function') {
+        videoRef.current.cancelVideoFrameCallback(videoFrameHandle)
+      }
+      if (fallbackTimer) clearTimeout(fallbackTimer)
+      if (firstAnimationFrame !== null) cancelAnimationFrame(firstAnimationFrame)
+      if (secondAnimationFrame !== null) cancelAnimationFrame(secondAnimationFrame)
+    }
+  }, [
+    completedMirrorTransitionId,
+    directIdentity,
+    mirrorState.active,
+    nativeReady,
+    reconnectRevision,
+    status
   ])
 
   // PowerPoint fits the slide inside the source display and adds black bars
@@ -1137,14 +1277,14 @@ function ProgramMirrorDisplay(): JSX.Element {
     <div
       className="relative h-screen w-screen overflow-hidden bg-black bg-cover bg-center bg-no-repeat select-none"
       style={{
-        backgroundImage: !mirrorState.active && mirrorState.backdropImage
+        backgroundImage: mirrorState.backdropImage && (!mirrorState.active || isDirectBackdrop)
           ? `url("${mediaUrl(mirrorState.backdropImage)}")`
           : undefined
       }}
     >
       <div
         className={`absolute overflow-hidden bg-black ${
-          mirrorState.active && (!hasDirectContent || !nativeReady) ? '' : 'hidden'
+          mirrorState.active && !isDirectBackdrop && (!hasDirectContent || !nativeReady) ? '' : 'hidden'
         }`}
         style={{
           inset: slideAspect ? undefined : 0,
@@ -1188,9 +1328,12 @@ function ProgramMirrorDisplay(): JSX.Element {
           className={`absolute inset-0 z-10 overflow-hidden bg-black transition-none ${nativeReady ? 'opacity-100' : 'opacity-0'}`}
         >
           <ProgramDirectLayer
+            key={directIdentity}
             content={mirrorState.directContent}
             onReady={() => {
+              if (directIdentityRef.current !== directIdentity) return
               setNativeReady(true)
+              window.api.dbgLog(`program mirror direct ready identity=${directIdentity}`)
               window.api.sendToControl('program-mirror-ready', {
                 displayId: auxiliaryDisplayId,
                 sourceDisplayId: mirrorState.sourceDisplayId
@@ -1199,9 +1342,15 @@ function ProgramMirrorDisplay(): JSX.Element {
           />
         </div>
       )}
-      {status && !nativeReady && (
+      {mirrorState.active && !isDirectBackdrop && status && !nativeReady && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black text-xl text-gray-400">
-          {status}
+          {showBackdropWhileConnecting ? (
+            <img
+              src={mediaUrl(mirrorState.backdropImage as string)}
+              className="absolute inset-0 h-full w-full object-cover"
+              draggable={false}
+            />
+          ) : status}
         </div>
       )}
       {mirrorState.active && hasDirectContent && nativeReady && (

@@ -52,10 +52,17 @@ export interface NativeWindowRestoreResult {
 export interface NativeWindowFullscreenResult {
   hwnd: string
   valid: boolean
+  identityMatched: boolean
   wasFullscreen: boolean
   requested: boolean
   fullscreen: boolean
   foreground: boolean
+  /** True while the daemon owns a pre-F11 WINDOWPLACEMENT snapshot. */
+  ownershipHeld: boolean
+  /** True when the caller tracked ownership but this daemon has no snapshot. */
+  ownershipMissing: boolean
+  /** True when PDM restored the exact position/state captured before F11. */
+  placementRestored: boolean
 }
 
 export interface NativeWindowListOptions {
@@ -199,20 +206,30 @@ class NativeWindowDaemon {
     return response.result
   }
 
-  async ensureBrowserFullscreen(hwnd: string): Promise<NativeWindowFullscreenResult> {
+  async ensureBrowserFullscreen(
+    hwnd: string,
+    pid: number,
+    threadId: number
+  ): Promise<NativeWindowFullscreenResult> {
     if (!this.supported) {
       return {
         hwnd,
         valid: false,
+        identityMatched: false,
         wasFullscreen: false,
         requested: false,
         fullscreen: false,
-        foreground: false
+        foreground: false,
+        ownershipHeld: false,
+        ownershipMissing: true,
+        placementRestored: false
       }
     }
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error(`Invalid PID '${pid}'`)
+    if (!Number.isInteger(threadId) || threadId <= 0) throw new Error(`Invalid thread ID '${threadId}'`)
     const normalized = normalizeHwnd(hwnd)
     if (!normalized) throw new Error(`Invalid HWND '${hwnd}'`)
-    const response = await this.send('ensure-fullscreen', { hwnd: normalized }, 4000)
+    const response = await this.send('ensure-fullscreen', { hwnd: normalized, pid, threadId }, 5000)
     if (!response.fullscreenResult) {
       throw new Error('Window enumerator returned no fullscreen result')
     }
@@ -221,23 +238,33 @@ class NativeWindowDaemon {
 
   async exitBrowserFullscreen(
     hwnd: string,
+    pid: number,
+    threadId: number,
     returnFocusHwnd?: string
   ): Promise<NativeWindowFullscreenResult> {
     if (!this.supported) {
       return {
         hwnd,
         valid: false,
+        identityMatched: false,
         wasFullscreen: false,
         requested: false,
         fullscreen: false,
-        foreground: false
+        foreground: false,
+        ownershipHeld: false,
+        ownershipMissing: true,
+        placementRestored: false
       }
     }
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error(`Invalid PID '${pid}'`)
+    if (!Number.isInteger(threadId) || threadId <= 0) throw new Error(`Invalid thread ID '${threadId}'`)
     const normalized = normalizeHwnd(hwnd)
     if (!normalized) throw new Error(`Invalid HWND '${hwnd}'`)
     const normalizedReturnFocus = returnFocusHwnd ? normalizeHwnd(returnFocusHwnd) : undefined
     const response = await this.send('exit-fullscreen', {
       hwnd: normalized,
+      pid,
+      threadId,
       ...(normalizedReturnFocus ? { returnFocusHwnd: normalizedReturnFocus } : {})
     }, 4000)
     if (!response.fullscreenResult) {
@@ -250,7 +277,9 @@ class NativeWindowDaemon {
     const child = this.process
     if (!child) return
     try {
-      await this.send('exit', {}, 1000)
+      // The daemon restores every owned browser placement before acknowledging
+      // exit. Allow enough time for F11/DWM transitions already in its queue.
+      await this.send('exit', {}, 12000)
     } catch {
       // Best effort: application shutdown must not wait on a helper process.
     }
