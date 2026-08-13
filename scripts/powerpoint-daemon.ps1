@@ -1122,10 +1122,12 @@ while ($true) {
                 }
                 $count = [int]$pres.Slides.Count
                 if ($count -lt 1) { throw 'Presentation contains no slides' }
+                $slideWidth = [double]$pres.PageSetup.SlideWidth
+                $slideHeight = [double]$pres.PageSetup.SlideHeight
                 if ($script:pptOwnedByRoland) { Hide-PPEditor $ppt }
                 $prepareMs = [int]([DateTime]::UtcNow - $prepareStarted).TotalMilliseconds
-                Log "prepare: READY file='$preparePath' slides=$count dur=${prepareMs}ms managed=$(Test-ManagedPresentation $pres)"
-                Reply @{ id = $id; ok = $true; slideCount = $count }
+                Log "prepare: READY file='$preparePath' slides=$count size=${slideWidth}x${slideHeight} dur=${prepareMs}ms managed=$(Test-ManagedPresentation $pres)"
+                Reply @{ id = $id; ok = $true; slideCount = $count; slideWidth = $slideWidth; slideHeight = $slideHeight }
             }
             'sync-prepared' {
                 $desired = @{}

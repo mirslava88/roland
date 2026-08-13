@@ -209,7 +209,12 @@ interface Api {
   getScreenCaptureSource(displayId: number): Promise<string | null>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
-  preparePowerPoint(filePath: string): Promise<{ success: boolean; slideCount?: number; error?: string }>
+  preparePowerPoint(filePath: string): Promise<{
+    success: boolean
+    slideCount?: number
+    aspectRatio?: number
+    error?: string
+  }>
   syncPreparedPowerPoints(filePaths: string[]): Promise<{ success: boolean; error?: string }>
   launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
   powerpointCommand(

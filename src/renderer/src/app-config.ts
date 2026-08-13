@@ -953,6 +953,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     pptxThumbnails: [],
     pptxThumbnailsMap: {},
     pptxSlidesMap: {},
+    pptxAspectRatios: {},
     pptxCacheStatuses: {},
     displayAssignments: displays.assignments,
     displayNames: displays.displayNames,

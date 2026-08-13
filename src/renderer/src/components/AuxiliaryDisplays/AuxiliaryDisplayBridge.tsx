@@ -36,6 +36,7 @@ export function AuxiliaryDisplayBridge(): null {
     currentSlide,
     totalSlides,
     pptxSlidesMap,
+    pptxAspectRatios,
     pptxThumbnailsMap,
     displays,
     displayAssignments,
@@ -161,6 +162,9 @@ export function AuxiliaryDisplayBridge(): null {
 
   useEffect(() => {
     const sourceDisplay = displays.find((display) => display.id === selectedDisplayId)
+    const presentationAspectRatio = activeFile?.type === 'presentation'
+      ? pptxAspectRatios[activeFile.path] ?? null
+      : null
     const playback = activeFile?.type === 'video'
       ? videoPlayback[activeFile.path]
       : undefined
@@ -197,10 +201,18 @@ export function AuxiliaryDisplayBridge(): null {
         : null,
       sourceDipHeight: sourceDisplay?.bounds.height ?? null,
       contentType: activeFile?.type ?? null,
+      contentAspectRatio: presentationAspectRatio,
       directContent,
       active: activeFile !== null || isPresentationWindowOpen,
       backdropImage
     })
+    if (activeFile?.type === 'presentation') {
+      window.api.dbgLog(
+        `program mirror state source=${sourceDisplay?.id ?? 'none'} ` +
+        `size=${sourceDisplay ? `${sourceDisplay.bounds.width}x${sourceDisplay.bounds.height}` : 'none'} ` +
+        `pptxAspect=${presentationAspectRatio ?? 'missing'} file=${activeFile.path}`
+      )
+    }
   }, [
     activeFile,
     backdropImage,
@@ -208,6 +220,7 @@ export function AuxiliaryDisplayBridge(): null {
     displays,
     isPlaying,
     isPresentationWindowOpen,
+    pptxAspectRatios,
     selectedDisplayId,
     videoLoopTrack,
     videoPlayback

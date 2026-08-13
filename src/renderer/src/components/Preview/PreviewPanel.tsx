@@ -131,6 +131,18 @@ function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
       if (!prepared.success) {
         throw new Error(prepared.error || 'PowerPoint did not prepare the presentation')
       }
+      if (prepared.aspectRatio && Number.isFinite(prepared.aspectRatio)) {
+        const aspectState = useAppStore.getState()
+        useAppStore.setState({
+          pptxAspectRatios: {
+            ...aspectState.pptxAspectRatios,
+            [filePath]: prepared.aspectRatio
+          }
+        })
+        window.api.dbgLog(
+          `PPTX channel cache: ASPECT file=${filePath} ratio=${prepared.aspectRatio.toFixed(6)}`
+        )
+      }
       if (prepared.slideCount) applyPptxSlideCount(filePath, prepared.slideCount)
 
       const stateAfterPrepare = useAppStore.getState()
@@ -926,6 +938,30 @@ export function PreviewPanel(): JSX.Element {
     if (isTakeCancelled()) {
       await finishCancelledTake()
       return
+    }
+
+    // A recovered/cached channel can be marked ready before this renderer has
+    // learned the deck aspect (the ratio is intentionally session-only). Make
+    // it available before activeFile changes, otherwise the mirror receives
+    // its first PPTX state with `pptxAspect=missing` and keeps the whole
+    // ultrawide desktop letterboxed on a Full HD target.
+    if (
+      channel.file.type === 'presentation' &&
+      !useAppStore.getState().pptxAspectRatios[channel.file.path]
+    ) {
+      const preparedGeometry = await window.api.preparePowerPoint(channel.file.path)
+      if (preparedGeometry.success && preparedGeometry.aspectRatio) {
+        const geometryState = useAppStore.getState()
+        useAppStore.setState({
+          pptxAspectRatios: {
+            ...geometryState.pptxAspectRatios,
+            [channel.file.path]: preparedGeometry.aspectRatio
+          }
+        })
+        log(`PPTX aspect ready before TAKE ratio=${preparedGeometry.aspectRatio.toFixed(6)}`)
+      } else {
+        log(`PPTX aspect unavailable before TAKE error=${preparedGeometry.error || 'missing geometry'}`)
+      }
     }
 
     setActiveFile(channel.file)

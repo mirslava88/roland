@@ -522,10 +522,16 @@ export function registerIpcHandlers(
       const result = await pptDaemon.send('prepare', { path: filePath }, 120000)
       diagnosticLog(
         'pptx-preload',
-        `prepare result file=${filePath} ok=${result.ok} slides=${result.slideCount ?? 0} dur=${Date.now() - started}ms error=${result.error ?? '-'}`
+        `prepare result file=${filePath} ok=${result.ok} slides=${result.slideCount ?? 0} ` +
+        `size=${result.slideWidth ?? 0}x${result.slideHeight ?? 0} ` +
+        `dur=${Date.now() - started}ms error=${result.error ?? '-'}`
       )
+      const aspectRatio = typeof result.slideWidth === 'number' &&
+        typeof result.slideHeight === 'number' && result.slideHeight > 0
+        ? result.slideWidth / result.slideHeight
+        : undefined
       return result.ok
-        ? { success: true, slideCount: result.slideCount ?? 0 }
+        ? { success: true, slideCount: result.slideCount ?? 0, aspectRatio }
         : { success: false, error: result.error || 'PowerPoint preparation failed' }
     } catch (error) {
       diagnosticLog(

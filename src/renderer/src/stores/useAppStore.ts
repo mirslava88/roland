@@ -357,6 +357,7 @@ interface AppState {
   pptxThumbnails: string[]
   pptxThumbnailsMap: Record<string, string[]>
   pptxSlidesMap: Record<string, string[]>
+  pptxAspectRatios: Record<string, number>
   pptxCacheStatuses: Record<string, ChannelCacheStatus>
   displays: DisplayInfo[]
   displayAssignments: DisplayAssignments
@@ -500,6 +501,7 @@ export const useAppStore = create<AppState>()(persist(
   pptxThumbnails: [],
   pptxThumbnailsMap: {},
   pptxSlidesMap: {},
+  pptxAspectRatios: {},
   pptxCacheStatuses: {},
   displays: [],
   displayAssignments: {},
@@ -1075,9 +1077,11 @@ export const useAppStore = create<AppState>()(persist(
   }
   },
   {
-    // Сохраняем user-preferences и подготовленную сетку каналов. Это локальный
-    // recovery-снимок: после сбоя файлы и выбранные слайды восстанавливаются,
-    // но live-channel/activeFile не сохраняются и эфир сам не запускается.
+    // Сохраняем user-preferences и подготовленную сетку каналов как локальный
+    // crash-recovery снимок. При подтверждённом оператором закрытии main-процесс
+    // удаляет workspace-поля из этого снимка; при падении запись остаётся и
+    // восстанавливается на следующем запуске. live-channel/activeFile никогда
+    // не сохраняются, поэтому эфир сам не запускается.
     //
     // NOT persist-ится:
     // - backdropImage — подложка относится только к текущему эфиру. Каждая

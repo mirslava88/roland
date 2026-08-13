@@ -590,6 +590,41 @@ function createWindows(): void {
   let closeConfirmationOpen = false
   registerIpcHandlers(controlWindow, () => presentationWindow)
 
+  const discardPreparedWorkspaceRecovery = async (): Promise<void> => {
+    if (thisControlWindow.isDestroyed()) return
+    try {
+      const removed = await thisControlWindow.webContents.executeJavaScript(`(() => {
+        const key = 'roland-app-preferences'
+        const raw = localStorage.getItem(key)
+        if (!raw) return 0
+        const snapshot = JSON.parse(raw)
+        const state = snapshot && typeof snapshot.state === 'object' ? snapshot.state : null
+        if (!state) return 0
+        const workspaceKeys = [
+          'channels', 'channelIds', 'channelGridSize', 'currentChannelPage',
+          'selectedChannel', 'captureSources', 'slidePositions'
+        ]
+        let removedCount = 0
+        for (const field of workspaceKeys) {
+          if (Object.prototype.hasOwnProperty.call(state, field)) {
+            delete state[field]
+            removedCount++
+          }
+        }
+        localStorage.setItem(key, JSON.stringify(snapshot))
+        return removedCount
+      })()`)
+      diagnosticLog('workspace-recovery', `operator close discarded prepared workspace fields=${removed}`)
+    } catch (error) {
+      // Never block an explicitly confirmed exit. The failure remains in the
+      // diagnostic log so it can be investigated if recovery data reappears.
+      diagnosticLog(
+        'workspace-recovery',
+        `operator close discard failed ${formatDiagnosticError(error)}`
+      )
+    }
+  }
+
   ipcMain.handle('open-auxiliary-window', async (
     _event,
     role: AuxiliaryWindowRole,
@@ -635,10 +670,30 @@ function createWindows(): void {
     for (const [channel, args] of auxiliaryLastMessages.get(role) ?? []) {
       win.webContents.send(channel, ...args)
     }
-    win.setBounds(target.bounds)
-    if (!win.isVisible()) win.showInactive()
+    // A fullscreen BrowserWindow cannot be reliably moved with setBounds on
+    // Windows. Place it while windowed, then enter fullscreen on that monitor.
+    // This is especially important when a Full HD display and an ultrawide
+    // display are both connected: otherwise the renderer can inherit the
+    // geometry of the wrong screen and size the live copy incorrectly.
+    const actualBeforePlacement = win.getBounds()
+    const alreadyPlaced = actualBeforePlacement.x === target.bounds.x &&
+      actualBeforePlacement.y === target.bounds.y &&
+      actualBeforePlacement.width === target.bounds.width &&
+      actualBeforePlacement.height === target.bounds.height
+    if (!alreadyPlaced || !win.isFullScreen()) {
+      if (win.isFullScreen()) win.setFullScreen(false)
+      win.setBounds(target.bounds)
+      if (!win.isVisible()) win.showInactive()
+      win.setFullScreen(true)
+    } else if (!win.isVisible()) {
+      win.showInactive()
+    }
     win.setAlwaysOnTop(false)
-    diagnosticLog('display', `auxiliary open role=${role} display=${target.id} bounds=${JSON.stringify(target.bounds)}`)
+    diagnosticLog(
+      'display',
+      `auxiliary open role=${role} display=${target.id} requested=${JSON.stringify(target.bounds)} ` +
+      `actual=${JSON.stringify(win.getBounds())} fullscreen=${win.isFullScreen()}`
+    )
     return { success: true }
   })
 
@@ -713,18 +768,19 @@ function createWindows(): void {
       type: 'warning',
       title: 'Закрыть PDM?',
       message: 'Закрыть Presentation Display Manager?',
-      detail: 'Текущий эфир будет остановлен. Подготовленные каналы сохранятся автоматически.',
+      detail: 'Текущий эфир будет остановлен. Подготовленные каналы будут очищены. Они восстанавливаются только после аварийного завершения PDM.',
       buttons: ['Отмена', 'Закрыть PDM'],
       defaultId: 0,
       cancelId: 0,
       noLink: true
-    }).then(({ response }) => {
+    }).then(async ({ response }) => {
       closeConfirmationOpen = false
       if (response !== 1) {
         diagnosticLog('lifecycle', 'control window close canceled by operator')
         return
       }
       shutdownTrigger = 'operator-confirmed-close'
+      await discardPreparedWorkspaceRecovery()
       allowControlWindowClose = true
       diagnosticLog('lifecycle', 'control window close confirmed by operator')
       if (!thisControlWindow.isDestroyed()) thisControlWindow.close()
@@ -1795,7 +1851,13 @@ function createWindows(): void {
         previous.width !== next.width || previous.height !== next.height
       if (!changed) return
       try {
+        // Only auxiliary windows use the explicit windowed -> place ->
+        // fullscreen sequence. The main program/transition pair has its own
+        // flicker-sensitive z-order choreography and must not be toggled here.
+        const restoreFullscreen = label.startsWith('auxiliary ') && win.isFullScreen()
+        if (restoreFullscreen) win.setFullScreen(false)
         win.setBounds(next)
+        if (restoreFullscreen) win.setFullScreen(true)
         diagnosticLog(
           'display',
           `${label} resized display=${target.id} from=${JSON.stringify(previous)} to=${JSON.stringify(next)}`

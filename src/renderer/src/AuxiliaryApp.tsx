@@ -857,6 +857,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     sourcePixelHeight: number | null
     sourceDipHeight: number | null
     contentType: string | null
+    contentAspectRatio: number | null
     directContent: ProgramDirectContent | null
     active: boolean
     backdropImage: string | null
@@ -866,6 +867,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     sourcePixelHeight: null,
     sourceDipHeight: null,
     contentType: null,
+    contentAspectRatio: null,
     directContent: null,
     active: false,
     backdropImage: null
@@ -882,22 +884,36 @@ function ProgramMirrorDisplay(): JSX.Element {
       sourcePixelHeight?: number | null
       sourceDipHeight?: number | null
       contentType?: string | null
+      contentAspectRatio?: number | null
       directContent?: ProgramDirectContent | null
       active?: boolean
       backdropImage?: string | null
     }
+    const nextContentAspectRatio = typeof data?.contentAspectRatio === 'number' &&
+      Number.isFinite(data.contentAspectRatio) && data.contentAspectRatio > 0
+      ? data.contentAspectRatio
+      : null
     setMirrorState({
       sourceDisplayId: typeof data?.sourceDisplayId === 'number' ? data.sourceDisplayId : null,
       sourcePixelWidth: typeof data?.sourcePixelWidth === 'number' ? data.sourcePixelWidth : null,
       sourcePixelHeight: typeof data?.sourcePixelHeight === 'number' ? data.sourcePixelHeight : null,
       sourceDipHeight: typeof data?.sourceDipHeight === 'number' ? data.sourceDipHeight : null,
       contentType: typeof data?.contentType === 'string' ? data.contentType : null,
+      contentAspectRatio: nextContentAspectRatio,
       directContent: data?.directContent && typeof data.directContent.path === 'string'
         ? data.directContent
         : null,
       active: data?.active === true,
       backdropImage: data?.backdropImage || null
     })
+    if (data?.contentType === 'presentation') {
+      window.api.dbgLog(
+        `program mirror geometry display=${auxiliaryDisplayId} ` +
+        `source=${data.sourcePixelWidth ?? 0}x${data.sourcePixelHeight ?? 0} ` +
+        `target=${window.innerWidth}x${window.innerHeight} ` +
+        `pptxAspect=${nextContentAspectRatio ?? 'missing'}`
+      )
+    }
   }), [])
 
   useEffect(() => window.api.on('program-timer-overlay', (...args: unknown[]) => {
@@ -908,6 +924,26 @@ function ProgramMirrorDisplay(): JSX.Element {
       visible: data?.visible === true
     })
   }), [])
+
+  useEffect(() => {
+    // Fullscreen placement and a runtime resolution/DPI change both resize the
+    // mirror renderer. Reopen desktop capture after the size has settled so
+    // its requested buffer always matches this monitor, not the display on
+    // which the BrowserWindow happened to be initialized.
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    const handleResize = (): void => {
+      if (resizeTimer) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null
+        setReconnectRevision((value) => value + 1)
+      }, 250)
+    }
+    window.addEventListener('resize', handleResize)
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      if (resizeTimer) clearTimeout(resizeTimer)
+    }
+  }, [])
 
   const directIdentity = mirrorState.directContent
     ? `${mirrorState.directContent.type}|${mirrorState.directContent.path}`
@@ -1038,8 +1074,64 @@ function ProgramMirrorDisplay(): JSX.Element {
     mirrorState.sourceDisplayId,
     mirrorState.sourcePixelHeight,
     mirrorState.sourcePixelWidth,
+    mirrorState.contentAspectRatio,
+    mirrorState.contentType,
     reconnectRevision
   ])
+
+  // PowerPoint fits the slide inside the source display and adds black bars
+  // when their aspect ratios differ. Geometry is therefore applied in two
+  // independent layers:
+  // 1. pptxFrame fits the untouched slide aspect into THIS monitor;
+  // 2. pptxSourceCrop enlarges the captured SOURCE display only enough to
+  //    remove PowerPoint's source-side letterbox around that slide.
+  // A 16:9 deck consequently fills 1920x1080, while the same deck retains
+  // proper side bars on 3440x1440. Slide pixels are never distorted or cut.
+  const sourceAspect = mirrorState.sourcePixelWidth && mirrorState.sourcePixelHeight
+    ? mirrorState.sourcePixelWidth / mirrorState.sourcePixelHeight
+    : null
+  const slideAspect = mirrorState.contentType === 'presentation'
+    ? mirrorState.contentAspectRatio
+    : null
+  const targetAspect = Math.max(1, window.innerWidth) / Math.max(1, window.innerHeight)
+  const pptxFrame = slideAspect
+    ? targetAspect > slideAspect
+      ? {
+          width: `${(slideAspect / targetAspect) * 100}%`,
+          height: '100%',
+          left: '50%',
+          top: 0,
+          transform: 'translateX(-50%)'
+        }
+      : targetAspect < slideAspect
+        ? {
+            width: '100%',
+            height: `${(targetAspect / slideAspect) * 100}%`,
+            left: 0,
+            top: '50%',
+            transform: 'translateY(-50%)'
+          }
+        : undefined
+    : undefined
+  const pptxSourceCrop = sourceAspect && slideAspect
+    ? sourceAspect > slideAspect
+      ? {
+          width: `${(sourceAspect / slideAspect) * 100}%`,
+          height: '100%',
+          left: '50%',
+          top: 0,
+          transform: 'translateX(-50%)'
+        }
+      : sourceAspect < slideAspect
+        ? {
+            width: '100%',
+            height: `${(slideAspect / sourceAspect) * 100}%`,
+            left: 0,
+            top: '50%',
+            transform: 'translateY(-50%)'
+          }
+        : undefined
+    : undefined
 
   return (
     <div
@@ -1050,20 +1142,47 @@ function ProgramMirrorDisplay(): JSX.Element {
           : undefined
       }}
     >
-      <video
-        ref={videoRef}
-        className={`absolute inset-0 h-full w-full object-fill bg-black ${
+      <div
+        className={`absolute overflow-hidden bg-black ${
           mirrorState.active && (!hasDirectContent || !nativeReady) ? '' : 'hidden'
         }`}
         style={{
-          transform: mirrorState.contentType === 'pdf'
-            ? `scaleX(${MIRROR_PDF_SAFE_WIDTH_RATIO})`
-            : undefined,
-          transformOrigin: 'center center'
+          inset: slideAspect ? undefined : 0,
+          width: pptxFrame?.width ?? (slideAspect ? '100%' : undefined),
+          height: pptxFrame?.height ?? (slideAspect ? '100%' : undefined),
+          left: pptxFrame?.left ?? (slideAspect ? 0 : undefined),
+          top: pptxFrame?.top ?? (slideAspect ? 0 : undefined),
+          transform: pptxFrame?.transform
         }}
-        muted
-        playsInline
-      />
+      >
+        <video
+          ref={videoRef}
+          className="absolute object-contain bg-black"
+          style={{
+            inset: pptxSourceCrop ? undefined : 0,
+            width: pptxSourceCrop?.width ?? '100%',
+            height: pptxSourceCrop?.height ?? '100%',
+            // Tailwind's preflight applies both `max-width: 100%` and
+            // `height: auto` to every video. The PPTX mirror intentionally
+            // makes this element wider/taller than its clipping frame to
+            // remove PowerPoint's source-display letterbox, so neither
+            // global constraint may participate in this geometry.
+            maxWidth: 'none',
+            maxHeight: 'none',
+            minWidth: 0,
+            minHeight: 0,
+            left: pptxSourceCrop?.left ?? 0,
+            top: pptxSourceCrop?.top ?? 0,
+            objectFit: 'contain',
+            transform: pptxSourceCrop?.transform ?? (mirrorState.contentType === 'pdf'
+              ? `scaleX(${MIRROR_PDF_SAFE_WIDTH_RATIO})`
+              : undefined),
+            transformOrigin: 'center center'
+          }}
+          muted
+          playsInline
+        />
+      </div>
       {mirrorState.directContent && (
         <div
           className={`absolute inset-0 z-10 overflow-hidden bg-black transition-none ${nativeReady ? 'opacity-100' : 'opacity-0'}`}

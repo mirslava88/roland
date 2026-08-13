@@ -111,7 +111,12 @@ export function createAuxiliaryWindow(
     y,
     width,
     height,
-    fullscreen: true,
+    // Do not enter fullscreen until main/index.ts has placed the window on
+    // the requested display. On Windows, creating a hidden fullscreen window
+    // can make Chromium choose the primary/previous monitor first. The URL
+    // still carries the requested display id, so the mirror would then render
+    // for (for example) 3440x1440 while its real monitor was 1920x1080.
+    fullscreen: false,
     frame: false,
     show: false,
     backgroundColor: '#000000',

@@ -71,6 +71,11 @@ public class TimerOverlay
     private double positionX = 1.0;
     private double positionY = 1.0;
     private bool hasSavedPosition = false;
+    private int savedOffsetX = 0;
+    private int savedOffsetY = 0;
+    private int savedDisplayWidth = 0;
+    private int savedDisplayHeight = 0;
+    private bool hasSavedPixelPosition = false;
     private int lastPositionRevision = -1;
     private int targetDisplayX;
     private int targetDisplayY;
@@ -181,6 +186,7 @@ public class TimerOverlay
             SaveState();
         };
         window.SizeChanged += (s, e) => { RepositionToTarget(); };
+        window.Closing += (s, e) => { SaveState(); };
 
         var timer = new DispatcherTimer();
         timer.Interval = TimeSpan.FromMilliseconds(100);
@@ -319,7 +325,18 @@ public class TimerOverlay
             if (dpi == 0) dpi = 96;
             int targetX;
             int targetY;
-            if (hasSavedPosition)
+            if (hasSavedPixelPosition &&
+                savedDisplayWidth == targetDisplayWidth &&
+                savedDisplayHeight == targetDisplayHeight)
+            {
+                // On the same monitor geometry restore the exact physical
+                // top-left pixel. Normalized travel coordinates subtly move a
+                // SizeToContent window whenever its measured width changes by
+                // a pixel between Stop and Start.
+                targetX = targetDisplayX + savedOffsetX;
+                targetY = targetDisplayY + savedOffsetY;
+            }
+            else if (hasSavedPosition)
             {
                 int travelX = Math.Max(0, targetDisplayWidth - windowWidth);
                 int travelY = Math.Max(0, targetDisplayHeight - windowHeight);
@@ -367,6 +384,15 @@ public class TimerOverlay
                 positionY = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(json, "y", 1.0)));
                 hasSavedPosition = true;
             }
+            if (json.Contains("\"offsetX\"") && json.Contains("\"offsetY\"") &&
+                json.Contains("\"displayWidth\"") && json.Contains("\"displayHeight\""))
+            {
+                savedOffsetX = GetJsonInt(json, "offsetX");
+                savedOffsetY = GetJsonInt(json, "offsetY");
+                savedDisplayWidth = Math.Max(1, GetJsonInt(json, "displayWidth"));
+                savedDisplayHeight = Math.Max(1, GetJsonInt(json, "displayHeight"));
+                hasSavedPixelPosition = true;
+            }
             scale = Math.Max(0.5, Math.Min(8.0, GetJsonDouble(json, "scale", 1.0)));
         }
         catch {}
@@ -388,6 +414,11 @@ public class TimerOverlay
             positionX = Math.Max(0.0, Math.Min(1.0, positionX));
             positionY = Math.Max(0.0, Math.Min(1.0, positionY));
             hasSavedPosition = true;
+            savedOffsetX = rect.Left - targetDisplayX;
+            savedOffsetY = rect.Top - targetDisplayY;
+            savedDisplayWidth = targetDisplayWidth;
+            savedDisplayHeight = targetDisplayHeight;
+            hasSavedPixelPosition = true;
         }
         catch {}
     }
@@ -402,8 +433,9 @@ public class TimerOverlay
             if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
             string json = string.Format(
                 CultureInfo.InvariantCulture,
-                "{{\"x\":{0:0.######},\"y\":{1:0.######},\"scale\":{2:0.###}}}",
-                positionX, positionY, scale);
+                "{{\"x\":{0:0.######},\"y\":{1:0.######},\"scale\":{2:0.###},\"offsetX\":{3},\"offsetY\":{4},\"displayWidth\":{5},\"displayHeight\":{6}}}",
+                positionX, positionY, scale, savedOffsetX, savedOffsetY,
+                savedDisplayWidth, savedDisplayHeight);
             File.WriteAllText(stateFile, json);
         }
         catch {}
