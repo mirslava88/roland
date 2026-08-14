@@ -27,7 +27,11 @@ function waitForProgramMirror(displayId: number, sourceDisplayId: number): Promi
       unsubscribe()
       resolve(ready)
     }
-    const timeout = setTimeout(() => finish(false), 4000)
+    // A cold desktop-capture mirror needs several seconds on Windows while
+    // the fullscreen renderer receives media permission and paints its first
+    // frame. Four seconds expired just before the real ready signal on 4K
+    // displays and exposed a black handoff.
+    const timeout = setTimeout(() => finish(false), 8000)
     unsubscribe = window.api.on('program-mirror-ready', (...args: unknown[]) => {
       const data = args[0] as { displayId?: number | null; sourceDisplayId?: number | null }
       if (data.displayId === displayId && data.sourceDisplayId === sourceDisplayId) finish(true)

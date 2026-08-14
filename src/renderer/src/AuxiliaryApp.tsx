@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { mediaUrl } from './media'
 import { renderPdfiumPageToCanvas } from './pdfium-renderer'
 import { EventTimerScene } from './components/EventTimer/EventTimerScene'
+import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
 
 const requestedRole = new URLSearchParams(window.location.search).get('role')
 const requestedDisplayId = Number(new URLSearchParams(window.location.search).get('displayId'))
@@ -9,6 +10,8 @@ const auxiliaryDisplayId = Number.isFinite(requestedDisplayId) ? requestedDispla
 const MIRROR_PDF_SAFE_WIDTH_RATIO = 0.96
 const MIRROR_PDF_MAX_HORIZONTAL_STRETCH = 1.08
 const PROGRAM_MIRROR_CONNECTING_STATUS = 'Подключение к основному эфиру…'
+const PROGRAM_MIRROR_FRAME_TIMEOUT_MS = 5_000
+const PROGRAM_MIRROR_MAX_RETRIES = 4
 const role: AuxiliaryDisplayRole = requestedRole === 'mirror' ||
   requestedRole === 'info' ||
   requestedRole === 'timer' ||
@@ -16,6 +19,85 @@ const role: AuxiliaryDisplayRole = requestedRole === 'mirror' ||
   requestedRole === 'backdrop'
   ? requestedRole
   : 'speaker'
+
+function captureVideoFrame(video: HTMLVideoElement): string | null {
+  if (
+    video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+    video.videoWidth < 1 ||
+    video.videoHeight < 1
+  ) return null
+  try {
+    const scale = Math.min(1, 1920 / video.videoWidth, 1080 / video.videoHeight)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(2, Math.round(video.videoWidth * scale))
+    canvas.height = Math.max(2, Math.round(video.videoHeight * scale))
+    const context = canvas.getContext('2d')
+    if (!context) return null
+    context.drawImage(video, 0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/jpeg', 0.9)
+  } catch {
+    return null
+  }
+}
+
+function playAndWaitForVideoFrame(
+  video: HTMLVideoElement,
+  timeoutMs = PROGRAM_MIRROR_FRAME_TIMEOUT_MS
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let videoFrameHandle: number | null = null
+    let firstAnimationFrame: number | null = null
+    let secondAnimationFrame: number | null = null
+    let staticFrameFallback: ReturnType<typeof setTimeout> | null = null
+
+    const cleanup = (): void => {
+      clearTimeout(timeout)
+      video.removeEventListener('loadeddata', requestFrame)
+      if (videoFrameHandle !== null && typeof video.cancelVideoFrameCallback === 'function') {
+        video.cancelVideoFrameCallback(videoFrameHandle)
+      }
+      if (firstAnimationFrame !== null) cancelAnimationFrame(firstAnimationFrame)
+      if (secondAnimationFrame !== null) cancelAnimationFrame(secondAnimationFrame)
+      if (staticFrameFallback) clearTimeout(staticFrameFallback)
+    }
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve()
+    }
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+    const requestFrame = (): void => {
+      if (settled) return
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        videoFrameHandle = video.requestVideoFrameCallback(() => finish())
+        // A static PowerPoint slide may not produce another damage frame even
+        // though HAVE_CURRENT_DATA already contains the first painted frame.
+        staticFrameFallback = setTimeout(() => {
+          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) finish()
+        }, 250)
+        return
+      }
+      firstAnimationFrame = requestAnimationFrame(() => {
+        secondAnimationFrame = requestAnimationFrame(() => finish())
+      })
+    }
+    const timeout = setTimeout(() => {
+      fail(new Error('Timeout waiting for the first program mirror frame'))
+    }, timeoutMs)
+
+    void video.play().then(() => {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) requestFrame()
+      else video.addEventListener('loadeddata', requestFrame, { once: true })
+    }).catch(fail)
+  })
+}
 
 function formatTime(totalSeconds: number): string {
   const negative = totalSeconds < 0
@@ -512,16 +594,38 @@ function describeInformationCaptureError(error: unknown, desktop: boolean): stri
   return 'Не удалось открыть внешний источник.'
 }
 
-function InformationCapture({ config }: { config: CaptureSourceConfig }): JSX.Element {
+function InformationCapture({
+  config,
+  onReady,
+  onStatus,
+  retryDesktop = false,
+  readyTimeoutMs = PROGRAM_MIRROR_FRAME_TIMEOUT_MS,
+  logContext = 'information'
+}: {
+  config: CaptureSourceConfig
+  onReady?: () => void
+  onStatus?: (status: string) => void
+  retryDesktop?: boolean
+  readyTimeoutMs?: number
+  logContext?: string
+}): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const onReadyRef = useRef(onReady)
+  const onStatusRef = useRef(onStatus)
   const [status, setStatus] = useState('Подключение источника…')
   const [retryRevision, setRetryRevision] = useState(0)
+  onReadyRef.current = onReady
+  onStatusRef.current = onStatus
 
   useEffect(() => {
     let cancelled = false
     let stream: MediaStream | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null
     const desktop = config.captureKind === 'desktop'
+    const updateStatus = (nextStatus: string): void => {
+      setStatus(nextStatus)
+      onStatusRef.current?.(nextStatus)
+    }
 
     const stopStream = (): void => {
       if (!stream) return
@@ -534,7 +638,7 @@ function InformationCapture({ config }: { config: CaptureSourceConfig }): JSX.El
     }
 
     const connect = async (): Promise<void> => {
-      setStatus(desktop
+      updateStatus(desktop
         ? `Подключение ${config.desktopSourceType === 'screen' ? 'экрана' : 'окна'}…`
         : 'Подключение внешнего источника…')
       try {
@@ -600,37 +704,39 @@ function InformationCapture({ config }: { config: CaptureSourceConfig }): JSX.El
         if (desktop) videoTrack.contentHint = 'detail'
         videoTrack.onended = () => {
           if (cancelled) return
-          setStatus('Источник отключён. Повторное подключение…')
+          updateStatus('Источник отключён. Повторное подключение…')
           retryTimer = setTimeout(() => setRetryRevision((value) => value + 1), 1200)
         }
         videoTrack.onmute = () => {
-          if (!cancelled) setStatus(desktop ? 'Изображение окна временно недоступно.' : 'Видеосигнал временно отсутствует.')
+          if (!cancelled) updateStatus(desktop ? 'Изображение окна временно недоступно.' : 'Видеосигнал временно отсутствует.')
         }
         videoTrack.onunmute = () => {
-          if (!cancelled) setStatus('')
+          if (!cancelled) updateStatus('')
         }
 
         const video = videoRef.current
         if (!video) return
         video.srcObject = stream
-        await video.play()
+        if (onReadyRef.current) await playAndWaitForVideoFrame(video, readyTimeoutMs)
+        else await video.play()
         if (cancelled) return
         const settings = videoTrack.getSettings()
-        setStatus('')
+        updateStatus('')
+        onReadyRef.current?.()
         window.api.dbgLog(
-          `information capture ready source=${config.sourceId.slice(-8)} kind=${desktop ? config.desktopSourceType : 'device'} ` +
+          `${logContext} capture ready source=${config.sourceId.slice(-8)} kind=${desktop ? config.desktopSourceType : 'device'} ` +
           `size=${settings.width || 0}x${settings.height || 0} fps=${settings.frameRate || 0}`
         )
       } catch (error) {
         stopStream()
         if (cancelled) return
         const message = describeInformationCaptureError(error, desktop)
-        setStatus(message)
-        window.api.dbgLog(`information capture failed source=${config.sourceId.slice(-8)}: ${String(error)}`)
+        updateStatus(message)
+        window.api.dbgLog(`${logContext} capture failed source=${config.sourceId.slice(-8)}: ${String(error)}`)
         // USB capture devices are often connected a moment after Windows has
-        // announced them. Keep retrying video devices so the information
-        // screen recovers without forcing the operator to select it again.
-        if (!desktop && !(error instanceof DOMException && (
+        // announced them. Program mirrors also retry desktop sources because
+        // an output/display topology change can invalidate them temporarily.
+        if ((!desktop || retryDesktop) && !(error instanceof DOMException && (
           error.name === 'NotAllowedError' || error.name === 'SecurityError'
         ))) {
           retryTimer = setTimeout(() => setRetryRevision((value) => value + 1), 2500)
@@ -663,6 +769,9 @@ function InformationCapture({ config }: { config: CaptureSourceConfig }): JSX.El
     config.videoDeviceId,
     config.videoGroupId,
     config.videoLabel,
+    logContext,
+    readyTimeoutMs,
+    retryDesktop,
     retryRevision
   ])
 
@@ -682,7 +791,9 @@ function InformationDisplay(): JSX.Element {
   const [state, setState] = useState<InformationDisplayState>({
     media: null,
     displayTimer: false,
-    backdropImage: null
+    backdropImage: null,
+    titles: null,
+    titleSourceIdentity: null
   })
   const [timer, setTimer] = useState<TimerDisplayState>({
     remaining: 0,
@@ -701,6 +812,9 @@ function InformationDisplay(): JSX.Element {
     const offTimer = window.api.on('timer-update', (...args: unknown[]) => {
       setTimer(args[0] as TimerDisplayState)
     })
+    if (role === 'info') {
+      window.api.sendToControl('information-state-ready', { displayId: auxiliaryDisplayId })
+    }
     return () => { offState(); offTimer() }
   }, [])
 
@@ -739,6 +853,12 @@ function InformationDisplay(): JSX.Element {
           <div className="text-xl">Файл не выбран</div>
         </div>
       ) : null}
+      {state.titles && (
+        <BroadcastTitlesOverlay
+          key={state.titleSourceIdentity || 'no-information-title-source'}
+          titles={state.titles}
+        />
+      )}
     </div>
   )
 }
@@ -830,11 +950,25 @@ function ProgramNativeVideo({
 
 function ProgramDirectLayer({
   content,
-  onReady
+  onReady,
+  onStatus
 }: {
   content: ProgramDirectContent
   onReady: () => void
+  onStatus?: (status: string) => void
 }): JSX.Element {
+  if (content.type === 'capture' && content.capture) {
+    return (
+      <InformationCapture
+        config={content.capture}
+        onReady={onReady}
+        onStatus={onStatus}
+        retryDesktop
+        readyTimeoutMs={14_000}
+        logContext="program mirror direct"
+      />
+    )
+  }
   if (content.type === 'pdf') {
     return (
       <SpeakerPdfFrame
@@ -873,6 +1007,11 @@ function ProgramDirectLayer({
 function ProgramMirrorDisplay(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
   const directIdentityRef = useRef('')
+  const reconnectFailuresRef = useRef(0)
+  const lastPhysicalSizeRef = useRef(
+    `${Math.round(window.innerWidth * (window.devicePixelRatio || 1))}x` +
+    `${Math.round(window.innerHeight * (window.devicePixelRatio || 1))}`
+  )
   const [mirrorState, setMirrorState] = useState<{
     sourceDisplayId: number | null
     sourcePixelWidth: number | null
@@ -883,6 +1022,8 @@ function ProgramMirrorDisplay(): JSX.Element {
     directContent: ProgramDirectContent | null
     active: boolean
     backdropImage: string | null
+    titles: InformationDisplayState['titles']
+    titleSourceIdentity: string | null
   }>({
     sourceDisplayId: null,
     sourcePixelWidth: null,
@@ -892,10 +1033,13 @@ function ProgramMirrorDisplay(): JSX.Element {
     contentAspectRatio: null,
     directContent: null,
     active: false,
-    backdropImage: null
+    backdropImage: null,
+    titles: null,
+    titleSourceIdentity: null
   })
   const [status, setStatus] = useState('Ожидание основного эфира…')
   const [reconnectRevision, setReconnectRevision] = useState(0)
+  const [reconnectFrameUrl, setReconnectFrameUrl] = useState<string | null>(null)
   const [nativeReady, setNativeReady] = useState(false)
   const [programTimer, setProgramTimer] = useState<ProgramTimerOverlayState>(EMPTY_PROGRAM_TIMER)
   const [completedMirrorTransitionId, setCompletedMirrorTransitionId] = useState<string | null>(null)
@@ -912,16 +1056,22 @@ function ProgramMirrorDisplay(): JSX.Element {
         directContent?: ProgramDirectContent | null
         active?: boolean
         backdropImage?: string | null
+        titles?: InformationDisplayState['titles']
+        titleSourceIdentity?: string | null
       }
       const nextContentAspectRatio = typeof data?.contentAspectRatio === 'number' &&
         Number.isFinite(data.contentAspectRatio) && data.contentAspectRatio > 0
         ? data.contentAspectRatio
         : null
-      const nextDirectContent = data?.directContent && typeof data.directContent.path === 'string'
+      const nextDirectContent = data?.directContent &&
+        typeof data.directContent.path === 'string' &&
+        (data.directContent.type !== 'capture' || typeof data.directContent.capture?.sourceId === 'string')
         ? data.directContent
         : null
       const nextDirectIdentity = nextDirectContent
-        ? `${nextDirectContent.type}|${nextDirectContent.path}`
+        ? nextDirectContent.type === 'capture'
+          ? `capture|${nextDirectContent.capture?.sourceId || nextDirectContent.path}`
+          : `${nextDirectContent.type}|${nextDirectContent.path}`
         : ''
       if (nextDirectIdentity !== directIdentityRef.current) {
         directIdentityRef.current = nextDirectIdentity
@@ -936,7 +1086,11 @@ function ProgramMirrorDisplay(): JSX.Element {
         contentAspectRatio: nextContentAspectRatio,
         directContent: nextDirectContent,
         active: data?.active === true,
-        backdropImage: data?.backdropImage || null
+        backdropImage: data?.backdropImage || null,
+        titles: data?.titles || null,
+        titleSourceIdentity: typeof data?.titleSourceIdentity === 'string'
+          ? data.titleSourceIdentity
+          : null
       })
       window.api.dbgLog(
         `program mirror state received display=${auxiliaryDisplayId ?? 'unknown'} ` +
@@ -985,6 +1139,16 @@ function ProgramMirrorDisplay(): JSX.Element {
       if (resizeTimer) clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
         resizeTimer = null
+        const nextPhysicalSize =
+          `${Math.round(window.innerWidth * (window.devicePixelRatio || 1))}x` +
+          `${Math.round(window.innerHeight * (window.devicePixelRatio || 1))}`
+        if (nextPhysicalSize === lastPhysicalSizeRef.current) return
+        window.api.dbgLog(
+          `program mirror reconnect trigger=resize display=${auxiliaryDisplayId ?? 'unknown'} ` +
+          `old=${lastPhysicalSizeRef.current} new=${nextPhysicalSize}`
+        )
+        lastPhysicalSizeRef.current = nextPhysicalSize
+        reconnectFailuresRef.current = 0
         setReconnectRevision((value) => value + 1)
       }, 250)
     }
@@ -996,25 +1160,46 @@ function ProgramMirrorDisplay(): JSX.Element {
   }, [])
 
   const directIdentity = mirrorState.directContent
-    ? `${mirrorState.directContent.type}|${mirrorState.directContent.path}`
+    ? mirrorState.directContent.type === 'capture'
+      ? `capture|${mirrorState.directContent.capture?.sourceId || mirrorState.directContent.path}`
+      : `${mirrorState.directContent.type}|${mirrorState.directContent.path}`
     : ''
   const hasDirectContent = mirrorState.directContent !== null
   const isDirectBackdrop = mirrorState.directContent?.type === 'backdrop'
-  const showBackdropWhileConnecting = Boolean(
-    mirrorState.backdropImage && status === PROGRAM_MIRROR_CONNECTING_STATUS
-  )
+  const isDirectCapture = mirrorState.directContent?.type === 'capture'
+  const showBackdropBehindStatus = Boolean(mirrorState.backdropImage && status)
 
   useEffect(() => {
     let cancelled = false
     let stream: MediaStream | null = null
+    let firstFramePresented = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
 
     const connect = async (): Promise<void> => {
       if (!mirrorState.active) {
         setStatus('')
+        setReconnectFrameUrl(null)
+        reconnectFailuresRef.current = 0
+        return
+      }
+      // Chromium's desktop capture can return black when it captures another
+      // BrowserWindow from this same Electron process. External sources are
+      // therefore opened directly in the mirror renderer; PowerPoint keeps
+      // using the existing display-capture path below.
+      if (isDirectCapture) {
+        if (nativeReady) {
+          setStatus('')
+          setReconnectFrameUrl(null)
+          reconnectFailuresRef.current = 0
+        } else {
+          setStatus(PROGRAM_MIRROR_CONNECTING_STATUS)
+        }
         return
       }
       if (isDirectBackdrop) {
         setStatus('')
+        setReconnectFrameUrl(null)
+        reconnectFailuresRef.current = 0
         return
       }
       // PDF, video, images and the backdrop are rendered directly in this
@@ -1022,6 +1207,8 @@ function ProgramMirrorDisplay(): JSX.Element {
       // that opaque layer doubled GPU/encoder load for no visible benefit.
       if (hasDirectContent && nativeReady) {
         setStatus('')
+        setReconnectFrameUrl(null)
+        reconnectFailuresRef.current = 0
         window.api.dbgLog(`program mirror desktop capture skipped direct=${mirrorState.directContent?.type || 'none'}`)
         return
       }
@@ -1091,25 +1278,60 @@ function ProgramMirrorDisplay(): JSX.Element {
         video.srcObject = stream
         const track = stream.getVideoTracks()[0]
         if (track) {
-          track.onended = () => setReconnectRevision((value) => value + 1)
+          track.onended = () => {
+            window.api.dbgLog(
+              `program mirror reconnect trigger=track-ended display=${mirrorState.sourceDisplayId}`
+            )
+            reconnectFailuresRef.current = 0
+            setReconnectRevision((value) => value + 1)
+          }
           const settings = track.getSettings()
           window.api.dbgLog(
-            `program mirror ready display=${mirrorState.sourceDisplayId} ` +
+            `program mirror track acquired display=${mirrorState.sourceDisplayId} ` +
             `source=${sourceWidth || 0}x${sourceHeight || 0} ` +
             `target=${targetWidth}x${targetHeight} requested=${captureWidth}x${captureHeight} ` +
             `actual=${settings.width || 0}x${settings.height || 0} fps=${settings.frameRate || 0}`
           )
         }
-        await video.play()
+        await playAndWaitForVideoFrame(video)
+        if (cancelled || video.srcObject !== stream || track?.readyState === 'ended') return
+        firstFramePresented = true
+        reconnectFailuresRef.current = 0
         setStatus('')
+        setReconnectFrameUrl(null)
+        window.api.dbgLog(
+          `program mirror first frame display=${mirrorState.sourceDisplayId} ` +
+          `video=${video.videoWidth}x${video.videoHeight}`
+        )
         window.api.sendToControl('program-mirror-ready', {
           displayId: auxiliaryDisplayId,
           sourceDisplayId: mirrorState.sourceDisplayId
         })
       } catch (error) {
         if (!cancelled) {
-          setStatus(`Не удалось показать копию эфира: ${String(error)}`)
-          window.api.dbgLog(`program mirror failed display=${mirrorState.sourceDisplayId}: ${String(error)}`)
+          if (stream) {
+            stream.getTracks().forEach((track) => {
+              track.onended = null
+              track.stop()
+            })
+            stream = null
+          }
+          if (videoRef.current) videoRef.current.srcObject = null
+          const failure = ++reconnectFailuresRef.current
+          window.api.dbgLog(
+            `program mirror failed display=${mirrorState.sourceDisplayId} ` +
+            `attempt=${failure}/${PROGRAM_MIRROR_MAX_RETRIES}: ${String(error)}`
+          )
+          if (failure < PROGRAM_MIRROR_MAX_RETRIES) {
+            setStatus(PROGRAM_MIRROR_CONNECTING_STATUS)
+            const retryDelay = Math.min(3_000, 500 * (2 ** (failure - 1)))
+            retryTimer = setTimeout(() => {
+              retryTimer = null
+              if (!cancelled) setReconnectRevision((value) => value + 1)
+            }, retryDelay)
+          } else {
+            setStatus(`Не удалось показать копию эфира: ${String(error)}`)
+          }
         }
       }
     }
@@ -1117,7 +1339,12 @@ function ProgramMirrorDisplay(): JSX.Element {
     void connect()
     return () => {
       cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
       if (stream) {
+        if (firstFramePresented && videoRef.current?.srcObject === stream) {
+          const frozenFrame = captureVideoFrame(videoRef.current)
+          if (frozenFrame) setReconnectFrameUrl(frozenFrame)
+        }
         stream.getTracks().forEach((track) => {
           track.onended = null
           track.stop()
@@ -1133,6 +1360,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     mirrorState.sourcePixelWidth,
     mirrorState.contentAspectRatio,
     mirrorState.contentType,
+    isDirectCapture,
     isDirectBackdrop,
     reconnectRevision
   ])
@@ -1330,6 +1558,7 @@ function ProgramMirrorDisplay(): JSX.Element {
           <ProgramDirectLayer
             key={directIdentity}
             content={mirrorState.directContent}
+            onStatus={setStatus}
             onReady={() => {
               if (directIdentityRef.current !== directIdentity) return
               setNativeReady(true)
@@ -1342,14 +1571,33 @@ function ProgramMirrorDisplay(): JSX.Element {
           />
         </div>
       )}
+      {mirrorState.directContent?.type === 'capture' && mirrorState.titles && nativeReady && (
+        <BroadcastTitlesOverlay
+          key={mirrorState.titleSourceIdentity || 'no-program-mirror-title-source'}
+          titles={mirrorState.titles}
+        />
+      )}
       {mirrorState.active && !isDirectBackdrop && status && !nativeReady && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black text-xl text-gray-400">
-          {showBackdropWhileConnecting ? (
+          {reconnectFrameUrl ? (
+            <img
+              src={reconnectFrameUrl}
+              className="absolute inset-0 h-full w-full object-contain bg-black"
+              draggable={false}
+            />
+          ) : showBackdropBehindStatus ? (
+            <>
             <img
               src={mediaUrl(mirrorState.backdropImage as string)}
               className="absolute inset-0 h-full w-full object-cover"
               draggable={false}
             />
+              {status !== PROGRAM_MIRROR_CONNECTING_STATUS && (
+                <span className="relative z-10 rounded bg-black/70 px-4 py-2 text-sm text-gray-200">
+                  {status}
+                </span>
+              )}
+            </>
           ) : status}
         </div>
       )}

@@ -80,7 +80,7 @@ export function BroadcastTitlesOverlay({
       accentStart: titles.speakerAccentStart,
       accentEnd: titles.speakerAccentEnd
     },
-    `${titles.speakerId || ''}\u0000${speakerName}\u0000${speakerRole}\u0000${titles.speakerEnterEffect}\u0000${titles.speakerExitEffect}\u0000${titles.speakerStyle}\u0000${titles.speakerTextColor}\u0000${titles.speakerBackgroundStart}\u0000${titles.speakerBackgroundEnd}\u0000${titles.speakerAccentStart}\u0000${titles.speakerAccentEnd}`
+    `${titles.speakerRevision}\u0000${titles.speakerId || ''}\u0000${speakerName}\u0000${speakerRole}\u0000${titles.speakerEnterEffect}\u0000${titles.speakerExitEffect}\u0000${titles.speakerStyle}\u0000${titles.speakerTextColor}\u0000${titles.speakerBackgroundStart}\u0000${titles.speakerBackgroundEnd}\u0000${titles.speakerAccentStart}\u0000${titles.speakerAccentEnd}`
   )
   const event = useAnimatedValue(
     eventVisible,
@@ -97,7 +97,7 @@ export function BroadcastTitlesOverlay({
       accentStart: titles.eventAccentStart,
       accentEnd: titles.eventAccentEnd
     },
-    `${eventLabel}\u0000${eventInfo}\u0000${titles.eventPosition}\u0000${titles.eventEnterEffect}\u0000${titles.eventExitEffect}\u0000${titles.eventStyle}\u0000${titles.eventTextColor}\u0000${titles.eventBackgroundStart}\u0000${titles.eventBackgroundEnd}\u0000${titles.eventAccentStart}\u0000${titles.eventAccentEnd}`
+    `${titles.eventRevision}\u0000${eventLabel}\u0000${eventInfo}\u0000${titles.eventPosition}\u0000${titles.eventEnterEffect}\u0000${titles.eventExitEffect}\u0000${titles.eventStyle}\u0000${titles.eventTextColor}\u0000${titles.eventBackgroundStart}\u0000${titles.eventBackgroundEnd}\u0000${titles.eventAccentStart}\u0000${titles.eventAccentEnd}`
   )
 
   if (!speaker.content && !event.content) return null

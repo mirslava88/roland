@@ -110,6 +110,17 @@ const fullscreenBrowserWindows = new Map<string, {
 let browserFullscreenOperationTail: Promise<void> = Promise.resolve()
 let lastDesktopWindowInventorySignature = ''
 
+function notifyControlPresentationContentCleared(reason: string): void {
+  if (
+    controlWindow &&
+    !controlWindow.isDestroyed() &&
+    !controlWindow.webContents.isDestroyed()
+  ) {
+    controlWindow.webContents.send('presentation-content-cleared')
+  }
+  diagnosticLog('window', `presentation content no longer visible reason=${reason}`)
+}
+
 async function withBrowserFullscreenLock<T>(operation: () => Promise<T>): Promise<T> {
   const previous = browserFullscreenOperationTail
   let unlock!: () => void
@@ -653,6 +664,7 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
     presentationWindowReady = false
     for (const resolve of presentationReadyWaiters) resolve()
     presentationReadyWaiters.clear()
+    notifyControlPresentationContentCleared('window-closed')
     controlWindow?.webContents.send('presentation-window-closed')
   })
   return win
@@ -1006,11 +1018,36 @@ function createWindows(): void {
     }
 
     if (win.webContents.isLoading()) {
-      await new Promise<void>((resolve) => {
-        win!.webContents.once('did-finish-load', () => resolve())
+      const contents = win.webContents
+      const loaded = await new Promise<boolean>((resolve) => {
+        let settled = false
+        const finish = (success: boolean): void => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          contents.removeListener('did-finish-load', onLoaded)
+          contents.removeListener('did-fail-load', onFailed)
+          contents.removeListener('destroyed', onDestroyed)
+          resolve(success)
+        }
+        const onLoaded = (): void => finish(true)
+        const onFailed = (): void => finish(false)
+        const onDestroyed = (): void => finish(false)
+        const timeout = setTimeout(() => finish(false), 8000)
+        contents.once('did-finish-load', onLoaded)
+        contents.once('did-fail-load', onFailed)
+        contents.once('destroyed', onDestroyed)
       })
+      if (!loaded) {
+        return {
+          success: false,
+          error: win.isDestroyed() || contents.isDestroyed()
+            ? 'Окно дисплея было закрыто во время запуска'
+            : 'Окно дисплея не успело загрузиться'
+        }
+      }
     }
-    if (win.isDestroyed()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) {
       return { success: false, error: 'Окно дисплея было закрыто во время запуска' }
     }
     for (const [channel, args] of auxiliaryLastMessages.get(role) ?? []) {
@@ -1197,9 +1234,16 @@ function createWindows(): void {
       types: ['screen'],
       thumbnailSize: { width: 1, height: 1 }
     })
-    const source = sources.find((item) => item.display_id === String(target.id)) ||
-      sources[displays.indexOf(target)] ||
-      null
+    const source = sources.find((item) => item.display_id === String(target.id)) || null
+    diagnosticLog(
+      'display',
+      `program mirror source target=${target.id} source=${source?.id ?? 'none'} ` +
+      `mapping=${sources.map((item) => `${item.id}:${item.display_id || 'none'}`).join(',')}`
+    )
+    // Never fall back by array index: screen.getAllDisplays() and
+    // desktopCapturer use different ordering on Windows (for example
+    // primary, Screen 3, Screen 2 versus Screen 1, Screen 2, Screen 3).
+    // A mismatched fallback makes the mirror capture its own black window.
     return source?.id ?? null
   })
 
@@ -1507,6 +1551,7 @@ function createWindows(): void {
       console.log(`[MAIN ${Date.now()}] presentation-window: opacity=0 (kept warm)`)
       diagnosticLog('window', 'presentation output opacity=0 (kept warm)')
     }
+    notifyControlPresentationContentCleared('window-parked')
   })
 
   ipcMain.handle('show-overlay', async (
@@ -2582,7 +2627,10 @@ function createWindows(): void {
     for (const [displayId, entry] of [...auxiliaryWindows.entries()]) {
       if (!connectedIds.has(displayId)) {
         diagnosticLog('display', `auxiliary display removed role=${entry.role} id=${displayId}`)
-        closeAuxiliaryWindow(entry.role, displayId, true)
+        // A monitor input switch is reported by Windows as remove/add. Close
+        // only the native window; the renderer keeps the desired assignment
+        // and reopens the same role when this display id returns.
+        closeAuxiliaryWindow(entry.role, displayId)
       }
     }
     if (
@@ -2959,11 +3007,15 @@ app.whenReady().then(() => {
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
     contents.on('render-process-gone', (_event, details) => {
       const isControl = controlWindow?.webContents.id === contents.id
+      const isPresentation = presentationWindow?.webContents.id === contents.id
       diagnosticLog(
         'renderer-failure',
         `gone wc=${contents.id} type=${contents.getType()} control=${isControl} ` +
         `reason=${details.reason} exitCode=${details.exitCode}`
       )
+      if (isPresentation && details.reason !== 'clean-exit') {
+        notifyControlPresentationContentCleared(`renderer-${details.reason}`)
+      }
       if (!isControl || quitCleanupStarted || details.reason === 'clean-exit') return
 
       const now = Date.now()

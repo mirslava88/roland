@@ -5,6 +5,7 @@ const EMPTY_EXCLUDED_DISPLAY_IDS: number[] = []
 interface DesktopCapturePickerProps {
   excludedDisplayId: number | null
   excludedDisplayIds?: number[]
+  overlayZClassName?: string
   onClose: () => void
   onSelect: (source: DesktopCaptureSourceDescriptor) => void
 }
@@ -12,6 +13,7 @@ interface DesktopCapturePickerProps {
 export function DesktopCapturePicker({
   excludedDisplayId,
   excludedDisplayIds = EMPTY_EXCLUDED_DISPLAY_IDS,
+  overlayZClassName = 'z-50',
   onClose,
   onSelect
 }: DesktopCapturePickerProps): JSX.Element {
@@ -132,7 +134,7 @@ export function DesktopCapturePicker({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+      className={`fixed inset-0 ${overlayZClassName} flex items-center justify-center bg-black/70 p-6`}
     >
       <div
         className="flex max-h-[86vh] w-full max-w-4xl flex-col rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"

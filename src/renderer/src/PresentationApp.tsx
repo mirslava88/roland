@@ -7,11 +7,12 @@ import {
   type CaptureTakeRequest
 } from './components/PresentationView/CaptureHub'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
-import type {
-  BroadcastTitleEffect,
-  BroadcastTitlePosition,
-  BroadcastTitleStyle,
-  BroadcastTitlesOutput
+import {
+  captureSourceIdentity,
+  type BroadcastTitleEffect,
+  type BroadcastTitlePosition,
+  type BroadcastTitleStyle,
+  type BroadcastTitlesOutput
 } from './stores/useAppStore'
 import {
   ensurePdfLiveCache,
@@ -45,6 +46,9 @@ type PendingContent =
   | { kind: 'capture'; sourceId: string; revision: number; payload: ContentPayload }
 
 const HIDDEN_BROADCAST_TITLES: BroadcastTitlesOutput = {
+  sourceIdentity: null,
+  speakerRevision: 0,
+  eventRevision: 0,
   speakerId: null,
   speakerName: '',
   speakerRole: '',
@@ -102,6 +106,15 @@ function normalizeBroadcastTitles(value: unknown): BroadcastTitlesOutput {
     typeof candidate === 'string' && /^#[0-9a-f]{6}$/i.test(candidate) ? candidate.toLowerCase() : fallback
   )
   return {
+    sourceIdentity: typeof raw.sourceIdentity === 'string'
+      ? raw.sourceIdentity.slice(0, 4096)
+      : null,
+    speakerRevision: typeof raw.speakerRevision === 'number' && Number.isFinite(raw.speakerRevision)
+      ? Math.max(0, Math.round(raw.speakerRevision))
+      : 0,
+    eventRevision: typeof raw.eventRevision === 'number' && Number.isFinite(raw.eventRevision)
+      ? Math.max(0, Math.round(raw.eventRevision))
+      : 0,
     speakerId: typeof raw.speakerId === 'string' ? raw.speakerId.slice(0, 80) : null,
     speakerName: typeof raw.speakerName === 'string' ? raw.speakerName.slice(0, 120) : '',
     speakerRole: typeof raw.speakerRole === 'string' ? raw.speakerRole.slice(0, 180) : '',
@@ -152,6 +165,7 @@ export function PresentationApp(): JSX.Element {
   const [captureAudioSourceId, setCaptureAudioSourceId] = useState<string | null>(null)
   const [captureTakeRequest, setCaptureTakeRequest] = useState<CaptureTakeRequest | null>(null)
   const [broadcastTitles, setBroadcastTitles] = useState<BroadcastTitlesOutput>(HIDDEN_BROADCAST_TITLES)
+  const broadcastTitlesRef = useRef(broadcastTitles)
   const slotsRef = useRef(slots)
   const activeLayerRef = useRef<ActiveLayer>(activeLayer)
   const activeSlotRef = useRef<SlotIndex>(0)
@@ -161,6 +175,7 @@ export function PresentationApp(): JSX.Element {
 
   slotsRef.current = slots
   activeLayerRef.current = activeLayer
+  broadcastTitlesRef.current = broadcastTitles
 
   const notifyControlAfterPaint = useCallback((payload: ContentPayload): void => {
     requestAnimationFrame(() => {
@@ -244,6 +259,20 @@ export function PresentationApp(): JSX.Element {
     if (oldLayer.kind === 'capture' && oldLayer.sourceId === sourceId) {
       notifyControlAfterPaint(pending.payload)
       return
+    }
+
+    // The picture switches before the control renderer receives the ready ACK.
+    // Hide A's title synchronously when the next picture belongs to B.  Separate
+    // PDM records of the same physical camera/window share one stable identity,
+    // so their title stays continuous instead of being restarted unnecessarily.
+    const nextTitleSourceIdentity = captureSourceIdentity(pending.payload.capture)
+    if ((broadcastTitlesRef.current.sourceIdentity || null) !== nextTitleSourceIdentity) {
+      const hiddenTitles = {
+        ...HIDDEN_BROADCAST_TITLES,
+        sourceIdentity: nextTitleSourceIdentity
+      }
+      broadcastTitlesRef.current = hiddenTitles
+      setBroadcastTitles(hiddenTitles)
     }
 
     activeLayerRef.current = { kind: 'capture', sourceId }
@@ -506,6 +535,7 @@ export function PresentationApp(): JSX.Element {
         { payload: null, revision: previous[0].revision },
         { payload: null, revision: previous[1].revision }
       ])
+      window.api.sendToControl('presentation-content-cleared')
       window.api.dbgLog('PresApp: active output cleared; capture sources remain warm')
     })
 
@@ -523,7 +553,9 @@ export function PresentationApp(): JSX.Element {
 
   useEffect(() => {
     const unsubscribe = window.api.on('broadcast-titles-update', (...args: unknown[]) => {
-      setBroadcastTitles(normalizeBroadcastTitles(args[0]))
+      const nextTitles = normalizeBroadcastTitles(args[0])
+      broadcastTitlesRef.current = nextTitles
+      setBroadcastTitles(nextTitles)
     })
     window.api.sendToControl('broadcast-titles-ready')
     return unsubscribe
@@ -618,7 +650,10 @@ export function PresentationApp(): JSX.Element {
         onTakeError={failCaptureTake}
       />
       {activeLayer.kind === 'capture' && (
-        <BroadcastTitlesOverlay titles={broadcastTitles} />
+        <BroadcastTitlesOverlay
+          key={broadcastTitles.sourceIdentity || 'no-program-title-source'}
+          titles={broadcastTitles}
+        />
       )}
       {!hasVisibleContent && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-700 text-lg select-none">

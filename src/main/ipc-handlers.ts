@@ -1127,7 +1127,10 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('hide-taskbar', async (_event, displayBounds: { x: number; y: number; width: number; height: number }) => {
-    await hideTaskbarForDisplay(displayBounds)
+    await hideTaskbarForDisplay(
+      displayBounds,
+      controlWindow.isDestroyed() ? undefined : controlWindow.getBounds()
+    )
   })
 
   ipcMain.handle('show-taskbar', async () => {

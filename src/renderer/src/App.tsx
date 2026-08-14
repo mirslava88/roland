@@ -112,14 +112,34 @@ export default function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    window.api.getDisplays().then(setDisplays)
-
     const unsubClose = window.api.on('presentation-window-closed', () => {
       setPresentationWindowOpen(false)
     })
 
+    let cancelled = false
+    let displayPushRevision = 0
     const unsubDisplays = window.api.on('displays-changed', (...args: unknown[]) => {
-      setDisplays(args[0] as DisplayInfo[])
+      const nextDisplays = args[0] as DisplayInfo[]
+      displayPushRevision++
+      setDisplays(nextDisplays)
+      window.api.dbgLog(`display topology push revision=${displayPushRevision} count=${nextDisplays.length}`)
+    })
+
+    // Subscribe before requesting the initial snapshot. Windows can publish a
+    // display-added event while this IPC is in flight; an older response must
+    // never overwrite that newer topology in the store.
+    const initialDisplayRevision = displayPushRevision
+    window.api.getDisplays().then((nextDisplays) => {
+      if (cancelled || displayPushRevision !== initialDisplayRevision) {
+        window.api.dbgLog(
+          `display topology initial snapshot ignored stale=true count=${nextDisplays.length} pushRevision=${displayPushRevision}`
+        )
+        return
+      }
+      setDisplays(nextDisplays)
+      window.api.dbgLog(`display topology initial count=${nextDisplays.length}`)
+    }).catch((error: unknown) => {
+      window.api.dbgLog(`display topology initial request failed error=${String(error)}`)
     })
 
     const unsubSlideInfo = window.api.on('slide-info', (...args: unknown[]) => {
@@ -265,6 +285,7 @@ export default function App(): JSX.Element {
     window.addEventListener('flush-take-navigation', flushQueuedNavigation)
 
     return () => {
+      cancelled = true
       unsubClose()
       unsubDisplays()
       unsubSlideInfo()

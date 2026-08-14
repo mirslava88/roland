@@ -207,6 +207,47 @@ export interface InformationMediaConfig {
   capture?: CaptureSourceConfig
 }
 
+function normalizedDesktopWindowHwnd(sourceKey?: string): string | null {
+  if (!sourceKey) return null
+  const match = /^native-window:([^:]+):/.exec(sourceKey) || /^window:([^:]+):/.exec(sourceKey)
+  if (!match) return null
+  try {
+    return BigInt(match[1]).toString(10)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Stable identity of the picture being captured. `sourceId` is intentionally
+ * not the first choice: the channel picker and the information-screen picker
+ * create separate PDM source records even when the operator selects the same
+ * camera/window. The native device/window keys let titles follow the actual
+ * source across every place where it is used.
+ */
+export function captureSourceIdentity(capture?: CaptureSourceConfig | null): string | null {
+  if (!capture) return null
+  if (capture.captureKind === 'desktop' && capture.desktopSourceType === 'screen' && capture.desktopDisplayId) {
+    return `screen:${capture.desktopDisplayId}`
+  }
+  const desktopKey = capture.desktopSourceKey || capture.desktopSourceId || capture.desktopDisplayId
+  if (capture.captureKind === 'desktop' || desktopKey) {
+    const windowHwnd = normalizedDesktopWindowHwnd(capture.desktopSourceKey) ||
+      normalizedDesktopWindowHwnd(capture.desktopSourceId)
+    if (windowHwnd) return `window:${windowHwnd}`
+    return desktopKey ? `desktop:${desktopKey}` : null
+  }
+  if (capture.videoGroupId) {
+    const normalizedLabel = capture.videoLabel.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+    // A physical capture device may expose several distinct video endpoints
+    // under one groupId (for example RGB/IR or several inputs of one card).
+    // The tuple survives deviceId changes without merging different pictures.
+    return `device-group:${JSON.stringify([capture.videoGroupId, normalizedLabel])}`
+  }
+  if (capture.videoDeviceId) return `device:${capture.videoDeviceId}`
+  return capture.sourceId ? `source:${capture.sourceId}` : null
+}
+
 export type BroadcastTitleEffect = 'instant' | 'fade' | 'slide-left' | 'slide-right' | 'slide-up' | 'scale'
 export type BroadcastTitleStyle = 'rounded' | 'rectangle' | 'slant-right' | 'slant-left' | 'pill'
 export type BroadcastTitlePosition =
@@ -257,6 +298,9 @@ export interface BroadcastTitlesDraft {
 }
 
 export interface BroadcastTitlesOutput {
+  sourceIdentity?: string | null
+  speakerRevision: number
+  eventRevision: number
   speakerId: string | null
   speakerName: string
   speakerRole: string
@@ -312,6 +356,9 @@ export const DEFAULT_BROADCAST_TITLES: BroadcastTitlesDraft = {
 }
 
 export const DEFAULT_BROADCAST_TITLES_OUTPUT: BroadcastTitlesOutput = {
+  sourceIdentity: null,
+  speakerRevision: 0,
+  eventRevision: 0,
   speakerId: null,
   speakerName: '',
   speakerRole: '',
@@ -338,6 +385,48 @@ export const DEFAULT_BROADCAST_TITLES_OUTPUT: BroadcastTitlesOutput = {
   eventAccentEnd: DEFAULT_BROADCAST_TITLES.eventAccentEnd,
   speakerVisible: false,
   eventVisible: false
+}
+
+function normalizeBroadcastTitlesOutput(
+  current: BroadcastTitlesOutput,
+  update: Partial<BroadcastTitlesOutput>
+): BroadcastTitlesOutput {
+  return {
+    ...current,
+    ...update,
+    sourceIdentity: update.sourceIdentity === undefined
+      ? current.sourceIdentity || null
+      : update.sourceIdentity?.slice(0, 4096) || null,
+    speakerRevision: update.speakerVisible === true
+      ? current.speakerRevision + 1
+      : update.speakerRevision ?? current.speakerRevision,
+    eventRevision: update.eventVisible === true
+      ? current.eventRevision + 1
+      : update.eventRevision ?? current.eventRevision,
+    speakerId: update.speakerId === undefined
+      ? current.speakerId
+      : update.speakerId?.slice(0, 80) || null,
+    speakerName: (update.speakerName ?? current.speakerName).slice(0, 120),
+    speakerRole: (update.speakerRole ?? current.speakerRole).slice(0, 180),
+    eventLabel: (update.eventLabel ?? current.eventLabel).replace(/[\r\n\t]+/g, ' ').slice(0, 80),
+    eventInfo: (update.eventInfo ?? current.eventInfo).replace(/\r/g, '').slice(0, 320),
+    speakerAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
+      update.speakerAutoHideSeconds ?? current.speakerAutoHideSeconds
+    ))),
+    speakerTextColor: normalizeBroadcastColor(update.speakerTextColor, current.speakerTextColor),
+    speakerBackgroundStart: normalizeBroadcastColor(update.speakerBackgroundStart, current.speakerBackgroundStart),
+    speakerBackgroundEnd: normalizeBroadcastColor(update.speakerBackgroundEnd, current.speakerBackgroundEnd),
+    speakerAccentStart: normalizeBroadcastColor(update.speakerAccentStart, current.speakerAccentStart),
+    speakerAccentEnd: normalizeBroadcastColor(update.speakerAccentEnd, current.speakerAccentEnd),
+    eventAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
+      update.eventAutoHideSeconds ?? current.eventAutoHideSeconds
+    ))),
+    eventTextColor: normalizeBroadcastColor(update.eventTextColor, current.eventTextColor),
+    eventBackgroundStart: normalizeBroadcastColor(update.eventBackgroundStart, current.eventBackgroundStart),
+    eventBackgroundEnd: normalizeBroadcastColor(update.eventBackgroundEnd, current.eventBackgroundEnd),
+    eventAccentStart: normalizeBroadcastColor(update.eventAccentStart, current.eventAccentStart),
+    eventAccentEnd: normalizeBroadcastColor(update.eventAccentEnd, current.eventAccentEnd)
+  }
 }
 
 interface AppState {
@@ -371,6 +460,8 @@ interface AppState {
   eventTimerOutput: EventTimerState | null
   broadcastTitles: BroadcastTitlesDraft
   broadcastTitlesOutput: BroadcastTitlesOutput
+  captureTitlesOutputs: Record<string, BroadcastTitlesOutput>
+  programCaptureTitlesSourceIdentity: string | null
 
   overlayState: OverlayState
   setOverlayState: (state: OverlayState) => void
@@ -432,6 +523,8 @@ interface AppState {
   setEventTimerOutput: (timer: EventTimerState | null) => void
   setBroadcastTitles: (update: Partial<BroadcastTitlesDraft>) => void
   setBroadcastTitlesOutput: (update: Partial<BroadcastTitlesOutput>) => void
+  setCaptureTitlesOutput: (sourceIdentity: string, update: Partial<BroadcastTitlesOutput>) => void
+  setProgramCaptureTitlesSourceIdentity: (sourceIdentity: string | null) => void
 
   // Doc previews (Word/Excel -> temp PDF path)
   docPreviewsMap: Record<string, string>
@@ -519,6 +612,8 @@ export const useAppStore = create<AppState>()(persist(
   eventTimerOutput: null,
   broadcastTitles: { ...DEFAULT_BROADCAST_TITLES },
   broadcastTitlesOutput: { ...DEFAULT_BROADCAST_TITLES_OUTPUT },
+  captureTitlesOutputs: {},
+  programCaptureTitlesSourceIdentity: null,
 
   overlayState: { kind: 'hidden' } as OverlayState,
 
@@ -824,18 +919,29 @@ export const useAppStore = create<AppState>()(persist(
 
   setDisplays: (displays) => {
     const state = get()
-    const primaryId = displays.find((display) => display.isPrimary)?.id ?? null
+    const primaryDisplays = displays.filter((display) => display.isPrimary)
+    // During an HDMI/DisplayPort input switch Windows can briefly publish an
+    // incomplete topology where no entry (or more than one entry) is marked
+    // primary. Never turn that malformed snapshot into live assignments: it
+    // could classify the laptop panel as an external Program/Mirror display.
+    // A later stable displays-changed snapshot will reconcile the same IDs.
+    if (primaryDisplays.length !== 1) return
+    const primaryId = primaryDisplays[0].id
     const externalIds = displays
       .filter((display) => display.id !== primaryId)
       .sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y)
       .map((display) => display.id)
-    const assignments: DisplayAssignments = {}
-    for (const id of externalIds) {
-      const mode = state.displayAssignments[String(id)]
-      if (mode) assignments[String(id)] = mode
-    }
+    // Keep the operator's desired role for temporarily disconnected displays.
+    // Switching a monitor to another physical input makes Windows publish a
+    // short remove/add cycle; pruning the missing id here permanently changed
+    // Program/Mirror/Speaker/Info to Off when that input was selected again.
+    // Runtime consumers still filter this map through the connected displays.
+    const assignments: DisplayAssignments = { ...state.displayAssignments }
 
-    if (Object.keys(assignments).length === 0) {
+    const hasConnectedAssignment = externalIds.some((id) => (
+      assignments[String(id)] !== undefined
+    ))
+    if (!hasConnectedAssignment) {
       if (externalIds[0] !== undefined) assignments[String(externalIds[0])] = 'program'
     }
 
@@ -940,34 +1046,21 @@ export const useAppStore = create<AppState>()(persist(
     }
   })),
   setBroadcastTitlesOutput: (update) => set((state) => ({
-    broadcastTitlesOutput: {
-      ...state.broadcastTitlesOutput,
-      ...update,
-      speakerId: update.speakerId === undefined
-        ? state.broadcastTitlesOutput.speakerId
-        : update.speakerId?.slice(0, 80) || null,
-      speakerName: (update.speakerName ?? state.broadcastTitlesOutput.speakerName).slice(0, 120),
-      speakerRole: (update.speakerRole ?? state.broadcastTitlesOutput.speakerRole).slice(0, 180),
-      eventLabel: (update.eventLabel ?? state.broadcastTitlesOutput.eventLabel).replace(/[\r\n\t]+/g, ' ').slice(0, 80),
-      eventInfo: (update.eventInfo ?? state.broadcastTitlesOutput.eventInfo).replace(/\r/g, '').slice(0, 320),
-      speakerAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
-        update.speakerAutoHideSeconds ?? state.broadcastTitlesOutput.speakerAutoHideSeconds
-      ))),
-      speakerTextColor: normalizeBroadcastColor(update.speakerTextColor, state.broadcastTitlesOutput.speakerTextColor),
-      speakerBackgroundStart: normalizeBroadcastColor(update.speakerBackgroundStart, state.broadcastTitlesOutput.speakerBackgroundStart),
-      speakerBackgroundEnd: normalizeBroadcastColor(update.speakerBackgroundEnd, state.broadcastTitlesOutput.speakerBackgroundEnd),
-      speakerAccentStart: normalizeBroadcastColor(update.speakerAccentStart, state.broadcastTitlesOutput.speakerAccentStart),
-      speakerAccentEnd: normalizeBroadcastColor(update.speakerAccentEnd, state.broadcastTitlesOutput.speakerAccentEnd),
-      eventAutoHideSeconds: Math.max(0, Math.min(86400, Math.round(
-        update.eventAutoHideSeconds ?? state.broadcastTitlesOutput.eventAutoHideSeconds
-      ))),
-      eventTextColor: normalizeBroadcastColor(update.eventTextColor, state.broadcastTitlesOutput.eventTextColor),
-      eventBackgroundStart: normalizeBroadcastColor(update.eventBackgroundStart, state.broadcastTitlesOutput.eventBackgroundStart),
-      eventBackgroundEnd: normalizeBroadcastColor(update.eventBackgroundEnd, state.broadcastTitlesOutput.eventBackgroundEnd),
-      eventAccentStart: normalizeBroadcastColor(update.eventAccentStart, state.broadcastTitlesOutput.eventAccentStart),
-      eventAccentEnd: normalizeBroadcastColor(update.eventAccentEnd, state.broadcastTitlesOutput.eventAccentEnd)
-    }
+    broadcastTitlesOutput: normalizeBroadcastTitlesOutput(state.broadcastTitlesOutput, update)
   })),
+  setCaptureTitlesOutput: (sourceIdentity, update) => set((state) => {
+    if (!sourceIdentity) return state
+    const current = state.captureTitlesOutputs[sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    return {
+      captureTitlesOutputs: {
+        ...state.captureTitlesOutputs,
+        [sourceIdentity]: normalizeBroadcastTitlesOutput(current, update)
+      }
+    }
+  }),
+  setProgramCaptureTitlesSourceIdentity: (sourceIdentity) => set({
+    programCaptureTitlesSourceIdentity: sourceIdentity || null
+  }),
 
   setOverlayState: (state) => set({ overlayState: state }),
 

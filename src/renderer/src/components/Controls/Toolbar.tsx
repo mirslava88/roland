@@ -23,6 +23,7 @@ export function Toolbar(): JSX.Element {
     setGlobalHookEnabled,
     channelBoundaryNavigationEnabled,
     setChannelBoundaryNavigationEnabled,
+    displays,
     displayAssignments,
     channels,
     selectedChannel,
@@ -45,7 +46,9 @@ export function Toolbar(): JSX.Element {
     pptxCacheStatuses[selectedChannelFile.path] !== 'ready' &&
     pptxCacheStatuses[selectedChannelFile.path] !== 'error'
   const canTogglePresentation = isOutputActive || (selectedChannelHasContent && !selectedPptxIsPreparing)
-  const assignedModes = Object.values(displayAssignments)
+  const assignedModes = displays
+    .filter((display) => !display.isPrimary)
+    .map((display) => displayAssignments[String(display.id)] || 'off')
   const hasAdditionalScreenOutput = assignedModes.some((mode) => mode !== 'program') ||
     assignedModes.filter((mode) => mode === 'program').length > 1
 

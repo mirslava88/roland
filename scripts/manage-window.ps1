@@ -7,7 +7,11 @@ param(
     [int]$X = 0,
     [int]$Y = 0,
     [int]$Width = 1920,
-    [int]$Height = 1080
+    [int]$Height = 1080,
+    [int]$ProtectedX = 0,
+    [int]$ProtectedY = 0,
+    [int]$ProtectedWidth = 0,
+    [int]$ProtectedHeight = 0
 )
 
 Add-Type @"
@@ -134,7 +138,7 @@ function Log($msg) {
     Add-Content -Path $logFile -Value "$ts $msg" -ErrorAction SilentlyContinue
 }
 
-Log "=== Action=$Action FilePath=$FilePath X=$X Y=$Y W=$Width H=$Height Hwnd=$Hwnd ==="
+Log "=== Action=$Action FilePath=$FilePath X=$X Y=$Y W=$Width H=$Height Protected=$ProtectedX,$ProtectedY,$ProtectedWidth,$ProtectedHeight Hwnd=$Hwnd ==="
 
 switch ($Action) {
     "open" {
@@ -304,6 +308,25 @@ switch ($Action) {
         foreach ($tb in $taskbars) {
             $rect = New-Object WinMgr+RECT
             [WinMgr]::GetWindowRect($tb, [ref]$rect) | Out-Null
+            $className = New-Object System.Text.StringBuilder -ArgumentList 256
+            [WinMgr]::GetClassName($tb, $className, $className.Capacity) | Out-Null
+            $isMainTaskbar = $className.ToString() -eq "Shell_TrayWnd"
+            $intersectsProtectedDisplay = (
+                $ProtectedWidth -gt 0 -and
+                $ProtectedHeight -gt 0 -and
+                $rect.Right -gt $ProtectedX -and
+                $rect.Left -lt ($ProtectedX + $ProtectedWidth) -and
+                $rect.Bottom -gt $ProtectedY -and
+                $rect.Top -lt ($ProtectedY + $ProtectedHeight)
+            )
+            # The Windows-primary taskbar and the taskbar on the PDM control
+            # display are operator UI. A transient topology snapshot must never
+            # hide either of them. ShowWindow also repairs an earlier bad hide.
+            if ($isMainTaskbar -or $intersectsProtectedDisplay) {
+                [WinMgr]::ShowWindow($tb, [WinMgr]::SW_SHOW) | Out-Null
+                Log "taskbar protected class=$($className.ToString()) rect=$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
+                continue
+            }
             $intersectsDisplay = (
                 $rect.Right -gt $X -and
                 $rect.Left -lt ($X + $Width) -and
@@ -312,6 +335,25 @@ switch ($Action) {
             )
             if ($intersectsDisplay) {
                 [WinMgr]::ShowWindow($tb, [WinMgr]::SW_HIDE) | Out-Null
+                Log "taskbar hidden class=$($className.ToString()) rect=$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
+            }
+        }
+        Write-Output '{"success":true}'
+    }
+    "show-taskbar-on-display" {
+        $taskbars = [WinMgr]::FindTaskbars()
+        foreach ($tb in $taskbars) {
+            $rect = New-Object WinMgr+RECT
+            [WinMgr]::GetWindowRect($tb, [ref]$rect) | Out-Null
+            $intersectsDisplay = (
+                $rect.Right -gt $X -and
+                $rect.Left -lt ($X + $Width) -and
+                $rect.Bottom -gt $Y -and
+                $rect.Top -lt ($Y + $Height)
+            )
+            if ($intersectsDisplay) {
+                [WinMgr]::ShowWindow($tb, [WinMgr]::SW_SHOW) | Out-Null
+                Log "taskbar restored on display rect=$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
             }
         }
         Write-Output '{"success":true}'

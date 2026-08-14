@@ -15,7 +15,8 @@ function enqueueTaskbarOperation(operation: () => Promise<void>): Promise<void> 
 }
 
 export function hideTaskbarForDisplay(
-  displayBounds: { x: number; y: number; width: number; height: number }
+  displayBounds: { x: number; y: number; width: number; height: number },
+  controlWindowBounds?: { x: number; y: number; width: number; height: number }
 ): Promise<void> {
   if (process.platform !== 'win32' || finalRestoreRequested) return Promise.resolve()
   return enqueueTaskbarOperation(async () => {
@@ -25,10 +26,34 @@ export function hideTaskbarForDisplay(
     try {
       const targetDisplay = screen.getDisplayMatching(displayBounds)
       const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+      const protectedDisplay = controlWindowBounds
+        ? screen.getDisplayMatching(controlWindowBounds)
+        : screen.getPrimaryDisplay()
+      const protectedPhysicalBounds = screen.dipToScreenRect(null, protectedDisplay.bounds)
+      const primaryDisplay = screen.getPrimaryDisplay()
+      if (targetDisplay.id === primaryDisplay.id || targetDisplay.id === protectedDisplay.id) {
+        diagnosticLog(
+          'display',
+          `hide taskbar skipped protected display=${targetDisplay.id} ` +
+          `primary=${primaryDisplay.id} control=${protectedDisplay.id}`
+        )
+        // Repair a taskbar that an older/stale request may already have hidden.
+        await execFileAsync('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
+          '-File', scriptPath('manage-window.ps1'),
+          '-Action', 'show-taskbar-on-display',
+          '-X', String(physicalBounds.x),
+          '-Y', String(physicalBounds.y),
+          '-Width', String(physicalBounds.width),
+          '-Height', String(physicalBounds.height)
+        ], { timeout: 5000 })
+        return
+      }
       diagnosticLog(
         'display',
         `hide taskbar display=${targetDisplay.id} dip=${JSON.stringify(targetDisplay.bounds)} ` +
-        `physical=${JSON.stringify(physicalBounds)}`
+        `physical=${JSON.stringify(physicalBounds)} protectedControl=${protectedDisplay.id}`
       )
       await execFileAsync('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
@@ -38,7 +63,11 @@ export function hideTaskbarForDisplay(
         '-X', String(physicalBounds.x),
         '-Y', String(physicalBounds.y),
         '-Width', String(physicalBounds.width),
-        '-Height', String(physicalBounds.height)
+        '-Height', String(physicalBounds.height),
+        '-ProtectedX', String(protectedPhysicalBounds.x),
+        '-ProtectedY', String(protectedPhysicalBounds.y),
+        '-ProtectedWidth', String(protectedPhysicalBounds.width),
+        '-ProtectedHeight', String(protectedPhysicalBounds.height)
       ], { timeout: 5000 })
     } catch (error) {
       diagnosticLog('display', `hide taskbar failed ${formatDiagnosticError(error)}`)

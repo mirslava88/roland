@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
+  captureSourceIdentity,
+  DEFAULT_BROADCAST_TITLES_OUTPUT,
   useAppStore,
   type BroadcastSpeaker,
   type BroadcastTitleEffect,
@@ -60,8 +62,20 @@ function parseSeconds(value: string): number {
 
 export function BroadcastTitles(): JSX.Element {
   const [open, setOpen] = useState(false)
-  const output = useAppStore((state) => state.broadcastTitlesOutput)
-  const isVisible = output.speakerVisible || output.eventVisible
+  const isVisible = useAppStore((state) => {
+    const selectedCapture = state.selectedChannel
+      ? state.channels[state.selectedChannel]?.file?.capture
+      : undefined
+    const activeCapture = state.activeFile?.type === 'capture' ? state.activeFile.capture : undefined
+    const informationCapture = state.informationMedia?.type === 'capture'
+      ? state.informationMedia.capture
+      : undefined
+    const sourceIdentity = captureSourceIdentity(selectedCapture || activeCapture || informationCapture)
+    const output = sourceIdentity
+      ? state.captureTitlesOutputs[sourceIdentity]
+      : undefined
+    return !!output && (output.speakerVisible || output.eventVisible)
+  })
 
   return (
     <>
@@ -86,21 +100,43 @@ export function BroadcastTitles(): JSX.Element {
 function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element {
   const {
     activeFile,
+    informationMedia,
+    displayAssignments,
+    displays,
+    programCaptureTitlesSourceIdentity,
     selectedChannel,
     channels,
     broadcastTitles,
-    broadcastTitlesOutput,
+    captureTitlesOutputs,
     setBroadcastTitles,
-    setBroadcastTitlesOutput
+    setCaptureTitlesOutput
   } = useAppStore()
 
-  const selectedCapture = selectedChannel ? channels[selectedChannel]?.file : null
-  const previewCapture = selectedCapture?.type === 'capture'
-    ? selectedCapture.capture
-    : activeFile?.type === 'capture'
-      ? activeFile.capture
-      : undefined
-  const captureOnAir = activeFile?.type === 'capture'
+  const selectedFile = selectedChannel ? channels[selectedChannel]?.file : null
+  const selectedCapture = selectedFile?.type === 'capture' ? selectedFile.capture : undefined
+  const activeCapture = activeFile?.type === 'capture' ? activeFile.capture : undefined
+  const informationCapture = informationMedia?.type === 'capture' ? informationMedia.capture : undefined
+  const previewUsesInformationFallback = !selectedCapture && !activeCapture && !!informationCapture
+  const previewCapture = selectedCapture || activeCapture || informationCapture
+  const sourceIdentity = captureSourceIdentity(previewCapture)
+  const activeSourceIdentity = programCaptureTitlesSourceIdentity
+  const informationSourceIdentity = informationMedia?.type === 'capture'
+    ? captureSourceIdentity(informationMedia.capture)
+    : null
+  const broadcastTitlesOutput = sourceIdentity
+    ? captureTitlesOutputs[sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    : DEFAULT_BROADCAST_TITLES_OUTPUT
+  const setTargetTitlesOutput = (update: Partial<BroadcastTitlesOutput>): void => {
+    if (sourceIdentity) setCaptureTitlesOutput(sourceIdentity, update)
+  }
+  const captureOnAir = !!sourceIdentity && (
+    sourceIdentity === activeSourceIdentity || (
+      sourceIdentity === informationSourceIdentity &&
+      displays.some((display) => (
+        !display.isPrimary && displayAssignments[String(display.id)] === 'information'
+      ))
+    )
+  )
   const selectedSpeaker = broadcastTitles.speakers.find(
     (speaker) => speaker.id === broadcastTitles.selectedSpeakerId
   ) || null
@@ -135,6 +171,8 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
   const anythingVisible = broadcastTitlesOutput.speakerVisible || broadcastTitlesOutput.eventVisible
 
   const previewTitles = useMemo<BroadcastTitlesOutput>(() => ({
+    speakerRevision: 0,
+    eventRevision: 0,
     speakerId: selectedSpeaker?.id || null,
     speakerName: selectedSpeaker?.name || '',
     speakerRole: selectedSpeaker?.role || '',
@@ -189,7 +227,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
 
   const publishSpeaker = (): void => {
     if (!selectedSpeaker?.name.trim()) return
-    setBroadcastTitlesOutput({
+    setTargetTitlesOutput({
       speakerId: selectedSpeaker.id,
       speakerName: selectedSpeaker.name,
       speakerRole: selectedSpeaker.role,
@@ -208,7 +246,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
 
   const publishEvent = (): void => {
     if (!broadcastTitles.eventInfo.trim()) return
-    setBroadcastTitlesOutput({
+    setTargetTitlesOutput({
       eventLabel: broadcastTitles.eventLabel,
       eventInfo: broadcastTitles.eventInfo,
       eventEnterEffect: broadcastTitles.eventEnterEffect,
@@ -265,9 +303,17 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
               <span className="text-[10px] text-gray-600">Изменения здесь не меняют эфир</span>
             </div>
             <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-gray-700 bg-[radial-gradient(circle_at_30%_30%,#253a48_0%,#111827_48%,#05070b_100%)]">
-              {previewCapture ? (
+              {previewCapture && !previewUsesInformationFallback ? (
                 <div className="absolute inset-0">
                   <CaptureThumbnail config={previewCapture} className="h-full w-full" />
+                </div>
+              ) : previewCapture ? (
+                <div className="absolute inset-0 flex items-center justify-center bg-[radial-gradient(circle_at_50%_35%,#244050_0%,#111827_52%,#05070b_100%)]">
+                  <div className="max-w-[80%] text-center text-gray-400">
+                    <div className="text-4xl font-light tracking-[.18em] text-gray-300">LIVE</div>
+                    <div className="mt-2 truncate text-xs text-gray-400">{previewCapture.videoLabel}</div>
+                    <div className="mt-1 text-[10px] text-gray-600">Информационный внешний источник</div>
+                  </div>
                 </div>
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -402,14 +448,14 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                     <button
                       type="button"
                       onClick={publishSpeaker}
-                      disabled={!selectedSpeaker.name.trim()}
+                      disabled={!sourceIdentity || !selectedSpeaker.name.trim()}
                       className="rounded-lg bg-cyan-700 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-35"
                     >
                       {selectedSpeakerIsLive ? 'Обновить' : 'Показать'}
                     </button>
                     <button
                       type="button"
-                      onClick={() => setBroadcastTitlesOutput({ speakerVisible: false })}
+                      onClick={() => setTargetTitlesOutput({ speakerVisible: false })}
                       disabled={!broadcastTitlesOutput.speakerVisible}
                       className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs font-semibold text-gray-300 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
                     >
@@ -510,14 +556,14 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                 <button
                   type="button"
                   onClick={publishEvent}
-                  disabled={!broadcastTitles.eventInfo.trim()}
+                  disabled={!sourceIdentity || !broadcastTitles.eventInfo.trim()}
                   className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-35"
                 >
                   {broadcastTitlesOutput.eventVisible ? 'Обновить' : 'Показать'}
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBroadcastTitlesOutput({ eventVisible: false })}
+                  onClick={() => setTargetTitlesOutput({ eventVisible: false })}
                   disabled={!broadcastTitlesOutput.eventVisible}
                   className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs font-semibold text-gray-300 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
                 >
@@ -528,7 +574,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
 
             <button
               type="button"
-              onClick={() => setBroadcastTitlesOutput({ speakerVisible: false, eventVisible: false })}
+              onClick={() => setTargetTitlesOutput({ speakerVisible: false, eventVisible: false })}
               disabled={!anythingVisible}
               className="w-full rounded-lg border border-red-900/70 bg-red-950/30 px-3 py-2.5 text-xs font-semibold text-red-300 hover:bg-red-950/60 disabled:cursor-not-allowed disabled:opacity-30"
             >

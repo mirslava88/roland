@@ -1,7 +1,27 @@
-import { useEffect, useMemo, useRef } from 'react'
-import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  captureSourceIdentity,
+  DEFAULT_BROADCAST_TITLES_OUTPUT,
+  useAppStore
+} from '../../stores/useAppStore'
 
 const notesCache = new Map<string, string>()
+
+function currentInformationDisplayState(): InformationDisplayState {
+  const state = useAppStore.getState()
+  const sourceIdentity = state.informationMedia?.type === 'capture'
+    ? captureSourceIdentity(state.informationMedia.capture)
+    : null
+  return {
+    media: state.informationMedia,
+    displayTimer: false,
+    backdropImage: state.backdropImage,
+    titleSourceIdentity: sourceIdentity,
+    titles: sourceIdentity
+      ? state.captureTitlesOutputs[sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+      : DEFAULT_BROADCAST_TITLES_OUTPUT
+  }
+}
 
 function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>): void {
   const {
@@ -23,6 +43,12 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
   const playback = activeFile?.type === 'video'
     ? videoPlayback[activeFile.path]
     : undefined
+  const titleSourceIdentity = activeFile?.type === 'capture'
+    ? captureSourceIdentity(activeFile.capture)
+    : null
+  const titles = titleSourceIdentity
+    ? state.captureTitlesOutputs[titleSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    : DEFAULT_BROADCAST_TITLES_OUTPUT
   let directContent: ProgramDirectContent | null = null
   if (activeFile?.type === 'pdf') {
     directContent = {
@@ -40,6 +66,12 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     }
   } else if (activeFile?.type === 'other' && activeFile.isImage) {
     directContent = { type: 'image', path: activeFile.path }
+  } else if (activeFile?.type === 'capture' && activeFile.capture) {
+    directContent = {
+      type: 'capture',
+      path: activeFile.path,
+      capture: activeFile.capture
+    }
   } else if (backdropImage && (!activeFile || activeFile.isAudio)) {
     directContent = { type: 'backdrop', path: backdropImage }
   }
@@ -57,7 +89,9 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     contentAspectRatio: presentationAspectRatio,
     directContent,
     active: mirrorActive,
-    backdropImage
+    backdropImage,
+    titleSourceIdentity,
+    titles
   })
   if (activeFile?.type === 'presentation') {
     window.api.dbgLog(
@@ -71,34 +105,54 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
 function useAuxiliaryWindows(
   role: AuxiliaryDisplayRole,
   ids: number[],
-  setDisplayAssignment: (displayId: number, mode: DisplayOutputMode) => void
+  topologyRevision: number
 ): void {
   const signature = ids.join(',')
+  const previousIdsRef = useRef<number[]>([])
   useEffect(() => {
     let cancelled = false
+    const previousIds = previousIdsRef.current
+    previousIdsRef.current = [...ids]
     const reconcile = async (): Promise<void> => {
-      await window.api.closeAuxiliaryWindow(role)
+      const desiredIds = new Set(ids)
+      // Close only displays that no longer carry this role. Re-running a
+      // topology reconciliation must not blink healthy windows on the other
+      // outputs just because one monitor was switched to another input.
+      for (const previousDisplayId of previousIds) {
+        if (desiredIds.has(previousDisplayId)) continue
+        await window.api.closeAuxiliaryWindow(role, previousDisplayId)
+      }
       for (const displayId of ids) {
         if (cancelled) return
-        const opened = await window.api.openAuxiliaryWindow(role, displayId)
-        // A newer role/primary-display reconciliation may have replaced this
-        // run while the native fullscreen window was opening. Never let a
-        // stale failure turn the newly assigned program display back to Off.
-        if (cancelled) return
-        if (!opened.success) {
-          window.api.dbgLog(`${role} display open failed id=${displayId}: ${opened.error || 'unknown error'}`)
-          setDisplayAssignment(displayId, 'off')
+        let opened: Awaited<ReturnType<typeof window.api.openAuxiliaryWindow>> | null = null
+        for (let attempt = 1; attempt <= 5 && !cancelled; attempt++) {
+          opened = await window.api.openAuxiliaryWindow(role, displayId)
+          if (opened.success) break
+          window.api.dbgLog(
+            `${role} display open retry id=${displayId} attempt=${attempt}/5: ` +
+            `${opened.error || 'unknown error'}`
+          )
+          if (attempt < 5) {
+            await new Promise((resolve) => setTimeout(resolve, attempt * 300))
+          }
+        }
+        // Opening can race Windows' remove/add topology stabilization. A
+        // transient failure must never rewrite the user's desired role to Off;
+        // the next topology reconciliation will try again.
+        if (!cancelled && !opened?.success) {
+          window.api.dbgLog(`${role} display unavailable id=${displayId}; assignment retained`)
         }
       }
     }
     void reconcile()
     return () => { cancelled = true }
-  }, [role, setDisplayAssignment, signature])
+  }, [role, signature, topologyRevision])
 }
 
 export function AuxiliaryDisplayBridge(): null {
   const taskbarSyncChainRef = useRef<Promise<void>>(Promise.resolve())
   const taskbarSyncRevisionRef = useRef(0)
+  const [displayTopologyRevision, setDisplayTopologyRevision] = useState(0)
   const {
     activeFile,
     isPlaying,
@@ -112,6 +166,7 @@ export function AuxiliaryDisplayBridge(): null {
     displayAssignments,
     selectedDisplayId,
     informationMedia,
+    captureTitlesOutputs,
     backdropImage,
     videoLoopTrack,
     videoPlayback,
@@ -124,7 +179,6 @@ export function AuxiliaryDisplayBridge(): null {
     timerTextOpacity,
     eventTimer,
     eventTimerOutput,
-    setDisplayAssignment,
     setInformationMedia
   } = useAppStore()
 
@@ -151,24 +205,35 @@ export function AuxiliaryDisplayBridge(): null {
     }
   }, [displayAssignments, displays, selectedDisplayId])
 
-  useAuxiliaryWindows('mirror', roleIds.mirror, setDisplayAssignment)
-  useAuxiliaryWindows('speaker', roleIds.speaker, setDisplayAssignment)
-  useAuxiliaryWindows('info', roleIds.info, setDisplayAssignment)
-  useAuxiliaryWindows('timer', roleIds.timer, setDisplayAssignment)
-  useAuxiliaryWindows('event-timer', roleIds.eventTimer, setDisplayAssignment)
-  useAuxiliaryWindows('backdrop', roleIds.backdrop, setDisplayAssignment)
+  // Windows can publish remove + add for the same display id before React
+  // commits an intermediate render. The final roleIds signature is then
+  // unchanged even though main already closed that display's native window.
+  // Count every topology push so the surviving assignment is always reopened.
+  useEffect(() => window.api.on('displays-changed', () => {
+    setDisplayTopologyRevision((revision) => revision + 1)
+  }), [])
+
+  useAuxiliaryWindows('mirror', roleIds.mirror, displayTopologyRevision)
+  useAuxiliaryWindows('speaker', roleIds.speaker, displayTopologyRevision)
+  useAuxiliaryWindows('info', roleIds.info, displayTopologyRevision)
+  useAuxiliaryWindows('timer', roleIds.timer, displayTopologyRevision)
+  useAuxiliaryWindows('event-timer', roleIds.eventTimer, displayTopologyRevision)
+  useAuxiliaryWindows('backdrop', roleIds.backdrop, displayTopologyRevision)
 
   const externalDisplays = useMemo(() => displays
     .filter((display) => !display.isPrimary), [displays])
   const externalDisplaySignature = externalDisplays.map((display) => (
     `${display.id}:${display.bounds.x},${display.bounds.y},${display.bounds.width},${display.bounds.height}@${display.scaleFactor}`
   )).join('|')
-  const hasInformationOutput = informationMedia !== null &&
-    Object.values(displayAssignments).includes('information')
-  const hasTimerOutput = timerDuration > 0 &&
-    Object.values(displayAssignments).includes('timer')
-  const hasEventTimerOutput = eventTimerOutput?.live === true &&
-    Object.values(displayAssignments).includes('event-timer')
+  const hasInformationOutput = informationMedia !== null && roleIds.info.length > 0
+  const informationSourceIdentity = informationMedia?.type === 'capture'
+    ? captureSourceIdentity(informationMedia.capture)
+    : null
+  const informationTitles = informationSourceIdentity
+    ? captureTitlesOutputs[informationSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    : DEFAULT_BROADCAST_TITLES_OUTPUT
+  const hasTimerOutput = timerDuration > 0 && roleIds.timer.length > 0
+  const hasEventTimerOutput = eventTimerOutput?.live === true && roleIds.eventTimer.length > 0
   const taskbarSuppressionActive =
     externalDisplays.length > 0 && (
       backdropImage !== null ||
@@ -213,12 +278,7 @@ export function AuxiliaryDisplayBridge(): null {
           await window.api.hideTaskbar(display.bounds)
         }
       })
-  }, [externalDisplaySignature, taskbarOutputPhase, taskbarSuppressionActive])
-
-  useEffect(() => window.api.on('auxiliary-window-closed', (...args: unknown[]) => {
-    const data = args[0] as { role?: AuxiliaryDisplayRole; displayId?: number }
-    if (typeof data.displayId === 'number') setDisplayAssignment(data.displayId, 'off')
-  }), [setDisplayAssignment])
+  }, [displayTopologyRevision, externalDisplaySignature, taskbarOutputPhase, taskbarSuppressionActive])
 
   useEffect(() => window.api.on('event-timer-ready', (...args: unknown[]) => {
     const data = args[0] as { displayId?: number } | undefined
@@ -237,6 +297,12 @@ export function AuxiliaryDisplayBridge(): null {
     // The auxiliary renderer installs its React listener after did-finish-load.
     // Re-send a fresh snapshot now so it cannot miss main's earlier cache replay.
     sendProgramMirrorState(useAppStore.getState())
+  }), [])
+
+  useEffect(() => window.api.on('information-state-ready', (...args: unknown[]) => {
+    const data = args[0] as { displayId?: number | null } | undefined
+    window.api.dbgLog(`information display state listener ready display=${data?.displayId ?? 'unknown'}`)
+    window.api.sendToAuxiliary('info', 'information-state', currentInformationDisplayState())
   }), [])
 
   useEffect(() => window.api.on('information-video-ended', (...args: unknown[]) => {
@@ -277,6 +343,7 @@ export function AuxiliaryDisplayBridge(): null {
   }, [
     activeFile,
     backdropImage,
+    captureTitlesOutputs,
     currentSlide,
     displays,
     isPlaying,
@@ -342,7 +409,9 @@ export function AuxiliaryDisplayBridge(): null {
       if (
         latest.activeFile?.path !== activeFile.path ||
         latest.currentSlide !== safeCurrent ||
-        !Object.values(latest.displayAssignments).includes('speaker')
+        !latest.displays.some((display) => (
+          !display.isPrimary && latest.displayAssignments[String(display.id)] === 'speaker'
+        ))
       ) return
       const notes = notesResult.success ? notesResult.notes || '' : ''
       notesCache.set(cacheKey, notes)
@@ -362,17 +431,14 @@ export function AuxiliaryDisplayBridge(): null {
 
   useEffect(() => {
     window.api.sendToAuxiliary('backdrop', 'backdrop-state', { backdropImage })
-    window.api.sendToAuxiliary('info', 'information-state', {
-      media: informationMedia,
-      displayTimer: false,
-      backdropImage
-    } satisfies InformationDisplayState)
+    window.api.sendToAuxiliary('info', 'information-state', currentInformationDisplayState())
     window.api.sendToAuxiliary('timer', 'information-state', {
       media: null,
       displayTimer: timerDuration > 0,
-      backdropImage
+      backdropImage,
+      titleSourceIdentity: null
     } satisfies InformationDisplayState)
-  }, [backdropImage, informationMedia, timerDuration])
+  }, [backdropImage, informationMedia, informationTitles, timerDuration])
 
   useEffect(() => {
     const timerState = {

@@ -1,6 +1,14 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useAppStore, ChannelState, ChannelId, resetPptxNavState, awaitPptxGotoChainIdle } from '../../stores/useAppStore'
+import {
+  captureSourceIdentity,
+  DEFAULT_BROADCAST_TITLES_OUTPUT,
+  useAppStore,
+  ChannelState,
+  ChannelId,
+  resetPptxNavState,
+  awaitPptxGotoChainIdle
+} from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
@@ -597,6 +605,12 @@ export function PreviewPanel(): JSX.Element {
       // [MAIN], [DAEMON], [R] логами при диагностике мерцаний.
       window.api.dbgLog(`TAKE +${ms}ms: ${step}`)
     }
+    const clearCommittedCaptureTitleSource = (reason: string): void => {
+      const state = useAppStore.getState()
+      if (!state.programCaptureTitlesSourceIdentity) return
+      state.setProgramCaptureTitlesSourceIdentity(null)
+      log(`program capture titles cleared after ${reason}`)
+    }
     let cancelCleanupPromise: Promise<void> | null = null
     const finishCancelledTake = (): Promise<void> => {
       if (cancelCleanupPromise) return cancelCleanupPromise
@@ -1146,8 +1160,9 @@ export function PreviewPanel(): JSX.Element {
       // Прячем явно через ShowWindow(SW_HIDE); восстанавливаем на exit.
       try {
         const { selectedDisplayId: sid, displays: disps } = useAppStore.getState()
-        const td = disps.find((d) => d.id === sid) || disps.find((d) => !d.isPrimary) || disps[0]
-        if (td) window.api.hideTaskbar(td.bounds)
+        const td = disps.find((d) => !d.isPrimary && d.id === sid) ||
+          disps.find((d) => !d.isPrimary)
+        if (td) void window.api.hideTaskbar(td.bounds)
       } catch { /* ignore */ }
 
       const slideAfterLaunch = useAppStore.getState().currentSlide
@@ -1197,6 +1212,7 @@ export function PreviewPanel(): JSX.Element {
         await finishCancelledTake()
         return
       }
+      clearCommittedCaptureTitleSource('PowerPoint takeover')
       const shouldPinPowerPointTarget =
         !useSeamlessLayerSwitch &&
         (prevActiveFile?.type === 'pdf' ||
@@ -1297,6 +1313,7 @@ export function PreviewPanel(): JSX.Element {
         await finishCancelledTake()
         return
       }
+      clearCommittedCaptureTitleSource('audio takeover')
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
       await releaseInactiveBrowserFullscreen()
@@ -1460,6 +1477,7 @@ export function PreviewPanel(): JSX.Element {
         await finishCancelledTake()
         return
       }
+      clearCommittedCaptureTitleSource('external document takeover')
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
       await releaseInactiveBrowserFullscreen()
@@ -1980,9 +1998,11 @@ function ChannelPanel({
   const [slideFocused, setSlideFocused] = useState(false)
   const [captionEditing, setCaptionEditing] = useState(false)
   const [captionDraft, setCaptionDraft] = useState(channel.caption)
-  const [titlesMenu, setTitlesMenu] = useState<{ x: number; y: number } | null>(null)
-  const [pendingSpeakerId, setPendingSpeakerId] = useState<string | null>(null)
-  const [pendingEventTitle, setPendingEventTitle] = useState(false)
+  const [titlesMenu, setTitlesMenu] = useState<{
+    x: number
+    y: number
+    sourceIdentity: string
+  } | null>(null)
   const captionInputRef = useRef<HTMLInputElement>(null)
   const cancelCaptionOnBlurRef = useRef(false)
 
@@ -2066,16 +2086,25 @@ function ChannelPanel({
     isPresentationWindowOpen,
     activeFile: storeActiveFile,
     broadcastTitles,
-    broadcastTitlesOutput,
+    captureTitlesOutputs,
     setBroadcastTitles,
-    setBroadcastTitlesOutput
+    setCaptureTitlesOutput
   } = useAppStore()
+  const channelSourceIdentity = channel.file?.type === 'capture'
+    ? captureSourceIdentity(channel.file.capture)
+    : null
+  const channelTitlesOutput = channelSourceIdentity
+    ? captureTitlesOutputs[channelSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    : DEFAULT_BROADCAST_TITLES_OUTPUT
+  const titlesMenuOutput = titlesMenu
+    ? captureTitlesOutputs[titlesMenu.sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    : channelTitlesOutput
 
-  const publishSpeaker = (speakerId: string): void => {
+  const publishSpeaker = (sourceIdentity: string, speakerId: string): void => {
     const speaker = useAppStore.getState().broadcastTitles.speakers.find((item) => item.id === speakerId)
     if (!speaker?.name.trim()) return
     const titles = useAppStore.getState().broadcastTitles
-    setBroadcastTitlesOutput({
+    setCaptureTitlesOutput(sourceIdentity, {
       speakerId: speaker.id,
       speakerName: speaker.name,
       speakerRole: speaker.role,
@@ -2092,10 +2121,10 @@ function ChannelPanel({
     })
   }
 
-  const publishEventTitle = (): void => {
+  const publishEventTitle = (sourceIdentity: string): void => {
     const titles = useAppStore.getState().broadcastTitles
     if (!titles.eventInfo.trim()) return
-    setBroadcastTitlesOutput({
+    setCaptureTitlesOutput(sourceIdentity, {
       eventLabel: titles.eventLabel,
       eventInfo: titles.eventInfo,
       eventEnterEffect: titles.eventEnterEffect,
@@ -2113,66 +2142,42 @@ function ChannelPanel({
   }
 
   useEffect(() => {
-    if (!pendingSpeakerId || channel.file?.type !== 'capture') return
-    const expectedSourceId = channel.file.capture?.sourceId
-    const activeSourceId = storeActiveFile?.type === 'capture' ? storeActiveFile.capture?.sourceId : null
-    if (!expectedSourceId || activeSourceId !== expectedSourceId) return
-    publishSpeaker(pendingSpeakerId)
-    setPendingSpeakerId(null)
-  }, [pendingSpeakerId, storeActiveFile, channel.file])
-
-  useEffect(() => {
-    if (!pendingEventTitle || channel.file?.type !== 'capture') return
-    const expectedSourceId = channel.file.capture?.sourceId
-    const activeSourceId = storeActiveFile?.type === 'capture' ? storeActiveFile.capture?.sourceId : null
-    if (!expectedSourceId || activeSourceId !== expectedSourceId) return
-    publishEventTitle()
-    setPendingEventTitle(false)
-  }, [pendingEventTitle, storeActiveFile, channel.file])
-
-  useEffect(() => {
     if (channel.file?.type !== 'capture') {
       setTitlesMenu(null)
-      setPendingSpeakerId(null)
-      setPendingEventTitle(false)
     }
   }, [channel.file])
 
+  useEffect(() => {
+    setTitlesMenu((current) => (
+      current && current.sourceIdentity !== channelSourceIdentity ? null : current
+    ))
+  }, [channelSourceIdentity])
+
   const handleTitlesContextMenu = (event: React.MouseEvent<HTMLDivElement>): void => {
-    if (channel.file?.type !== 'capture') return
+    if (channel.file?.type !== 'capture' || !channelSourceIdentity) return
     event.preventDefault()
     event.stopPropagation()
-    onSelect()
     const menuWidth = 310
     const menuHeight = Math.min(610, 270 + broadcastTitles.speakers.length * 54)
     setTitlesMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8))
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+      sourceIdentity: channelSourceIdentity
     })
   }
 
-  const takeAndPublishSpeaker = (speakerId: string): void => {
+  const publishChannelSpeaker = (speakerId: string): void => {
+    const sourceIdentity = titlesMenu?.sourceIdentity
     setTitlesMenu(null)
     setBroadcastTitles({ selectedSpeakerId: speakerId })
-    if (isLive) {
-      publishSpeaker(speakerId)
-      return
-    }
-    if (isTaking) return
-    setPendingSpeakerId(speakerId)
-    onTake()
+    if (sourceIdentity) publishSpeaker(sourceIdentity, speakerId)
   }
 
-  const takeAndPublishEvent = (): void => {
+  const publishChannelEvent = (): void => {
+    const sourceIdentity = titlesMenu?.sourceIdentity
     setTitlesMenu(null)
     if (!broadcastTitles.eventInfo.trim()) return
-    if (isLive) {
-      publishEventTitle()
-      return
-    }
-    if (isTaking) return
-    setPendingEventTitle(true)
-    onTake()
+    if (sourceIdentity) publishEventTitle(sourceIdentity)
   }
   const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation' || (storeActiveFile?.type === 'other' && !storeActiveFile.isImage)
   const showSelected = isSelected && !isOutputActive
@@ -2300,8 +2305,11 @@ function ChannelPanel({
             Перетащите материал сюда
           </div>
         )}
-        {isLive && channel.file?.type === 'capture' && (
-          <BroadcastTitlesOverlay titles={broadcastTitlesOutput} />
+        {channel.file?.type === 'capture' && (
+          <BroadcastTitlesOverlay
+            key={channelSourceIdentity || 'no-channel-title-source'}
+            titles={channelTitlesOutput}
+          />
         )}
         {isTaking && openingMessage && (
           <div
@@ -2440,12 +2448,15 @@ function ChannelPanel({
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
             onDoubleClick={(event) => event.stopPropagation()}
-            onContextMenu={(event) => event.preventDefault()}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+            }}
           >
             <div className="border-b border-gray-700 px-3 py-2.5">
-              <div className="text-xs font-semibold text-white">Титры канала</div>
+              <div className="text-xs font-semibold text-white">Титры внешнего источника</div>
               <div className="mt-0.5 text-[10px] text-gray-500">
-                Канал {label}{isLive ? ' уже в эфире' : ' будет отправлен в эфир'}
+                Канал {label} · основной эфир не переключается
               </div>
             </div>
 
@@ -2455,13 +2466,13 @@ function ChannelPanel({
               </div>
               <button
                 type="button"
-                disabled={!broadcastTitles.eventInfo.trim() || isTaking}
-                onClick={takeAndPublishEvent}
+                disabled={!broadcastTitles.eventInfo.trim()}
+                onClick={publishChannelEvent}
                 className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-                  broadcastTitlesOutput.eventVisible ? 'bg-emerald-900/40' : 'hover:bg-gray-700/70'
+                  titlesMenuOutput.eventVisible ? 'bg-emerald-900/40' : 'hover:bg-gray-700/70'
                 }`}
               >
-                <span className={`h-2 w-2 shrink-0 rounded-full ${broadcastTitlesOutput.eventVisible ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                <span className={`h-2 w-2 shrink-0 rounded-full ${titlesMenuOutput.eventVisible ? 'bg-red-500' : 'bg-emerald-500'}`} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-xs font-medium text-gray-100">
                     {broadcastTitles.eventLabel.trim() || 'Без заголовка'}
@@ -2470,14 +2481,15 @@ function ChannelPanel({
                     {broadcastTitles.eventInfo.trim() || 'Заполните информацию через кнопку «▰ Титры»'}
                   </span>
                 </span>
-                {broadcastTitlesOutput.eventVisible && <span className="text-[8px] font-semibold text-red-300">ЭФИР</span>}
+                {titlesMenuOutput.eventVisible && <span className="text-[8px] font-semibold text-red-300">ВКЛ</span>}
               </button>
-              {broadcastTitlesOutput.eventVisible && (
+              {titlesMenuOutput.eventVisible && (
                 <button
                   type="button"
                   onClick={() => {
+                    const sourceIdentity = titlesMenu.sourceIdentity
                     setTitlesMenu(null)
-                    setBroadcastTitlesOutput({ eventVisible: false })
+                    setCaptureTitlesOutput(sourceIdentity, { eventVisible: false })
                   }}
                   className="mt-1 w-full rounded-md px-2.5 py-1.5 text-left text-[10px] font-medium text-red-300 hover:bg-red-950/40"
                 >
@@ -2493,13 +2505,13 @@ function ChannelPanel({
             {broadcastTitles.speakers.length > 0 ? (
               <div className="max-h-[360px] overflow-y-auto p-1.5">
                 {broadcastTitles.speakers.map((speaker) => {
-                  const live = broadcastTitlesOutput.speakerVisible && broadcastTitlesOutput.speakerId === speaker.id
+                  const live = titlesMenuOutput.speakerVisible && titlesMenuOutput.speakerId === speaker.id
                   return (
                     <button
                       key={speaker.id}
                       type="button"
-                      disabled={!speaker.name.trim() || isTaking}
-                      onClick={() => takeAndPublishSpeaker(speaker.id)}
+                      disabled={!speaker.name.trim()}
+                      onClick={() => publishChannelSpeaker(speaker.id)}
                       className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
                         live ? 'bg-cyan-900/45' : 'hover:bg-gray-700/70'
                       }`}
@@ -2513,7 +2525,7 @@ function ChannelPanel({
                           {speaker.role.trim() || 'Должность не указана'}
                         </span>
                       </span>
-                      {live && <span className="text-[8px] font-semibold text-red-300">ЭФИР</span>}
+                      {live && <span className="text-[8px] font-semibold text-red-300">ВКЛ</span>}
                     </button>
                   )
                 })}
@@ -2524,12 +2536,13 @@ function ChannelPanel({
               </div>
             )}
 
-            {broadcastTitlesOutput.speakerVisible && (
+            {titlesMenuOutput.speakerVisible && (
               <button
                 type="button"
                 onClick={() => {
+                  const sourceIdentity = titlesMenu.sourceIdentity
                   setTitlesMenu(null)
-                  setBroadcastTitlesOutput({ speakerVisible: false })
+                  setCaptureTitlesOutput(sourceIdentity, { speakerVisible: false })
                 }}
                 className="w-full border-t border-gray-700 px-3 py-2.5 text-left text-[11px] font-medium text-red-300 hover:bg-red-950/40"
               >

@@ -995,7 +995,9 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     eventTimer,
     eventTimerOutput: null,
     broadcastTitles,
-    broadcastTitlesOutput: { ...DEFAULT_BROADCAST_TITLES_OUTPUT }
+    broadcastTitlesOutput: { ...DEFAULT_BROADCAST_TITLES_OUTPUT },
+    captureTitlesOutputs: {},
+    programCaptureTitlesSourceIdentity: null
   })
 
   // Loading a configuration is allowed only while no channel is on air. If

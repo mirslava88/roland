@@ -80,8 +80,9 @@ interface DisplayInfo {
 type AuxiliaryDisplayRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop'
 
 interface ProgramDirectContent {
-  type: 'pdf' | 'video' | 'image' | 'backdrop'
+  type: 'pdf' | 'video' | 'image' | 'backdrop' | 'capture'
   path: string
+  capture?: CaptureSourceConfig
   currentSlide?: number
   currentTime?: number
   playing?: boolean
@@ -120,6 +121,8 @@ interface InformationDisplayState {
   } | null
   displayTimer: boolean
   backdropImage?: string | null
+  titles?: import('./stores/useAppStore').BroadcastTitlesOutput | null
+  titleSourceIdentity?: string | null
 }
 
 interface TimerDisplayState {

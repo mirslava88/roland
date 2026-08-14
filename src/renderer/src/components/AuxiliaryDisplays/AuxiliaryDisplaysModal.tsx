@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { mediaUrl } from '../../media'
 import { renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
 import { DesktopCapturePicker } from '../Capture/DesktopCapturePicker'
+import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
 import {
+  captureSourceIdentity,
+  DEFAULT_BROADCAST_TITLES_OUTPUT,
   useAppStore,
+  type BroadcastTitlesOutput,
   type DisplayOutputMode,
   type InformationMediaConfig,
   type InformationMediaType
@@ -173,7 +178,7 @@ function InformationDevicePicker({
   const selectedDevice = videoDevices.find((device) => device.deviceId === selectedId)
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-6">
+    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/75 p-6">
       <div
         className="w-full max-w-lg rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
@@ -278,8 +283,12 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
     activeFile,
     isPresentationWindowOpen,
     informationMedia,
+    broadcastTitles,
+    captureTitlesOutputs,
     setDisplayName,
-    setInformationMedia
+    setInformationMedia,
+    setBroadcastTitles,
+    setCaptureTitlesOutput
   } = useAppStore()
   const [mediaStatus, setMediaStatus] = useState('')
   const [loadingMedia, setLoadingMedia] = useState(false)
@@ -287,6 +296,15 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
   const [displayStatus, setDisplayStatus] = useState('')
   const [devicePickerOpen, setDevicePickerOpen] = useState(false)
   const [desktopPickerOpen, setDesktopPickerOpen] = useState(false)
+  const [titlesMenu, setTitlesMenu] = useState<{ x: number; y: number } | null>(null)
+
+  const informationSourceIdentity = informationMedia?.type === 'capture'
+    ? captureSourceIdentity(informationMedia.capture)
+    : null
+  const informationTitlesOutput = informationSourceIdentity
+    ? captureTitlesOutputs[informationSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+    : DEFAULT_BROADCAST_TITLES_OUTPUT
+  const informationTitlesVisible = informationTitlesOutput.speakerVisible || informationTitlesOutput.eventVisible
 
   const externalDisplays = useMemo(
     () => displays.filter((display) => !display.isPrimary),
@@ -295,6 +313,88 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
   const informationDisplayIds = useMemo(() => externalDisplays
     .filter((display) => displayAssignments[String(display.id)] === 'information')
     .map((display) => display.id), [displayAssignments, externalDisplays])
+
+  useEffect(() => {
+    let cancelled = false
+    let pushRevision = 0
+    const unsubscribe = window.api.on('displays-changed', () => { pushRevision++ })
+    const requestRevision = pushRevision
+    window.api.getDisplays().then((nextDisplays) => {
+      if (cancelled || pushRevision !== requestRevision) return
+      useAppStore.getState().setDisplays(nextDisplays)
+      window.api.dbgLog(`screens modal refreshed display topology count=${nextDisplays.length}`)
+    }).catch((error: unknown) => {
+      window.api.dbgLog(`screens modal display refresh failed error=${String(error)}`)
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (informationMedia?.type !== 'capture') setTitlesMenu(null)
+  }, [informationMedia?.type])
+
+  const openTitlesMenu = (clientX: number, clientY: number): void => {
+    if (!informationSourceIdentity) return
+    const menuWidth = 320
+    const menuHeight = Math.min(620, 310 + broadcastTitles.speakers.length * 54)
+    setTitlesMenu({
+      x: Math.max(8, Math.min(clientX, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(clientY, window.innerHeight - menuHeight - 8))
+    })
+  }
+
+  const publishInformationSpeaker = (speakerId: string): void => {
+    if (!informationSourceIdentity) return
+    const speaker = useAppStore.getState().broadcastTitles.speakers.find((item) => item.id === speakerId)
+    if (!speaker?.name.trim()) return
+    const titles = useAppStore.getState().broadcastTitles
+    setBroadcastTitles({ selectedSpeakerId: speaker.id })
+    setCaptureTitlesOutput(informationSourceIdentity, {
+      speakerId: speaker.id,
+      speakerName: speaker.name,
+      speakerRole: speaker.role,
+      speakerEnterEffect: titles.speakerEnterEffect,
+      speakerExitEffect: titles.speakerExitEffect,
+      speakerAutoHideSeconds: titles.speakerAutoHideSeconds,
+      speakerStyle: titles.speakerStyle,
+      speakerTextColor: titles.speakerTextColor,
+      speakerBackgroundStart: titles.speakerBackgroundStart,
+      speakerBackgroundEnd: titles.speakerBackgroundEnd,
+      speakerAccentStart: titles.speakerAccentStart,
+      speakerAccentEnd: titles.speakerAccentEnd,
+      speakerVisible: true
+    })
+    setTitlesMenu(null)
+  }
+
+  const publishInformationEvent = (): void => {
+    if (!informationSourceIdentity) return
+    const titles = useAppStore.getState().broadcastTitles
+    if (!titles.eventInfo.trim()) return
+    setCaptureTitlesOutput(informationSourceIdentity, {
+      eventLabel: titles.eventLabel,
+      eventInfo: titles.eventInfo,
+      eventEnterEffect: titles.eventEnterEffect,
+      eventExitEffect: titles.eventExitEffect,
+      eventAutoHideSeconds: titles.eventAutoHideSeconds,
+      eventPosition: titles.eventPosition,
+      eventStyle: titles.eventStyle,
+      eventTextColor: titles.eventTextColor,
+      eventBackgroundStart: titles.eventBackgroundStart,
+      eventBackgroundEnd: titles.eventBackgroundEnd,
+      eventAccentStart: titles.eventAccentStart,
+      eventAccentEnd: titles.eventAccentEnd,
+      eventVisible: true
+    })
+    setTitlesMenu(null)
+  }
+
+  const updateInformationTitles = (update: Partial<BroadcastTitlesOutput>): void => {
+    if (informationSourceIdentity) setCaptureTitlesOutput(informationSourceIdentity, update)
+  }
 
   const chooseInformationMedia = async (): Promise<void> => {
     const path = await window.api.selectInformationMedia()
@@ -638,7 +738,9 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
               </div>
             )}
 
-            {externalDisplays.length === 0 && (
+            {displays.length === 0 ? (
+              <div className="mt-3 text-xs text-gray-400">Поиск подключённых мониторов…</div>
+            ) : externalDisplays.length === 0 && (
               <div className="mt-3 text-xs text-amber-300">Дополнительные мониторы не обнаружены.</div>
             )}
           </section>
@@ -774,8 +876,41 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
                 </div>
 
                 <div>
-                  <div className="text-[10px] text-gray-500 mb-1">Предварительный просмотр</div>
-                  <div className="aspect-video rounded-lg border border-gray-700 bg-black overflow-hidden flex items-center justify-center">
+                  <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-gray-500">
+                    <span>Предварительный просмотр</span>
+                    {informationSourceIdentity && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          const bounds = event.currentTarget.getBoundingClientRect()
+                          openTitlesMenu(bounds.right - 320, bounds.bottom + 6)
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                        }}
+                        className={`rounded-md border px-2 py-0.5 text-[9px] font-semibold shadow transition-colors ${
+                          informationTitlesVisible
+                            ? 'border-cyan-400 bg-cyan-700 text-white hover:bg-cyan-600'
+                            : 'border-gray-600 bg-surface-100 text-gray-300 hover:border-cyan-500 hover:text-white'
+                        }`}
+                        title="Выбрать титр для этого внешнего источника"
+                      >
+                        ▰ Титры
+                      </button>
+                    )}
+                  </div>
+                  <div
+                    className="relative aspect-video rounded-lg border border-gray-700 bg-black overflow-hidden flex items-center justify-center"
+                    onContextMenu={(event) => {
+                      if (!informationSourceIdentity) return
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openTitlesMenu(event.clientX, event.clientY)
+                    }}
+                    title={informationSourceIdentity ? 'Правый клик — выбрать титр' : undefined}
+                  >
                     {currentPreview ? (
                       <img src={mediaUrl(currentPreview)} className="h-full w-full object-contain" draggable={false} />
                     ) : informationMedia.type === 'pdf' ? (
@@ -819,6 +954,12 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
                         <div className="text-xs">Видео готово к воспроизведению</div>
                       </div>
                     )}
+                    {informationSourceIdentity && (
+                      <BroadcastTitlesOverlay
+                        key={informationSourceIdentity}
+                        titles={informationTitlesOutput}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -833,6 +974,149 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
           </div>
         </div>
       </div>
+      {titlesMenu && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[150]"
+            onMouseDown={(event) => {
+              event.stopPropagation()
+              setTitlesMenu(null)
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setTitlesMenu(null)
+            }}
+          />
+          <div
+            className="fixed z-[151] max-h-[calc(100vh-16px)] w-[320px] overflow-y-auto rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"
+            style={{
+              left: titlesMenu.x,
+              top: titlesMenu.y,
+              maxHeight: Math.max(160, window.innerHeight - titlesMenu.y - 8)
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="border-b border-gray-700 px-3 py-2.5">
+              <div className="text-xs font-semibold text-white">Титры информационного экрана</div>
+              <div className="mt-0.5 truncate text-[10px] text-gray-500">
+                {informationMedia?.name || 'Внешний источник'}
+              </div>
+            </div>
+
+            <div className="border-b border-gray-700 p-1.5">
+              <div className="px-2 pb-1 pt-0.5 text-[9px] font-semibold uppercase tracking-[.12em] text-emerald-400">
+                Информация о мероприятии
+              </div>
+              <button
+                type="button"
+                disabled={!broadcastTitles.eventInfo.trim()}
+                onClick={publishInformationEvent}
+                className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                  informationTitlesOutput.eventVisible ? 'bg-emerald-900/40' : 'hover:bg-gray-700/70'
+                }`}
+              >
+                <span className={`h-2 w-2 shrink-0 rounded-full ${informationTitlesOutput.eventVisible ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium text-gray-100">
+                    {broadcastTitles.eventLabel.trim() || 'Без заголовка'}
+                  </span>
+                  <span className="block truncate text-[10px] text-gray-500">
+                    {broadcastTitles.eventInfo.trim() || 'Заполните информацию через кнопку «▰ Титры»'}
+                  </span>
+                </span>
+                {informationTitlesOutput.eventVisible && (
+                  <span className="text-[8px] font-semibold text-red-300">ЭФИР</span>
+                )}
+              </button>
+              {informationTitlesOutput.eventVisible && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateInformationTitles({ eventVisible: false })
+                    setTitlesMenu(null)
+                  }}
+                  className="mt-1 w-full rounded-md px-2.5 py-1.5 text-left text-[10px] font-medium text-red-300 hover:bg-red-950/40"
+                >
+                  Скрыть информацию о мероприятии
+                </button>
+              )}
+            </div>
+
+            <div className="px-3 pb-1 pt-2 text-[9px] font-semibold uppercase tracking-[.12em] text-cyan-400">
+              Выступающие
+            </div>
+            {broadcastTitles.speakers.length > 0 ? (
+              <div className="max-h-[310px] overflow-y-auto p-1.5">
+                {broadcastTitles.speakers.map((speaker) => {
+                  const live = informationTitlesOutput.speakerVisible &&
+                    informationTitlesOutput.speakerId === speaker.id
+                  return (
+                    <button
+                      key={speaker.id}
+                      type="button"
+                      disabled={!speaker.name.trim()}
+                      onClick={() => publishInformationSpeaker(speaker.id)}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                        live ? 'bg-cyan-900/45' : 'hover:bg-gray-700/70'
+                      }`}
+                    >
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${live ? 'bg-red-500' : 'bg-cyan-600'}`} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-medium text-gray-100">
+                          {speaker.name.trim() || 'ФИО не заполнено'}
+                        </span>
+                        <span className="block truncate text-[10px] text-gray-500">
+                          {speaker.role.trim() || 'Должность не указана'}
+                        </span>
+                      </span>
+                      {live && <span className="text-[8px] font-semibold text-red-300">ЭФИР</span>}
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="px-3 py-5 text-center text-[11px] text-gray-500">
+                Сначала добавьте выступающих через кнопку «▰ Титры» в верхней панели.
+              </div>
+            )}
+
+            {informationTitlesOutput.speakerVisible && (
+              <button
+                type="button"
+                onClick={() => {
+                  updateInformationTitles({ speakerVisible: false })
+                  setTitlesMenu(null)
+                }}
+                className="w-full border-t border-gray-700 px-3 py-2.5 text-left text-[11px] font-medium text-red-300 hover:bg-red-950/40"
+              >
+                Скрыть титр выступающего
+              </button>
+            )}
+
+            <div className="border-t border-gray-700 px-3 py-2.5">
+              {informationTitlesVisible && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateInformationTitles({ speakerVisible: false, eventVisible: false })
+                    setTitlesMenu(null)
+                  }}
+                  className="mb-2 w-full rounded-md border border-red-900/70 bg-red-950/30 px-2.5 py-1.5 text-left text-[10px] font-medium text-red-300 hover:bg-red-950/60"
+                >
+                  Скрыть все титры этого источника
+                </button>
+              )}
+              <p className="text-[9px] leading-relaxed text-gray-500">
+                Если этот же источник выбран в канале, титр синхронно появится и там.
+              </p>
+            </div>
+          </div>
+        </>,
+        document.body
+      )}
       {devicePickerOpen && (
         <InformationDevicePicker
           onClose={() => setDevicePickerOpen(false)}
@@ -843,6 +1127,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
         <DesktopCapturePicker
           excludedDisplayId={null}
           excludedDisplayIds={informationDisplayIds}
+          overlayZClassName="z-[130]"
           onClose={() => setDesktopPickerOpen(false)}
           onSelect={selectDesktopSource}
         />
