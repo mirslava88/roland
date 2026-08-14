@@ -669,7 +669,11 @@ function prewarmPresentationWindow(): void {
     // enumeration alive when the laptop starts without an external monitor.
     // Once an output is attached, move that same warm surface onto it instead
     // of creating a second CaptureHub and duplicate media streams.
-    if (externalDisplay) {
+    if (
+      externalDisplay &&
+      !presentationWindowRequestedVisible &&
+      activeContentType === null
+    ) {
       presentationDisplayId = externalDisplay.id
       presentationWindow.setBounds(externalDisplay.bounds)
       presentationWindow.setIgnoreMouseEvents(true)
@@ -1363,31 +1367,133 @@ function createWindows(): void {
   // it is parked. PDF/video must be moved to that same display before their
   // next frame is prepared, otherwise PowerPoint and Chromium diverge onto two
   // different monitors.
-  ipcMain.handle('place-presentation-window', (_event, displayId?: number): boolean => {
+  ipcMain.handle('place-presentation-window', async (_event, displayId?: number): Promise<boolean> => {
     if (!presentationWindow || presentationWindow.isDestroyed()) return false
+    const win = presentationWindow
 
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
-    const targetDisplay = displayId
-      ? displays.find((display) => display.id === displayId) || externalDisplay || primaryDisplay
-      : externalDisplay || primaryDisplay
-    presentationDisplayId = targetDisplay.id
-    const currentBounds = presentationWindow.getBounds()
+    const explicitlyRequestedDisplay = displayId === undefined
+      ? undefined
+      : displays.find((display) => display.id === displayId)
+    if (displayId !== undefined && !explicitlyRequestedDisplay) {
+      diagnosticLog('window', `presentation output relocate refused: display=${displayId} is disconnected`)
+      return false
+    }
+    const targetDisplay = explicitlyRequestedDisplay || externalDisplay || primaryDisplay
+    const originalBounds = win.getBounds()
+    const originalFullScreen = win.isFullScreen()
     const nextBounds = targetDisplay.bounds
     const changed =
-      currentBounds.x !== nextBounds.x || currentBounds.y !== nextBounds.y ||
-      currentBounds.width !== nextBounds.width || currentBounds.height !== nextBounds.height
+      originalBounds.x !== nextBounds.x || originalBounds.y !== nextBounds.y ||
+      originalBounds.width !== nextBounds.width || originalBounds.height !== nextBounds.height
 
-    if (changed) {
-      presentationWindow.setBounds(nextBounds)
+    const sameBounds = (a: Electron.Rectangle, b: Electron.Rectangle): boolean => (
+      a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+    )
+    const waitForFullScreenState = async (fullScreen: boolean): Promise<boolean> => {
+      if (win.isDestroyed()) return false
+      if (win.isFullScreen() === fullScreen) return true
+      const eventName = fullScreen ? 'enter-full-screen' : 'leave-full-screen'
+      return new Promise<boolean>((resolve) => {
+        let settled = false
+        const settle = (ready: boolean): void => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          clearInterval(poll)
+          win.removeListener(eventName, onFullScreenEvent)
+          resolve(ready)
+        }
+        const checkState = (): void => {
+          if (win.isDestroyed()) {
+            settle(false)
+            return
+          }
+          if (win.isFullScreen() === fullScreen) settle(true)
+        }
+        // Electron can emit enter/leave-full-screen just before
+        // BrowserWindow.isFullScreen() reflects the new native HWND state.
+        // The event is only a prompt to check again; polling is authoritative.
+        const onFullScreenEvent = (): void => {
+          setImmediate(checkState)
+        }
+        const timeout = setTimeout(() => {
+          settle(!win.isDestroyed() && win.isFullScreen() === fullScreen)
+        }, 2000)
+        const poll = setInterval(checkState, 25)
+        win.on(eventName, onFullScreenEvent)
+        try {
+          win.setFullScreen(fullScreen)
+        } catch {
+          settle(false)
+        }
+      })
+    }
+    const restoreOriginalPlacement = async (): Promise<boolean> => {
+      if (win.isDestroyed()) return false
+      try {
+        const boundsNeedRestore = !sameBounds(win.getBounds(), originalBounds)
+        if (boundsNeedRestore && win.isFullScreen() && !(await waitForFullScreenState(false))) {
+          return false
+        }
+        if (win.isDestroyed()) return false
+        if (boundsNeedRestore) win.setBounds(originalBounds)
+        if (originalFullScreen !== win.isFullScreen()) {
+          if (!(await waitForFullScreenState(originalFullScreen))) return false
+        }
+        return !win.isDestroyed() &&
+          sameBounds(win.getBounds(), originalBounds) &&
+          win.isFullScreen() === originalFullScreen
+      } catch {
+        return false
+      }
+    }
+
+    try {
+      if (changed) {
+        // Windows does not reliably honour setBounds() for a fullscreen HWND.
+        // Keep the existing transition overlay/live mirror above it, place the
+        // window while windowed, then return to fullscreen on the target.
+        if (win.isFullScreen() && !(await waitForFullScreenState(false))) {
+          throw new Error('Presentation output did not leave fullscreen for relocation')
+        }
+        if (win.isDestroyed()) throw new Error('Presentation output closed during relocation')
+        win.setBounds(nextBounds)
+        if (!(await waitForFullScreenState(true))) {
+          throw new Error('Presentation output did not return to fullscreen after relocation')
+        }
+      } else if (!win.isFullScreen()) {
+        // Recover a partially failed previous relocation before reporting the
+        // already-correct monitor as ready.
+        if (!(await waitForFullScreenState(true))) {
+          throw new Error('Presentation output did not enter fullscreen')
+        }
+      }
+
+      if (win.isDestroyed()) throw new Error('Presentation output closed during verification')
+      const actualBounds = win.getBounds()
+      const actualDisplay = screen.getDisplayMatching(actualBounds)
+      const placed = actualDisplay.id === targetDisplay.id && win.isFullScreen()
       diagnosticLog(
         'window',
-        `presentation output relocated display=${targetDisplay.id} ` +
-        `from=${JSON.stringify(currentBounds)} to=${JSON.stringify(nextBounds)}`
+        `presentation output relocate requested=${targetDisplay.id} actual=${actualDisplay.id} ` +
+        `from=${JSON.stringify(originalBounds)} target=${JSON.stringify(nextBounds)} ` +
+        `actualBounds=${JSON.stringify(actualBounds)} fullscreen=${win.isFullScreen()} ok=${placed}`
       )
+      if (!placed) throw new Error('Presentation output is not on the requested fullscreen display')
+      presentationDisplayId = targetDisplay.id
+      return true
+    } catch (error) {
+      const restored = await restoreOriginalPlacement()
+      diagnosticLog(
+        'window',
+        `presentation output relocate failed display=${targetDisplay.id} restored=${restored} ` +
+        `${formatDiagnosticError(error)}`
+      )
+      return false
     }
-    return true
   })
 
   ipcMain.handle('close-presentation-window', () => {
@@ -2410,12 +2516,28 @@ function createWindows(): void {
     }
 
     if (activeContentType === 'presentation') {
-      const physicalBounds = screen.dipToScreenRect(null, presentationTarget.bounds)
+      // An explicit program-display handoff can finish while this metrics job
+      // is in flight. Re-read the authoritative target immediately before the
+      // native relocate so a stale topology snapshot cannot move PowerPoint
+      // back onto the former main display after a successful handoff.
+      const latestDisplays = screen.getAllDisplays()
+      const latestPrimary = screen.getPrimaryDisplay()
+      const latestById = new Map(latestDisplays.map((display) => [display.id, display]))
+      const latestFallback = latestDisplays.find((display) => display.id !== latestPrimary.id) || latestPrimary
+      const latestPresentationTarget = latestById.get(presentationDisplayId ?? -1) || latestFallback
+      if (latestPresentationTarget.id !== presentationTarget.id) {
+        diagnosticLog(
+          'display',
+          `PowerPoint metrics relocate retargeted stale=${presentationTarget.id} latest=${latestPresentationTarget.id}`
+        )
+      }
+      presentationDisplayId = latestPresentationTarget.id
+      const physicalBounds = screen.dipToScreenRect(null, latestPresentationTarget.bounds)
       try {
         const result = await pptDaemon.send('relocate', { bounds: physicalBounds }, 5000)
         diagnosticLog(
           'display',
-          `PowerPoint metrics relocate display=${presentationTarget.id} ` +
+          `PowerPoint metrics relocate display=${latestPresentationTarget.id} ` +
           `physical=${JSON.stringify(physicalBounds)} ok=${result.ok}`
         )
       } catch (error) {

@@ -174,13 +174,21 @@ async function runAudioControlJson<T>(action: 'list' | 'get-default'): Promise<T
 // Map of file path -> { hwnd, pid } for tracking multiple external windows
 const externalFiles = new Map<string, { hwnd: number; pid: number }>()
 
+interface ExternalWindowActionResult {
+  success: boolean
+  error?: string
+}
 
-async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<void> {
+async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> {
   const scriptPath = resolveScript('manage-window.ps1')
 
   if (filePath) {
     const entry = externalFiles.get(filePath)
-    if (!entry) return
+    if (!entry) {
+      return action === 'close'
+        ? { success: true }
+        : { success: false, error: 'Окно программы больше не найдено.' }
+    }
     try {
       const args = [
         '-ExecutionPolicy', 'Bypass',
@@ -194,11 +202,17 @@ async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', fi
       if (bounds && action === 'restore') {
         args.push('-X', String(bounds.x), '-Y', String(bounds.y), '-Width', String(bounds.width), '-Height', String(bounds.height))
       }
-      await execFileAsync('powershell.exe', args, { timeout: 5000 })
-    } catch { /* ignore */ }
+      const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 5000 })
+      const data = JSON.parse(stdout.trim()) as ExternalWindowActionResult
+      if (!data.success) return { success: false, error: data.error || 'Windows не переместила окно программы.' }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
     if (action === 'close') externalFiles.delete(filePath)
+    return { success: true }
   } else {
     // Apply to all tracked files
+    let firstError: string | undefined
     for (const [path, entry] of externalFiles) {
       try {
         const args = [
@@ -209,10 +223,15 @@ async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', fi
           '-Hwnd', String(entry.hwnd),
           '-ProcessId', String(entry.pid)
         ]
-        await execFileAsync('powershell.exe', args, { timeout: 5000 })
-      } catch { /* ignore */ }
+        const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 5000 })
+        const data = JSON.parse(stdout.trim()) as ExternalWindowActionResult
+        if (!data.success && !firstError) firstError = data.error || 'Windows не обработала окно программы.'
+      } catch (error) {
+        if (!firstError) firstError = String(error)
+      }
       if (action === 'close') externalFiles.delete(path)
     }
+    return firstError ? { success: false, error: firstError } : { success: true }
   }
 }
 
@@ -807,9 +826,12 @@ export function registerIpcHandlers(
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const displays = screen.getAllDisplays()
-      const primaryDisplay = screen.getPrimaryDisplay()
-      const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
-      const targetDisplay = displays.find((display) => display.id === displayId) || externalDisplay
+      const explicitlyRequestedDisplay = displays.find((display) => display.id === displayId)
+      if (!explicitlyRequestedDisplay) {
+        diagnosticLog('window', `PowerPoint output relocate refused: display=${displayId} is disconnected`)
+        return { success: false, error: 'Target display is not connected' }
+      }
+      const targetDisplay = explicitlyRequestedDisplay
       if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
       const bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
       const result = await pptDaemon.send('relocate', { bounds }, 5000)
@@ -1010,12 +1032,24 @@ export function registerIpcHandlers(
           '-Width', String(displayBounds.width),
           '-Height', String(displayBounds.height)
         ], { timeout: 25000 })
-        try {
-          const data = JSON.parse(stdout.trim())
-          if (data.hwnd) {
-            externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
+        const data = JSON.parse(stdout.trim()) as {
+          success?: boolean
+          hwnd?: number
+          pid?: number
+          error?: string
+        }
+        if (data.hwnd) {
+          // Keep a failed-but-created HWND tracked as well. The PowerShell
+          // helper parks it on verification failure, and a later TAKE can
+          // retry or close that exact window instead of leaving an orphan.
+          externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
+        }
+        if (!data.success || !data.hwnd) {
+          return {
+            success: false,
+            error: data.error || 'The application window was not placed on the target display.'
           }
-        } catch { /* ignore */ }
+        }
         return { success: true }
       }
       await shell.openPath(filePath)
@@ -1029,10 +1063,10 @@ export function registerIpcHandlers(
 
   ipcMain.handle('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
 
-  ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
+  ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> => {
     // If not tracked yet, open instead of restore
     if (filePath && !externalFiles.has(filePath)) {
-      if (!isOpenable(filePath)) return
+      if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла.' }
       if (displayBounds && process.platform === 'win32') {
         const scriptPath = resolveScript('manage-window.ps1')
         try {
@@ -1047,19 +1081,28 @@ export function registerIpcHandlers(
             '-Width', String(displayBounds.width),
             '-Height', String(displayBounds.height)
           ], { timeout: 25000 })
-          try {
-            const data = JSON.parse(stdout.trim())
-            if (data.hwnd) {
-              externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
-            }
-          } catch { /* ignore */ }
-        } catch { /* ignore */ }
+          const data = JSON.parse(stdout.trim()) as {
+            success?: boolean
+            hwnd?: number
+            pid?: number
+            error?: string
+          }
+          if (data.hwnd) {
+            externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
+          }
+          if (!data.success || !data.hwnd) {
+            return { success: false, error: data.error || 'Окно программы не найдено после открытия.' }
+          }
+        } catch (error) {
+          return { success: false, error: String(error) }
+        }
       } else {
-        await shell.openPath(filePath!)
+        const error = await shell.openPath(filePath)
+        if (error) return { success: false, error }
       }
-      return
+      return { success: true }
     }
-    await manageExternalWindow('restore', filePath, displayBounds || undefined)
+    return manageExternalWindow('restore', filePath, displayBounds || undefined)
   })
 
   ipcMain.handle('select-sound-file', async () => {

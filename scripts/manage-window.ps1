@@ -188,16 +188,33 @@ switch ($Action) {
             [WinMgr]::MoveToMonitorAndMaximize($newWindow, $X, $Y, $Width, $Height)
             [WinMgr]::SetForegroundWindow($newWindow) | Out-Null
 
-            # Log final position
+            # Verify the window by its centre, not by any tiny frame overlap.
+            # Maximized windows can extend several invisible border pixels onto
+            # an adjacent monitor and used to produce false routing success.
             $rect = New-Object WinMgr+RECT
-            [WinMgr]::GetWindowRect($newWindow, [ref]$rect) | Out-Null
+            $positionRead = [WinMgr]::GetWindowRect($newWindow, [ref]$rect)
             Log "Final GetWindowRect: L=$($rect.Left) T=$($rect.Top) R=$($rect.Right) B=$($rect.Bottom)"
             Log "Target monitor: X=$X Y=$Y W=$Width H=$Height"
-
-            Write-Output "{`"success`":true,`"hwnd`":$($newWindow.ToInt64()),`"pid`":$procId}"
+            $windowCenterX = [int](($rect.Left + $rect.Right) / 2)
+            $windowCenterY = [int](($rect.Top + $rect.Bottom) / 2)
+            $positionVerified = $positionRead -and (
+                $windowCenterX -ge $X -and
+                $windowCenterX -lt ($X + $Width) -and
+                $windowCenterY -ge $Y -and
+                $windowCenterY -lt ($Y + $Height)
+            )
+            if (-not $positionVerified) {
+                [WinMgr]::ShowWindow($newWindow, [WinMgr]::SW_MINIMIZE) | Out-Null
+            }
+            [pscustomobject]@{
+                success = $positionVerified
+                hwnd = $newWindow.ToInt64()
+                pid = $procId
+                error = if ($positionVerified) { $null } else { "Window did not move to the target monitor" }
+            } | ConvertTo-Json -Compress
         } else {
             Log "Window not found for '$searchName'"
-            Write-Output '{"success":true,"hwnd":0,"pid":0}'
+            Write-Output '{"success":false,"hwnd":0,"pid":0,"error":"Window was not found after opening"}'
         }
     }
     "minimize" {
@@ -210,9 +227,20 @@ switch ($Action) {
         Write-Output '{"success":true}'
     }
     "restore" {
-        if ($Hwnd -ne 0) {
+        $restoreSuccess = $false
+        $restoreError = ""
+        if ($Hwnd -eq 0) {
+            $restoreError = "Window handle is missing"
+        } else {
             $handle = [IntPtr]::new($Hwnd)
-            if ([WinMgr]::IsWindow($handle)) {
+            if (-not [WinMgr]::IsWindow($handle)) {
+                $restoreError = "Window handle is no longer valid"
+            } else {
+                $actualProcessId = 0
+                [WinMgr]::GetWindowThreadProcessId($handle, [ref]$actualProcessId) | Out-Null
+                if ($ProcessId -ne 0 -and $actualProcessId -ne $ProcessId) {
+                    $restoreError = "Window now belongs to another process"
+                } else {
                 $fileExt = [System.IO.Path]::GetExtension($FilePath).ToLower()
                 $isWord = $fileExt -in '.doc', '.docx', '.rtf', '.odt'
 
@@ -227,9 +255,31 @@ switch ($Action) {
 
                 [WinMgr]::MoveToMonitorAndMaximize($handle, $X, $Y, $Width, $Height)
                 [WinMgr]::SetForegroundWindow($handle) | Out-Null
+                    $rect = New-Object WinMgr+RECT
+                    if ([WinMgr]::GetWindowRect($handle, [ref]$rect)) {
+                        $windowCenterX = [int](($rect.Left + $rect.Right) / 2)
+                        $windowCenterY = [int](($rect.Top + $rect.Bottom) / 2)
+                        $centerIsOnTarget = (
+                            $windowCenterX -ge $X -and
+                            $windowCenterX -lt ($X + $Width) -and
+                            $windowCenterY -ge $Y -and
+                            $windowCenterY -lt ($Y + $Height)
+                        )
+                        if ($centerIsOnTarget) {
+                            $restoreSuccess = $true
+                        } else {
+                            $restoreError = "Window did not move to the target monitor"
+                        }
+                    } else {
+                        $restoreError = "Could not verify the restored window position"
+                    }
+                }
             }
         }
-        Write-Output '{"success":true}'
+        [pscustomobject]@{
+            success = $restoreSuccess
+            error = if ($restoreSuccess) { $null } else { $restoreError }
+        } | ConvertTo-Json -Compress
     }
     "close" {
         if ($Hwnd -ne 0) {

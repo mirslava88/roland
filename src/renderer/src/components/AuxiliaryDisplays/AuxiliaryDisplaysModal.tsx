@@ -8,6 +8,10 @@ import {
   type InformationMediaConfig,
   type InformationMediaType
 } from '../../stores/useAppStore'
+import {
+  setDisplayAssignmentWithProgramRouting,
+  switchPrimaryProgramDisplay
+} from '../../program-display-routing'
 
 interface AuxiliaryDisplaysModalProps {
   onClose: () => void
@@ -274,9 +278,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
     activeFile,
     isPresentationWindowOpen,
     informationMedia,
-    setDisplayAssignment,
     setDisplayName,
-    setSelectedDisplayId,
     setInformationMedia
   } = useAppStore()
   const [mediaStatus, setMediaStatus] = useState('')
@@ -463,84 +465,56 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
       ? informationMedia.path
       : null
 
-  const waitForProgramMirror = (displayId: number, sourceDisplayId: number): Promise<boolean> => (
-    new Promise((resolve) => {
-      let settled = false
-      let unsubscribe = (): void => {}
-      const finish = (ready: boolean): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timeout)
-        unsubscribe()
-        resolve(ready)
-      }
-      const timeout = setTimeout(() => finish(false), 4000)
-      unsubscribe = window.api.on('program-mirror-ready', (...args: unknown[]) => {
-        const data = args[0] as { displayId?: number | null; sourceDisplayId?: number | null }
-        if (data.displayId === displayId && data.sourceDisplayId === sourceDisplayId) finish(true)
-      })
-    })
-  )
-
-  const makePrimaryDisplay = async (displayId: number): Promise<void> => {
-    if (displayId === selectedDisplayId || switchingPrimaryId !== null) return
-    const previousDisplayId = selectedDisplayId
-    const targetDisplay = displays.find((display) => display.id === displayId)
-    if (!targetDisplay) return
+  const makePrimaryDisplay = async (displayId: number): Promise<boolean> => {
+    if (displayId === selectedDisplayId || switchingPrimaryId !== null) return false
     const outputIsLive = activeFile !== null || isPresentationWindowOpen
-    let transitionProtected = false
-
     setSwitchingPrimaryId(displayId)
     setDisplayStatus(outputIsLive ? 'Перенос главного эфира на выбранный дисплей…' : '')
     try {
-      if (outputIsLive && previousDisplayId !== null) {
-        let freezeFrame: string | null = null
-        let freezeImagePath: string | null = null
-        if (activeFile?.type === 'presentation') {
-          freezeImagePath = await window.api.snapshotSlideshow()
-        } else if (isPresentationWindowOpen) {
-          freezeFrame = await window.api.capturePresentationFrame()
-        }
-        if (!freezeFrame && !freezeImagePath) {
-          freezeFrame = await window.api.captureDisplay(previousDisplayId)
-        }
-        if (freezeFrame || freezeImagePath) {
-          await window.api.showOverlay(
-            previousDisplayId,
-            freezeFrame || undefined,
-            freezeImagePath || undefined,
-            'cover'
-          )
-          transitionProtected = true
-        }
+      const result = await switchPrimaryProgramDisplay(displayId)
+      if (!result.success) {
+        setDisplayStatus(`Не удалось назначить главный дисплей: ${result.error || 'неизвестная ошибка'}`)
+        return false
       }
+      setDisplayStatus('')
+      return true
+    } catch (error) {
+      setDisplayStatus(`Не удалось назначить главный дисплей: ${String(error)}`)
+      return false
+    } finally {
+      setSwitchingPrimaryId(null)
+    }
+  }
 
-      if (outputIsLive) {
-        if (activeFile?.type === 'presentation') {
-          const result = await window.api.relocatePowerPoint(displayId)
-          if (!result.success) throw new Error(result.error || 'PowerPoint не перенёс эфир')
-        } else if (activeFile?.type === 'other' && !activeFile.isImage && !activeFile.isAudio) {
-          await window.api.restoreExternalFile(activeFile.path, targetDisplay.bounds)
-        }
-        await window.api.placePresentationWindow(displayId)
-      }
+  const handleDisplayAssignmentChange = async (
+    displayId: number,
+    mode: DisplayOutputMode
+  ): Promise<void> => {
+    if (switchingPrimaryId !== null) return
+    const latest = useAppStore.getState()
+    const replacementDisplayId = latest.selectedDisplayId === displayId && mode !== 'program'
+      ? latest.displays
+        .filter((display) => !display.isPrimary && display.id !== displayId)
+        .sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y)
+        .find((display) => latest.displayAssignments[String(display.id)] === 'program')?.id
+      : undefined
 
-      const mirrorReady = outputIsLive && previousDisplayId !== null
-        ? waitForProgramMirror(previousDisplayId, displayId)
-        : Promise.resolve(true)
-      setSelectedDisplayId(displayId)
-      const ready = await mirrorReady
-      if (outputIsLive && previousDisplayId !== null && !ready) {
-        window.api.dbgLog(`primary display switch: mirror ready timeout display=${previousDisplayId} source=${displayId}`)
+    setSwitchingPrimaryId(replacementDisplayId ?? displayId)
+    setDisplayStatus(
+      replacementDisplayId !== undefined && (latest.activeFile !== null || latest.isPresentationWindowOpen)
+        ? 'Перенос главного эфира перед сменой назначения…'
+        : ''
+    )
+    try {
+      const result = await setDisplayAssignmentWithProgramRouting(displayId, mode)
+      if (!result.success) {
+        setDisplayStatus(`Не удалось изменить назначение дисплея: ${result.error || 'неизвестная ошибка'}`)
+        return
       }
       setDisplayStatus('')
     } catch (error) {
-      setDisplayStatus(`Не удалось назначить главный дисплей: ${String(error)}`)
+      setDisplayStatus(`Не удалось изменить назначение дисплея: ${String(error)}`)
     } finally {
-      if (transitionProtected) {
-        await window.api.hideOverlay()
-        useAppStore.getState().setOverlayState({ kind: 'hidden' })
-      }
       setSwitchingPrimaryId(null)
     }
   }
@@ -557,7 +531,13 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
             <h2 className="text-sm font-semibold text-white">Экраны PDM</h2>
             <p className="text-[10px] text-gray-500 mt-0.5">Назначение мониторов, суфлёр, мультимедиа и таймеры</p>
           </div>
-          <button onClick={onClose} className="text-lg text-gray-500 hover:text-white">✕</button>
+          <button
+            onClick={onClose}
+            disabled={switchingPrimaryId !== null}
+            className="text-lg text-gray-500 hover:text-white disabled:cursor-wait disabled:opacity-30"
+          >
+            ✕
+          </button>
         </header>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
@@ -609,7 +589,13 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
                     className="w-full min-w-0 bg-surface-100 border border-gray-700 rounded-sm px-2 py-1.5 text-[10px] text-gray-200 outline-hidden hover:border-gray-600 focus:border-accent"
                     value={mode}
                     aria-label={`Режим монитора ${customName || display.label}`}
-                    onChange={(event) => setDisplayAssignment(display.id, event.target.value as DisplayOutputMode)}
+                    disabled={switchingPrimaryId !== null}
+                    onChange={(event) => {
+                      void handleDisplayAssignmentChange(
+                        display.id,
+                        event.target.value as DisplayOutputMode
+                      )
+                    }}
                   >
                     <option value="off">Выключен</option>
                     <option value="program">Основной эфир</option>

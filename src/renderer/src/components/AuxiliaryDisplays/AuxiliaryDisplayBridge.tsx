@@ -81,6 +81,10 @@ function useAuxiliaryWindows(
       for (const displayId of ids) {
         if (cancelled) return
         const opened = await window.api.openAuxiliaryWindow(role, displayId)
+        // A newer role/primary-display reconciliation may have replaced this
+        // run while the native fullscreen window was opening. Never let a
+        // stale failure turn the newly assigned program display back to Off.
+        if (cancelled) return
         if (!opened.success) {
           window.api.dbgLog(`${role} display open failed id=${displayId}: ${opened.error || 'unknown error'}`)
           setDisplayAssignment(displayId, 'off')

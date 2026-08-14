@@ -304,7 +304,7 @@ interface Api {
   openFileExternal(filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
   closeExternalFile(filePath?: string): Promise<void>
   minimizeExternalFile(filePath?: string): Promise<void>
-  restoreExternalFile(filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<void>
+  restoreExternalFile(filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
   getPathForFile(file: File): string
   setActiveContentType(type: string): void
   sendToPresentation(channel: string, ...args: unknown[]): void

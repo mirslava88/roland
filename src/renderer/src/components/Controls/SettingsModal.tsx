@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
 import { loadAppConfigFromFile, saveCurrentAppConfig } from '../../app-config'
+import { setDisplayAssignmentWithProgramRouting } from '../../program-display-routing'
 
 interface AudioDevice {
   id: string
@@ -41,7 +42,6 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     displayAssignments,
     displayNames,
     selectedDisplayId,
-    setDisplayAssignment,
     setDisplayName
   } = useAppStore()
   const [tab, setTab] = useState<'audio' | 'display' | 'config' | 'diagnostics' | 'help'>('audio')
@@ -50,6 +50,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
   const [displaysLoading, setDisplaysLoading] = useState(false)
   const [applyingMode, setApplyingMode] = useState<DisplayMultiMode | null>(null)
+  const [displayAssignmentBusyId, setDisplayAssignmentBusyId] = useState<number | null>(null)
+  const [displayAssignmentStatus, setDisplayAssignmentStatus] = useState('')
   const [diagnosticStatus, setDiagnosticStatus] = useState('')
   const [configBusy, setConfigBusy] = useState(false)
   const [configStatus, setConfigStatus] = useState('')
@@ -138,6 +140,25 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     setTimeout(loadDisplays, 500)
   }
 
+  const changeDisplayAssignment = async (
+    displayId: number,
+    mode: DisplayOutputMode
+  ): Promise<void> => {
+    if (displayAssignmentBusyId !== null) return
+    setDisplayAssignmentBusyId(displayId)
+    setDisplayAssignmentStatus('Применение назначения дисплея…')
+    try {
+      const result = await setDisplayAssignmentWithProgramRouting(displayId, mode)
+      setDisplayAssignmentStatus(result.success
+        ? ''
+        : `Не удалось изменить назначение дисплея: ${result.error || 'неизвестная ошибка'}`)
+    } catch (error) {
+      setDisplayAssignmentStatus(`Не удалось изменить назначение дисплея: ${String(error)}`)
+    } finally {
+      setDisplayAssignmentBusyId(null)
+    }
+  }
+
   const loadDevices = async (): Promise<void> => {
     setLoading(true)
     const d = await window.api.getAudioDevices()
@@ -204,7 +225,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               Инструкция
             </button>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-white text-lg leading-none px-1">
+          <button
+            onClick={onClose}
+            disabled={displayAssignmentBusyId !== null}
+            className="text-gray-500 hover:text-white text-lg leading-none px-1 disabled:cursor-wait disabled:opacity-30"
+          >
             ✕
           </button>
         </div>
@@ -289,7 +314,13 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                       <select
                         className="w-full bg-surface-200 border border-gray-700 rounded-sm px-2 py-1.5 text-xs text-gray-200 outline-hidden hover:border-gray-600 focus:border-accent"
                         value={mode}
-                        onChange={(event) => setDisplayAssignment(display.id, event.target.value as DisplayOutputMode)}
+                        disabled={displayAssignmentBusyId !== null}
+                        onChange={(event) => {
+                          void changeDisplayAssignment(
+                            display.id,
+                            event.target.value as DisplayOutputMode
+                          )
+                        }}
                       >
                         <option value="off">Выключен</option>
                         <option value="program">Основной эфир</option>
@@ -300,6 +331,9 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                     </label>
                   )})}
                 </div>
+                {displayAssignmentStatus && (
+                  <p className="mt-2 text-[10px] text-amber-300">{displayAssignmentStatus}</p>
+                )}
               </section>
 
               <section>

@@ -16,6 +16,7 @@ import {
   makePdfLiveCacheKey,
   type PdfLivePrewarmRequest
 } from '../../pdf-live-cache'
+import { acquireOutputTransition } from '../../output-transition-lock'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -525,14 +526,15 @@ export function PreviewPanel(): JSX.Element {
     const takeId = crypto.randomUUID()
     const takeGeneration = ++takeGenerationRef.current
     activeTakeIdRef.current = takeId
-    beginNavigationTransition()
-    setTakeProgress({ channelId: ch, message })
+    const releaseOutputTransition = await acquireOutputTransition(`take:${ch}:${takeId}`)
 
     // Top-level safety net: если handleTake бросит (daemon crash,
     // launchPowerPoint reject, capturePage fail), overlay оставался бы
     // opacity=1 чёрным НАВСЕГДА — юзер видит зависший чёрный экран без
     // способа recovery (audit F-205). Ловим, логируем, force-hide overlay.
     try {
+      beginNavigationTransition()
+      setTakeProgress({ channelId: ch, message })
       await doTake(ch, takeId, takeGeneration)
     } catch (err) {
       console.error('[TAKE] unhandled error, forcing overlay hide:', err)
@@ -563,6 +565,7 @@ export function PreviewPanel(): JSX.Element {
       }
       if (activeTakeIdRef.current === takeId) activeTakeIdRef.current = null
       if (cancelTakeCleanupRef.current?.takeId === takeId) cancelTakeCleanupRef.current = null
+      releaseOutputTransition()
 
       const queued = queuedTakeRef.current
       queuedTakeRef.current = null
@@ -638,6 +641,32 @@ export function PreviewPanel(): JSX.Element {
     }
     cancelTakeCleanupRef.current = { takeId, run: finishCancelledTake }
     log(`BEGIN prev=${prevActiveFile?.type} next=${channel.file.type} slide=${channel.slide}`)
+
+    // TAKE can wait behind a display-routing transaction. Re-check both the
+    // cancellation token and selected program display only after acquiring
+    // that shared lock, otherwise a queued screen source may start capturing
+    // the monitor that has just become the main output.
+    if (isTakeCancelled()) {
+      await finishCancelledTake()
+      return
+    }
+    if (
+      channel.file.type === 'capture' &&
+      channel.file.capture?.captureKind === 'desktop' &&
+      channel.file.capture.desktopSourceType === 'screen' &&
+      channel.file.capture.desktopDisplayId &&
+      freshState.selectedDisplayId !== null &&
+      channel.file.capture.desktopDisplayId === String(freshState.selectedDisplayId)
+    ) {
+      const message = 'Этот экран выбран для эфира. Выберите другое окно или экран.'
+      log(`blocked after routing: captured screen is output display=${channel.file.capture.desktopDisplayId}`)
+      setTakeProgress({ channelId: ch, message })
+      setTimeout(() => {
+        setTakeProgress((current) => current?.channelId === ch ? null : current)
+      }, 3500)
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      return
+    }
 
     // A minimized native window is intentionally added without touching it.
     // Resolve and restore it only after the operator explicitly presses TAKE,
@@ -993,8 +1022,17 @@ export function PreviewPanel(): JSX.Element {
     setActiveFile(channel.file)
     setLiveChannel(ch)
 
-    // Minimize previously opened external file (Word/Excel) when switching to other content
-    if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && !prevActiveFile.isAudio) {
+    // Keep the previous Word/Excel window visible until another native
+    // document has been verified on the program display. The external-target
+    // branch minimizes it only after the replacement succeeds.
+    const nextIsExternalDocument =
+      channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio
+    if (
+      prevActiveFile?.type === 'other' &&
+      !prevActiveFile.isImage &&
+      !prevActiveFile.isAudio &&
+      !nextIsExternalDocument
+    ) {
       await window.api.minimizeExternalFile(prevActiveFile.path)
     }
 
@@ -1206,8 +1244,14 @@ export function PreviewPanel(): JSX.Element {
     }
     const deferPowerPointCloseUntilTargetReady =
       prevActiveFile?.type === 'presentation' &&
-      (channel.file.type === 'pdf' || channel.file.type === 'video' || channel.file.type === 'capture') &&
-      useLiveLayerSwitch
+      (
+        (
+          channel.file.type === 'pdf' ||
+          channel.file.type === 'video' ||
+          channel.file.type === 'capture'
+        ) && useLiveLayerSwitch ||
+        (channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio)
+      )
     if (prevActiveFile?.type === 'presentation' && !deferPowerPointCloseUntilTargetReady) {
       parallelTasks2.push(window.api.powerpointCommand('close'))
     }
@@ -1261,51 +1305,157 @@ export function PreviewPanel(): JSX.Element {
 
     // For 'other' non-image files (Word, Excel, etc.), open/restore on external display
     if (channel.file.type === 'other' && !channel.file.isImage) {
-      if (prevActiveFile?.type === 'capture') {
-        window.api.sendToPresentation('capture-audio-live', null)
-      }
-      // Show backdrop on presentation window so it's visible when Word/Excel is minimized
-      const { backdropImage, selectedDisplayId } = useAppStore.getState()
-      const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
-      if (backdropImage) {
-        if (!outputWindowOpen) {
-          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-          setPresentationWindowOpen(true)
-        }
-        window.api.sendToPresentation('load-content', {
-          type: 'backdrop',
-          path: backdropImage,
-          name: 'Backdrop'
-        })
-      } else if (outputWindowOpen) {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
-      }
-      if (isTakeCancelled()) {
-        await finishCancelledTake()
-        return
-      }
       const displays = await window.api.getDisplays()
       if (isTakeCancelled()) {
         await finishCancelledTake()
         return
       }
-      const external = displays.find((d) => !d.isPrimary)
-      // Minimize previous other file (different file) — don't close
-      if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && !prevActiveFile.isAudio && prevActiveFile.path !== channel.file.path) {
-        await window.api.minimizeExternalFile(prevActiveFile.path)
+      const outputState = useAppStore.getState()
+      const requestedProgramDisplayId = outputState.selectedDisplayId
+      const selectedExternal = displays.find((display) => (
+        !display.isPrimary && display.id === requestedProgramDisplayId
+      ))
+      const external = requestedProgramDisplayId === null
+        ? displays.find((display) => !display.isPrimary)
+        : selectedExternal
+      if (!external) {
+        useAppStore.setState({
+          activeFile: prevActiveFile,
+          liveChannel: freshState.liveChannel
+        })
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        setTakeProgress({
+          channelId: ch,
+          message: 'Главный эфирный дисплей не подключён.'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
+        return
       }
       // Hide taskbar FIRST, wait for Windows to update work area, then position window
-      if (external) {
-        await window.api.hideTaskbar(external.bounds)
-        await new Promise((r) => setTimeout(r, 500))
-        if (isTakeCancelled()) {
-          await finishCancelledTake()
+      await window.api.hideTaskbar(external.bounds)
+      await new Promise((r) => setTimeout(r, 500))
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
+
+      // Try to restore; if not tracked yet, open fresh. Do not commit a
+      // logical TAKE or tear down the previous visual output until Windows has
+      // confirmed that the new native document is on the selected display.
+      const targetWasPreviousExternal =
+        prevActiveFile?.type === 'other' &&
+        !prevActiveFile.isImage &&
+        !prevActiveFile.isAudio &&
+        prevActiveFile.path === channel.file.path
+      const restored = await window.api.restoreExternalFile(channel.file.path, external?.bounds)
+      if (!restored.success) {
+        log(`external document restore failed: ${restored.error || 'unknown error'}`)
+        if (!targetWasPreviousExternal) {
+          try { await window.api.minimizeExternalFile(channel.file.path) } catch { /* best effort */ }
+        }
+        useAppStore.setState({
+          activeFile: prevActiveFile,
+          liveChannel: freshState.liveChannel
+        })
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        setTakeProgress({
+          channelId: ch,
+          message: restored.error || 'Не удалось вывести окно программы на главный эфирный дисплей.'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
+        return
+      }
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
+
+      // Verify the same HWND a second time before touching the previous
+      // output. This absorbs slow Office maximize/focus transitions without
+      // turning a failed TAKE into a blank program display.
+      let foregrounded = await window.api.restoreExternalFile(channel.file.path, external.bounds)
+      if (!foregrounded.success) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        foregrounded = await window.api.restoreExternalFile(channel.file.path, external.bounds)
+      }
+      if (!foregrounded.success) {
+        log(`external document foreground verification failed: ${foregrounded.error || 'unknown error'}`)
+        if (!targetWasPreviousExternal) {
+          try { await window.api.minimizeExternalFile(channel.file.path) } catch { /* best effort */ }
+        }
+        useAppStore.setState({
+          activeFile: prevActiveFile,
+          liveChannel: freshState.liveChannel
+        })
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        setTakeProgress({
+          channelId: ch,
+          message: foregrounded.error || 'Не удалось вывести окно программы поверх главного эфира.'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
+        return
+      }
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
+
+      // Only now replace the surface behind Word/Excel and stop the previous
+      // native output. Never raise a newly-created backdrop window above the
+      // verified Office window; the idle-output path will create it on exit.
+      const { backdropImage } = useAppStore.getState()
+      const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
+      if (backdropImage) {
+        if (outputWindowOpen) {
+          window.api.sendToPresentation('load-content', {
+            type: 'backdrop',
+            path: backdropImage,
+            name: 'Backdrop'
+          })
+        }
+      } else if (outputWindowOpen) {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
+      if (prevActiveFile?.type === 'presentation') {
+        let closed = await window.api.powerpointCommand('close')
+        if (!closed.success) {
+          await new Promise((resolve) => setTimeout(resolve, 150))
+          closed = await window.api.powerpointCommand('close')
+        }
+        if (!closed.success) {
+          log(`PowerPoint close before external TAKE failed: ${closed.error || 'unknown error'}`)
+          if (!targetWasPreviousExternal) {
+            try { await window.api.minimizeExternalFile(channel.file.path) } catch { /* best effort */ }
+          }
+          useAppStore.setState({
+            activeFile: prevActiveFile,
+            liveChannel: freshState.liveChannel
+          })
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+          setTakeProgress({
+            channelId: ch,
+            message: closed.error || 'Не удалось завершить предыдущую презентацию PowerPoint.'
+          })
+          await new Promise((resolve) => setTimeout(resolve, 3500))
           return
         }
       }
-      // Try to restore; if not tracked yet, open fresh
-      await window.api.restoreExternalFile(channel.file.path, external?.bounds)
+      if (
+        prevActiveFile?.type === 'other' &&
+        !prevActiveFile.isImage &&
+        !prevActiveFile.isAudio &&
+        prevActiveFile.path !== channel.file.path
+      ) {
+        await window.api.minimizeExternalFile(prevActiveFile.path)
+      }
+      if (prevActiveFile?.type === 'capture') {
+        window.api.sendToPresentation('capture-audio-live', null)
+      }
       if (isTakeCancelled()) {
         await finishCancelledTake()
         return
@@ -1323,7 +1473,22 @@ export function PreviewPanel(): JSX.Element {
     // changed while that surface was parked, move it before preparing the next
     // Chromium frame. This operation deliberately does not touch opacity or
     // z-order, so the existing seamless transition remains intact.
-    await window.api.placePresentationWindow(programDisplayId)
+    const presentationPlacementReady = await window.api.placePresentationWindow(programDisplayId)
+    if (!presentationPlacementReady) {
+      log(`presentation output placement failed display=${programDisplayId ?? 'default'}`)
+      useAppStore.setState({
+        activeFile: prevActiveFile,
+        liveChannel: freshState.liveChannel
+      })
+      await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
+      setTakeProgress({
+        channelId: ch,
+        message: 'Не удалось подготовить главный эфирный дисплей.'
+      })
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      return
+    }
     const revealWarmOutputAfterPaint =
       !outputWindowWasOpen && prevActiveFile?.type === 'presentation'
     if (!outputWindowWasOpen && !revealWarmOutputAfterPaint) {

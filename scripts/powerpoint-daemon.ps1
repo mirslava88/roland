@@ -325,6 +325,43 @@ function Set-SlideShowBounds([long]$hwnd, $targetRect) {
     } catch {}
 }
 
+function Get-SlideShowWindowRect([long]$hwnd) {
+    if ($hwnd -eq 0) { return $null }
+    try {
+        $rect = New-Object PptDaemon.Native+RECT
+        if ([PptDaemon.Native]::GetWindowRect([System.IntPtr]$hwnd, [ref]$rect)) {
+            $width = [int]$rect.Right - [int]$rect.Left
+            $height = [int]$rect.Bottom - [int]$rect.Top
+            if ($width -gt 0 -and $height -gt 0) {
+                return @([int]$rect.Left, [int]$rect.Top, $width, $height)
+            }
+        }
+    } catch {}
+    return $null
+}
+
+function Test-SlideShowBounds([long]$hwnd, $targetRect) {
+    if ($null -eq $targetRect -or $targetRect.Count -ne 4) { return $false }
+    $actual = Get-SlideShowWindowRect $hwnd
+    if ($null -eq $actual -or $actual.Count -ne 4) { return $false }
+
+    $targetX = [int]$targetRect[0]; $targetY = [int]$targetRect[1]
+    $targetW = [int]$targetRect[2]; $targetH = [int]$targetRect[3]
+    $centerX = [int]$actual[0] + [int]($actual[2] / 2)
+    $centerY = [int]$actual[1] + [int]($actual[3] / 2)
+    $centerMatches = (
+        $centerX -ge $targetX -and $centerX -lt ($targetX + $targetW) -and
+        $centerY -ge $targetY -and $centerY -lt ($targetY + $targetH)
+    )
+    # Allow a small DWM/invisible-frame tolerance, but reject a slideshow that
+    # merely overlaps the requested monitor or kept the previous monitor size.
+    $sizeMatches = (
+        [Math]::Abs([int]$actual[2] - $targetW) -le 32 -and
+        [Math]::Abs([int]$actual[3] - $targetH) -le 32
+    )
+    return $centerMatches -and $sizeMatches
+}
+
 function Raise-SlideShow([long]$hwnd, $targetRect) {
     if ($hwnd -eq 0) { return }
     # HWND_TOP=0 keeps the slideshow non-topmost (the screen-saver overlay
@@ -1715,11 +1752,30 @@ while ($true) {
                 if (-not $sw -or $hwnd -eq 0 -or $null -eq $targetRect) {
                     Reply @{ id = $id; ok = $false; error = 'no slideshow or invalid target bounds' }
                 } else {
-                    Set-SlideShowBounds $hwnd $targetRect
-                    Raise-SlideShow $hwnd $targetRect
-                    $script:activeSlideShowHwnd = $hwnd
-                    Log "relocate: slideshow HWND=$hwnd targetRect=$($targetRect -join ',')"
-                    Reply @{ id = $id; ok = $true }
+                    $placed = $false
+                    $actualRect = $null
+                    for ($attempt = 1; $attempt -le 3; $attempt++) {
+                        Set-SlideShowBounds $hwnd $targetRect
+                        Raise-SlideShow $hwnd $targetRect
+                        try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                        Start-Sleep -Milliseconds 40
+                        $actualRect = Get-SlideShowWindowRect $hwnd
+                        $placed = Test-SlideShowBounds $hwnd $targetRect
+                        $actualText = if ($null -ne $actualRect) { $actualRect -join ',' } else { '-' }
+                        Log ("relocate: verify attempt={0} HWND={1} target={2} actual={3} ok={4}" -f `
+                            $attempt, $hwnd, ($targetRect -join ','), $actualText, $placed)
+                        if ($placed) { break }
+                    }
+                    if ($placed) {
+                        $script:activeSlideShowHwnd = $hwnd
+                        Reply @{ id = $id; ok = $true }
+                    } else {
+                        Reply @{
+                            id = $id
+                            ok = $false
+                            error = "slideshow did not move to target bounds; actual=$actualText"
+                        }
+                    }
                 }
             }
             'close' {

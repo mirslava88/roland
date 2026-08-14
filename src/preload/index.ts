@@ -254,7 +254,7 @@ const api = {
 
   minimizeExternalFile: (filePath?: string): Promise<void> => ipcRenderer.invoke('minimize-external-file', filePath),
 
-  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<void> =>
+  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('restore-external-file', filePath, displayBounds),
 
   setActiveContentType: (type: string): void => {
