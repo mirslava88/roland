@@ -32,26 +32,49 @@ export function FileItemGrid({
 }: FileItemGridProps): JSX.Element {
   const [thumbnail, setThumbnail] = useState<string | null>(null)
   const pptxThumbnailsMap = useAppStore((s) => s.pptxThumbnailsMap)
+  const cachedPptxThumbnails = pptxThumbnailsMap[file.path]
 
   useEffect(() => {
     let cancelled = false
+    let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null
+    let renderTask: pdfjsLib.RenderTask | null = null
+    let thumbnailVideo: HTMLVideoElement | null = null
+    let settleVideo: (() => void) | null = null
 
     async function generateThumb(): Promise<void> {
       if (file.type === 'pdf') {
+        let page: pdfjsLib.PDFPageProxy | null = null
+        let canvas: HTMLCanvasElement | null = null
         try {
           const data = await window.api.readFile(file.path)
-          const doc = await pdfjsLib.getDocument({ data }).promise
-          const page = await doc.getPage(1)
+          if (cancelled) return
+          loadingTask = pdfjsLib.getDocument({ data })
+          const doc = await loadingTask.promise
+          page = await doc.getPage(1)
           const viewport = page.getViewport({ scale: 0.4 })
-          const canvas = document.createElement('canvas')
+          canvas = document.createElement('canvas')
           canvas.width = viewport.width
           canvas.height = viewport.height
           const ctx = canvas.getContext('2d')!
-          await page.render({ canvasContext: ctx, viewport }).promise
+          renderTask = page.render({ canvas, canvasContext: ctx, viewport })
+          await renderTask.promise
           if (!cancelled) setThumbnail(canvas.toDataURL())
         } catch { /* ignore */ }
+        finally {
+          renderTask = null
+          page?.cleanup()
+          if (canvas) {
+            canvas.width = 0
+            canvas.height = 0
+          }
+          if (loadingTask) {
+            const task = loadingTask
+            loadingTask = null
+            await task.destroy().catch(() => undefined)
+          }
+        }
       } else if (file.type === 'presentation') {
-        const cached = pptxThumbnailsMap[file.path]
+        const cached = cachedPptxThumbnails
         if (cached && cached.length > 0) {
           setThumbnail(mediaUrl(cached[0]))
         } else {
@@ -70,10 +93,22 @@ export function FileItemGrid({
         // Video thumbnail via hidden video element
         try {
           const video = document.createElement('video')
+          thumbnailVideo = video
           video.src = mediaUrl(file.path)
           video.muted = true
           video.preload = 'metadata'
           await new Promise<void>((resolve) => {
+            let settled = false
+            let timeout: ReturnType<typeof setTimeout> | null = null
+            const finish = (): void => {
+              if (settled) return
+              settled = true
+              if (timeout) clearTimeout(timeout)
+              timeout = null
+              settleVideo = null
+              resolve()
+            }
+            settleVideo = finish
             video.onloadedmetadata = () => {
               video.currentTime = 1
             }
@@ -84,17 +119,50 @@ export function FileItemGrid({
               const ctx = canvas.getContext('2d')!
               ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
               if (!cancelled) setThumbnail(canvas.toDataURL())
-              resolve()
+              canvas.width = 0
+              canvas.height = 0
+              finish()
             }
-            video.onerror = () => resolve()
+            video.onerror = finish
+            timeout = setTimeout(finish, 8_000)
           })
         } catch { /* ignore */ }
+        finally {
+          if (thumbnailVideo) {
+            thumbnailVideo.onloadedmetadata = null
+            thumbnailVideo.onseeked = null
+            thumbnailVideo.onerror = null
+            thumbnailVideo.pause()
+            thumbnailVideo.removeAttribute('src')
+            thumbnailVideo.load()
+            thumbnailVideo = null
+          }
+        }
       }
     }
 
     generateThumb()
-    return () => { cancelled = true }
-  }, [file.path, file.type, pptxThumbnailsMap])
+    return () => {
+      cancelled = true
+      settleVideo?.()
+      settleVideo = null
+      renderTask?.cancel()
+      renderTask = null
+      if (loadingTask) {
+        void loadingTask.destroy().catch(() => undefined)
+        loadingTask = null
+      }
+      if (thumbnailVideo) {
+        thumbnailVideo.onloadedmetadata = null
+        thumbnailVideo.onseeked = null
+        thumbnailVideo.onerror = null
+        thumbnailVideo.pause()
+        thumbnailVideo.removeAttribute('src')
+        thumbnailVideo.load()
+        thumbnailVideo = null
+      }
+    }
+  }, [file.path, file.type, cachedPptxThumbnails])
 
   return (
     <div

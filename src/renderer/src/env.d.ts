@@ -187,6 +187,7 @@ interface DriveInfo {
 }
 
 interface Api {
+  getAppVersion(): Promise<string>
   saveAppConfig(content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }>
   loadAppConfig(): Promise<{ success: boolean; canceled: boolean; path?: string; content?: string; error?: string }>
   validateConfigPaths(paths: string[]): Promise<Array<{ path: string; exists: boolean; isDirectory: boolean }>>
@@ -224,13 +225,18 @@ interface Api {
     error?: string
   }>
   syncPreparedPowerPoints(filePaths: string[]): Promise<{ success: boolean; error?: string }>
-  launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{ success: boolean; output?: string; error?: string }>
+  launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{
+    success: boolean
+    output?: string
+    error?: string
+    safeToUncover?: boolean
+  }>
   powerpointCommand(
     command: string,
     arg?: number | { stopAtBoundary?: boolean }
   ): Promise<{ success: boolean; output?: string; error?: string }>
   relocatePowerPoint(displayId: number): Promise<{ success: boolean; error?: string }>
-  generatePptxThumbnails(filePath: string): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
+  generatePptxThumbnails(filePath: string, keepPrepared?: boolean): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   getPptxSlideNotes(filePath: string, slide: number): Promise<{ success: boolean; notes?: string; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>
@@ -238,8 +244,9 @@ interface Api {
     displayId?: number,
     freezeImageDataUrl?: string,
     imagePath?: string,
-    placement?: 'cover' | 'underlay'
-  ): Promise<void>
+    placement?: 'cover' | 'underlay',
+    safetyLock?: boolean
+  ): Promise<boolean>
   swapOverlayImage(imagePath: string): Promise<void>
   pinOverlay(): Promise<void>
   snapshotSlideshow(): Promise<string | null>
@@ -305,8 +312,8 @@ interface Api {
   selectVideoFiles(): Promise<string[] | null>
   selectVideoFolder(): Promise<string[] | null>
   openFileExternal(filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
-  closeExternalFile(filePath?: string): Promise<void>
-  minimizeExternalFile(filePath?: string): Promise<void>
+  closeExternalFile(filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }>
+  minimizeExternalFile(filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }>
   restoreExternalFile(filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
   getPathForFile(file: File): string
   setActiveContentType(type: string): void

@@ -3,7 +3,7 @@ import { useAppStore } from '../../stores/useAppStore'
 import { queueAbsoluteNavigationDuringTransition } from '../../navigation-transition'
 import { mediaUrl } from '../../media'
 import * as pdfjsLib from 'pdfjs-dist'
-import { renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
+import { releasePdfiumResources, renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -55,7 +55,9 @@ export function SlideNavigator(): JSX.Element {
   const [loading, setLoading] = useState(false)
   const activeRef = useRef<HTMLDivElement>(null)
   const pdfThumbnailGenerationRef = useRef(0)
-  const pdfThumbnailRenderTaskRef = useRef<pdfjsLib.PDFRenderTask | null>(null)
+  const pdfThumbnailRenderTaskRef = useRef<pdfjsLib.RenderTask | null>(null)
+  const pdfThumbnailLoadingTaskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null)
+  const pptxThumbnailGenerationRef = useRef(0)
   const currentSlideRef = useRef(currentSlide)
   currentSlideRef.current = currentSlide
 
@@ -68,6 +70,10 @@ export function SlideNavigator(): JSX.Element {
   const loadPdfThumbnails = useCallback(async (filePath: string) => {
     pdfThumbnailRenderTaskRef.current?.cancel()
     pdfThumbnailRenderTaskRef.current = null
+    if (pdfThumbnailLoadingTaskRef.current) {
+      void pdfThumbnailLoadingTaskRef.current.destroy().catch(() => undefined)
+      pdfThumbnailLoadingTaskRef.current = null
+    }
     const generation = ++pdfThumbnailGenerationRef.current
     const started = performance.now()
     const remembered = pdfThumbnailCache.get(filePath)
@@ -81,7 +87,7 @@ export function SlideNavigator(): JSX.Element {
     }
     window.api.dbgLog(`SlideNavigator: PDF thumbnails BEGIN file=${filePath}`)
 
-    let doc: pdfjsLib.PDFDocumentProxy | null = null
+    let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null
     try {
       const readStarted = performance.now()
       const data = await window.api.readFile(filePath)
@@ -106,7 +112,9 @@ export function SlideNavigator(): JSX.Element {
         return
       }
 
-      doc = await pdfjsLib.getDocument({ data }).promise
+      loadingTask = pdfjsLib.getDocument({ data })
+      pdfThumbnailLoadingTaskRef.current = loadingTask
+      const doc = await loadingTask.promise
       if (generation !== pdfThumbnailGenerationRef.current) return
       setTotalSlides(doc.numPages)
       const cacheEntry: CachedPdfThumbnails = cached?.signature === signature && cached.totalSlides === doc.numPages
@@ -143,6 +151,7 @@ export function SlideNavigator(): JSX.Element {
         if (generation !== pdfThumbnailGenerationRef.current) return
         const pageStarted = performance.now()
         const page = await doc.getPage(pageNumber)
+        try {
         const baseViewport = page.getViewport({ scale: 1 })
         // The panel is 176 CSS pixels wide. A 224-pixel bitmap stays sharp at
         // common Windows scaling factors without doing the old 576px render.
@@ -171,7 +180,7 @@ export function SlideNavigator(): JSX.Element {
           canvas.height = targetHeight
           const ctx = canvas.getContext('2d')
           if (!ctx) throw new Error('Canvas 2D context is unavailable')
-          const renderTask = page.render({ canvasContext: ctx, viewport })
+          const renderTask = page.render({ canvas, canvasContext: ctx, viewport })
           pdfThumbnailRenderTaskRef.current = renderTask
           try {
             await renderTask.promise
@@ -191,16 +200,19 @@ export function SlideNavigator(): JSX.Element {
           next[pageNumber - 1] = { index: pageNumber, dataUrl }
           return next
         })
-        page.cleanup()
         window.api.dbgLog(
           `SlideNavigator: PDF thumbnail READY renderer=${renderer} page=${pageNumber} size=${canvas.width}x${canvas.height} dur=${Math.round(performance.now() - pageStarted)}ms file=${filePath}`
         )
+        } finally {
+          try { page.cleanup() } catch { /* loading-task teardown may already own it */ }
+        }
 
         // Yield between pages: navigation and TAKE must always win over
         // background thumbnail generation on slower computers.
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
       }
 
+      if (generation !== pdfThumbnailGenerationRef.current) return
       cacheEntry.complete = cacheEntry.thumbnails.every((thumb) => Boolean(thumb.dataUrl))
       touchPdfThumbnailCache(filePath, cacheEntry)
 
@@ -213,29 +225,50 @@ export function SlideNavigator(): JSX.Element {
         window.api.dbgLog(`SlideNavigator: PDF thumbnails ERROR file=${filePath} error=${String(err)}`)
       }
     } finally {
-      if (doc) await doc.destroy()
+      if (loadingTask) {
+        if (pdfThumbnailLoadingTaskRef.current === loadingTask) {
+          pdfThumbnailLoadingTaskRef.current = null
+        }
+        await loadingTask.destroy().catch(() => undefined)
+      }
+      releasePdfiumResources(filePath)
       if (generation === pdfThumbnailGenerationRef.current) setLoading(false)
     }
   }, [setTotalSlides])
 
-  // pdf.js fallback tasks can be cancelled. PDFium runs in its own background
-  // worker, so live output no longer stops the whole thumbnail queue.
+  // pdf.js fallback tasks can be cancelled. PDFium cleanup is file-scoped in
+  // loadPdfThumbnails.finally so this control renderer cannot evict a PDF still
+  // used by the information-screen preview.
   useEffect(() => {
     return () => {
       pdfThumbnailGenerationRef.current += 1
       pdfThumbnailRenderTaskRef.current?.cancel()
       pdfThumbnailRenderTaskRef.current = null
+      if (pdfThumbnailLoadingTaskRef.current) {
+        void pdfThumbnailLoadingTaskRef.current.destroy().catch(() => undefined)
+        pdfThumbnailLoadingTaskRef.current = null
+      }
     }
   }, [])
 
   // Generate PPTX thumbnails
   const loadPptxThumbnails = useCallback(async (filePath: string) => {
+    const generation = ++pptxThumbnailGenerationRef.current
+    const isCurrent = (): boolean => {
+      const state = useAppStore.getState()
+      return generation === pptxThumbnailGenerationRef.current &&
+        state.activeFile?.type === 'presentation' &&
+        state.activeFile.path === filePath
+    }
     setLoading(true)
     setThumbnails([])
-    // Wait for PowerPoint slideshow to finish launching before generating thumbnails
-    await new Promise((r) => setTimeout(r, 2500))
+    // PowerPoint commands are serialized by the main-process daemon queue, so
+    // an arbitrary delay only created a window where CLOSE could be followed
+    // by a stale export that reopened the deck.
+    if (!isCurrent()) return
     try {
       const result = await window.api.generatePptxThumbnails(filePath)
+      if (!isCurrent()) return
       if (result.success && result.thumbnails) {
         const thumbs: SlideThumb[] = result.thumbnails.map((path, i) => ({
           index: i + 1,
@@ -249,14 +282,35 @@ export function SlideNavigator(): JSX.Element {
         if (result.slideCount) setTotalSlides(result.slideCount)
       }
     } catch (err) {
-      console.error('Failed to generate PPTX thumbnails:', err)
+      if (isCurrent()) console.error('Failed to generate PPTX thumbnails:', err)
+    } finally {
+      // Export commands can no longer be cancelled after Office accepted
+      // them. Ensure any hidden managed deck/idle PDM-owned host is released
+      // even when the active file changed while export was finishing.
+      const released = await window.api.syncPreparedPowerPoints([]).catch((error: unknown) => ({
+        success: false,
+        error: String(error)
+      }))
+      if (!released.success) {
+        window.api.dbgLog(
+          `PPTX navigator: native document release failed file=${filePath} error=${released.error || '-'}`
+        )
+      }
+      if (isCurrent()) setLoading(false)
     }
-    setLoading(false)
   }, [setTotalSlides])
 
   useEffect(() => {
+    pptxThumbnailGenerationRef.current += 1
     if (!activeFile) {
       pdfThumbnailGenerationRef.current += 1
+      pdfThumbnailRenderTaskRef.current?.cancel()
+      pdfThumbnailRenderTaskRef.current = null
+      if (pdfThumbnailLoadingTaskRef.current) {
+        void pdfThumbnailLoadingTaskRef.current.destroy().catch(() => undefined)
+        pdfThumbnailLoadingTaskRef.current = null
+      }
+      pdfThumbnailCache.clear()
       setThumbnails([])
       return
     }
@@ -264,6 +318,13 @@ export function SlideNavigator(): JSX.Element {
       loadPdfThumbnails(activeFile.path)
     } else if (activeFile.type === 'presentation') {
       pdfThumbnailGenerationRef.current += 1
+      pdfThumbnailRenderTaskRef.current?.cancel()
+      pdfThumbnailRenderTaskRef.current = null
+      if (pdfThumbnailLoadingTaskRef.current) {
+        void pdfThumbnailLoadingTaskRef.current.destroy().catch(() => undefined)
+        pdfThumbnailLoadingTaskRef.current = null
+      }
+      pdfThumbnailCache.clear()
       // Check if thumbnails already exist in the map (generated by handleTake)
       const { pptxThumbnailsMap } = useAppStore.getState()
       const existing = pptxThumbnailsMap[activeFile.path]
@@ -280,9 +341,20 @@ export function SlideNavigator(): JSX.Element {
       }
     } else {
       pdfThumbnailGenerationRef.current += 1
+      pdfThumbnailRenderTaskRef.current?.cancel()
+      pdfThumbnailRenderTaskRef.current = null
+      if (pdfThumbnailLoadingTaskRef.current) {
+        void pdfThumbnailLoadingTaskRef.current.destroy().catch(() => undefined)
+        pdfThumbnailLoadingTaskRef.current = null
+      }
+      pdfThumbnailCache.clear()
       setThumbnails([])
     }
   }, [activeFile?.path, activeFile?.type, loadPdfThumbnails, loadPptxThumbnails])
+
+  useEffect(() => () => {
+    pptxThumbnailGenerationRef.current += 1
+  }, [])
 
   const handleClick = (index: number): void => {
     if (queueAbsoluteNavigationDuringTransition(index)) return

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { flushSync } from 'react-dom'
 import { mediaUrl } from './media'
 import { PdfViewer } from './components/PresentationView/PdfViewer'
 import { VideoViewer } from './components/PresentationView/VideoViewer'
@@ -15,9 +16,12 @@ import {
   type BroadcastTitlesOutput
 } from './stores/useAppStore'
 import {
+  cancelPdfLivePrewarmFile,
+  cancelPdfLivePrewarmJobs,
   ensurePdfLiveCache,
   type PdfLivePrewarmRequest
 } from './pdf-live-cache'
+import { releasePdfiumResources } from './pdfium-renderer'
 
 interface ContentPayload {
   type: 'presentation' | 'pdf' | 'video' | 'capture' | 'backdrop' | 'other'
@@ -172,14 +176,32 @@ export function PresentationApp(): JSX.Element {
   const activePayloadRef = useRef<ContentPayload | null>(null)
   const revisionRef = useRef(0)
   const pendingRef = useRef<PendingContent | null>(null)
+  const postCommitGenerationRef = useRef(0)
 
   slotsRef.current = slots
   activeLayerRef.current = activeLayer
   broadcastTitlesRef.current = broadcastTitles
 
-  const notifyControlAfterPaint = useCallback((payload: ContentPayload): void => {
+  const notifyControlAfterPaint = useCallback((
+    payload: ContentPayload,
+    postCommitGeneration: number
+  ): void => {
     requestAnimationFrame(() => {
+      if (
+        postCommitGeneration !== postCommitGenerationRef.current ||
+        activePayloadRef.current !== payload
+      ) {
+        window.api.dbgLog(`PresApp: skipped stale painted ACK take=${payload.takeId ?? '-'}`)
+        return
+      }
       requestAnimationFrame(() => {
+        if (
+          postCommitGeneration !== postCommitGenerationRef.current ||
+          activePayloadRef.current !== payload
+        ) {
+          window.api.dbgLog(`PresApp: skipped stale painted ACK take=${payload.takeId ?? '-'}`)
+          return
+        }
         window.api.dbgLog(`PresApp: sendToControl(presentation-content-ready) take=${payload.takeId ?? '-'}`)
         window.api.sendToControl('presentation-content-ready', {
           takeId: payload.takeId,
@@ -205,22 +227,53 @@ export function PresentationApp(): JSX.Element {
     }
 
     pendingRef.current = null
+    const postCommitGeneration = ++postCommitGenerationRef.current
     const oldLayer = activeLayerRef.current
     activePayloadRef.current = pending.payload
     setCaptureAudioSourceId(null)
     activeSlotRef.current = slot
+    if (pending.payload.type === 'backdrop') {
+      cancelPdfLivePrewarmJobs()
+      releasePdfiumResources()
+      window.api.dbgLog('PresApp: idle backdrop committed; heavy PDF resources released')
+    }
     if (oldLayer.kind === 'slot' && slot === oldLayer.slot) {
-      notifyControlAfterPaint(pending.payload)
+      // onReady means the target media frame exists. Mark the TAKE committed
+      // synchronously so a controller timeout cannot issue a stale rollback in
+      // the one-frame gap before the painted ACK below.
+      window.api.sendToControl('presentation-content-committed', {
+        takeId: pending.payload.takeId,
+        type: pending.payload.type,
+        sourceId: pending.payload.capture?.sourceId
+      })
+      notifyControlAfterPaint(pending.payload, postCommitGeneration)
       return
     }
 
     activeLayerRef.current = { kind: 'slot', slot }
-    setActiveLayer({ kind: 'slot', slot })
+    // Commit the opacity/z-index swap before publishing the committed marker.
+    // This keeps the marker a true DOM transaction boundary rather than merely
+    // an indication that React has queued the state update.
+    flushSync(() => setActiveLayer({ kind: 'slot', slot }))
+    window.api.sendToControl('presentation-content-committed', {
+      takeId: pending.payload.takeId,
+      type: pending.payload.type,
+      sourceId: pending.payload.capture?.sourceId
+    })
     window.api.dbgLog(
       `PresApp: atomic layer swap ${oldLayer.kind === 'slot' ? `slot-${oldLayer.slot}` : `capture-${oldLayer.sourceId.slice(-8)}`}->slot-${slot} revision=${revision}`
     )
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        if (
+          postCommitGeneration !== postCommitGenerationRef.current ||
+          activePayloadRef.current !== pending.payload ||
+          activeLayerRef.current.kind !== 'slot' ||
+          activeLayerRef.current.slot !== slot
+        ) {
+          window.api.dbgLog(`PresApp: skipped stale slot retirement/ACK revision=${revision}`)
+          return
+        }
         const retireSlot = oldLayer.kind === 'slot' ? oldLayer.slot : otherSlot(slot)
         if (retireSlot !== slot) {
           setSlots((previous) => {
@@ -252,12 +305,13 @@ export function PresentationApp(): JSX.Element {
     }
 
     pendingRef.current = null
+    const postCommitGeneration = ++postCommitGenerationRef.current
     setCaptureTakeRequest(null)
     const oldLayer = activeLayerRef.current
     activePayloadRef.current = pending.payload
     setCaptureAudioSourceId(pending.payload.captureAudioOnCommit === false ? null : sourceId)
     if (oldLayer.kind === 'capture' && oldLayer.sourceId === sourceId) {
-      notifyControlAfterPaint(pending.payload)
+      notifyControlAfterPaint(pending.payload, postCommitGeneration)
       return
     }
 
@@ -282,6 +336,15 @@ export function PresentationApp(): JSX.Element {
     )
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        if (
+          postCommitGeneration !== postCommitGenerationRef.current ||
+          activePayloadRef.current !== pending.payload ||
+          activeLayerRef.current.kind !== 'capture' ||
+          activeLayerRef.current.sourceId !== sourceId
+        ) {
+          window.api.dbgLog(`PresApp: skipped stale capture retirement/ACK revision=${revision}`)
+          return
+        }
         if (oldLayer.kind === 'slot') {
           setSlots((previous) => {
             const next: [ContentSlot, ContentSlot] = [previous[0], previous[1]]
@@ -347,6 +410,7 @@ export function PresentationApp(): JSX.Element {
   }, [])
 
   const loadContent = useCallback((payload: ContentPayload): void => {
+    postCommitGenerationRef.current += 1
     const currentLayer = activeLayerRef.current
     const currentPayload = activePayloadRef.current
     const revision = ++revisionRef.current
@@ -372,20 +436,16 @@ export function PresentationApp(): JSX.Element {
     }
 
     const currentSlot = activeSlotRef.current
-    const currentIsElectronLive =
-      currentPayload !== null &&
-      (currentPayload.type === 'pdf' || currentPayload.type === 'video' || currentPayload.type === 'capture')
-    const targetIsElectronLive = payload.type === 'pdf' || payload.type === 'video'
-    const isBufferedElectronTransition =
-      currentIsElectronLive &&
-      targetIsElectronLive &&
-      (
-        currentPayload?.type === 'video' ||
-        currentPayload?.type === 'capture' ||
-        payload.type === 'video'
-      )
-    const targetSlot: SlotIndex = isBufferedElectronTransition
-      ? otherSlot(currentSlot)
+    // Never replace the currently-painted slot before the next PDF/video/image
+    // has produced a real ready frame.  Besides preventing a black transition,
+    // this makes cancel-content-load transactional: a timeout can simply drop
+    // the staging slot and the previous output is still mounted and visible.
+    // The overlap lasts only until commitReadySlot retires the old slot.
+    const hasPaintedSlotToPreserve =
+      currentLayer.kind === 'slot' && currentPayload !== null
+    const isBufferedElectronTransition = hasPaintedSlotToPreserve
+    const targetSlot: SlotIndex = hasPaintedSlotToPreserve
+      ? otherSlot(currentLayer.slot)
       : currentLayer.kind === 'slot'
         ? currentLayer.slot
         : currentSlot
@@ -469,6 +529,19 @@ export function PresentationApp(): JSX.Element {
       })
     })
 
+    const unsubPdfRelease = window.api.on('release-prewarmed-pdf', (...args: unknown[]) => {
+      const request = args[0] as { filePath?: string } | undefined
+      if (!request?.filePath) return
+      if (
+        activePayloadRef.current?.type === 'pdf' &&
+        activePayloadRef.current.path === request.filePath
+      ) {
+        window.api.dbgLog(`PDF channel cache: release deferred for live file=${request.filePath}`)
+        return
+      }
+      cancelPdfLivePrewarmFile(request.filePath)
+    })
+
     const unsubLoad = window.api.on('load-content', (...args: unknown[]) => {
       const payload = args[0] as ContentPayload
       window.api.dbgLog(`PresApp: load-content received type=${payload.type}`)
@@ -476,15 +549,29 @@ export function PresentationApp(): JSX.Element {
     })
 
     const unsubStop = window.api.on('stop', () => {
-      if (activePayloadRef.current?.type === 'video' || activePayloadRef.current?.type === 'capture') return
+      // The video transport's Stop button means pause + rewind and must remain
+      // replayable through Play. A true output close uses clear-active-content,
+      // which unmounts VideoViewer and releases its decoder/src below.
+      if (
+        activePayloadRef.current?.type === 'video' ||
+        activePayloadRef.current?.type === 'capture'
+      ) return
+      // For non-video output, do not leave a target staged behind the old
+      // layer: a late onReady must not resurrect it after STOP.
       const layer = activeLayerRef.current
       if (layer.kind !== 'slot') return
+      postCommitGenerationRef.current += 1
+      pendingRef.current = null
+      setCaptureTakeRequest(null)
+      cancelPdfLivePrewarmJobs()
+      releasePdfiumResources()
       activePayloadRef.current = null
-      setSlots((previous) => {
-        const next: [ContentSlot, ContentSlot] = [previous[0], previous[1]]
-        next[layer.slot] = { payload: null, revision: previous[layer.slot].revision }
-        return next
-      })
+      activeSlotRef.current = layer.slot
+      setSlots((previous) => [
+        { payload: null, revision: previous[0].revision },
+        { payload: null, revision: previous[1].revision }
+      ])
+      window.api.dbgLog('PresApp: STOP cleared active and staged output; heavy resources released')
     })
 
     const unsubCaptureAudioLive = window.api.on('capture-audio-live', (...args: unknown[]) => {
@@ -510,6 +597,7 @@ export function PresentationApp(): JSX.Element {
       const request = args[0] as { takeId?: string }
       const pending = pendingRef.current
       if (!request?.takeId || !pending || pending.payload.takeId !== request.takeId) return
+      postCommitGenerationRef.current += 1
       pendingRef.current = null
       setCaptureTakeRequest(null)
       if (pending.kind === 'slot') {
@@ -524,6 +612,9 @@ export function PresentationApp(): JSX.Element {
     })
 
     const unsubClearActive = window.api.on('clear-active-content', () => {
+      postCommitGenerationRef.current += 1
+      cancelPdfLivePrewarmJobs()
+      releasePdfiumResources()
       pendingRef.current = null
       setCaptureTakeRequest(null)
       setCaptureAudioSourceId(null)
@@ -536,12 +627,13 @@ export function PresentationApp(): JSX.Element {
         { payload: null, revision: previous[1].revision }
       ])
       window.api.sendToControl('presentation-content-cleared')
-      window.api.dbgLog('PresApp: active output cleared; capture sources remain warm')
+      window.api.dbgLog('PresApp: active output cleared; document/media resources released; capture sources remain warm')
     })
 
     window.api.signalReady()
     return () => {
       unsubPdfPrewarm()
+      unsubPdfRelease()
       unsubLoad()
       unsubStop()
       unsubCaptureAudioLive()

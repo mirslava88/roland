@@ -102,6 +102,15 @@ type ChannelCacheStatus = 'loading' | 'ready' | 'error'
 // serializes PowerPoint exports, while this renderer-side map prevents the
 // same deck from being requested by several channel cards at once.
 const pptxChannelCacheJobs = new Map<string, Promise<PptxCacheResult>>()
+let pptxChannelCacheTail: Promise<void> = Promise.resolve()
+
+function isPptxStillAssigned(filePath: string): boolean {
+  const state = useAppStore.getState()
+  return state.channelIds.some((id) => (
+    state.channels[id]?.file?.type === 'presentation' &&
+    state.channels[id]?.file?.path === filePath
+  ))
+}
 
 function applyPptxSlideCount(filePath: string, slideCount: number): void {
   if (slideCount < 1) return
@@ -121,24 +130,23 @@ function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
   const existing = pptxChannelCacheJobs.get(filePath)
   if (existing) return existing
 
-  const job = (async (): Promise<PptxCacheResult> => {
+  let job: Promise<PptxCacheResult>
+  const run = async (): Promise<PptxCacheResult> => {
     window.api.dbgLog(`PPTX channel cache: BEGIN file=${filePath}`)
     try {
-      const beforeNativePrepare = useAppStore.getState()
-      const isStillAssigned = beforeNativePrepare.channelIds.some((id) => (
-        beforeNativePrepare.channels[id]?.file?.type === 'presentation' &&
-        beforeNativePrepare.channels[id]?.file?.path === filePath
-      ))
-      if (!isStillAssigned) {
+      // Serialize the complete prepare/export/release pipeline. Serializing
+      // only daemon commands used to open every queued deck before the first
+      // one reached cleanup, producing a large avoidable POWERPNT memory peak.
+      if (!isPptxStillAssigned(filePath)) {
         return { success: false, slideCount: 0, error: 'Presentation was removed from channels' }
       }
 
-      // Opening the native Presentation object is the expensive part of the
-      // first TAKE. Keep it hidden in PowerPoint as soon as the file is placed
-      // in a channel, before producing the remaining full-size cache.
       const prepared = await window.api.preparePowerPoint(filePath)
       if (!prepared.success) {
         throw new Error(prepared.error || 'PowerPoint did not prepare the presentation')
+      }
+      if (!isPptxStillAssigned(filePath)) {
+        return { success: false, slideCount: 0, error: 'Presentation was removed during preparation' }
       }
       if (prepared.aspectRatio && Number.isFinite(prepared.aspectRatio)) {
         const aspectState = useAppStore.getState()
@@ -171,7 +179,10 @@ function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
       // With the native deck already open, generate the lightweight channel
       // preview and then the full-size frames without reopening PowerPoint.
       if (!stateAfterPrepare.pptxThumbnailsMap[filePath]?.length) {
-        const thumbnails = await window.api.generatePptxThumbnails(filePath)
+        const thumbnails = await window.api.generatePptxThumbnails(filePath, true)
+        if (!isPptxStillAssigned(filePath)) {
+          return { success: false, slideCount: 0, error: 'Presentation was removed during thumbnail export' }
+        }
         if (thumbnails.success && thumbnails.thumbnails?.length) {
           const thumbnailState = useAppStore.getState()
           useAppStore.setState({
@@ -184,7 +195,13 @@ function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
         }
       }
 
+      if (!isPptxStillAssigned(filePath)) {
+        return { success: false, slideCount: 0, error: 'Presentation was removed before slide export' }
+      }
       const slides = await window.api.generatePptxSlides(filePath)
+      if (!isPptxStillAssigned(filePath)) {
+        return { success: false, slideCount: 0, error: 'Presentation was removed during slide export' }
+      }
       if (!slides.success || !slides.slides?.length) {
         throw new Error(slides.error || 'PowerPoint не подготовил слайды')
       }
@@ -206,9 +223,36 @@ function ensurePptxChannelCache(filePath: string): Promise<PptxCacheResult> {
       window.api.dbgLog(`PPTX channel cache: ERROR file=${filePath} error=${String(error)}`)
       return { success: false, slideCount: 0, error: String(error) }
     } finally {
-      pptxChannelCacheJobs.delete(filePath)
+      if (pptxChannelCacheJobs.get(filePath) === job) {
+        pptxChannelCacheJobs.delete(filePath)
+      }
+      // Channel preparation may open a full native Presentation object. The
+      // exported slide/thumbnail files remain available on disk, but a deck
+      // that is not currently on air must not stay loaded in POWERPNT.EXE.
+      // No queued deck is open yet; the daemon itself protects an actually
+      // live slideshow or an in-flight transactional TAKE.
+      const released = await window.api.syncPreparedPowerPoints([]).catch((error: unknown) => ({
+        success: false,
+        error: String(error)
+      }))
+      window.api.dbgLog(
+        `PPTX channel cache: native document release file=${filePath} success=${released.success} error=${released.error ?? '-'}`
+      )
+      if (!released.success) {
+        // A rendered disk cache is not a successful *memory* cache operation
+        // until the native Presentation object has actually been released.
+        // Returning an error prevents the UI from claiming READY and gives a
+        // later operator action a truthful chance to retry cleanup.
+        return {
+          success: false,
+          slideCount: 0,
+          error: released.error || 'PowerPoint prepared the files but did not release the native presentation'
+        }
+      }
     }
-  })()
+  }
+  job = pptxChannelCacheTail.then(run, run)
+  pptxChannelCacheTail = job.then(() => undefined, () => undefined)
   pptxChannelCacheJobs.set(filePath, job)
   return job
 }
@@ -231,6 +275,7 @@ export function PreviewPanel(): JSX.Element {
   const queuedTakeRef = useRef<ChannelId | null>(null)
   const takeGenerationRef = useRef(0)
   const activeTakeIdRef = useRef<string | null>(null)
+  const clearingChannelsRef = useRef<Set<ChannelId>>(new Set())
   const cancelTakeCleanupRef = useRef<{ takeId: string; run: () => Promise<void> } | null>(null)
   const cancelOutputIntentRef = useRef<{ backdropImage: string | null; selectedDisplayId: number | null }>({
     backdropImage: null,
@@ -243,6 +288,7 @@ export function PreviewPanel(): JSX.Element {
   } | null>(null)
   const [pdfCacheStatuses, setPdfCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
   const pdfCacheRequestKeysRef = useRef<Record<string, string>>({})
+  const prewarmedPdfPathsRef = useRef<Set<string>>(new Set())
 
   const pptxChannelPaths = [...new Set(channelIds
     .map((id) => channels[id]?.file)
@@ -286,10 +332,6 @@ export function PreviewPanel(): JSX.Element {
       })
     }
   }, [pptxChannelPathKey, pptxCacheStatuses])
-
-  useEffect(() => {
-    void window.api.syncPreparedPowerPoints(pptxChannelPaths)
-  }, [pptxChannelPathKey])
 
   useEffect(() => window.api.on('pdf-channel-cache-status', (...args: unknown[]) => {
     const update = args[0] as {
@@ -340,6 +382,12 @@ export function PreviewPanel(): JSX.Element {
 
   useEffect(() => {
     const activePaths = new Set(pdfChannelFiles.map((file) => file.filePath))
+    for (const previousPath of prewarmedPdfPathsRef.current) {
+      if (!activePaths.has(previousPath)) {
+        window.api.sendToPresentation('release-prewarmed-pdf', { filePath: previousPath })
+      }
+    }
+    prewarmedPdfPathsRef.current = activePaths
     pdfCacheRequestKeysRef.current = Object.fromEntries(
       Object.entries(pdfCacheRequestKeysRef.current).filter(([path]) => activePaths.has(path))
     )
@@ -369,6 +417,13 @@ export function PreviewPanel(): JSX.Element {
       window.api.sendToPresentation('prewarm-pdf', request)
     }
   }, [pdfChannelPathKey, pdfTargetKey])
+
+  useEffect(() => () => {
+    for (const filePath of prewarmedPdfPathsRef.current) {
+      window.api.sendToPresentation('release-prewarmed-pdf', { filePath })
+    }
+    prewarmedPdfPathsRef.current.clear()
+  }, [])
 
   useEffect(() => {
     const cancelCurrentTake = (event: Event): void => {
@@ -402,12 +457,96 @@ export function PreviewPanel(): JSX.Element {
     : -1
   const currentPageIsEmpty = pageIds.every((id) => !channels[id]?.file && !channels[id]?.caption.trim())
 
+  const clearHeavyPresentationOutput = async (
+    backdropImage: string | null,
+    selectedDisplayId: number | null,
+    reason: string
+  ): Promise<boolean> => {
+    let outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
+    try {
+      if (backdropImage && !outputWindowOpen) {
+        await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+        setPresentationWindowOpen(true)
+        outputWindowOpen = true
+      }
+
+      // Always unmount the outgoing PDF/video/capture layer first. Loading the
+      // backdrop without this clear could leave the previous decoder/document
+      // alive if the image is slow or fails to paint.
+      window.api.sendToPresentation('clear-active-content')
+
+      if (!backdropImage) {
+        if (outputWindowOpen) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+        }
+        return true
+      }
+
+      const takeId = `clear-backdrop-${crypto.randomUUID()}`
+      const backdropReady = new Promise<boolean>((resolve) => {
+        let settled = false
+        let timeout: ReturnType<typeof setTimeout> | null = null
+        let unsubscribe = (): void => {}
+        const finish = (ready: boolean): void => {
+          if (settled) return
+          settled = true
+          if (timeout) clearTimeout(timeout)
+          unsubscribe()
+          resolve(ready)
+        }
+        unsubscribe = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+          const payload = args[0] as { takeId?: string; type?: string }
+          if (payload?.takeId !== takeId || payload.type !== 'backdrop') return
+          finish(true)
+        })
+        timeout = setTimeout(() => finish(false), 8_000)
+      })
+
+      window.api.sendToPresentation('load-content', {
+        type: 'backdrop',
+        path: backdropImage,
+        name: 'Backdrop',
+        takeId
+      })
+      const painted = await backdropReady
+      if (painted) return true
+
+      window.api.dbgLog(`${reason}: backdrop did not paint; closing empty output after heavy-content release`)
+    } catch (error) {
+      window.api.dbgLog(`${reason}: output cleanup failed; forcing empty output: ${String(error)}`)
+    }
+
+    // Once native PPT/Word/Excel has been released, a renderer/window error
+    // must not leave a pinned cover, stale live state or the old decoder in
+    // memory. This fallback is deliberately idempotent and non-throwing.
+    try { window.api.sendToPresentation('clear-active-content') } catch { /* best effort */ }
+    try { await window.api.closePresentationWindow() } catch { /* best effort */ }
+    if (outputWindowOpen || useAppStore.getState().isPresentationWindowOpen) {
+      setPresentationWindowOpen(false)
+    }
+    return false
+  }
+
   const handleClear = async (ch: ChannelId): Promise<void> => {
-    const channel = channels[ch]
-    if (!channel) return
+    const requestedChannel = useAppStore.getState().channels[ch]
+    if (!requestedChannel || clearingChannelsRef.current.has(ch)) return
+    const requestedFilePath = requestedChannel.file?.path
+    const requestedFileId = requestedChannel.file?.id
+    clearingChannelsRef.current.add(ch)
+    const releaseOutputTransition = await acquireOutputTransition(`clear-channel:${ch}`)
+    let liveOutputReleased = false
+    try {
+    const currentState = useAppStore.getState()
+    const channel = currentState.channels[ch]
+    if (
+      !channel ||
+      channel.file?.path !== requestedFilePath ||
+      channel.file?.id !== requestedFileId
+    ) return
     const clearedFilePath = channel.file?.path
     // If this channel is live, close the presentation
-    if (liveChannel === ch && channel.file) {
+    if (currentState.liveChannel === ch && channel.file) {
       if (channel.file.type === 'capture') {
         window.api.sendToPresentation('capture-audio-live', null)
       }
@@ -422,7 +561,7 @@ export function PreviewPanel(): JSX.Element {
       // handleTake uses for channel switches) to reliably hide everything
       // underneath while we tear down external content.
       const hasPinnedOverlay = useAppStore.getState().overlayState.kind !== 'hidden'
-      const needsCover = isPptx || isExternalDoc || hasPinnedOverlay
+      const needsCover = !isAudio || Boolean(backdropImage) || hasPinnedOverlay
 
       if (needsCover) {
         await window.api.showOverlay(selectedDisplayId ?? undefined)
@@ -430,36 +569,53 @@ export function PreviewPanel(): JSX.Element {
 
       // Close underlying content (hidden behind overlay)
       if (isPptx) {
-        await window.api.powerpointCommand('close')
+        const closed = await window.api.powerpointCommand('close')
+        if (!closed.success) {
+          window.api.dbgLog(`channel clear: PowerPoint release failed ${closed.error || '-'}`)
+          if (needsCover) {
+            await window.api.hideOverlay()
+            setOverlayState({ kind: 'hidden' })
+          }
+          setTakeProgress({
+            channelId: ch,
+            message: closed.error || 'Не удалось закрыть и освободить презентацию PowerPoint.'
+          })
+          await new Promise((resolve) => setTimeout(resolve, 3500))
+          return
+        }
+        liveOutputReleased = true
       }
       if (isAudio) {
         await window.api.musicStop()
+        liveOutputReleased = true
       }
       if (isExternalDoc) {
-        await window.api.closeExternalFile(channel.file.path)
+        const closed = await window.api.closeExternalFile(channel.file.path)
+        if (!closed.success) {
+          window.api.dbgLog(`channel clear: external window close failed ${closed.error || '-'}`)
+          if (needsCover) {
+            await window.api.hideOverlay()
+            setOverlayState({ kind: 'hidden' })
+          }
+          setTakeProgress({
+            channelId: ch,
+            message: closed.error || 'Не удалось закрыть окно Word/Excel. Канал и эфир оставлены без изменений.'
+          })
+          await new Promise((resolve) => setTimeout(resolve, 3500))
+          return
+        }
+        liveOutputReleased = true
       }
 
-      // Decide final state of the presentation window:
-      // - with backdrop: show backdrop (for any content type)
-      // - without backdrop: close the window entirely
-      if (backdropImage) {
-        if (!useAppStore.getState().isPresentationWindowOpen) {
-          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-          setPresentationWindowOpen(true)
-        }
-        window.api.sendToPresentation('load-content', {
-          type: 'backdrop',
-          path: backdropImage,
-          name: 'Backdrop'
-        })
-        // Give the renderer a moment to paint the backdrop before dropping the overlay
-        if (needsCover) await new Promise((r) => setTimeout(r, 150))
-      } else {
-        window.api.sendToPresentation('clear-active-content')
-        if (useAppStore.getState().isPresentationWindowOpen) {
-          await window.api.closePresentationWindow()
-          setPresentationWindowOpen(false)
-        }
+      if (!isPptx && !isExternalDoc && !isAudio) liveOutputReleased = true
+
+      const backdropPainted = await clearHeavyPresentationOutput(
+        backdropImage,
+        selectedDisplayId,
+        `channel clear ${ch}`
+      )
+      if (backdropImage && !backdropPainted) {
+        window.alert('Фон не удалось подготовить. Контент закрыт, память освобождена.')
       }
 
       if (needsCover) {
@@ -475,12 +631,44 @@ export function PreviewPanel(): JSX.Element {
     // setActiveFile(null) intentionally saves the outgoing position for normal
     // channel switches. An explicit X means unload, so forget it afterwards.
     if (clearedFilePath) clearSlidePosition(clearedFilePath)
+    } catch (error) {
+      window.api.dbgLog(`channel clear ${ch} failed afterRelease=${liveOutputReleased}: ${String(error)}`)
+      try { await window.api.hideOverlay() } catch { /* best effort */ }
+      setOverlayState({ kind: 'hidden' })
+      if (liveOutputReleased) {
+        try { window.api.sendToPresentation('clear-active-content') } catch { /* best effort */ }
+        try { await window.api.closePresentationWindow() } catch { /* best effort */ }
+        setPresentationWindowOpen(false)
+        try { await window.api.releaseBrowserFullscreen() } catch { /* best effort */ }
+        useAppStore.setState({ activeFile: null, liveChannel: null, isPlaying: false })
+        setChannelFile(ch, null)
+        if (requestedFilePath) clearSlidePosition(requestedFilePath)
+      }
+      window.alert(
+        liveOutputReleased
+          ? 'Эфир закрыт, но дополнительное оформление не удалось подготовить. Тяжёлый контент выгружен из памяти.'
+          : `Не удалось закрыть эфир: ${String(error)}`
+      )
+    } finally {
+      releaseOutputTransition()
+      clearingChannelsRef.current.delete(ch)
+    }
   }
 
   const handleTake = async (ch: ChannelId): Promise<void> => {
     const freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
     if (!file) return
+    if (freshState.overlayState.kind === 'blocked') {
+      setTakeProgress({
+        channelId: ch,
+        message: freshState.overlayState.reason
+      })
+      setTimeout(() => {
+        setTakeProgress((current) => current?.channelId === ch ? null : current)
+      }, 3500)
+      return
+    }
     if (
       file.type === 'capture' &&
       file.capture?.captureKind === 'desktop' &&
@@ -566,6 +754,17 @@ export function PreviewPanel(): JSX.Element {
       } catch (error) {
         window.api.dbgLog(`TAKE mirror transition completion failed id=${takeId}: ${String(error)}`)
       }
+      const finalCancelledCleanup = cancelTakeCleanupRef.current
+      if (
+        takeGenerationRef.current !== takeGeneration &&
+        finalCancelledCleanup?.takeId === takeId
+      ) {
+        try {
+          await finalCancelledCleanup.run()
+        } catch (error) {
+          window.api.dbgLog(`TAKE final cancellation cleanup failed id=${takeId}: ${String(error)}`)
+        }
+      }
       const queuedNavigation = finishNavigationTransition()
       if (takeInFlightRef.current === ch) {
         takeInFlightRef.current = null
@@ -618,33 +817,99 @@ export function PreviewPanel(): JSX.Element {
         log('cancellation cleanup BEGIN')
         window.api.sendToPresentation('cancel-content-load', { takeId })
         window.api.sendToPresentation('capture-audio-live', null)
-        if (prevActiveFile?.type === 'presentation' || channel.file?.type === 'presentation') {
-          try { await window.api.powerpointCommand('close') } catch { /* already closed */ }
+        const cancellationIntent = cancelOutputIntentRef.current
+        try {
+          await window.api.showOverlay(cancellationIntent.selectedDisplayId ?? undefined)
+        } catch (error) {
+          log(`cancellation cover failed: ${String(error)}`)
         }
         try { await window.api.musicStop() } catch { /* already stopped */ }
-        if (channel.file?.type === 'other' && !channel.file.isImage && !channel.file.isAudio) {
-          try { await window.api.closeExternalFile(channel.file.path) } catch { /* not opened */ }
+        const targetExternalPath = channel.file?.type === 'other' &&
+          !channel.file.isImage && !channel.file.isAudio
+          ? channel.file.path
+          : null
+        const previousExternalPath = prevActiveFile?.type === 'other' &&
+          !prevActiveFile.isImage && !prevActiveFile.isAudio
+          ? prevActiveFile.path
+          : null
+        let targetExternalClosed: { success: boolean; error?: string } = { success: true }
+        if (targetExternalPath && targetExternalPath !== previousExternalPath) {
+          targetExternalClosed = await window.api.closeExternalFile(targetExternalPath).catch((error: unknown) => ({
+            success: false,
+            error: String(error)
+          }))
+        }
+        let powerPointClosed: { success: boolean; error?: string } = { success: true }
+        if (prevActiveFile?.type === 'presentation' || channel.file?.type === 'presentation') {
+          powerPointClosed = await window.api.powerpointCommand('close').catch((error: unknown) => ({
+            success: false,
+            error: String(error)
+          }))
+        }
+        let previousExternalMinimized: { success: boolean; error?: string } = { success: true }
+        if (previousExternalPath) {
+          // Match normal STOP semantics for a document that was already live:
+          // park the user's Word/Excel window, never leave it on the program
+          // display and never destroy their document just because TAKE was cancelled.
+          previousExternalMinimized = await window.api.minimizeExternalFile(previousExternalPath).catch((error: unknown) => ({
+            success: false,
+            error: String(error)
+          }))
         }
 
-        useAppStore.setState({ activeFile: null, liveChannel: null, isPlaying: false })
-        const intent = cancelOutputIntentRef.current
-        if (intent.backdropImage) {
-          if (!useAppStore.getState().isPresentationWindowOpen) {
-            await window.api.openPresentationWindow(intent.selectedDisplayId ?? undefined)
-            setPresentationWindowOpen(true)
-          }
-          window.api.sendToPresentation('load-content', {
-            type: 'backdrop',
-            path: intent.backdropImage,
-            name: 'Backdrop'
-          })
-          await new Promise((resolve) => setTimeout(resolve, 150))
-        } else {
+        if (!targetExternalClosed.success || !powerPointClosed.success || !previousExternalMinimized.success) {
+          const retainedFile = !targetExternalClosed.success && targetExternalPath
+            ? channel.file
+            : !powerPointClosed.success
+              ? channel.file?.type === 'presentation'
+                ? channel.file
+                : prevActiveFile?.type === 'presentation'
+                  ? prevActiveFile
+                  : null
+              : prevActiveFile
+          const retainedLiveChannel = retainedFile === channel.file ? ch : freshState.liveChannel
+
+          // A failed native cleanup must not retain a committed/staged PDF,
+          // video decoder or capture stream underneath the truthful native
+          // output. Keep only the empty warm BrowserWindow.
           window.api.sendToPresentation('clear-active-content')
           if (useAppStore.getState().isPresentationWindowOpen) {
             await window.api.closePresentationWindow()
             setPresentationWindowOpen(false)
           }
+          useAppStore.setState({
+            activeFile: retainedFile,
+            liveChannel: retainedLiveChannel,
+            isPlaying: false
+          })
+          if (retainedFile) window.api.setActiveContentType(retainedFile.type)
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+          const cleanupErrors = [
+            !targetExternalClosed.success
+              ? targetExternalClosed.error || 'Не удалось закрыть новое окно Word/Excel.'
+              : null,
+            !powerPointClosed.success
+              ? powerPointClosed.error || 'Не удалось закрыть и освободить презентацию PowerPoint.'
+              : null,
+            !previousExternalMinimized.success
+              ? previousExternalMinimized.error || 'Не удалось свернуть прежнее окно Word/Excel.'
+              : null
+          ].filter((value): value is string => Boolean(value))
+          window.alert(`${cleanupErrors.join('\n')} Эфир оставлен в фактическом состоянии; повторите остановку.`)
+          log(`cancellation cleanup incomplete: ${cleanupErrors.join(' | ')}`)
+          return
+        }
+
+        useAppStore.setState({ activeFile: null, liveChannel: null, isPlaying: false })
+        const intent = cancellationIntent
+        const backdropPainted = await clearHeavyPresentationOutput(
+          intent.backdropImage,
+          intent.selectedDisplayId,
+          `TAKE cancellation ${takeId}`
+        )
+        if (intent.backdropImage && !backdropPainted) {
+          window.alert('Фон не удалось подготовить. Контент закрыт, память освобождена.')
         }
         await window.api.hideOverlay()
         setOverlayState({ kind: 'hidden' })
@@ -1033,22 +1298,36 @@ export function PreviewPanel(): JSX.Element {
       }
     }
 
-    setActiveFile(channel.file)
-    setLiveChannel(ch)
-
     // Keep the previous Word/Excel window visible until another native
     // document has been verified on the program display. The external-target
     // branch minimizes it only after the replacement succeeds.
     const nextIsExternalDocument =
       channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio
-    if (
+    const previousExternalFile =
       prevActiveFile?.type === 'other' &&
       !prevActiveFile.isImage &&
-      !prevActiveFile.isAudio &&
-      !nextIsExternalDocument
-    ) {
-      await window.api.minimizeExternalFile(prevActiveFile.path)
+      !prevActiveFile.isAudio
+        ? prevActiveFile
+        : null
+    const shouldDeferPreviousExternalMinimize = Boolean(previousExternalFile && !nextIsExternalDocument)
+    const minimizePreviousExternalAfterTargetReady = async (): Promise<{
+      success: boolean
+      error?: string
+    }> => {
+      if (!shouldDeferPreviousExternalMinimize || !previousExternalFile) return { success: true }
+      let minimized = await window.api.minimizeExternalFile(previousExternalFile.path)
+      if (!minimized.success) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        minimized = await window.api.minimizeExternalFile(previousExternalFile.path)
+      }
+      if (!minimized.success) {
+        log(`previous external window minimize failed after target ready: ${minimized.error || 'unknown error'}`)
+      }
+      return minimized
     }
+
+    setActiveFile(channel.file)
+    setLiveChannel(ch)
 
     if (channel.file.type === 'presentation') {
       window.api.setActiveContentType('presentation')
@@ -1104,7 +1383,8 @@ export function PreviewPanel(): JSX.Element {
         stopListeningForVisible()
       }
       log(`launchPowerPoint: END success=${result.success} error=${result.error ?? '-'}`)
-      if (isTakeCancelled()) {
+      const requiresLockedFailureCover = !result.success && result.safeToUncover === false
+      if (isTakeCancelled() && !requiresLockedFailureCover) {
         log('PowerPoint TAKE cancelled while launching')
         await finishCancelledTake()
         return
@@ -1121,13 +1401,57 @@ export function PreviewPanel(): JSX.Element {
       // Never continue into close-presentation-window + pinned overlay in that
       // state: it replaces the existing backdrop with a permanent black screen.
       if (!result.success) {
-        log('launchPowerPoint failed: revealing previous output and aborting take')
-        await window.api.hideOverlay()
-        setOverlayState({ kind: 'hidden' })
+        const rollbackMessage = result.error ||
+          'PowerPoint rollback was not verified. Restart PDM before continuing.'
+        if (result.safeToUncover === false) {
+          log('launchPowerPoint failed: rollback unverified; pinning safety cover')
+          try {
+            let safetyCoverLocked = false
+            for (let attempt = 1; attempt <= 3 && !safetyCoverLocked; attempt++) {
+              safetyCoverLocked = await window.api.showOverlay(
+                freshState.selectedDisplayId ?? undefined,
+                freezeFrame || undefined,
+                freezeImagePath || undefined,
+                'cover',
+                true
+              )
+              if (!safetyCoverLocked && attempt < 3) {
+                await new Promise((resolve) => setTimeout(resolve, 50))
+              }
+            }
+            if (!safetyCoverLocked) {
+              throw new Error('PowerPoint safety cover could not be locked')
+            }
+          } catch (error) {
+            log(`failed to arm PowerPoint safety cover: ${String(error)}`)
+          }
+          setOverlayState({ kind: 'blocked', reason: rollbackMessage })
+          if (cancelTakeCleanupRef.current?.takeId === takeId) {
+            cancelTakeCleanupRef.current = null
+          }
+          setTakeProgress({ channelId: ch, message: rollbackMessage })
+        } else {
+          log('launchPowerPoint failed: revealing verified previous output')
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+        }
         useAppStore.setState({
           activeFile: prevActiveFile,
-          liveChannel: freshState.liveChannel
+          liveChannel: freshState.liveChannel,
+          currentSlide: freshState.currentSlide,
+          totalSlides: freshState.totalSlides,
+          isPlaying: freshState.isPlaying
         })
+        if (prevActiveFile) {
+          window.api.setActiveContentType(prevActiveFile.type)
+        } else if (freshState.backdropImage) {
+          window.api.setActiveContentType('backdrop')
+        } else {
+          window.api.sendToPresentation('clear-active-content')
+        }
+        if (result.safeToUncover === false) {
+          await new Promise((resolve) => setTimeout(resolve, 3500))
+        }
         return
       }
 
@@ -1180,10 +1504,22 @@ export function PreviewPanel(): JSX.Element {
       // composed and while the transition overlay is still opaque. Unlike
       // BrowserWindow.hide(), this keeps its renderer/GPU surface warm, so the
       // next PPTX→PDF reveal remains fast.
-      if (useAppStore.getState().isPresentationWindowOpen && !useLiveLayerSwitch) {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
-        log('presentation output parked at opacity=0 under ready PowerPoint')
+      if (useAppStore.getState().isPresentationWindowOpen) {
+        // PowerPoint is fully painted and still covered. Drop the old
+        // PDF/video/capture layer now; keeping the empty renderer warm retains
+        // fast window activation without retaining the old document/decoder.
+        if (!useLiveLayerSwitch) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+          log('empty presentation output parked at opacity=0 under ready PowerPoint')
+        } else {
+          window.api.sendToPresentation('clear-active-content')
+          log('old Electron content released under ready PowerPoint')
+        }
+        // Clearing/parking only removes the hidden Electron underlay. The real
+        // program output is still PowerPoint and must remain the authoritative
+        // target for display/DPI reconnect handling in main.
+        window.api.setActiveContentType('presentation')
       }
       if (result.success && result.output) {
         try {
@@ -1210,6 +1546,30 @@ export function PreviewPanel(): JSX.Element {
       }
       if (isTakeCancelled()) {
         await finishCancelledTake()
+        return
+      }
+      const previousExternalMinimized = await minimizePreviousExternalAfterTargetReady()
+      if (!previousExternalMinimized.success) {
+        let targetClosed = await window.api.powerpointCommand('close')
+        if (!targetClosed.success) {
+          await new Promise((resolve) => setTimeout(resolve, 150))
+          targetClosed = await window.api.powerpointCommand('close')
+        }
+        if (targetClosed.success && previousExternalFile) {
+          useAppStore.setState({ activeFile: previousExternalFile, liveChannel: freshState.liveChannel })
+          window.api.setActiveContentType(previousExternalFile.type)
+        }
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        setTakeProgress({
+          channelId: ch,
+          message: previousExternalMinimized.error || (
+            targetClosed.success
+              ? 'Не удалось свернуть прежнее окно Word/Excel. Переключение на PowerPoint отменено.'
+              : 'Не удалось завершить переключение между Word/Excel и PowerPoint. Проверьте эфирный дисплей.'
+          )
+        })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
         return
       }
       clearCommittedCaptureTitleSource('PowerPoint takeover')
@@ -1250,28 +1610,16 @@ export function PreviewPanel(): JSX.Element {
       return
     }
 
-    // PDF / Video / Other — close PowerPoint and switch audio in parallel
-    const parallelTasks2: Promise<unknown>[] = []
+    // Prepare the replacement first. PowerPoint is the last trustworthy
+    // picture on the program display and must remain live until the target
+    // PDF/video/image/capture (or audio cue + backdrop) is actually ready.
     if (prevActiveFile?.type !== channel.file.type) {
       // Audio-device enumeration can block for 5–6 seconds on this machine.
       // It is independent from video output, so never hold the visual TAKE on
       // it; the device switch completes in parallel after the new frame shows.
       void window.api.switchAudioToExternal()
     }
-    const deferPowerPointCloseUntilTargetReady =
-      prevActiveFile?.type === 'presentation' &&
-      (
-        (
-          channel.file.type === 'pdf' ||
-          channel.file.type === 'video' ||
-          channel.file.type === 'capture'
-        ) && useLiveLayerSwitch ||
-        (channel.file.type === 'other' && !channel.file.isImage && !channel.file.isAudio)
-      )
-    if (prevActiveFile?.type === 'presentation' && !deferPowerPointCloseUntilTargetReady) {
-      parallelTasks2.push(window.api.powerpointCommand('close'))
-    }
-    if (parallelTasks2.length > 0) await Promise.all(parallelTasks2)
+    const deferPowerPointCloseUntilTargetReady = prevActiveFile?.type === 'presentation'
     if (isTakeCancelled()) {
       await finishCancelledTake()
       return
@@ -1284,34 +1632,227 @@ export function PreviewPanel(): JSX.Element {
       }
       const { backdropImage, selectedDisplayId } = useAppStore.getState()
       const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
+      const rollbackAudioTake = async (
+        message: string,
+        backdropWasCommitted = false
+      ): Promise<void> => {
+        window.api.sendToPresentation('cancel-content-load', { takeId })
+        try { await window.api.musicStop() } catch { /* best effort */ }
+        if (backdropWasCommitted) {
+          window.api.sendToPresentation('clear-active-content')
+        }
+        const presentationWindowOpen = useAppStore.getState().isPresentationWindowOpen
+        const shouldClosePresentationWindow = presentationWindowOpen && (
+          !outputWindowOpen || (backdropWasCommitted && prevActiveFile?.type === 'presentation')
+        )
+        if (shouldClosePresentationWindow) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+        }
+        useAppStore.setState({
+          activeFile: prevActiveFile,
+          liveChannel: freshState.liveChannel,
+          currentSlide: freshState.currentSlide,
+          totalSlides: freshState.totalSlides,
+          isPlaying: freshState.isPlaying
+        })
+        if (prevActiveFile) {
+          window.api.setActiveContentType(prevActiveFile.type)
+        } else if (freshState.backdropImage) {
+          window.api.setActiveContentType('backdrop')
+        } else {
+          window.api.sendToPresentation('clear-active-content')
+        }
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        setTakeProgress({ channelId: ch, message })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
+      }
+
+      // A resolved play IPC only means that the command reached the hidden
+      // player. Keep the old program picture until the media element confirms
+      // that playback has actually started.
+      try {
+        useAppStore.getState().setMusicPlaylist([channel.file.path])
+        await window.api.musicSetPlaylist([channel.file.path], 0)
+        if (isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
+        await window.api.musicPlay()
+      } catch (error) {
+        log(`audio take failed before playback: ${String(error)}`)
+        await rollbackAudioTake('Не удалось запустить аудиофайл.')
+        return
+      }
+      const audioReadyDeadline = performance.now() + 8_000
+      let audioReady = false
+      while (!audioReady && performance.now() < audioReadyDeadline) {
+        if (isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
+        const musicState = await window.api.musicGetState().catch(() => null)
+        audioReady = musicState?.playing === true
+        if (!audioReady) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+      }
+      if (!audioReady) {
+        log('audio take aborted: playback did not start within 8000ms')
+        await rollbackAudioTake('Аудиофайл не начал воспроизводиться.')
+        return
+      }
+
+      let backdropWasCommitted = false
       if (backdropImage) {
         if (!outputWindowOpen) {
-          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-          setPresentationWindowOpen(true)
+          const placementReady = await window.api.placePresentationWindow(selectedDisplayId ?? undefined)
+          if (!placementReady) {
+            log('audio backdrop window placement failed')
+            await rollbackAudioTake('Не удалось подготовить фон для аудиофайла.')
+            return
+          }
         }
-        window.api.sendToPresentation('load-content', {
-          type: 'backdrop',
-          path: backdropImage,
-          name: 'Backdrop'
+        if (isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
+
+        // Subscribe before load-content. The backdrop is staged in the spare
+        // slot and only replaces the prior Electron layer after <img>.onLoad.
+        const backdropReady = new Promise<{ ready: boolean; cancelled?: boolean }>((resolve) => {
+          let settled = false
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          let unsubscribe = (): void => {}
+          let unsubscribeCommitted = (): void => {}
+          let handleTakeCancelled = (): void => {}
+          let committed = false
+          const finish = (result: { ready: boolean; cancelled?: boolean }): void => {
+            if (settled) return
+            settled = true
+            if (timeout) clearTimeout(timeout)
+            unsubscribe()
+            unsubscribeCommitted()
+            window.removeEventListener('cancel-active-take', handleTakeCancelled)
+            resolve(result)
+          }
+          handleTakeCancelled = (): void => finish({ ready: false, cancelled: true })
+          unsubscribe = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+            const ready = args[0] as { takeId?: string }
+            if (ready?.takeId !== takeId) return
+            finish({ ready: true })
+          })
+          unsubscribeCommitted = window.api.on('presentation-content-committed', (...args: unknown[]) => {
+            const marker = args[0] as { takeId?: string; type?: string }
+            if (marker?.takeId !== takeId || marker.type !== 'backdrop') return
+            committed = true
+            log(`audio backdrop committed; awaiting painted ACK take=${takeId}`)
+          })
+          window.addEventListener('cancel-active-take', handleTakeCancelled)
+          // Close the tiny gap between the check above and listener setup.
+          if (isTakeCancelled()) {
+            finish({ ready: false, cancelled: true })
+            return
+          }
+          timeout = setTimeout(() => {
+            const finishAfterCommitBoundary = (): void => {
+              if (!committed) {
+                finish({ ready: false })
+                return
+              }
+              // The target image has loaded and the layer swap is queued. Give
+              // the painted ACK a bounded cross-process grace instead of rolling
+              // back an already-committed backdrop at the timeout boundary.
+              timeout = setTimeout(() => finish({ ready: true }), 1_000)
+            }
+            if (committed) {
+              finishAfterCommitBoundary()
+              return
+            }
+            // The output renderer may have swapped at the exact deadline while
+            // its IPC marker is still queued behind this timer. Keep listeners
+            // alive briefly before deciding that the load itself timed out.
+            timeout = setTimeout(finishAfterCommitBoundary, 500)
+          }, 8_000)
         })
-      } else if (outputWindowOpen) {
+        if (!isTakeCancelled()) {
+          window.api.sendToPresentation('load-content', {
+            type: 'backdrop',
+            path: backdropImage,
+            name: 'Backdrop',
+            takeId
+          })
+        }
+        const backdropResult = await backdropReady
+        if (backdropResult.cancelled || isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
+        if (!backdropResult.ready) {
+          log('audio take aborted: backdrop did not paint within 8000ms')
+          await rollbackAudioTake('Фон не успел подготовиться для аудиофайла.')
+          return
+        }
+        backdropWasCommitted = true
+        if (isTakeCancelled()) {
+          await finishCancelledTake()
+          return
+        }
+        if (!outputWindowOpen) {
+          try {
+            // The image has already painted in the opacity-zero warm renderer.
+            // Reveal that completed frame behind PowerPoint, then release PPT.
+            await window.api.openPresentationWindow(
+              selectedDisplayId ?? undefined,
+              deferPowerPointCloseUntilTargetReady
+            )
+            setPresentationWindowOpen(true)
+          } catch (error) {
+            log(`audio backdrop reveal failed: ${String(error)}`)
+            await rollbackAudioTake('Не удалось показать подготовленный фон для аудиофайла.', true)
+            return
+          }
+        }
+      }
+
+      if (isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
+      if (deferPowerPointCloseUntilTargetReady) {
+        let closed = await window.api.powerpointCommand('close').catch((error: unknown) => ({
+          success: false,
+          error: String(error)
+        }))
+        if (!closed.success) {
+          await new Promise((resolve) => setTimeout(resolve, 150))
+          closed = await window.api.powerpointCommand('close').catch((error: unknown) => ({
+            success: false,
+            error: String(error)
+          }))
+        }
+        if (!closed.success) {
+          log(`PowerPoint close after audio readiness failed: ${closed.error || 'unknown error'}`)
+          await rollbackAudioTake(
+            closed.error || 'Не удалось завершить предыдущую презентацию PowerPoint.',
+            backdropWasCommitted
+          )
+          return
+        }
+        log('live PowerPoint released only after audio and backdrop were ready')
+      }
+      const previousExternalMinimized = await minimizePreviousExternalAfterTargetReady()
+      if (!previousExternalMinimized.success) {
+        await rollbackAudioTake(
+          previousExternalMinimized.error || 'Не удалось свернуть прежнее окно Word/Excel. Переключение на аудио отменено.',
+          backdropWasCommitted
+        )
+        return
+      }
+      if (!backdropImage && useAppStore.getState().isPresentationWindowOpen) {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
-      }
-      if (isTakeCancelled()) {
-        await finishCancelledTake()
-        return
-      }
-      useAppStore.getState().setMusicPlaylist([channel.file.path])
-      await window.api.musicSetPlaylist([channel.file.path], 0)
-      if (isTakeCancelled()) {
-        await finishCancelledTake()
-        return
-      }
-      await window.api.musicPlay()
-      if (isTakeCancelled()) {
-        await finishCancelledTake()
-        return
       }
       clearCommittedCaptureTitleSource('audio takeover')
       await window.api.hideOverlay()
@@ -1365,23 +1906,46 @@ export function PreviewPanel(): JSX.Element {
         !prevActiveFile.isImage &&
         !prevActiveFile.isAudio &&
         prevActiveFile.path === channel.file.path
-      const restored = await window.api.restoreExternalFile(channel.file.path, external?.bounds)
-      if (!restored.success) {
-        log(`external document restore failed: ${restored.error || 'unknown error'}`)
+      const settleExternalTakeFailure = async (message: string): Promise<void> => {
+        let targetClosed: { success: boolean; error?: string } = { success: true }
         if (!targetWasPreviousExternal) {
-          try { await window.api.minimizeExternalFile(channel.file.path) } catch { /* best effort */ }
+          // A failed open may never have created/tracked a HWND. Closing is
+          // intentionally idempotent: an untracked target is already gone,
+          // while a partially-created window must be verified as destroyed.
+          targetClosed = await window.api.closeExternalFile(channel.file!.path).catch((error: unknown) => ({
+            success: false,
+            error: String(error)
+          }))
         }
-        useAppStore.setState({
-          activeFile: prevActiveFile,
-          liveChannel: freshState.liveChannel
-        })
+        const retainedFile = targetClosed.success ? prevActiveFile : channel.file
+        const retainedLiveChannel = targetClosed.success ? freshState.liveChannel : ch
+        if (!targetClosed.success) {
+          // The failed target window is still physically present. Make it the
+          // truthful native output and release any PDF/video/capture underlay.
+          window.api.sendToPresentation('clear-active-content')
+          if (useAppStore.getState().isPresentationWindowOpen) {
+            await window.api.closePresentationWindow()
+            setPresentationWindowOpen(false)
+          }
+        }
+        useAppStore.setState({ activeFile: retainedFile, liveChannel: retainedLiveChannel })
+        if (retainedFile) window.api.setActiveContentType(retainedFile.type)
         await window.api.hideOverlay()
         setOverlayState({ kind: 'hidden' })
         setTakeProgress({
           channelId: ch,
-          message: restored.error || 'Не удалось вывести окно программы на главный эфирный дисплей.'
+          message: targetClosed.success
+            ? message
+            : `${message} ${targetClosed.error || 'Новое окно Word/Excel не удалось закрыть; оно оставлено текущим эфиром.'}`
         })
         await new Promise((resolve) => setTimeout(resolve, 3500))
+      }
+      const restored = await window.api.restoreExternalFile(channel.file.path, external?.bounds)
+      if (!restored.success) {
+        log(`external document restore failed: ${restored.error || 'unknown error'}`)
+        await settleExternalTakeFailure(
+          restored.error || 'Не удалось вывести окно программы на главный эфирный дисплей.'
+        )
         return
       }
       if (isTakeCancelled()) {
@@ -1399,20 +1963,9 @@ export function PreviewPanel(): JSX.Element {
       }
       if (!foregrounded.success) {
         log(`external document foreground verification failed: ${foregrounded.error || 'unknown error'}`)
-        if (!targetWasPreviousExternal) {
-          try { await window.api.minimizeExternalFile(channel.file.path) } catch { /* best effort */ }
-        }
-        useAppStore.setState({
-          activeFile: prevActiveFile,
-          liveChannel: freshState.liveChannel
-        })
-        await window.api.hideOverlay()
-        setOverlayState({ kind: 'hidden' })
-        setTakeProgress({
-          channelId: ch,
-          message: foregrounded.error || 'Не удалось вывести окно программы поверх главного эфира.'
-        })
-        await new Promise((resolve) => setTimeout(resolve, 3500))
+        await settleExternalTakeFailure(
+          foregrounded.error || 'Не удалось вывести окно программы поверх главного эфира.'
+        )
         return
       }
       if (isTakeCancelled()) {
@@ -1425,17 +1978,21 @@ export function PreviewPanel(): JSX.Element {
       // verified Office window; the idle-output path will create it on exit.
       const { backdropImage } = useAppStore.getState()
       const outputWindowOpen = useAppStore.getState().isPresentationWindowOpen
-      if (backdropImage) {
-        if (outputWindowOpen) {
+      if (outputWindowOpen) {
+        // Word/Excel is already verified in front. Unmount the old hidden
+        // PDF/video now; a backdrop load failure must never retain its heavy
+        // document/decoder indefinitely behind the native Office window.
+        window.api.sendToPresentation('clear-active-content')
+        if (backdropImage) {
           window.api.sendToPresentation('load-content', {
             type: 'backdrop',
             path: backdropImage,
             name: 'Backdrop'
           })
+        } else {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
         }
-      } else if (outputWindowOpen) {
-        await window.api.closePresentationWindow()
-        setPresentationWindowOpen(false)
       }
       if (prevActiveFile?.type === 'presentation') {
         let closed = await window.api.powerpointCommand('close')
@@ -1445,20 +2002,9 @@ export function PreviewPanel(): JSX.Element {
         }
         if (!closed.success) {
           log(`PowerPoint close before external TAKE failed: ${closed.error || 'unknown error'}`)
-          if (!targetWasPreviousExternal) {
-            try { await window.api.minimizeExternalFile(channel.file.path) } catch { /* best effort */ }
-          }
-          useAppStore.setState({
-            activeFile: prevActiveFile,
-            liveChannel: freshState.liveChannel
-          })
-          await window.api.hideOverlay()
-          setOverlayState({ kind: 'hidden' })
-          setTakeProgress({
-            channelId: ch,
-            message: closed.error || 'Не удалось завершить предыдущую презентацию PowerPoint.'
-          })
-          await new Promise((resolve) => setTimeout(resolve, 3500))
+          await settleExternalTakeFailure(
+            closed.error || 'Не удалось завершить предыдущую презентацию PowerPoint.'
+          )
           return
         }
       }
@@ -1468,7 +2014,40 @@ export function PreviewPanel(): JSX.Element {
         !prevActiveFile.isAudio &&
         prevActiveFile.path !== channel.file.path
       ) {
-        await window.api.minimizeExternalFile(prevActiveFile.path)
+        const previousMinimized = await window.api.minimizeExternalFile(prevActiveFile.path)
+        if (!previousMinimized.success) {
+          let targetRemoved = await window.api.minimizeExternalFile(channel.file.path).catch((error: unknown) => ({
+            success: false,
+            error: String(error)
+          }))
+          if (!targetRemoved.success) {
+            targetRemoved = await window.api.closeExternalFile(channel.file.path).catch((error: unknown) => ({
+              success: false,
+              error: String(error)
+            }))
+          }
+          const previousRestored = await window.api.restoreExternalFile(prevActiveFile.path, external.bounds)
+          const previousIsAuthoritative = targetRemoved.success || previousRestored.success
+          if (previousIsAuthoritative) {
+            useAppStore.setState({ activeFile: prevActiveFile, liveChannel: freshState.liveChannel })
+            window.api.setActiveContentType(prevActiveFile.type)
+          } else {
+            useAppStore.setState({ activeFile: channel.file, liveChannel: ch })
+            window.api.setActiveContentType(channel.file.type)
+          }
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+          setTakeProgress({
+            channelId: ch,
+            message: previousMinimized.error || (
+              previousIsAuthoritative
+                ? 'Не удалось свернуть прежнее окно Word/Excel. Переключение отменено.'
+                : 'Windows не завершила переключение окон Word/Excel. Проверьте эфирный дисплей и повторите действие.'
+            )
+          })
+          await new Promise((resolve) => setTimeout(resolve, 3500))
+          return
+        }
       }
       if (prevActiveFile?.type === 'capture') {
         window.api.sendToPresentation('capture-audio-live', null)
@@ -1523,12 +2102,21 @@ export function PreviewPanel(): JSX.Element {
     // <img> elements emit it after onLoad; VideoViewer emits it after the
     // first decoded frame is submitted for composition.
     const contentReady = new Promise<{ ready: boolean; error?: string; cancelled?: boolean }>((resolve) => {
+      const timeoutMs = channel.file?.type === 'capture'
+        ? 16_000
+        : channel.file?.type === 'video'
+          ? 12_000
+          : channel.file?.type === 'pdf'
+            ? 10_000
+            : 8_000
       let settled = false
       let timeout: ReturnType<typeof setTimeout> | undefined
       let unsubReady = (): void => {}
       let unsubError = (): void => {}
       let unsubPrepared = (): void => {}
+      let unsubCommitted = (): void => {}
       let captureCommitSent = false
+      let slotCommitSeen = false
       let handleTakeCancelled = (): void => {}
       const finish = (
         result: { ready: boolean; error?: string; cancelled?: boolean },
@@ -1540,17 +2128,18 @@ export function PreviewPanel(): JSX.Element {
         unsubReady()
         unsubError()
         unsubPrepared()
+        unsubCommitted()
         window.removeEventListener('cancel-active-take', handleTakeCancelled)
         log(
           reason === 'received'
             ? 'content-ready received'
             : reason === 'committed'
-              ? 'content-ready ACK timeout after capture commit; commit retained'
+              ? 'content-ready ACK timeout after commit; committed output retained'
             : reason === 'cancelled'
               ? 'content-ready CANCELLED by operator'
             : reason === 'error'
               ? `content-ready ERROR ${result.error ?? '-'}`
-              : `content-ready TIMEOUT (${channel.file?.type === 'capture' ? 16000 : 5000}ms)`
+              : `content-ready TIMEOUT (${timeoutMs}ms)`
         )
         resolve(result)
       }
@@ -1576,6 +2165,12 @@ export function PreviewPanel(): JSX.Element {
         log(`capture prepared; committing take=${takeId}`)
         window.api.sendToPresentation('commit-content-load', { takeId })
       })
+      unsubCommitted = window.api.on('presentation-content-committed', (...args: unknown[]) => {
+        const committed = args[0] as { takeId?: string; type?: string }
+        if (committed?.takeId !== takeId || channel.file?.type === 'capture') return
+        slotCommitSeen = true
+        log(`content committed; awaiting painted ACK take=${takeId}`)
+      })
       unsubError = window.api.on('presentation-content-error', (...args: unknown[]) => {
         const error = args[0] as { takeId?: string; type?: string; sourceId?: string; message?: string }
         if (channel.file?.type !== 'capture' || error?.type !== 'capture') return
@@ -1591,18 +2186,41 @@ export function PreviewPanel(): JSX.Element {
       // frame and its TAKE waiter up to 14 seconds. Keep the controller's
       // outer timeout last in the chain so it cannot cancel a nearly-ready
       // Word/Excel capture like the previous 7s/8s race did.
-      const timeoutMs = channel.file?.type === 'capture' ? 16000 : 5000
       timeout = setTimeout(() => {
         if (channel.file?.type === 'capture' && captureCommitSent) {
           finish({ ready: true }, 'committed')
           return
         }
-        finish(
-          channel.file?.type === 'capture'
-            ? { ready: false, error: 'Видеосигнал не появился за 16 секунд.' }
-            : { ready: true },
-          'timeout'
-        )
+        const finishAfterSlotCommitBoundary = (): void => {
+          if (!slotCommitSeen) {
+            const typeLabel = channel.file?.type === 'video'
+              ? 'Видео'
+              : channel.file?.type === 'pdf'
+                ? 'PDF'
+                : 'Контент'
+            finish({
+              ready: false,
+              error: `${typeLabel} не успел подготовить первый кадр за ${Math.round(timeoutMs / 1000)} с.`
+            }, 'timeout')
+            return
+          }
+          // The target has a real frame and its layer swap is queued. Keep
+          // waiting briefly for the painted ACK; never issue
+          // cancel-content-load against an already committed slot.
+          timeout = setTimeout(() => finish({ ready: true }, 'committed'), 1_000)
+        }
+        if (slotCommitSeen) {
+          finishAfterSlotCommitBoundary()
+          return
+        }
+        if (channel.file?.type === 'capture') {
+          finish({ ready: false, error: 'Видеосигнал не появился за 16 секунд.' }, 'timeout')
+          return
+        }
+        // A renderer can cross the commit boundary just before this timer while
+        // the committed/ready IPC is still queued. Preserve both listeners for
+        // a short delivery grace before issuing a transactional cancel.
+        timeout = setTimeout(finishAfterSlotCommitBoundary, 500)
       }, timeoutMs)
     })
 
@@ -1646,9 +2264,9 @@ export function PreviewPanel(): JSX.Element {
       await finishCancelledTake()
       return
     }
-    if (!readiness.ready && channel.file.type === 'capture') {
+    if (!readiness.ready) {
       window.api.sendToPresentation('cancel-content-load', { takeId })
-      log(`capture take aborted; previous output preserved error=${readiness.error ?? '-'}`)
+      log(`${channel.file.type} take aborted; previous output preserved error=${readiness.error ?? '-'}`)
       useAppStore.setState({
         activeFile: prevActiveFile,
         liveChannel: freshState.liveChannel,
@@ -1656,6 +2274,13 @@ export function PreviewPanel(): JSX.Element {
         totalSlides: freshState.totalSlides,
         isPlaying: freshState.isPlaying
       })
+      if (prevActiveFile) {
+        window.api.setActiveContentType(prevActiveFile.type)
+      } else if (freshState.backdropImage) {
+        window.api.setActiveContentType('backdrop')
+      } else {
+        window.api.sendToPresentation('clear-active-content')
+      }
       if (!prevActiveFile && !outputWindowWasOpen && useAppStore.getState().isPresentationWindowOpen) {
         await window.api.closePresentationWindow()
         setPresentationWindowOpen(false)
@@ -1684,6 +2309,27 @@ export function PreviewPanel(): JSX.Element {
       await finishCancelledTake()
       return
     }
+    const previousExternalMinimized = await minimizePreviousExternalAfterTargetReady()
+    if (!previousExternalMinimized.success) {
+      window.api.sendToPresentation('capture-audio-live', null)
+      window.api.sendToPresentation('clear-active-content')
+      if (useAppStore.getState().isPresentationWindowOpen) {
+        await window.api.closePresentationWindow()
+        setPresentationWindowOpen(false)
+      }
+      if (previousExternalFile) {
+        useAppStore.setState({ activeFile: previousExternalFile, liveChannel: freshState.liveChannel })
+        window.api.setActiveContentType(previousExternalFile.type)
+      }
+      await window.api.hideOverlay()
+      setOverlayState({ kind: 'hidden' })
+      setTakeProgress({
+        channelId: ch,
+        message: previousExternalMinimized.error || 'Не удалось свернуть прежнее окно Word/Excel. Переключение отменено.'
+      })
+      await new Promise((resolve) => setTimeout(resolve, 3500))
+      return
+    }
     if (revealWarmOutputAfterPaint) {
       // Keep the fullscreen Electron HWND transparent while its new PDF/video
       // is rendered. Promoting it before content-ready caused PDF→PPTX→PDF
@@ -1703,8 +2349,26 @@ export function PreviewPanel(): JSX.Element {
       return
     }
     if (deferPowerPointCloseUntilTargetReady) {
-      await window.api.powerpointCommand('close')
-      log('live PowerPoint closed only after Electron target was ready underneath')
+      const closed = await window.api.powerpointCommand('close')
+      if (!closed.success) {
+        log(`PowerPoint close failed; prepared target discarded: ${closed.error || 'unknown error'}`)
+        window.api.sendToPresentation('clear-active-content')
+        if (useAppStore.getState().isPresentationWindowOpen) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
+        }
+        useAppStore.setState({ activeFile: prevActiveFile, liveChannel: freshState.liveChannel })
+        window.api.setActiveContentType('presentation')
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        setTakeProgress({
+          channelId: ch,
+          message: closed.error || 'Не удалось освободить предыдущую презентацию PowerPoint.'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 3500))
+        return
+      }
+      log('live PowerPoint closed and released only after Electron target was ready underneath')
     }
     if (isTakeCancelled()) {
       await finishCancelledTake()
@@ -2075,7 +2739,9 @@ function ChannelPanel({
       // a PPTX must first finish the same native preparation as an offline
       // channel. Otherwise this path could bypass the disabled TAKE buttons.
       if (file.type === 'presentation') {
-        void ensurePptxChannelCache(file.path).then(() => onTake())
+        void ensurePptxChannelCache(file.path).then((result) => {
+          if (result.success) onTake()
+        })
       } else {
         setTimeout(() => onTake(), 50)
       }
@@ -2602,7 +3268,7 @@ function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
 }): JSX.Element {
   if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
-  if (file.type === 'video') return <VideoPreview file={file} />
+  if (file.type === 'video') return <VideoPreview key={file.path} file={file} />
   if (file.type === 'capture') {
     return file.capture
       ? <CaptureThumbnail config={file.capture} className="w-full h-full" />
@@ -2617,66 +3283,81 @@ function PdfPreview({ file, currentSlide, onTotalSlides }: {
 }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
-  const renderTaskRef = useRef<pdfjsLib.PDFRenderTask | null>(null)
+  const loadingTaskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null)
+  const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null)
   const renderGenerationRef = useRef(0)
+  const onTotalSlidesRef = useRef(onTotalSlides)
+  onTotalSlidesRef.current = onTotalSlides
 
   useEffect(() => {
     let cancelled = false
-    async function load(): Promise<void> {
-      try {
-        const data = await window.api.readFile(file.path)
-        const doc = await pdfjsLib.getDocument({ data }).promise
-        if (!cancelled) {
-          setPdf(doc)
-          onTotalSlides(doc.numPages)
-        }
-      } catch (err) {
-        console.error('Preview: Failed to load PDF:', err)
-      }
-    }
-    load()
-    return () => { cancelled = true }
-  }, [file.path])
-
-  const renderPage = useCallback(async (pageNum: number) => {
-    if (!pdf || !canvasRef.current || !containerRef.current) return
     const generation = ++renderGenerationRef.current
     renderTaskRef.current?.cancel()
-    const page = await pdf.getPage(pageNum)
-    if (generation !== renderGenerationRef.current) return
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const containerWidth = containerRef.current.clientWidth
-    const containerHeight = containerRef.current.clientHeight
-    const viewport = page.getViewport({ scale: 1 })
-    const scale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
-    const scaledViewport = page.getViewport({ scale })
-
-    canvas.width = scaledViewport.width
-    canvas.height = scaledViewport.height
-
-    const renderTask = page.render({ canvasContext: ctx, viewport: scaledViewport })
-    renderTaskRef.current = renderTask
-    try {
-      await renderTask.promise
-    } catch (error) {
-      if (generation === renderGenerationRef.current) throw error
-    } finally {
-      if (renderTaskRef.current === renderTask) renderTaskRef.current = null
+    renderTaskRef.current = null
+    if (loadingTaskRef.current) {
+      void loadingTaskRef.current.destroy().catch(() => undefined)
+      loadingTaskRef.current = null
     }
-  }, [pdf])
 
-  useEffect(() => {
-    if (pdf && currentSlide >= 1 && currentSlide <= pdf.numPages) void renderPage(currentSlide)
+    async function render(): Promise<void> {
+      let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null
+      let page: pdfjsLib.PDFPageProxy | null = null
+      let renderTask: pdfjsLib.RenderTask | null = null
+      try {
+        const data = await window.api.readFile(file.path)
+        if (cancelled || generation !== renderGenerationRef.current) return
+        loadingTask = pdfjsLib.getDocument({ data })
+        loadingTaskRef.current = loadingTask
+        const doc = await loadingTask.promise
+        if (cancelled || generation !== renderGenerationRef.current) return
+        onTotalSlidesRef.current(doc.numPages)
+        const pageNumber = Math.max(1, Math.min(doc.numPages, currentSlide))
+        page = await doc.getPage(pageNumber)
+        if (
+          cancelled ||
+          generation !== renderGenerationRef.current ||
+          !canvasRef.current ||
+          !containerRef.current
+        ) return
+
+        const canvas = canvasRef.current
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return
+        const containerWidth = Math.max(1, containerRef.current.clientWidth)
+        const containerHeight = Math.max(1, containerRef.current.clientHeight)
+        const viewport = page.getViewport({ scale: 1 })
+        const scale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
+        const scaledViewport = page.getViewport({ scale })
+        canvas.width = Math.max(1, Math.round(scaledViewport.width))
+        canvas.height = Math.max(1, Math.round(scaledViewport.height))
+
+        renderTask = page.render({ canvas, canvasContext: ctx, viewport: scaledViewport })
+        renderTaskRef.current = renderTask
+        await renderTask.promise
+      } catch (err) {
+        if (!cancelled && generation === renderGenerationRef.current) {
+          console.error('Preview: Failed to render PDF:', err)
+        }
+      } finally {
+        if (renderTaskRef.current === renderTask) renderTaskRef.current = null
+        page?.cleanup()
+        if (loadingTask) {
+          if (loadingTaskRef.current === loadingTask) loadingTaskRef.current = null
+          await loadingTask.destroy().catch(() => undefined)
+        }
+      }
+    }
+    void render()
     return () => {
+      cancelled = true
       renderGenerationRef.current += 1
       renderTaskRef.current?.cancel()
       renderTaskRef.current = null
+      const loadingTask = loadingTaskRef.current
+      loadingTaskRef.current = null
+      if (loadingTask) void loadingTask.destroy().catch(() => undefined)
     }
-  }, [currentSlide, pdf, renderPage])
+  }, [currentSlide, file.path])
 
   return (
     <div ref={containerRef} className="w-full h-full flex items-center justify-center">
@@ -2712,15 +3393,125 @@ function PptxPreview({ file, currentSlide, pptxThumbnails }: {
 }
 
 function VideoPreview({ file }: { file: FileEntry }): JSX.Element {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const capturedRef = useRef(false)
+  const desiredTimeRef = useRef(0)
+  const posterTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [poster, setPoster] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  const releaseVideo = (video: HTMLVideoElement): void => {
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+  }
+
+  useEffect(() => {
+    const video = videoRef.current
+    posterTimeoutRef.current = setTimeout(() => {
+      if (!video || capturedRef.current) return
+      releaseVideo(video)
+      setFailed(true)
+    }, 8_000)
+    return () => {
+      if (posterTimeoutRef.current) clearTimeout(posterTimeoutRef.current)
+      posterTimeoutRef.current = null
+      if (!video) return
+      releaseVideo(video)
+    }
+  }, [])
+
+  const capturePoster = (video: HTMLVideoElement): void => {
+    if (capturedRef.current || video.videoWidth < 1 || video.videoHeight < 1) return
+
+    const maxWidth = 480
+    const scale = Math.min(1, maxWidth / video.videoWidth)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale))
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale))
+    const context = canvas.getContext('2d')
+    if (!context) {
+      canvas.width = 0
+      canvas.height = 0
+      releaseVideo(video)
+      setFailed(true)
+      return
+    }
+
+    try {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      capturedRef.current = true
+      if (posterTimeoutRef.current) clearTimeout(posterTimeoutRef.current)
+      posterTimeoutRef.current = null
+      setPoster(canvas.toDataURL('image/jpeg', 0.72))
+      releaseVideo(video)
+    } catch (error) {
+      console.warn('Preview: Failed to capture video poster:', error)
+      releaseVideo(video)
+      setFailed(true)
+    } finally {
+      canvas.width = 0
+      canvas.height = 0
+    }
+  }
+
+  if (poster) {
+    return (
+      <div className="w-full h-full flex items-center justify-center">
+        <img src={poster} alt={file.name} className="max-w-full max-h-full rounded-lg object-contain" />
+      </div>
+    )
+  }
+
+  if (failed) {
+    return (
+      <div className="w-full h-full flex items-center justify-center text-center text-gray-500 p-4">
+        <div>
+          <div className="text-3xl mb-2">🎬</div>
+          <p className="text-[11px]">{file.name}</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="w-full h-full flex items-center justify-center">
       <video
+        ref={videoRef}
         src={mediaUrl(file.path)}
         className="max-w-full max-h-full rounded-lg"
         controls={false}
         muted
-        preload="metadata"
-        onLoadedMetadata={(e) => { e.currentTarget.currentTime = 1 }}
+        preload="auto"
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget
+          desiredTimeRef.current = Number.isFinite(video.duration) && video.duration > 0
+            ? Math.min(1, video.duration / 2)
+            : 0
+          if (desiredTimeRef.current > 0.05) {
+            try {
+              video.currentTime = desiredTimeRef.current
+            } catch {
+              // loadeddata will capture the first decoded frame instead
+            }
+          }
+        }}
+        onLoadedData={(event) => {
+          const video = event.currentTarget
+          if (
+            desiredTimeRef.current <= 0.05 ||
+            Math.abs(video.currentTime - desiredTimeRef.current) <= 0.1
+          ) {
+            capturePoster(video)
+          }
+        }}
+        onSeeked={(event) => capturePoster(event.currentTarget)}
+        onError={(event) => {
+          if (posterTimeoutRef.current) clearTimeout(posterTimeoutRef.current)
+          posterTimeoutRef.current = null
+          releaseVideo(event.currentTarget)
+          setFailed(true)
+        }}
       />
     </div>
   )
@@ -2774,6 +3565,8 @@ function OtherPreview({ file }: { file: FileEntry }): JSX.Element {
 function DocPreview({ file }: { file: FileEntry }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const loadingTaskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null)
+  const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null)
   const { docPreviewsMap } = useAppStore()
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -2806,10 +3599,16 @@ function DocPreview({ file }: { file: FileEntry }): JSX.Element {
     let cancelled = false
 
     async function render(): Promise<void> {
+      let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null
+      let page: pdfjsLib.PDFPageProxy | null = null
+      let renderTask: pdfjsLib.RenderTask | null = null
       try {
         const data = await window.api.readFile(pdfPath!)
-        const doc = await pdfjsLib.getDocument({ data }).promise
-        const page = await doc.getPage(1)
+        if (cancelled) return
+        loadingTask = pdfjsLib.getDocument({ data })
+        loadingTaskRef.current = loadingTask
+        const doc = await loadingTask.promise
+        page = await doc.getPage(1)
         if (cancelled || !canvasRef.current || !containerRef.current) return
 
         const containerWidth = containerRef.current.clientWidth
@@ -2823,15 +3622,35 @@ function DocPreview({ file }: { file: FileEntry }): JSX.Element {
 
         const ctx = canvasRef.current.getContext('2d')
         if (ctx) {
-          await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise
+          renderTask = page.render({
+            canvas: canvasRef.current,
+            canvasContext: ctx,
+            viewport: scaledViewport
+          })
+          renderTaskRef.current = renderTask
+          await renderTask.promise
         }
       } catch {
         if (!cancelled) setFailed(true)
+      } finally {
+        if (renderTaskRef.current === renderTask) renderTaskRef.current = null
+        page?.cleanup()
+        if (loadingTask) {
+          if (loadingTaskRef.current === loadingTask) loadingTaskRef.current = null
+          await loadingTask.destroy().catch(() => undefined)
+        }
       }
     }
 
     render()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      renderTaskRef.current?.cancel()
+      renderTaskRef.current = null
+      const loadingTask = loadingTaskRef.current
+      loadingTaskRef.current = null
+      if (loadingTask) void loadingTask.destroy().catch(() => undefined)
+    }
   }, [pdfPath])
 
   if (pdfPath) {

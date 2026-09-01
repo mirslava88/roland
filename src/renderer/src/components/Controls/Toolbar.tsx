@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { EventTimer } from '../EventTimer/EventTimer'
@@ -7,10 +7,13 @@ import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
 import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
 import { BroadcastTitles } from '../BroadcastTitles/BroadcastTitles'
+import { acquireOutputTransition } from '../../output-transition-lock'
 
 export function Toolbar(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [auxiliaryDisplaysOpen, setAuxiliaryDisplaysOpen] = useState(false)
+  const [outputCloseInFlight, setOutputCloseInFlight] = useState(false)
+  const outputCloseInFlightRef = useRef(false)
   const {
     isPresentationWindowOpen,
     setPresentationWindowOpen,
@@ -54,58 +57,117 @@ export function Toolbar(): JSX.Element {
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
+      if (outputCloseInFlightRef.current) return
       const cancelHandledByTake = !window.dispatchEvent(new CustomEvent('cancel-active-take', {
         cancelable: true,
         detail: { backdropImage, selectedDisplayId }
       }))
       if (cancelHandledByTake) return
-      if (activeFile?.type === 'capture') {
+      outputCloseInFlightRef.current = true
+      setOutputCloseInFlight(true)
+      const releaseOutputTransition = await acquireOutputTransition('toolbar-close-output')
+      let closeCanFinalize = false
+      try {
+      const currentState = useAppStore.getState()
+      const closingFile = currentState.activeFile
+      const closingWindowOpen = currentState.isPresentationWindowOpen
+      const closingBackdrop = currentState.backdropImage
+      const closingDisplayId = currentState.selectedDisplayId
+      const outputStillActive = (closingWindowOpen && closingFile !== null) ||
+        closingFile?.type === 'presentation' ||
+        (closingFile?.type === 'other' && !closingFile.isImage)
+      if (!outputStillActive) return
+
+      const closingExternalDocument = closingFile?.type === 'other' &&
+        !closingFile.isImage && !closingFile.isAudio
+      const closingPowerPoint = closingFile?.type === 'presentation'
+      closeCanFinalize = !closingExternalDocument && !closingPowerPoint
+
+      if (closingFile?.type === 'capture') {
         window.api.sendToPresentation('capture-audio-live', null)
       }
-      if (activeFile?.type === 'other' && activeFile.isAudio) {
+      if (closingFile?.type === 'other' && closingFile.isAudio) {
         await window.api.musicStop()
       }
       // Minimize external file (Word/Excel) if open — don't close it
-      if (activeFile?.type === 'other' && !activeFile.isImage && !activeFile.isAudio) {
-        await window.api.minimizeExternalFile(activeFile.path)
-      }
-      if (activeFile?.type === 'presentation' && backdropImage) {
-        // Seamless: open black window first, then close PowerPoint, then show backdrop
-        if (!isPresentationWindowOpen) {
-          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-          setPresentationWindowOpen(true)
+      if (closingExternalDocument) {
+        const minimized = await window.api.minimizeExternalFile(closingFile.path)
+        if (!minimized.success) {
+          window.api.dbgLog(`toolbar stop: external window minimize failed ${minimized.error || '-'}`)
+          window.alert(minimized.error || 'Не удалось свернуть окно Word/Excel. Эфир оставлен без изменений; повторите остановку.')
+          return
         }
-        await window.api.powerpointCommand('close')
+        closeCanFinalize = true
+      }
+      const shouldCoverVisualClose = Boolean(closingFile) && !(
+        closingFile?.type === 'other' && !closingFile.isImage
+      )
+      if (shouldCoverVisualClose) {
+        await window.api.showOverlay(closingDisplayId ?? undefined)
+      }
+      if (closingPowerPoint) {
+        const closed = await window.api.powerpointCommand('close')
+        if (!closed.success) {
+          window.api.dbgLog(`toolbar stop: PowerPoint release failed ${closed.error || '-'}`)
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+          window.alert(closed.error || 'Не удалось закрыть и освободить презентацию PowerPoint.')
+          return
+        }
+        closeCanFinalize = true
+      }
+      if (closingBackdrop) {
+        let outputWindowOpen = closingWindowOpen
+        if (!outputWindowOpen) {
+          await window.api.openPresentationWindow(closingDisplayId ?? undefined)
+          setPresentationWindowOpen(true)
+          outputWindowOpen = true
+        }
+
+        // A true close first unmounts the old PDF/video decoder. Keep the
+        // transition cover until the replacement image has actually painted;
+        // this preserves the old seamless behavior without making resource
+        // cleanup depend on an arbitrary 200 ms delay.
+        const closeBackdropTakeId = `close-backdrop-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const backdropReady = new Promise<boolean>((resolve) => {
+          let settled = false
+          let unsubscribe = (): void => {}
+          const finish = (ready: boolean): void => {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            unsubscribe()
+            resolve(ready)
+          }
+          unsubscribe = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+            const payload = args[0] as { takeId?: string; type?: string }
+            if (payload?.takeId !== closeBackdropTakeId || payload.type !== 'backdrop') return
+            finish(true)
+          })
+          const timeout = setTimeout(() => finish(false), 8_000)
+        })
+        window.api.sendToPresentation('clear-active-content')
         window.api.sendToPresentation('load-content', {
           type: 'backdrop',
-          path: backdropImage,
-          name: 'Backdrop'
+          path: closingBackdrop,
+          name: 'Backdrop',
+          takeId: closeBackdropTakeId
         })
-        // Дать backdrop отрисоваться в Electron окне до того как уберём
-        // overlay — иначе overlay (с PP snap) исчезнет, а под ним ещё не
-        // нарисованный backdrop = чёрный flash.
-        await new Promise((r) => setTimeout(r, 200))
-      } else {
-        if (activeFile?.type === 'presentation') {
-          await window.api.powerpointCommand('close')
-        }
-        if (backdropImage) {
-          if (!isPresentationWindowOpen) {
-            await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-            setPresentationWindowOpen(true)
-          }
-          window.api.sendToPresentation('load-content', {
-            type: 'backdrop',
-            path: backdropImage,
-            name: 'Backdrop'
-          })
-          await new Promise((r) => setTimeout(r, 200))
-        } else {
+        const backdropPainted = await backdropReady
+        if (!backdropPainted) {
+          window.api.dbgLog('toolbar stop: backdrop did not paint; closing empty output safely')
           window.api.sendToPresentation('clear-active-content')
-          if (isPresentationWindowOpen) {
+          if (outputWindowOpen) {
             await window.api.closePresentationWindow()
             setPresentationWindowOpen(false)
           }
+          window.alert('Фон не удалось подготовить. Контент закрыт, память освобождена.')
+        }
+      } else {
+        window.api.sendToPresentation('clear-active-content')
+        if (closingWindowOpen) {
+          await window.api.closePresentationWindow()
+          setPresentationWindowOpen(false)
         }
       }
       // КРИТИЧНО: всегда скрываем overlay при выходе из эфира. Если PPTX был
@@ -117,6 +179,28 @@ export function Toolbar(): JSX.Element {
       await window.api.releaseBrowserFullscreen()
       setActiveFile(null)
       setLiveChannelNull()
+      } catch (error) {
+        window.api.dbgLog(`toolbar stop failed afterRelease=${closeCanFinalize}: ${String(error)}`)
+        try { await window.api.hideOverlay() } catch { /* best effort */ }
+        setOverlayState({ kind: 'hidden' })
+        if (closeCanFinalize) {
+          try { window.api.sendToPresentation('clear-active-content') } catch { /* best effort */ }
+          try { await window.api.closePresentationWindow() } catch { /* best effort */ }
+          setPresentationWindowOpen(false)
+          try { await window.api.releaseBrowserFullscreen() } catch { /* best effort */ }
+          setActiveFile(null)
+          setLiveChannelNull()
+        }
+        window.alert(
+          closeCanFinalize
+            ? 'Эфир закрыт, тяжёлый контент выгружен. Дополнительное оформление подготовить не удалось.'
+            : `Не удалось закрыть эфир: ${String(error)}`
+        )
+      } finally {
+        releaseOutputTransition()
+        outputCloseInFlightRef.current = false
+        setOutputCloseInFlight(false)
+      }
     } else {
       if (!selectedChannelHasContent || selectedChannel === null) return
       window.dispatchEvent(new CustomEvent('take-channel', { detail: selectedChannel }))
@@ -242,7 +326,7 @@ export function Toolbar(): JSX.Element {
 
       <button
         onClick={handleTogglePresentation}
-        disabled={!canTogglePresentation}
+        disabled={!canTogglePresentation || outputCloseInFlight}
         className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
           isOutputActive
             ? 'bg-red-600/80 hover:bg-red-600 text-white'

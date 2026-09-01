@@ -21,6 +21,9 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
     let readySent = false
     let playRequested = false
     let disposed = false
+    let videoFrameCallbackId: number | null = null
+    let readyAnimationFrame1 = 0
+    let readyAnimationFrame2 = 0
     const fileName = filePath.split(/[\\/]/).pop() || filePath
 
     const sendContentReady = (waitForVideoFrame = true): void => {
@@ -28,8 +31,10 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
       readySent = true
       window.api.dbgLog(`VideoViewer: content-ready file=${fileName} time=${video.currentTime.toFixed(3)} readyState=${video.readyState}`)
       const notifyAfterPaint = (): void => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
+        readyAnimationFrame1 = requestAnimationFrame(() => {
+          readyAnimationFrame1 = 0
+          readyAnimationFrame2 = requestAnimationFrame(() => {
+            readyAnimationFrame2 = 0
             if (!disposed) {
               if (onReadyRef.current) onReadyRef.current()
               else window.api.sendToControl('presentation-content-ready')
@@ -39,7 +44,10 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
       }
       // Wait for an actual decoded frame to enter Chromium's compositor.
       if (waitForVideoFrame && typeof video.requestVideoFrameCallback === 'function') {
-        video.requestVideoFrameCallback(() => notifyAfterPaint())
+        videoFrameCallbackId = video.requestVideoFrameCallback(() => {
+          videoFrameCallbackId = null
+          notifyAfterPaint()
+        })
       } else {
         notifyAfterPaint()
       }
@@ -137,6 +145,12 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
       video.removeEventListener('loadeddata', handleLoadedData)
       video.removeEventListener('seeked', handleSeeked)
       video.removeEventListener('error', handleError)
+      if (videoFrameCallbackId !== null && typeof video.cancelVideoFrameCallback === 'function') {
+        video.cancelVideoFrameCallback(videoFrameCallbackId)
+        videoFrameCallbackId = null
+      }
+      if (readyAnimationFrame1) cancelAnimationFrame(readyAnimationFrame1)
+      if (readyAnimationFrame2) cancelAnimationFrame(readyAnimationFrame2)
       const finalTime = Number.isFinite(video.currentTime) ? video.currentTime : 0
       const finalDuration = Number.isFinite(video.duration) ? video.duration : 0
       const wasPlaying = !video.paused && !video.ended

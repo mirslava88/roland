@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { mediaUrl } from '../../media'
-import { renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
+import { releasePdfiumResources, renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
 import { DesktopCapturePicker } from '../Capture/DesktopCapturePicker'
 import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
 import {
@@ -82,6 +82,8 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
     return () => { cancelled = true }
   }, [filePath, page])
 
+  useEffect(() => () => releasePdfiumResources(filePath), [filePath])
+
   const isCurrentFrame = frame?.filePath === filePath && frame.page === page
   return (
     <div className="relative flex h-full w-full items-center justify-center bg-black">
@@ -103,6 +105,39 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
         </div>
       )}
     </div>
+  )
+}
+
+function InformationVideoPreview({
+  path,
+  onDuration
+}: {
+  path: string
+  onDuration: (duration: number) => void
+}): JSX.Element {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  useEffect(() => {
+    const video = videoRef.current
+    return () => {
+      if (!video) return
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+  }, [])
+
+  return (
+    <video
+      ref={videoRef}
+      src={mediaUrl(path)}
+      className="h-full w-full object-contain"
+      muted
+      playsInline
+      preload="metadata"
+      onLoadedMetadata={(event) => {
+        onDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)
+      }}
+    />
   )
 }
 
@@ -420,7 +455,11 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
         totalSlides = result.slideCount || result.slides.length
       } else if (type === 'pdf') {
         const data = await window.api.readFile(path)
-        totalSlides = await warmPdfiumDocument(path, 'background', data.slice(0))
+        try {
+          totalSlides = await warmPdfiumDocument(path, 'background', data.slice(0))
+        } finally {
+          releasePdfiumResources(path)
+        }
       }
 
       const media: InformationMediaConfig = {
@@ -928,16 +967,10 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
                         </div>
                       </div>
                     ) : informationMedia.type === 'video' ? (
-                      <video
-                        src={mediaUrl(informationMedia.path)}
-                        className="h-full w-full object-contain"
-                        muted
-                        playsInline
-                        preload="metadata"
-                        onLoadedMetadata={(event) => {
-                          const duration = Number.isFinite(event.currentTarget.duration)
-                            ? event.currentTarget.duration
-                            : 0
+                      <InformationVideoPreview
+                        key={informationMedia.path}
+                        path={informationMedia.path}
+                        onDuration={(duration) => {
                           const current = useAppStore.getState().informationMedia
                           if (
                             current?.type === 'video' &&

@@ -481,7 +481,17 @@ $script:pptOriginalEditorWasVisible = $false
 $script:pptOriginalEditorRect = $null
 $script:pptRegistryWindowSnapshot = $null
 $script:managedPresentationKeys = @{}
+$script:managedPresentationIdentities = @{}
+$script:unidentifiedManagedPresentations = New-Object System.Collections.ArrayList
 $script:preparedPresentationKeys = @{}
+$script:lastManagedPresentationCloseOk = $true
+$script:openTransaction = $null
+$script:lastOpenTransactionOk = $true
+$script:lastPowerPointSessionCleanupOk = $true
+$script:lastIdleOwnedPowerPointHostReleaseOk = $true
+$script:pptOwnedProcessId = 0
+$script:pptOwnedProcessStartTimeUtcTicks = 0L
+$script:pptSessionUncertain = $false
 
 function Restore-MediaForeground {
     $hwnd = [long]$script:mediaReturnForegroundHwnd
@@ -723,23 +733,176 @@ function Get-PresentationKey($presentation) {
     return $key.ToLowerInvariant()
 }
 
-function Mark-ManagedPresentation($presentation) {
-    $key = Get-PresentationKey $presentation
-    if (-not [string]::IsNullOrEmpty($key)) {
-        $script:managedPresentationKeys[$key] = $true
-        Log "managed presentation registered '$key'"
+function Get-PresentationIdentity($presentation) {
+    if (-not $presentation) { return '' }
+    $unknown = [IntPtr]::Zero
+    try {
+        # FullName is not ownership: a user can reopen the same path after a
+        # PDM-created Presentation was closed. IUnknown identity distinguishes
+        # the exact COM object. Release the temporary AddRef immediately so
+        # tracking never keeps a closed presentation alive by itself.
+        $unknown = [System.Runtime.InteropServices.Marshal]::GetIUnknownForObject($presentation)
+        if ($unknown -eq [IntPtr]::Zero) { return '' }
+        return ([long]$unknown).ToString('X16')
+    } catch {
+        return ''
+    } finally {
+        if ($unknown -ne [IntPtr]::Zero) {
+            try { [void][System.Runtime.InteropServices.Marshal]::Release($unknown) } catch {}
+        }
     }
 }
 
-function Test-ManagedPresentation($presentation) {
+function Get-UnidentifiedManagedPresentationRecord($presentation) {
+    if (-not $presentation) { return $null }
+    foreach ($record in @($script:unidentifiedManagedPresentations)) {
+        if ($record -and [object]::ReferenceEquals($record.presentation, $presentation)) {
+            return $record
+        }
+    }
+    return $null
+}
+
+function Remove-UnidentifiedManagedPresentation($presentation) {
+    if (-not $presentation) { return }
+    for ($i = $script:unidentifiedManagedPresentations.Count - 1; $i -ge 0; $i--) {
+        $record = $script:unidentifiedManagedPresentations[$i]
+        if ($record -and [object]::ReferenceEquals($record.presentation, $presentation)) {
+            $script:unidentifiedManagedPresentations.RemoveAt($i)
+        }
+    }
+}
+
+function Mark-ManagedPresentation($presentation) {
     $key = Get-PresentationKey $presentation
-    return (-not [string]::IsNullOrEmpty($key)) -and $script:managedPresentationKeys.ContainsKey($key)
+    $identity = Get-PresentationIdentity $presentation
+    if ([string]::IsNullOrEmpty($key) -or [string]::IsNullOrEmpty($identity)) {
+        # The caller has just opened this exact RCW, so retaining that reference
+        # is safe even though COM could not expose a durable IUnknown identity.
+        # Never acknowledge PREPARE/OPEN/EXPORT/NOTES in this state: doing so
+        # would later classify the PDM-created deck as user-owned and leak its
+        # document/media graph. Close-ManagedPresentation can retire this
+        # quarantined exact reference, and session cleanup keeps retrying it.
+        if (-not (Get-UnidentifiedManagedPresentationRecord $presentation)) {
+            [void]$script:unidentifiedManagedPresentations.Add(@{
+                presentation = $presentation
+                path = $key
+            })
+        }
+        Log "managed presentation identity unavailable '$key'; command rejected and exact RCW quarantined"
+        $script:lastManagedPresentationCloseOk = $false
+        Close-ManagedPresentation $presentation
+        $cleanupDetail = if ($script:lastManagedPresentationCloseOk) {
+            'the exact PDM-opened deck was closed'
+        } else {
+            'the exact PDM-opened deck is retained for cleanup retry'
+        }
+        throw "PowerPoint could not establish exact ownership for '$key'; $cleanupDetail"
+    }
+    $script:managedPresentationKeys[$key] = $true
+    $script:managedPresentationIdentities[$identity] = $key
+    Log "managed presentation registered '$key' identity=$identity"
+}
+
+function Test-ManagedPresentation($presentation) {
+    $identity = Get-PresentationIdentity $presentation
+    if ([string]::IsNullOrEmpty($identity) -or
+        -not $script:managedPresentationIdentities.ContainsKey($identity)) { return $false }
+    $expectedKey = [string]$script:managedPresentationIdentities[$identity]
+    $currentKey = Get-PresentationKey $presentation
+    return (-not [string]::IsNullOrEmpty($currentKey)) -and $currentKey -eq $expectedKey
+}
+
+function Test-PdmOwnedPresentation($presentation) {
+    if (-not $presentation) { return $false }
+    if (Test-ManagedPresentation $presentation) { return $true }
+    return $null -ne (Get-UnidentifiedManagedPresentationRecord $presentation)
+}
+
+function Test-PresentationProtectedByOpenTransaction($presentation) {
+    $transaction = $script:openTransaction
+    if (-not $transaction -or -not $presentation) { return $false }
+    $candidateIdentity = Get-PresentationIdentity $presentation
+    $protected = New-Object System.Collections.ArrayList
+    [void]$protected.Add($transaction.targetPresentation)
+    [void]$protected.Add($transaction.previousPresentation)
+    foreach ($record in @($transaction.oldPresentationRecords)) {
+        if ($record -and -not [bool]$record.retired) {
+            [void]$protected.Add($record.presentation)
+        }
+    }
+    foreach ($protectedPresentation in @($protected)) {
+        if (-not $protectedPresentation) { continue }
+        if ([object]::ReferenceEquals($protectedPresentation, $presentation)) { return $true }
+        if (-not [string]::IsNullOrEmpty($candidateIdentity)) {
+            $protectedIdentity = Get-PresentationIdentity $protectedPresentation
+            if (-not [string]::IsNullOrEmpty($protectedIdentity) -and
+                $protectedIdentity -eq $candidateIdentity) { return $true }
+        }
+    }
+    return $false
+}
+
+function Close-UnidentifiedManagedPresentations {
+    $allClosed = $true
+    # Work from a snapshot because successful closes remove their records.
+    foreach ($record in @($script:unidentifiedManagedPresentations)) {
+        if (-not $record -or -not $record.presentation) { continue }
+        if (Test-PresentationProtectedByOpenTransaction $record.presentation) {
+            # The transaction owns its completion tombstones. Closing the RCW
+            # here would remove quarantine tracking without setting
+            # targetReleased/record.retired and make rollback unrecoverable.
+            continue
+        }
+        $script:lastManagedPresentationCloseOk = $false
+        Close-ManagedPresentation $record.presentation
+        if (-not $script:lastManagedPresentationCloseOk) {
+            $allClosed = $false
+            Log "unidentified managed presentation cleanup pending path='$($record.path)'"
+        }
+    }
+    return $allClosed
+}
+
+function Get-PowerPointPresentationOwnershipState($ppt) {
+    $state = [PSCustomObject]@{
+        verified = $false
+        hasManaged = $false
+        hasUnmanaged = $true
+        error = ''
+    }
+    if (-not $ppt) {
+        $state.error = 'PowerPoint COM application is unavailable'
+        return $state
+    }
+    try {
+        $hasManaged = $false
+        $hasUnmanaged = $false
+        for ($i = 1; $i -le [int]$ppt.Presentations.Count; $i++) {
+            $candidate = $ppt.Presentations.Item($i)
+            if (Test-PdmOwnedPresentation $candidate) {
+                $hasManaged = $true
+            } else {
+                $hasUnmanaged = $true
+            }
+        }
+        $state.verified = $true
+        $state.hasManaged = $hasManaged
+        $state.hasUnmanaged = $hasUnmanaged
+    } catch {
+        $state.error = $_.Exception.Message
+    }
+    return $state
 }
 
 function Unmark-ManagedPresentation($presentation) {
     $key = Get-PresentationKey $presentation
+    $identity = Get-PresentationIdentity $presentation
     if (-not [string]::IsNullOrEmpty($key)) {
         $script:managedPresentationKeys.Remove($key)
+    }
+    if (-not [string]::IsNullOrEmpty($identity)) {
+        $script:managedPresentationIdentities.Remove($identity)
     }
 }
 
@@ -766,11 +929,114 @@ function Unmark-PreparedPresentation($presentation) {
 function Close-ManagedPresentation($presentation) {
     if (-not $presentation) { return }
     $key = Get-PresentationKey $presentation
+    $identity = Get-PresentationIdentity $presentation
+    $unidentifiedRecord = Get-UnidentifiedManagedPresentationRecord $presentation
+    $identityTracked = (-not [string]::IsNullOrEmpty($identity)) -and
+        $script:managedPresentationIdentities.ContainsKey($identity) -and
+        (([string]$script:managedPresentationIdentities[$identity]) -eq $key)
+    $closed = $false
+    if (-not $identityTracked -and -not $unidentifiedRecord) {
+        $script:lastManagedPresentationCloseOk = $false
+        Log "managed presentation close refused: exact COM identity is not tracked key='$key'"
+        return
+    }
+
+    # A previous Close may have succeeded even when its immediate COM
+    # verification was rejected. Prove absence by exact identity before
+    # invoking a stale RCW again. A user document reopened from the same path
+    # has a different IUnknown and is never treated as the old managed object.
+    try {
+        $identityStillOpen = $false
+        for ($i = 1; $i -le $script:pptApplication.Presentations.Count; $i++) {
+            $candidate = $script:pptApplication.Presentations.Item($i)
+            $candidateMatches = if (-not [string]::IsNullOrEmpty($identity)) {
+                (Get-PresentationIdentity $candidate) -eq $identity
+            } else {
+                [object]::ReferenceEquals($candidate, $presentation)
+            }
+            if ($candidateMatches) {
+                $identityStillOpen = $true
+                break
+            }
+        }
+        # An identity-bearing record can prove exact absence. For a quarantined
+        # RCW whose IUnknown is still unavailable, always invoke Close on the
+        # exact retained object instead of trusting wrapper reference equality.
+        if (-not $identityStillOpen -and -not [string]::IsNullOrEmpty($identity)) {
+            $closed = $true
+        }
+    } catch {
+        Log "managed presentation pre-close verification failed identity=$identity key='$key': $($_.Exception.Message)"
+    }
     try { $presentation.Saved = -1 } catch {}
-    try { $presentation.Close() } catch { Log "managed presentation close failed: $($_.Exception.Message)" }
-    if (-not [string]::IsNullOrEmpty($key)) {
-        $script:managedPresentationKeys.Remove($key)
-        $script:preparedPresentationKeys.Remove($key)
+    for ($attempt = 1; $attempt -le 2 -and -not $closed; $attempt++) {
+        $closeReturned = $false
+        try {
+            $presentation.Close()
+            $closeReturned = $true
+        } catch {
+            Log "managed presentation close failed attempt=$attempt key='$key': $($_.Exception.Message)"
+        }
+
+        # Verify after both a normal return and an exception: Office can close
+        # the document and then reject the stale RCW call. IUnknown identity is
+        # authoritative when available. For a quarantined identity-less RCW,
+        # prove only that its path is absent from a complete enumeration (or
+        # that the collection is completely empty). Never infer absence merely
+        # because Presentations.Item returned another wrapper instance.
+        if ($script:pptApplication) {
+            $verifyDeadline = [DateTime]::UtcNow.AddMilliseconds(600)
+            do {
+                $stillOpen = $true
+                try {
+                    $presentationCount = [int]$script:pptApplication.Presentations.Count
+                    $stillOpen = $false
+                    if ([string]::IsNullOrEmpty($identity) -and
+                        [string]::IsNullOrEmpty($key) -and $presentationCount -gt 0) {
+                        # No durable identity or path means a non-empty
+                        # collection is ambiguous. Retain the exact RCW.
+                        $stillOpen = $true
+                    } else {
+                        for ($i = 1; $i -le $presentationCount; $i++) {
+                            $candidate = $script:pptApplication.Presentations.Item($i)
+                            $candidateMatches = if (-not [string]::IsNullOrEmpty($identity)) {
+                                (Get-PresentationIdentity $candidate) -eq $identity
+                            } else {
+                                (Get-PresentationKey $candidate) -eq $key
+                            }
+                            if ($candidateMatches) {
+                                $stillOpen = $true
+                                break
+                            }
+                        }
+                    }
+                } catch {
+                    # Collection access can be rejected while Office is busy
+                    # (RPC_E_CALL_REJECTED). That is not proof of release.
+                    $stillOpen = $true
+                    Log "managed presentation verification failed key='$key': $($_.Exception.Message)"
+                }
+                if ($stillOpen) { Start-Sleep -Milliseconds 50 }
+            } while ($stillOpen -and [DateTime]::UtcNow -lt $verifyDeadline)
+            $closed = -not $stillOpen
+        } elseif ($closeReturned -and $identityTracked) {
+            $closed = $true
+        }
+        if (-not $closed) {
+            Log "managed presentation still present or unverified after Close key='$key'"
+            if ($attempt -lt 2) { Start-Sleep -Milliseconds 120 }
+        }
+    }
+    $script:lastManagedPresentationCloseOk = $closed
+    if ($closed -and -not [string]::IsNullOrEmpty($key)) {
+        [void]$script:managedPresentationKeys.Remove($key)
+        [void]$script:preparedPresentationKeys.Remove($key)
+    }
+    if ($closed -and -not [string]::IsNullOrEmpty($identity)) {
+        [void]$script:managedPresentationIdentities.Remove($identity)
+    }
+    if ($closed -and $unidentifiedRecord) {
+        Remove-UnidentifiedManagedPresentation $presentation
     }
 }
 
@@ -786,7 +1052,15 @@ function Reset-PowerPointSessionTracking {
     $script:pptOriginalEditorRect = $null
     $script:pptRegistryWindowSnapshot = $null
     $script:managedPresentationKeys = @{}
+    $script:managedPresentationIdentities = @{}
+    $script:unidentifiedManagedPresentations = New-Object System.Collections.ArrayList
     $script:preparedPresentationKeys = @{}
+    $script:lastManagedPresentationCloseOk = $true
+    $script:openTransaction = $null
+    $script:lastOpenTransactionOk = $true
+    $script:pptOwnedProcessId = 0
+    $script:pptOwnedProcessStartTimeUtcTicks = 0L
+    $script:pptSessionUncertain = $false
 }
 
 function Test-FatalPowerPointComError($errorRecord) {
@@ -810,23 +1084,29 @@ function Test-FatalPowerPointComError($errorRecord) {
 
 function Invalidate-PowerPointSession([string]$reason) {
     Log "PowerPoint COM session invalidated reason='$reason'"
-    Reset-SlideVideoClickState
-    $staleApplication = $script:pptApplication
-    $script:activeSlideShowHwnd = 0
-    $script:activeSlideShowWindow = $null
-    $script:activePresentation = $null
-    $script:activePresentationPath = ''
-
-    # PowerPoint can persist the temporary minimized editor placement even when
-    # its COM server crashes. Restore the pre-PDM registry snapshot before a new
-    # Application object is acquired.
-    try { Restore-PowerPointRegistryWindowState } catch {}
+    # A disconnected RCW is not proof that POWERPNT.EXE or a managed document
+    # disappeared.  First run the same ownership-aware cleanup used by CLOSE and
+    # shutdown.  Only that cleanup is allowed to discard COM identities/PID
+    # ownership; otherwise a later GetActiveObject could silently reattach to an
+    # orphaned deck as a borrowed user session.
     try {
-        if ($staleApplication) {
-            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($staleApplication)
-        }
-    } catch {}
-    Reset-PowerPointSessionTracking
+        Restore-PowerPointSession
+    } catch {
+        $script:lastPowerPointSessionCleanupOk = $false
+        Log "fatal PowerPoint session cleanup threw: $($_.Exception.Message)"
+    }
+    if ($script:lastPowerPointSessionCleanupOk) {
+        $script:pptSessionUncertain = $false
+        Log 'fatal PowerPoint session cleanup was verified; a fresh session may be created by a later command'
+        return $true
+    }
+
+    # Keep every ownership marker and stale RCW for diagnostics/EOF retry.  The
+    # command dispatcher will mark the response uncertain and leave its normal
+    # loop; Electron must not transparently spawn another daemon in this state.
+    $script:pptSessionUncertain = $true
+    Log 'fatal PowerPoint session cleanup was not verified; ownership retained and session poisoned'
+    return $false
 }
 
 function Initialize-PowerPointSession($ppt, [bool]$ownedByRoland) {
@@ -873,15 +1153,78 @@ function Initialize-PowerPointSession($ppt, [bool]$ownedByRoland) {
         $script:pptOriginalEditorHwnd, $rectText)
 }
 
+function Restore-BorrowedPowerPointEditorState($ppt, [bool]$allowComHide = $false) {
+    if (-not $ppt -or $script:pptOwnedByRoland) { return }
+
+    $shouldBeVisible = ($script:pptOriginalVisible -ne 0) -or $script:pptOriginalEditorWasVisible
+    $hwnd = 0
+    try { $hwnd = Get-PPEditorHwnd $ppt } catch {}
+    if ($hwnd -eq 0) { $hwnd = [long]$script:pptOriginalEditorHwnd }
+
+    if ($shouldBeVisible) {
+        try { $ppt.Visible = -1 } catch {}
+    }
+    # Restore the normal rect and state even when the editor was originally
+    # hidden. Otherwise PDM's temporary ppWindowMinimized state leaks into the
+    # next user-opened window from this borrowed PowerPoint process.
+    if ($hwnd -ne 0 -and $null -ne $script:pptOriginalEditorRect) {
+        try { $ppt.WindowState = 1 } catch {}
+        $r = $script:pptOriginalEditorRect
+        try {
+            [PptDaemon.Native]::SetWindowPos(
+                [System.IntPtr]$hwnd, [System.IntPtr]-2,
+                [int]$r[0], [int]$r[1], [int]$r[2], [int]$r[3], 0x10
+            ) | Out-Null
+        } catch {}
+    }
+    try { $ppt.WindowState = [int]$script:pptOriginalWindowState } catch {}
+
+    if ($shouldBeVisible) {
+        if ($hwnd -ne 0) {
+            $showCommand = switch ([int]$script:pptOriginalWindowState) {
+                2 { 2 } # SW_SHOWMINIMIZED
+                3 { 3 } # SW_SHOWMAXIMIZED
+                default { 4 } # SW_SHOWNOACTIVATE
+            }
+            try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, $showCommand) | Out-Null } catch {}
+        }
+    } else {
+        if ($hwnd -ne 0) {
+            try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, 0) | Out-Null } catch {}
+        }
+        # Visible=0 can disconnect a borrowed Office automation server after
+        # View.Exit(). Use it only while the daemon is releasing that session;
+        # a normal CLOSE keeps the COM host usable for the next TAKE.
+        if ($allowComHide) {
+            try { $ppt.Visible = 0 } catch {}
+        }
+    }
+    Log 'user-owned PowerPoint editor state restored'
+}
+
 function Get-PPT {
+    if ($script:pptSessionUncertain) {
+        throw 'PowerPoint session ownership is uncertain after a fatal COM failure'
+    }
     if ($script:pptApplication) {
         try {
             $null = [int]$script:pptApplication.Presentations.Count
             return $script:pptApplication
         } catch {
-            Log 'cached PowerPoint COM object is no longer valid'
-            Restore-PowerPointRegistryWindowState
-            Reset-PowerPointSessionTracking
+            if (Test-FatalPowerPointComError $_) {
+                Log "cached PowerPoint COM object is fatally disconnected: $($_.Exception.Message)"
+                $null = Invalidate-PowerPointSession 'cached COM validation failed fatally'
+                # Never reacquire/create inside the same command that observed a
+                # fatal proxy. The dispatcher either permits a later clean retry
+                # after verified cleanup or poisons the Electron session.
+                throw
+            } else {
+                # RPC_E_CALL_REJECTED is common while PowerPoint is busy or a
+                # modal dialog is open. Dropping ownership/managed keys here
+                # turns a retryable command into an orphaned deck/process.
+                Log "cached PowerPoint COM validation was transiently rejected: $($_.Exception.Message)"
+                throw
+            }
         }
     }
     try {
@@ -896,15 +1239,18 @@ function Get-OrCreatePPT {
     if ($ppt) { return $ppt }
     $existingEditorHwnds = @([PptDaemon.Native]::FindPowerPointEditorHwnds())
     $existingPowerPointPids = @{}
+    $processSnapshotReliable = $false
     try {
         foreach ($process in @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)) {
             $existingPowerPointPids[[long]$process.Id] = $true
         }
-    } catch {}
+        $processSnapshotReliable = $true
+    } catch {
+        Log "PowerPoint process snapshot failed; process ownership disabled: $($_.Exception.Message)"
+    }
     [PptDaemon.Native]::StartPowerPointEditorGuard(0, [long[]]$existingEditorHwnds)
     try {
         $ppt = New-Object -ComObject PowerPoint.Application
-        Initialize-PowerPointSession $ppt $true
         $editorHwnd = 0
         try { $editorHwnd = [long]$ppt.HWND } catch {}
         if ($editorHwnd -eq 0) {
@@ -914,32 +1260,85 @@ function Get-OrCreatePPT {
         if ($editorHwnd -ne 0) {
             try { $powerPointPid = [long][PptDaemon.Native]::GetWindowProcessId($editorHwnd) } catch {}
         }
-        if ($powerPointPid -eq 0) {
-            # A newly created invisible COM instance may not have an editor
-            # HWND yet. Resolve its process by diffing POWERPNT PIDs so the
-            # guard can still be scoped before Visible=true creates the frame.
-            $pidDeadline = [DateTime]::UtcNow.AddMilliseconds(1000)
-            while ($powerPointPid -eq 0 -and [DateTime]::UtcNow -lt $pidDeadline) {
+        # Diffing process IDs is a fallback, not proof by itself. Collect the
+        # complete post-CreateObject set and accept it only when exactly one new
+        # POWERPNT PID exists (and, when available, it matches the COM HWND).
+        $newPowerPointPids = @{}
+        $pidDeadline = [DateTime]::UtcNow.AddMilliseconds(1000)
+        do {
+            try {
+                foreach ($process in @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)) {
+                    $candidatePid = [long]$process.Id
+                    if (-not $existingPowerPointPids.ContainsKey($candidatePid)) {
+                        $newPowerPointPids[$candidatePid] = $true
+                    }
+                }
+            } catch {
+                $processSnapshotReliable = $false
+                Log "PowerPoint post-create process scan failed; process ownership disabled: $($_.Exception.Message)"
+            }
+            if ($powerPointPid -eq 0 -and $editorHwnd -eq 0) {
                 try {
-                    foreach ($process in @(Get-Process -Name POWERPNT -ErrorAction SilentlyContinue)) {
-                        $candidatePid = [long]$process.Id
-                        if (-not $existingPowerPointPids.ContainsKey($candidatePid)) {
-                            $powerPointPid = $candidatePid
-                            break
-                        }
+                    $editorHwnd = [long][PptDaemon.Native]::EditorGuardFoundHwnd
+                    if ($editorHwnd -ne 0) {
+                        $powerPointPid = [long][PptDaemon.Native]::GetWindowProcessId($editorHwnd)
                     }
                 } catch {}
-                if ($powerPointPid -eq 0) { Start-Sleep -Milliseconds 10 }
+            }
+            if ($powerPointPid -gt 0 -and $existingPowerPointPids.ContainsKey($powerPointPid)) { break }
+            if ($newPowerPointPids.Count -gt 1) { break }
+            if ($powerPointPid -gt 0 -and $newPowerPointPids.ContainsKey($powerPointPid)) { break }
+            Start-Sleep -Milliseconds 10
+        } while ([DateTime]::UtcNow -lt $pidDeadline)
+        if ($powerPointPid -eq 0 -and $newPowerPointPids.Count -eq 1) {
+            $powerPointPid = [long]@($newPowerPointPids.Keys)[0]
+        }
+
+        # CreateObject normally starts a dedicated POWERPNT process, but Office
+        # may attach the COM Application to an already-running process while
+        # the ROT is unavailable (startup, a modal dialog, protected view).
+        # Such a PID may contain user documents and must never be Quit/killed.
+        $processWasAlreadyRunning = $powerPointPid -gt 0 -and
+            $existingPowerPointPids.ContainsKey($powerPointPid)
+        $processIsUniqueNew = $powerPointPid -gt 0 -and
+            $newPowerPointPids.Count -eq 1 -and
+            $newPowerPointPids.ContainsKey($powerPointPid)
+        $powerPointStartTimeUtcTicks = 0L
+        if ($processSnapshotReliable -and $processIsUniqueNew) {
+            try {
+                $ownedProcess = Get-Process -Id $powerPointPid -ErrorAction Stop
+                if ($ownedProcess.ProcessName -ieq 'POWERPNT') {
+                    $powerPointStartTimeUtcTicks = [long]$ownedProcess.StartTime.ToUniversalTime().Ticks
+                }
+            } catch {
+                Log "PowerPoint process identity capture failed pid=$powerPointPid; ownership disabled: $($_.Exception.Message)"
             }
         }
-        if ($powerPointPid -gt 0) {
+        # Process ownership is granted only when the COM application's exact
+        # PID was resolved and did not exist before CreateObject. An unresolved
+        # PID is never proof of ownership, even when no POWERPNT process was
+        # visible in the initial snapshot: never Quit/force an unverified host.
+        $ownedByRoland = $processSnapshotReliable -and
+            $processIsUniqueNew -and
+            -not $processWasAlreadyRunning -and
+            $powerPointStartTimeUtcTicks -gt 0
+        Initialize-PowerPointSession $ppt $ownedByRoland
+
+        if ($powerPointPid -gt 0 -and $ownedByRoland) {
+            $script:pptOwnedProcessId = $powerPointPid
+            $script:pptOwnedProcessStartTimeUtcTicks = $powerPointStartTimeUtcTicks
             [PptDaemon.Native]::StartPowerPointEditorGuard($powerPointPid, [long[]]@())
             Log "PowerPoint editor guard attached pid=$powerPointPid hwnd=$editorHwnd"
+        } elseif ($powerPointPid -gt 0) {
+            # A PID-scoped guard would hide every editor window in the user's
+            # existing PowerPoint process, not just the PDM-created document.
+            [PptDaemon.Native]::StopPowerPointEditorGuard()
+            Log "PowerPoint host borrowed existing pid=$powerPointPid hwnd=$editorHwnd; Quit/force disabled"
         } else {
             # Do not leave an unscoped guard running: a user may open another
             # PowerPoint while PDM is idle and that window must stay visible.
             [PptDaemon.Native]::StopPowerPointEditorGuard()
-            Log "PowerPoint editor guard could not resolve owned PID hwnd=$editorHwnd"
+            Log "PowerPoint PID unresolved; host treated as borrowed hwnd=$editorHwnd; Quit/force disabled"
         }
         Hide-PPEditor $ppt
         return $ppt
@@ -949,93 +1348,332 @@ function Get-OrCreatePPT {
     }
 }
 
+function Get-OwnedPowerPointProcessState([long]$processId, [long]$startTimeUtcTicks) {
+    $state = @{ verified = $false; alive = $false; process = $null; detail = '' }
+    if ($processId -le 0 -or $startTimeUtcTicks -le 0) {
+        $state.detail = 'missing PID/start-time fingerprint'
+        return $state
+    }
+    try {
+        $candidate = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if (-not $candidate) {
+            $state.verified = $true
+            return $state
+        }
+        $candidateStart = [long]$candidate.StartTime.ToUniversalTime().Ticks
+        if ($candidate.ProcessName -ine 'POWERPNT' -or $candidateStart -ne $startTimeUtcTicks) {
+            # The numeric PID was reused. The original owned process is gone;
+            # never act on the unrelated replacement.
+            $state.verified = $true
+            $state.detail = "PID reused by '$($candidate.ProcessName)' start=$candidateStart"
+            return $state
+        }
+        $state.verified = $true
+        $state.alive = $true
+        $state.process = $candidate
+        return $state
+    } catch {
+        $state.detail = $_.Exception.Message
+        return $state
+    }
+}
+
 function Restore-PowerPointSession {
+    $script:lastPowerPointSessionCleanupOk = $true
     if (-not $script:pptSessionInitialized) { return }
     Log "PowerPoint session cleanup BEGIN owned=$($script:pptOwnedByRoland)"
+    $cleanupOk = $true
+    $ownedProcessId = [long]$script:pptOwnedProcessId
+    $ownedProcessStartTimeUtcTicks = [long]$script:pptOwnedProcessStartTimeUtcTicks
+    $sessionResourcesGone = $false
     Reset-SlideVideoClickState
     $ppt = $script:pptApplication
 
+    # Shutdown/fatal recovery can arrive while COMMIT still retains the old
+    # slideshow, or while an uncommitted OPEN still owns its staged target.
+    # Reconcile that exact transaction before touching the current active
+    # marker. Restore used to exit only the target and then discard the
+    # transaction, which could orphan the previous borrowed slideshow.
+    if ($script:openTransaction) {
+        for ($transactionAttempt = 1; $transactionAttempt -le 3; $transactionAttempt++) {
+            try {
+                if ([bool]$script:openTransaction.commitAccepted) {
+                    Commit-PowerPointOpenTransaction
+                } else {
+                    Abort-PowerPointOpenTransaction
+                }
+            } catch {
+                $script:lastOpenTransactionOk = $false
+                Log "PowerPoint session transaction cleanup failed attempt=${transactionAttempt}: $($_.Exception.Message)"
+            }
+            if ($script:lastOpenTransactionOk -and -not $script:openTransaction) { break }
+            if ($transactionAttempt -lt 3) { Start-Sleep -Milliseconds (150 * $transactionAttempt) }
+        }
+        if ($script:openTransaction) {
+            $cleanupOk = $false
+            Log 'PowerPoint session transaction cleanup remains pending'
+        }
+    }
+
     try {
-        $sw = Resolve-ActiveSlideShowWindow $ppt
-        if ($sw) { try { $sw.View.Exit() } catch {} }
-    } catch {}
-    $script:activeSlideShowHwnd = 0
-    $script:activeSlideShowWindow = $null
-    $script:activePresentation = $null
-    $script:activePresentationPath = ''
+        # Never resolve an arbitrary slideshow from a shared PowerPoint host.
+        # Only PDM's cached/path-qualified window is ours to stop.
+        $sw = $script:activeSlideShowWindow
+        if (-not $sw -and -not [string]::IsNullOrEmpty($script:activePresentationPath)) {
+            $sw = Resolve-ActiveSlideShowWindow $ppt $script:activePresentationPath
+        }
+        $activeNativeWindowGone = $false
+        $activeHwndForCleanup = [long]$script:activeSlideShowHwnd
+        if ($activeHwndForCleanup -ne 0) {
+            $activeNativeWindowGone = -not [PptDaemon.Native]::IsWindow(
+                [System.IntPtr]$activeHwndForCleanup
+            )
+        }
+        if ($sw -and -not $activeNativeWindowGone) {
+            try { $sw.View.Exit() } catch {
+                $cleanupOk = $false
+                Log "PowerPoint slideshow cleanup failed: $($_.Exception.Message)"
+            }
+        } elseif ($activeNativeWindowGone) {
+            Log "PowerPoint active slideshow HWND=$activeHwndForCleanup is already gone"
+        }
+    } catch {
+        $cleanupOk = $false
+        Log "PowerPoint slideshow cleanup inspection failed: $($_.Exception.Message)"
+    }
 
     if ($ppt) {
+        if (-not (Close-UnidentifiedManagedPresentations)) {
+            $cleanupOk = $false
+        }
         if ($script:pptOwnedByRoland) {
+            # Process ownership does not imply ownership of every document in
+            # that process. A user can open a deck after PDM starts POWERPNT;
+            # never mark such a deck Saved, close it, Quit its host, or force
+            # its PID. Only presentations explicitly registered by PDM may be
+            # discarded automatically.
             try {
                 for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
-                    $presentation = $ppt.Presentations($i)
-                    try { $presentation.Saved = -1 } catch {}
-                    try { $presentation.Close() } catch {}
+                    $presentation = $ppt.Presentations.Item($i)
+                    if ((Test-PdmOwnedPresentation $presentation) -and
+                        -not (Test-PresentationProtectedByOpenTransaction $presentation)) {
+                        $script:lastManagedPresentationCloseOk = $false
+                        Close-ManagedPresentation $presentation
+                        if (-not $script:lastManagedPresentationCloseOk) {
+                            $cleanupOk = $false
+                        }
+                    }
                 }
-            } catch {}
-            # PowerPoint persists WindowState/placement during Quit(). Restore
-            # the registry snapshot immediately afterwards so the next normal
-            # user launch cannot inherit Roland's minimized/off-screen editor.
-            try { $ppt.Quit() } catch { Log "PowerPoint Quit failed: $($_.Exception.Message)" }
+            } catch {
+                $cleanupOk = $false
+                Log "PowerPoint managed presentation enumeration failed: $($_.Exception.Message)"
+            }
+
+            $ownershipState = Get-PowerPointPresentationOwnershipState $ppt
+            $hasUnmanagedPresentation = [bool]$ownershipState.hasUnmanaged
+            $hasManagedPresentation = [bool]$ownershipState.hasManaged
+            $canTerminateOwnedHost = [bool]$ownershipState.verified -and
+                -not $hasUnmanagedPresentation
+            if (-not [bool]$ownershipState.verified) {
+                $cleanupOk = $false
+                Log "PowerPoint cleanup ownership verification failed: $($ownershipState.error)"
+            }
+
             try {
                 Log "PowerPoint editor guard hidden=$([PptDaemon.Native]::EditorGuardHideCount) error='$([PptDaemon.Native]::EditorGuardError)'"
                 [PptDaemon.Native]::StopPowerPointEditorGuard()
-            } catch {}
-            Start-Sleep -Milliseconds 150
-            Log 'Roland-owned PowerPoint instance quit'
+            } catch {
+                $cleanupOk = $false
+                Log "PowerPoint shared-host managed presentation enumeration failed: $($_.Exception.Message)"
+            }
+
+            # Resolve the PID/start-time fingerprint before the final document
+            # scan so no process lookup sits between that scan and Quit().
+            $ownedProcessState = Get-OwnedPowerPointProcessState `
+                $ownedProcessId $ownedProcessStartTimeUtcTicks
+
+            if ($canTerminateOwnedHost -and
+                [bool]$ownedProcessState.verified -and
+                [bool]$ownedProcessState.alive) {
+                # The editor guard has just been removed. A user may open a
+                # document into this otherwise PDM-owned process at any time,
+                # so the earlier scan is stale by definition. Re-enumerate at
+                # the last possible point before Quit and fail closed on any
+                # unmanaged document or COM verification error.
+                $preQuitOwnership = Get-PowerPointPresentationOwnershipState $ppt
+                $hasUnmanagedPresentation = [bool]$preQuitOwnership.hasUnmanaged
+                $hasManagedPresentation = [bool]$preQuitOwnership.hasManaged
+                if (-not [bool]$preQuitOwnership.verified -or $hasUnmanagedPresentation) {
+                    $canTerminateOwnedHost = $false
+                    if (-not [bool]$preQuitOwnership.verified) { $cleanupOk = $false }
+                    Log ("PowerPoint Quit disabled by final ownership check verified={0} unmanaged={1} error='{2}'" -f `
+                        $preQuitOwnership.verified, $preQuitOwnership.hasUnmanaged, $preQuitOwnership.error)
+                }
+            }
+
+            if ($canTerminateOwnedHost) {
+                # PowerPoint persists WindowState/placement during Quit(). The
+                # registry snapshot is restored below immediately afterwards.
+                $terminationOk = [bool]$ownedProcessState.verified -and
+                    -not [bool]$ownedProcessState.alive
+                if (-not [bool]$ownedProcessState.verified) {
+                    Log "PowerPoint cleanup: owned process identity could not be verified; Quit/force disabled detail='$($ownedProcessState.detail)'"
+                } elseif ([bool]$ownedProcessState.alive) {
+                    try { $ppt.Quit() } catch {
+                        $terminationOk = $false
+                        Log "PowerPoint Quit failed: $($_.Exception.Message)"
+                    }
+                    Start-Sleep -Milliseconds 150
+                    $deadline = [DateTime]::UtcNow.AddMilliseconds(2000)
+                    while ([DateTime]::UtcNow -lt $deadline) {
+                        $ownedProcessState = Get-OwnedPowerPointProcessState `
+                            $ownedProcessId $ownedProcessStartTimeUtcTicks
+                        if (-not [bool]$ownedProcessState.verified -or
+                            -not [bool]$ownedProcessState.alive) { break }
+                        Start-Sleep -Milliseconds 50
+                    }
+                    if ([bool]$ownedProcessState.verified -and [bool]$ownedProcessState.alive) {
+                        # Quit can be delayed by add-ins or prompts, and during
+                        # that delay a user document may enter the same process.
+                        # Never turn the original ownership scan into authority
+                        # for a later force-kill.
+                        $preForceOwnership = Get-PowerPointPresentationOwnershipState $ppt
+                        if ([bool]$preForceOwnership.verified -and
+                            -not [bool]$preForceOwnership.hasUnmanaged) {
+                            Log "PowerPoint cleanup: owned pid=$ownedProcessId survived Quit; forcing termination"
+                            try { Stop-Process -Id $ownedProcessId -Force -ErrorAction Stop } catch {
+                                Log "PowerPoint cleanup: force termination failed: $($_.Exception.Message)"
+                            }
+                            Start-Sleep -Milliseconds 150
+                        } else {
+                            Log ("PowerPoint force termination disabled by final ownership check verified={0} unmanaged={1} error='{2}'" -f `
+                                $preForceOwnership.verified, $preForceOwnership.hasUnmanaged, $preForceOwnership.error)
+                        }
+                    }
+                    $ownedProcessState = Get-OwnedPowerPointProcessState `
+                        $ownedProcessId $ownedProcessStartTimeUtcTicks
+                    $terminationOk = [bool]$ownedProcessState.verified -and
+                        -not [bool]$ownedProcessState.alive
+                }
+                # A verified process exit supersedes an earlier per-document
+                # Close failure: no managed document or media can remain.
+                $cleanupOk = $terminationOk
+                $sessionResourcesGone = $terminationOk
+                Log "Roland-owned PowerPoint instance termination ok=$terminationOk"
+            } else {
+                if ($hasManagedPresentation) { $cleanupOk = $false }
+                # Leave the process alive and expose its editor so a user's
+                # untracked document is never stranded in PDM's hidden host.
+                try { $ppt.Visible = -1 } catch {}
+                $editorHwnd = 0
+                try { $editorHwnd = Get-PPEditorHwnd $ppt } catch {}
+                if ($editorHwnd -ne 0) {
+                    try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$editorHwnd, 4) | Out-Null } catch {}
+                }
+                Log "PowerPoint owned host retained: unmanaged presentation present; Quit/force disabled"
+            }
         } else {
             try {
                 for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
-                    $presentation = $ppt.Presentations($i)
-                    if (Test-ManagedPresentation $presentation) {
+                    $presentation = $ppt.Presentations.Item($i)
+                    if ((Test-PdmOwnedPresentation $presentation) -and
+                        -not (Test-PresentationProtectedByOpenTransaction $presentation)) {
+                        $script:lastManagedPresentationCloseOk = $false
                         Close-ManagedPresentation $presentation
+                        if (-not $script:lastManagedPresentationCloseOk) { $cleanupOk = $false }
                     }
                 }
-            } catch {}
-
-            $shouldBeVisible = ($script:pptOriginalVisible -ne 0) -or $script:pptOriginalEditorWasVisible
-            if ($shouldBeVisible) {
-                try { $ppt.Visible = -1 } catch {}
-                $hwnd = 0
-                try { $hwnd = Get-PPEditorHwnd $ppt } catch {}
-                if ($hwnd -eq 0) { $hwnd = [long]$script:pptOriginalEditorHwnd }
-                if ($hwnd -ne 0 -and $null -ne $script:pptOriginalEditorRect) {
-                    try { $ppt.WindowState = 1 } catch {}
-                    $r = $script:pptOriginalEditorRect
-                    try {
-                        [PptDaemon.Native]::SetWindowPos(
-                            [System.IntPtr]$hwnd, [System.IntPtr]-2,
-                            [int]$r[0], [int]$r[1], [int]$r[2], [int]$r[3], 0x10
-                        ) | Out-Null
-                    } catch {}
-                }
-                try { $ppt.WindowState = [int]$script:pptOriginalWindowState } catch {}
-                if ($hwnd -ne 0) {
-                    $showCommand = switch ([int]$script:pptOriginalWindowState) {
-                        2 { 2 } # SW_SHOWMINIMIZED
-                        3 { 3 } # SW_SHOWMAXIMIZED
-                        default { 4 } # SW_SHOWNOACTIVATE
-                    }
-                    try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, $showCommand) | Out-Null } catch {}
-                }
-            } else {
-                $hwnd = 0
-                try { $hwnd = Get-PPEditorHwnd $ppt } catch {}
-                if ($hwnd -ne 0) {
-                    try { [PptDaemon.Native]::ShowWindow([System.IntPtr]$hwnd, 0) | Out-Null } catch {}
-                }
-                try { $ppt.Visible = 0 } catch {}
+            } catch {
+                # A COM/RPC failure while enumerating the borrowed host is not
+                # proof that PDM's managed decks disappeared. Retain tracking
+                # and let the bounded cleanup retry instead of reporting a
+                # false success and orphaning presentation/media memory.
+                $cleanupOk = $false
+                Log "PowerPoint borrowed-host managed presentation enumeration failed: $($_.Exception.Message)"
             }
-            Log 'user-owned PowerPoint editor state restored'
+
+            Restore-BorrowedPowerPointEditorState $ppt $true
         }
     }
 
     Restore-PowerPointRegistryWindowState
+    if (-not $sessionResourcesGone -and $script:openTransaction) {
+        $cleanupOk = $false
+        Log 'PowerPoint session cleanup cannot reset tracking while an open transaction remains unresolved'
+    }
+    if (-not $sessionResourcesGone -and $script:unidentifiedManagedPresentations.Count -gt 0) {
+        $cleanupOk = $false
+        Log "PowerPoint session cleanup cannot reset tracking while $($script:unidentifiedManagedPresentations.Count) unidentified managed presentation(s) remain"
+    }
+    if ($cleanupOk) {
+        $script:activeSlideShowHwnd = 0
+        $script:activeSlideShowWindow = $null
+        $script:activePresentation = $null
+        $script:activePresentationPath = ''
+        try {
+            if ($ppt) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) }
+        } catch {}
+        Reset-PowerPointSessionTracking
+    } else {
+        # Keep the live COM proxies, ownership map, transaction and managed keys
+        # so CLOSE/cleanup can retry. Dropping them here turns a real failure
+        # into a later false success and can orphan a loaded deck/media graph.
+        Log 'PowerPoint session cleanup incomplete; tracking retained for retry'
+    }
+    $script:lastPowerPointSessionCleanupOk = $cleanupOk
+    Log "PowerPoint session cleanup END ok=$cleanupOk"
+}
+
+function Release-IdleOwnedPowerPointHost([string]$reason) {
+    $script:lastIdleOwnedPowerPointHostReleaseOk = $true
+    if (-not $script:pptSessionInitialized -or -not $script:pptOwnedByRoland) { return }
+    if ($script:openTransaction) {
+        Log "PowerPoint idle release deferred reason='$reason': open transaction"
+        return
+    }
+
+    # These markers are the authoritative logical state of PDM's on-air
+    # slideshow.  Office collection calls can transiently return zero or throw
+    # RPC_E_CALL_REJECTED while a slideshow is still visible.  Never interpret
+    # that transient COM state as proof that the host is idle: export/notes
+    # cleanup runs in the same process and must not recycle the live program.
+    if (-not [string]::IsNullOrEmpty([string]$script:activePresentationPath) -or
+        $null -ne $script:activePresentation -or
+        $null -ne $script:activeSlideShowWindow -or
+        [long]$script:activeSlideShowHwnd -ne 0) {
+        Log "PowerPoint idle release deferred reason='$reason': active slideshow markers present"
+        return
+    }
+
+    $ppt = $script:pptApplication
+    if (-not $ppt) { return }
+    if (-not (Close-UnidentifiedManagedPresentations)) {
+        $script:lastIdleOwnedPowerPointHostReleaseOk = $false
+        Log "PowerPoint idle release verification failed reason='$reason': unidentified managed presentation remains"
+        return
+    }
     try {
-        if ($ppt) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($ppt) }
-    } catch {}
-    Reset-PowerPointSessionTracking
-    Log 'PowerPoint session cleanup END'
+        if ([int]$ppt.Presentations.Count -ne 0) { return }
+        if ([int]$ppt.SlideShowWindows.Count -ne 0) { return }
+        if ($script:activeSlideShowWindow) {
+            try {
+                $null = [int]$script:activeSlideShowWindow.View.Slide.SlideIndex
+                return
+            } catch {
+                $script:activeSlideShowWindow = $null
+                $script:activeSlideShowHwnd = 0
+            }
+        }
+    } catch {
+        $script:lastIdleOwnedPowerPointHostReleaseOk = $false
+        Log "PowerPoint idle release verification failed reason='$reason': $($_.Exception.Message)"
+        return
+    }
+
+    Log "PowerPoint idle release BEGIN reason='$reason' pid=$($script:pptOwnedProcessId)"
+    Restore-PowerPointSession
+    $script:lastIdleOwnedPowerPointHostReleaseOk = $script:lastPowerPointSessionCleanupOk
+    Log "PowerPoint idle release END reason='$reason' ok=$($script:lastIdleOwnedPowerPointHostReleaseOk)"
 }
 
 function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
@@ -1060,7 +1698,7 @@ function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
     if ($ppt) {
         try {
             for ($i = 1; $i -le $ppt.SlideShowWindows.Count; $i++) {
-                $candidate = $ppt.SlideShowWindows($i)
+                $candidate = $ppt.SlideShowWindows.Item($i)
                 $candidatePath = [string]$candidate.Presentation.FullName
                 if ([string]::IsNullOrEmpty($expectedPath) -or $candidatePath -ieq $expectedPath) {
                     $script:activeSlideShowWindow = $candidate
@@ -1073,6 +1711,292 @@ function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
         } catch {}
     }
     return $null
+}
+
+function Resolve-PdmSlideShowWindow($ppt) {
+    # Commands such as NEXT/CLOSE must never fall through to an arbitrary user
+    # slideshow merely because PDM currently has no active path.
+    $cached = $script:activeSlideShowWindow
+    if ($cached) {
+        try {
+            $null = [int]$cached.View.Slide.SlideIndex
+            return $cached
+        } catch {
+            $script:activeSlideShowWindow = $null
+            $script:activeSlideShowHwnd = 0
+        }
+    }
+    $expectedPath = [string]$script:activePresentationPath
+    if ([string]::IsNullOrEmpty($expectedPath)) { return $null }
+    return Resolve-ActiveSlideShowWindow $ppt $expectedPath
+}
+
+function Test-PowerPointHasAnySlideShow($ppt) {
+    if (-not $ppt) { return $false }
+    # Fail closed while PDM still has an authoritative active marker.  The
+    # SlideShowWindows collection is eventually consistent and can report zero
+    # during transitions or reject calls while Office is busy.
+    if (-not [string]::IsNullOrEmpty([string]$script:activePresentationPath) -or
+        $null -ne $script:activePresentation -or
+        $null -ne $script:activeSlideShowWindow -or
+        [long]$script:activeSlideShowHwnd -ne 0) {
+        return $true
+    }
+    if ($script:activeSlideShowWindow) {
+        try {
+            $null = [int]$script:activeSlideShowWindow.View.Slide.SlideIndex
+            return $true
+        } catch {}
+    }
+    try { return ([int]$ppt.SlideShowWindows.Count -gt 0) } catch { return $true }
+}
+
+function Abort-PowerPointOpenTransaction {
+    $transaction = $script:openTransaction
+    $script:lastOpenTransactionOk = $true
+    if (-not $transaction) { return }
+
+    # Once Electron has received commit-open success, the verified target is
+    # authoritative program output. It is no longer legal to roll that target
+    # back merely because retirement of the previous/hidden deck was delayed.
+    # Re-enter the idempotent retirement pass instead; CLOSE/next OPEN will
+    # either finish it or leave the accepted target visibly intact for retry.
+    if ([bool]$transaction.commitAccepted) {
+        Commit-PowerPointOpenTransaction
+        return
+    }
+
+    $targetPath = [string]$transaction.targetPath
+    $previousPath = [string]$transaction.previousPath
+    $samePresentation = (-not [string]::IsNullOrEmpty($previousPath)) -and
+        ($targetPath -ieq $previousPath)
+
+    if (-not [bool]$transaction.targetReleased) {
+        if ($samePresentation) {
+            # Same-file OPEN reuses the previous document and slideshow. There
+            # is no separate target to release; rollback below restores its
+            # original slide and z-order.
+            $transaction.targetReleased = $true
+        } else {
+            $targetWindow = $transaction.targetWindow
+            if (-not $targetWindow -and -not [string]::IsNullOrEmpty($targetPath)) {
+                $targetWindow = Resolve-ActiveSlideShowWindow $script:pptApplication $targetPath
+                if ($targetWindow) { $transaction.targetWindow = $targetWindow }
+            }
+
+            $targetHwnd = [long]$transaction.targetHwnd
+            $targetWindowExited = ($targetHwnd -eq 0) -or
+                (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$targetHwnd)) -or
+                (-not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$targetHwnd))
+            if ($targetWindow) {
+                try {
+                    $targetWindow.View.Exit()
+                    if ($targetHwnd -ne 0) {
+                        $exitDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
+                        do {
+                            $targetWindowExited = (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$targetHwnd)) -or
+                                (-not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$targetHwnd))
+                            if (-not $targetWindowExited) { Start-Sleep -Milliseconds 50 }
+                        } while (-not $targetWindowExited -and [DateTime]::UtcNow -lt $exitDeadline)
+                    } else {
+                        $targetWindowExited = $true
+                    }
+                } catch {
+                    $targetWindowExited = $false
+                    Log "abort-open: target slideshow exit failed: $($_.Exception.Message)"
+                }
+            } elseif (-not $targetWindowExited) {
+                Log "abort-open: target COM window missing but slideshow hwnd=$targetHwnd is still visible"
+            }
+
+            $targetPresentation = $transaction.targetPresentation
+            if ($targetPresentation -and (Test-PdmOwnedPresentation $targetPresentation)) {
+                # Presentation.Close is authoritative for a managed target and
+                # also exits its slideshow. A failed View.Exit is harmless when
+                # the document itself is verified gone.
+                $script:lastManagedPresentationCloseOk = $false
+                Close-ManagedPresentation $targetPresentation
+                $transaction.targetReleased = $script:lastManagedPresentationCloseOk
+            } else {
+                # A user-owned document stays open; only PDM's slideshow must
+                # have exited before the old program output is restored.
+                $transaction.targetReleased = $targetWindowExited
+            }
+        }
+    }
+
+    if (-not [bool]$transaction.previousRestored) {
+        $previousWindow = $transaction.previousWindow
+        if (-not $previousWindow -and -not [string]::IsNullOrEmpty($previousPath)) {
+            $previousWindow = Resolve-ActiveSlideShowWindow $script:pptApplication $previousPath
+            if ($previousWindow) { $transaction.previousWindow = $previousWindow }
+        }
+        if ($previousWindow) {
+            try {
+                if ($samePresentation -and [int]$transaction.previousSlide -gt 0) {
+                    $previousWindow.View.GotoSlide([int]$transaction.previousSlide)
+                }
+                $previousHwnd = [long]$previousWindow.HWND
+                $previousPresentation = $previousWindow.Presentation
+                $script:activeSlideShowWindow = $previousWindow
+                $script:activeSlideShowHwnd = $previousHwnd
+                $script:activePresentation = $previousPresentation
+                $script:activePresentationPath = [string]$previousPresentation.FullName
+                if ($previousHwnd -ne 0) {
+                    Raise-SlideShow $previousHwnd $transaction.targetRect
+                }
+                $transaction.previousRestored = $true
+                Log "abort-open: previous slideshow restored path='$($script:activePresentationPath)' hwnd=$previousHwnd"
+            } catch {
+                Log "abort-open: previous slideshow restore failed: $($_.Exception.Message)"
+            }
+        } elseif ([string]::IsNullOrEmpty($previousPath)) {
+            $script:activeSlideShowWindow = $null
+            $script:activeSlideShowHwnd = 0
+            $script:activePresentation = $null
+            $script:activePresentationPath = ''
+            $transaction.previousRestored = $true
+        } else {
+            Log "abort-open: previous slideshow was not found path='$previousPath'"
+        }
+    }
+
+    $script:lastOpenTransactionOk = [bool]$transaction.targetReleased -and
+        [bool]$transaction.previousRestored
+    if ($script:lastOpenTransactionOk) {
+        $script:openTransaction = $null
+    } else {
+        # Retain every COM reference and completion bit for an idempotent retry.
+        # Clearing an incomplete transaction made a later abort-open return a
+        # false success while the failed target still consumed memory/on-air.
+        Log "abort-open: incomplete targetReleased=$($transaction.targetReleased) previousRestored=$($transaction.previousRestored); retained for retry"
+    }
+}
+
+function Commit-PowerPointOpenTransaction {
+    $transaction = $script:openTransaction
+    $script:lastOpenTransactionOk = $true
+    if (-not $transaction) { return }
+    if (-not $transaction.verified) {
+        $script:lastOpenTransactionOk = $false
+        Log 'commit-open: rejected because target was not verified'
+        return
+    }
+
+    $targetPath = [string]$transaction.targetPath
+    $previousPath = [string]$transaction.previousPath
+    Log 'commit-open: teardown OLD BEGIN'
+
+    # Before ACK, revalidate the exact target through COM. After the Win32 ACK
+    # has made it authoritative, never turn a transient COM rejection into a
+    # rollback decision; this function is then only an idempotent retirement
+    # job for old/hidden resources.
+    $targetWindow = $transaction.targetWindow
+    if (-not $targetWindow -and -not [bool]$transaction.commitAccepted) {
+        $targetWindow = Resolve-ActiveSlideShowWindow $script:pptApplication $targetPath
+    }
+    $targetStillReady = [bool]$transaction.commitAccepted
+    if (-not $targetStillReady -and $targetWindow) {
+        try {
+            $targetWindowPath = [string]$targetWindow.Presentation.FullName
+            $targetWindowHwnd = [long]$targetWindow.HWND
+            $null = [int]$targetWindow.View.Slide.SlideIndex
+            $targetStillReady = ($targetWindowPath -ieq $targetPath) -and
+                ($targetWindowHwnd -ne 0) -and
+                [PptDaemon.Native]::IsWindow([System.IntPtr]$targetWindowHwnd)
+            if ($targetStillReady) {
+                $transaction.targetWindow = $targetWindow
+                $transaction.targetHwnd = $targetWindowHwnd
+            }
+        } catch {}
+    }
+    if (-not $targetStillReady) {
+        $script:lastOpenTransactionOk = $false
+        Log "commit-open: target revalidation failed path='$targetPath'; previous output retained"
+        return
+    }
+
+    # First release unrelated hidden PDM decks. Each record has its own
+    # completion tombstone so a retry never dereferences an RCW that was
+    # already closed by an earlier partial pass.
+    foreach ($record in @($transaction.oldPresentationRecords)) {
+        if (-not $record -or [bool]$record.retired) { continue }
+        $path = [string]$record.path
+        if ($path -ieq $targetPath -or $path -ieq $previousPath -or -not [bool]$record.managed) {
+            $record.retired = $true
+            continue
+        }
+        $script:lastManagedPresentationCloseOk = $false
+        Close-ManagedPresentation $record.presentation
+        if ($script:lastManagedPresentationCloseOk) {
+            $record.retired = $true
+        } else {
+            $script:lastOpenTransactionOk = $false
+            Log "commit-open: prerequisite presentation cleanup pending path='$path' identity='$($record.identity)'"
+        }
+    }
+
+    # Retire the previous program only after every unrelated managed deck is
+    # settled. Managed documents use exact COM identity; borrowed/user decks
+    # keep their document open and only exit the exact stored slideshow HWND.
+    if ($script:lastOpenTransactionOk) {
+        if ([string]::IsNullOrEmpty($previousPath) -or $previousPath -ieq $targetPath) {
+            $transaction.previousReleased = $true
+            $transaction.previousWindowExited = $true
+        } elseif ([bool]$transaction.previousManaged) {
+            if (-not [bool]$transaction.previousReleased) {
+                $script:lastManagedPresentationCloseOk = $false
+                Close-ManagedPresentation $transaction.previousPresentation
+                $transaction.previousReleased = $script:lastManagedPresentationCloseOk
+            }
+            if (-not [bool]$transaction.previousReleased) {
+                $script:lastOpenTransactionOk = $false
+                Log "commit-open: previous managed presentation cleanup pending path='$previousPath'"
+            }
+        } else {
+            if (-not [bool]$transaction.previousWindowExited) {
+                $previousHwnd = [long]$transaction.previousHwnd
+                $previousGone = $false
+                if ($previousHwnd -ne 0) {
+                    $previousGone = (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$previousHwnd)) -or
+                        (-not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$previousHwnd))
+                }
+                if (-not $previousGone -and $transaction.previousWindow) {
+                    $exitAccepted = $false
+                    try {
+                        $transaction.previousWindow.View.Exit()
+                        $exitAccepted = $true
+                    } catch {
+                        Log "commit-open: previous user slideshow exit failed: $($_.Exception.Message)"
+                    }
+                    if ($previousHwnd -eq 0) {
+                        $previousGone = $exitAccepted
+                    } else {
+                        $exitDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
+                        do {
+                            $previousGone = (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$previousHwnd)) -or
+                                (-not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$previousHwnd))
+                            if (-not $previousGone) { Start-Sleep -Milliseconds 50 }
+                        } while (-not $previousGone -and [DateTime]::UtcNow -lt $exitDeadline)
+                    }
+                }
+                $transaction.previousWindowExited = $previousGone
+            }
+            if (-not [bool]$transaction.previousWindowExited) {
+                $script:lastOpenTransactionOk = $false
+                Log "commit-open: previous user slideshow cleanup pending path='$previousPath'"
+            }
+        }
+    }
+
+    Hide-PPEditor $script:pptApplication
+    if ($script:lastOpenTransactionOk) {
+        $script:openTransaction = $null
+        Log 'commit-open: teardown OLD END ok=True'
+    } else {
+        $retainedFor = if ([bool]$transaction.commitAccepted) { 'retirement retry' } else { 'abort' }
+        Log "commit-open: teardown OLD END ok=False; transaction retained for $retainedFor"
+    }
 }
 
 function Reply($h) {
@@ -1122,49 +2046,65 @@ while ($true) {
                 }
 
                 $pres = $null
-                try {
-                    for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
-                        $candidate = $ppt.Presentations($i)
-                        try {
-                            if ($candidate.FullName -ieq $preparePath) {
-                                $pres = $candidate
-                                break
-                            }
-                        } catch {}
-                    }
-                } catch {}
-
                 $openedByPdm = $false
-                if (-not $pres) {
+                try {
                     try {
-                        # ReadOnly=true, Untitled=false, WithWindow=false.
-                        $pres = $ppt.Presentations.Open($preparePath, -1, 0, 0)
-                    } catch {
-                        if (-not $script:pptOwnedByRoland) {
-                            throw "Hidden PowerPoint preparation failed without changing the user's editor: $($_.Exception.Message)"
+                        for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
+                            $candidate = $ppt.Presentations.Item($i)
+                            try {
+                                if ($candidate.FullName -ieq $preparePath) {
+                                    $pres = $candidate
+                                    break
+                                }
+                            } catch {}
                         }
-                        Log "prepare: hidden open failed, retrying in hidden PDM instance: $($_.Exception.Message)"
-                        $pres = $ppt.Presentations.Open($preparePath)
-                        Hide-PPEditor $ppt
-                    }
-                    $openedByPdm = $true
-                    Mark-ManagedPresentation $pres
-                }
+                    } catch {}
 
-                # Only PDM-owned documents participate in automatic release.
-                # A presentation that the user had already opened is reused for
-                # TAKE, but is never closed or otherwise owned by PDM.
-                if ($openedByPdm -or (Test-ManagedPresentation $pres)) {
-                    Mark-PreparedPresentation $pres
+                    if (-not $pres) {
+                        try {
+                            # ReadOnly=true, Untitled=false, WithWindow=false.
+                            $pres = $ppt.Presentations.Open($preparePath, -1, 0, 0)
+                        } catch {
+                            if (-not $script:pptOwnedByRoland) {
+                                throw "Hidden PowerPoint preparation failed without changing the user's editor: $($_.Exception.Message)"
+                            }
+                            Log "prepare: hidden open failed, retrying in hidden PDM instance: $($_.Exception.Message)"
+                            $pres = $ppt.Presentations.Open($preparePath)
+                            Hide-PPEditor $ppt
+                        }
+                        $openedByPdm = $true
+                        Mark-ManagedPresentation $pres
+                    }
+
+                    # Only PDM-owned documents participate in automatic release.
+                    # A presentation that the user had already opened is reused for
+                    # TAKE, but is never closed or otherwise owned by PDM.
+                    if ($openedByPdm -or (Test-ManagedPresentation $pres)) {
+                        Mark-PreparedPresentation $pres
+                    }
+                    $count = [int]$pres.Slides.Count
+                    if ($count -lt 1) { throw 'Presentation contains no slides' }
+                    $slideWidth = [double]$pres.PageSetup.SlideWidth
+                    $slideHeight = [double]$pres.PageSetup.SlideHeight
+                    if ($script:pptOwnedByRoland) { Hide-PPEditor $ppt }
+                    $prepareMs = [int]([DateTime]::UtcNow - $prepareStarted).TotalMilliseconds
+                    Log "prepare: READY file='$preparePath' slides=$count size=${slideWidth}x${slideHeight} dur=${prepareMs}ms managed=$(Test-ManagedPresentation $pres)"
+                    Reply @{ id = $id; ok = $true; slideCount = $count; slideWidth = $slideWidth; slideHeight = $slideHeight }
+                } catch {
+                    $prepareError = [string]$_.Exception.Message
+                    if ($pres -and $openedByPdm -and (Test-PdmOwnedPresentation $pres)) {
+                        $script:lastManagedPresentationCloseOk = $false
+                        Close-ManagedPresentation $pres
+                        if (-not $script:lastManagedPresentationCloseOk) {
+                            $prepareError = "$prepareError; failed preparation deck was not released"
+                        }
+                    }
+                    Release-IdleOwnedPowerPointHost 'failed-prepare'
+                    if (-not $script:lastIdleOwnedPowerPointHostReleaseOk) {
+                        $prepareError = "$prepareError; idle PowerPoint host was not released"
+                    }
+                    throw $prepareError
                 }
-                $count = [int]$pres.Slides.Count
-                if ($count -lt 1) { throw 'Presentation contains no slides' }
-                $slideWidth = [double]$pres.PageSetup.SlideWidth
-                $slideHeight = [double]$pres.PageSetup.SlideHeight
-                if ($script:pptOwnedByRoland) { Hide-PPEditor $ppt }
-                $prepareMs = [int]([DateTime]::UtcNow - $prepareStarted).TotalMilliseconds
-                Log "prepare: READY file='$preparePath' slides=$count size=${slideWidth}x${slideHeight} dur=${prepareMs}ms managed=$(Test-ManagedPresentation $pres)"
-                Reply @{ id = $id; ok = $true; slideCount = $count; slideWidth = $slideWidth; slideHeight = $slideHeight }
             }
             'sync-prepared' {
                 $desired = @{}
@@ -1174,14 +2114,49 @@ while ($true) {
                         if (-not [string]::IsNullOrWhiteSpace($key)) { $desired[$key] = $true }
                     }
                 } catch {}
+                # Defensive protocol guard: Electron serializes these commands,
+                # but never let cache synchronization release either side of an
+                # in-flight transactional TAKE if an older client interleaves it.
+                if ($script:openTransaction) {
+                    foreach ($transactionPath in @(
+                        [string]$script:openTransaction.targetPath,
+                        [string]$script:openTransaction.previousPath
+                    )) {
+                        $transactionKey = $transactionPath.ToLowerInvariant()
+                        if (-not [string]::IsNullOrWhiteSpace($transactionKey)) {
+                            $desired[$transactionKey] = $true
+                        }
+                    }
+                }
 
                 $ppt = Get-PPT
                 $released = 0
+                $releaseFailed = 0
+                $releaseErrors = New-Object System.Collections.Generic.List[string]
                 if ($ppt) {
+                    if (-not (Close-UnidentifiedManagedPresentations)) {
+                        $releaseFailed++
+                        $null = $releaseErrors.Add('<unidentified managed presentation>')
+                    }
+                    $seenPresentationKeys = @{}
+                    $seenPresentationIdentities = @{}
                     for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
-                        $candidate = $ppt.Presentations($i)
-                        if (-not (Test-PreparedPresentation $candidate)) { continue }
+                        $candidate = $ppt.Presentations.Item($i)
+                        # A failed export/notes cleanup can leave a deck marked
+                        # managed without ever marking it prepared. It is still
+                        # PDM-owned memory and must participate in the same
+                        # release pass. User-owned decks match neither set.
+                        $isPrepared = Test-PreparedPresentation $candidate
+                        $isManaged = Test-ManagedPresentation $candidate
                         $key = Get-PresentationKey $candidate
+                        if (-not [string]::IsNullOrEmpty($key)) {
+                            $seenPresentationKeys[$key] = $true
+                        }
+                        $candidateIdentity = Get-PresentationIdentity $candidate
+                        if (-not [string]::IsNullOrEmpty($candidateIdentity)) {
+                            $seenPresentationIdentities[$candidateIdentity] = $true
+                        }
+                        if (-not $isPrepared -and -not $isManaged) { continue }
                         if ($desired.ContainsKey($key)) { continue }
 
                         $isActive = $false
@@ -1189,23 +2164,141 @@ while ($true) {
                             $isActive = (-not [string]::IsNullOrEmpty($script:activePresentationPath)) -and
                                 ([string]$candidate.FullName -ieq $script:activePresentationPath)
                         } catch {}
-                        Unmark-PreparedPresentation $candidate
                         if ($isActive) {
+                            Unmark-PreparedPresentation $candidate
                             Log "sync-prepared: deferred active release '$key'"
-                        } elseif (Test-ManagedPresentation $candidate) {
+                        } elseif ($isManaged) {
+                            $script:lastManagedPresentationCloseOk = $false
                             Close-ManagedPresentation $candidate
-                            $released++
-                            Log "sync-prepared: released '$key'"
+                            if ($script:lastManagedPresentationCloseOk) {
+                                $released++
+                                Log "sync-prepared: released '$key'"
+                            } else {
+                                $releaseFailed++
+                                $null = $releaseErrors.Add($key)
+                                Log "sync-prepared: release FAILED '$key'; tracking retained for retry"
+                            }
+                        } else {
+                            # User-owned presentations are never closed by PDM,
+                            # but they must not remain in the prepared set.
+                            Unmark-PreparedPresentation $candidate
                         }
                     }
-                    if ($script:pptOwnedByRoland -and -not (Resolve-ActiveSlideShowWindow $ppt)) {
+
+                    # A Close can succeed while its immediate verification hits
+                    # a transient RPC error. In that case Close-ManagedPresentation
+                    # deliberately keeps the path key for retry. Once a later,
+                    # complete Presentations enumeration proves that path absent,
+                    # discard the stale ownership marker. Otherwise a user who
+                    # later opens the same file in their own PowerPoint session
+                    # could be mistaken for the old PDM-owned COM object.
+                    $protectedTrackingKeys = @{}
+                    foreach ($protectedPath in @(
+                        [string]$script:activePresentationPath,
+                        $(if ($script:openTransaction) { [string]$script:openTransaction.targetPath } else { '' }),
+                        $(if ($script:openTransaction) { [string]$script:openTransaction.previousPath } else { '' })
+                    )) {
+                        $protectedKey = $protectedPath.ToLowerInvariant()
+                        if (-not [string]::IsNullOrWhiteSpace($protectedKey)) {
+                            $protectedTrackingKeys[$protectedKey] = $true
+                        }
+                    }
+                    try {
+                        $activeObjectKey = Get-PresentationKey $script:activePresentation
+                        if (-not [string]::IsNullOrWhiteSpace($activeObjectKey)) {
+                            $protectedTrackingKeys[$activeObjectKey] = $true
+                        }
+                    } catch {}
+                    $protectedTrackingIdentities = @{}
+                    foreach ($protectedObject in @(
+                        $script:activePresentation,
+                        $(if ($script:openTransaction) { $script:openTransaction.targetPresentation } else { $null }),
+                        $(if ($script:openTransaction) { $script:openTransaction.previousPresentation } else { $null })
+                    )) {
+                        $protectedIdentity = Get-PresentationIdentity $protectedObject
+                        if (-not [string]::IsNullOrWhiteSpace($protectedIdentity)) {
+                            $protectedTrackingIdentities[$protectedIdentity] = $true
+                        }
+                    }
+                    foreach ($trackedIdentity in @($script:managedPresentationIdentities.Keys)) {
+                        if ($seenPresentationIdentities.ContainsKey($trackedIdentity) -or
+                            $protectedTrackingIdentities.ContainsKey($trackedIdentity)) { continue }
+                        $script:managedPresentationIdentities.Remove($trackedIdentity)
+                        Log "sync-prepared: removed absent stale managed identity '$trackedIdentity'"
+                    }
+                    foreach ($trackedKey in @($script:managedPresentationKeys.Keys)) {
+                        if ($seenPresentationKeys.ContainsKey($trackedKey) -or
+                            $protectedTrackingKeys.ContainsKey($trackedKey)) { continue }
+                        $script:managedPresentationKeys.Remove($trackedKey)
+                        $script:preparedPresentationKeys.Remove($trackedKey)
+                        Log "sync-prepared: removed absent stale managed key '$trackedKey'"
+                    }
+                    foreach ($trackedKey in @($script:preparedPresentationKeys.Keys)) {
+                        if ($seenPresentationKeys.ContainsKey($trackedKey) -or
+                            $protectedTrackingKeys.ContainsKey($trackedKey)) { continue }
+                        $script:preparedPresentationKeys.Remove($trackedKey)
+                        Log "sync-prepared: removed absent stale prepared key '$trackedKey'"
+                    }
+                    if ($script:pptOwnedByRoland -and -not (Test-PowerPointHasAnySlideShow $ppt)) {
                         try { $ppt.Visible = 0 } catch {}
                     }
                 }
-                Reply @{ id = $id; ok = $true; released = $released }
+                if ($releaseFailed -eq 0) {
+                    Release-IdleOwnedPowerPointHost 'sync-prepared'
+                    if (-not $script:lastIdleOwnedPowerPointHostReleaseOk) {
+                        $releaseFailed++
+                        $null = $releaseErrors.Add('<idle PowerPoint host>')
+                    }
+                } elseif ($script:pptOwnedByRoland -and
+                    -not $script:openTransaction -and
+                    -not (Test-PowerPointHasAnySlideShow $ppt)) {
+                    # Presentation.Close can remain blocked by an idle COM host
+                    # even after bounded retries. Only a process proven to have
+                    # been created by PDM may be recycled, and Restore performs
+                    # a second ownership scan so an untracked user document
+                    # disables Quit/force automatically.
+                    Log "sync-prepared: managed release failed; recycling verified idle PDM-owned host"
+                    Restore-PowerPointSession
+                    if ($script:lastPowerPointSessionCleanupOk) {
+                        $released += $releaseFailed
+                        $releaseFailed = 0
+                        $releaseErrors.Clear()
+                        $ppt = $null
+                        Log 'sync-prepared: idle PDM-owned host recycle verified'
+                    } else {
+                        Log 'sync-prepared: idle PDM-owned host recycle FAILED; tracking retained'
+                    }
+                }
+                if ($releaseFailed -gt 0) {
+                    Reply @{
+                        id = $id
+                        ok = $false
+                        released = $released
+                        failed = $releaseFailed
+                        error = "PowerPoint did not release managed presentation(s): $($releaseErrors -join '; ')"
+                    }
+                } else {
+                    Reply @{ id = $id; ok = $true; released = $released; failed = 0 }
+                }
             }
             'open' {
+                if ($script:openTransaction) {
+                    Log 'open: aborting an unfinished previous transaction'
+                    Abort-PowerPointOpenTransaction
+                    if (-not $script:lastOpenTransactionOk) {
+                        throw 'Previous PowerPoint open transaction could not be rolled back safely'
+                    }
+                }
                 Reset-SlideVideoClickState
+                $previousActiveWindow = Resolve-PdmSlideShowWindow $script:pptApplication
+                $previousActivePresentation = $script:activePresentation
+                $previousActivePath = [string]$script:activePresentationPath
+                $previousActiveSlide = 0
+                try {
+                    if ($previousActiveWindow) {
+                        $previousActiveSlide = [int]$previousActiveWindow.View.Slide.SlideIndex
+                    }
+                } catch {}
                 $script:activeSlideShowHwnd = 0
                 $targetRect = $null
                 try {
@@ -1254,13 +2347,13 @@ while ($true) {
                 $oldSW = New-Object System.Collections.ArrayList
                 try {
                     for ($i = 1; $i -le $ppt.SlideShowWindows.Count; $i++) {
-                        $null = $oldSW.Add($ppt.SlideShowWindows($i))
+                        $null = $oldSW.Add($ppt.SlideShowWindows.Item($i))
                     }
                 } catch {}
                 # The collection may be transiently empty after the previous
                 # switch. The direct cached COM reference is still the real old
                 # slideshow and must be included in teardown/reuse decisions.
-                $cachedOldSW = Resolve-ActiveSlideShowWindow $ppt
+                $cachedOldSW = Resolve-PdmSlideShowWindow $ppt
                 if ($cachedOldSW) {
                     $cachedOldPath = ''
                     try { $cachedOldPath = [string]$cachedOldSW.Presentation.FullName } catch {}
@@ -1278,7 +2371,7 @@ while ($true) {
                 $oldPres = New-Object System.Collections.ArrayList
                 try {
                     for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
-                        $null = $oldPres.Add($ppt.Presentations($i))
+                        $null = $oldPres.Add($ppt.Presentations.Item($i))
                     }
                 } catch {}
                 if ($script:activePresentation) {
@@ -1296,6 +2389,48 @@ while ($true) {
                     if (-not $alreadyListed -and -not [string]::IsNullOrEmpty($cachedPresPath)) {
                         $null = $oldPres.Add($script:activePresentation)
                     }
+                }
+
+                $oldPresentationRecords = New-Object System.Collections.ArrayList
+                foreach ($candidatePres in $oldPres) {
+                    $candidatePath = ''
+                    try { $candidatePath = [string]$candidatePres.FullName } catch {}
+                    $null = $oldPresentationRecords.Add(@{
+                        presentation = $candidatePres
+                        path = $candidatePath
+                        identity = $(Get-PresentationIdentity $candidatePres)
+                        managed = $(Test-ManagedPresentation $candidatePres)
+                        retired = $false
+                    })
+                }
+                $previousHwnd = 0
+                try { if ($previousActiveWindow) { $previousHwnd = [long]$previousActiveWindow.HWND } } catch {}
+
+                $script:openTransaction = @{
+                    targetPath = [string]$req.path
+                    targetRect = $targetRect
+                    previousPath = $previousActivePath
+                    previousWindow = $previousActiveWindow
+                    previousPresentation = $previousActivePresentation
+                    previousSlide = $previousActiveSlide
+                    oldWindows = @($oldSW)
+                    oldPresentations = @($oldPres)
+                    oldPresentationRecords = @($oldPresentationRecords)
+                    targetWindow = $null
+                    targetPresentation = $null
+                    targetManaged = $false
+                    targetIsPrevious = $false
+                    targetSharesPreviousPresentation = $false
+                    presentationRelationshipKnown = $false
+                    targetHwnd = 0
+                    targetReleased = $false
+                    previousRestored = $false
+                    previousManaged = $(Test-ManagedPresentation $previousActivePresentation)
+                    previousHwnd = $previousHwnd
+                    previousReleased = $false
+                    previousWindowExited = $false
+                    verified = $false
+                    commitAccepted = $false
                 }
 
                 # Same-file re-open: Presentations.Open returns the existing
@@ -1316,7 +2451,25 @@ while ($true) {
                     } catch {
                         $pres = $ppt.Presentations.Open($req.path)
                     }
+                    # Publish the exact RCW to rollback before ownership
+                    # registration. Mark-ManagedPresentation deliberately
+                    # throws when IUnknown identity is unavailable; Abort must
+                    # still be able to close that quarantined PDM-opened deck.
+                    $script:openTransaction.targetPresentation = $pres
                     Mark-ManagedPresentation $pres
+                }
+                $script:openTransaction.targetPresentation = $pres
+                # Only an identity-backed PDM ownership record authorizes the
+                # out-of-process emergency helper to close this presentation.
+                # Quarantine/path-only tracking stays fail-closed.
+                $script:openTransaction.targetManaged = $(Test-PdmOwnedPresentation $pres)
+                $targetPresentationIdentity = Get-PresentationIdentity $pres
+                $previousPresentationIdentity = Get-PresentationIdentity $previousActivePresentation
+                if (-not [string]::IsNullOrEmpty($targetPresentationIdentity) -and
+                    -not [string]::IsNullOrEmpty($previousPresentationIdentity)) {
+                    $script:openTransaction.presentationRelationshipKnown = $true
+                    $script:openTransaction.targetSharesPreviousPresentation =
+                        $targetPresentationIdentity -eq $previousPresentationIdentity
                 }
 
                 $count = $pres.Slides.Count
@@ -1330,7 +2483,7 @@ while ($true) {
                 $existingSW = $null
                 try {
                     for ($i = 1; $i -le $ppt.SlideShowWindows.Count; $i++) {
-                        $sw = $ppt.SlideShowWindows($i)
+                        $sw = $ppt.SlideShowWindows.Item($i)
                         if ($sw.Presentation.FullName -ieq $pres.FullName) { $existingSW = $sw; break }
                     }
                 } catch {}
@@ -1380,7 +2533,7 @@ while ($true) {
                     # slideshow appears already-painted when the overlay lifts.
                     # Not persisted (we never call pres.Save()).
                     try {
-                        $tr = $pres.Slides($startSlide).SlideShowTransition
+                        $tr = $pres.Slides.Item($startSlide).SlideShowTransition
                         $tr.EntryEffect = 0   # ppEffectNone
                         $tr.Duration    = 0
                     } catch {}
@@ -1537,7 +2690,7 @@ while ($true) {
                     if (-not $newSW) {
                         try {
                             for ($i = 1; $i -le $ppt.SlideShowWindows.Count; $i++) {
-                                $sw = $ppt.SlideShowWindows($i)
+                                $sw = $ppt.SlideShowWindows.Item($i)
                                 if ($sw.Presentation.FullName -ieq $pres.FullName) { $newSW = $sw; break }
                             }
                         } catch {}
@@ -1580,6 +2733,16 @@ while ($true) {
                 $script:activeSlideShowWindow = $newSW
                 $script:activePresentation = $pres
                 $script:activePresentationPath = [string]$pres.FullName
+                $script:openTransaction.targetWindow = $newSW
+                $script:openTransaction.targetHwnd = $newHwnd
+                # Same-file TAKE reuses the exact live slideshow. An
+                # out-of-process rollback must restore its previous slide,
+                # never close/exit what is also the last committed output.
+                $script:openTransaction.targetIsPrevious =
+                    $previousHwnd -ne 0 -and
+                    $newHwnd -eq $previousHwnd -and
+                    -not [string]::IsNullOrEmpty($previousActivePath) -and
+                    ([string]$pres.FullName -ieq $previousActivePath)
                 $stagingCoverHwnd = $underlayHwnd
                 foreach ($candidateSW in $oldSW) {
                     try {
@@ -1624,25 +2787,6 @@ while ($true) {
                     try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
                     Log "promoted warmed slideshow HWND=$newHwnd"
                 }
-
-                # The new target now covers the real old output. Tear the old
-                # PowerPoint objects down underneath it so their editor/refocus
-                # events can no longer create a visible gap.
-                Log "teardown OLD: BEGIN"
-                foreach ($sw in $oldSW) {
-                    try { if ($sw.Presentation.FullName -ine $pres.FullName) { $sw.View.Exit() } } catch {}
-                }
-                foreach ($p in $oldPres) {
-                    try {
-                        if ($p.FullName -ine $pres.FullName -and
-                            (Test-ManagedPresentation $p) -and
-                            -not (Test-PreparedPresentation $p)) {
-                            Close-ManagedPresentation $p
-                        }
-                    } catch {}
-                }
-                Hide-PPEditor $ppt
-                Log "teardown OLD: END"
 
                 # The Win32 slideshow is already created, positioned and stable.
                 # Notify the control UI now; the COM collection verification below
@@ -1690,7 +2834,7 @@ while ($true) {
                         if ($cnt -gt 0) {
                             for ($i = 1; $i -le $cnt; $i++) {
                                 try {
-                                    if ($ppt.SlideShowWindows($i).Presentation.FullName -ieq $pres.FullName) {
+                                    if ($ppt.SlideShowWindows.Item($i).Presentation.FullName -ieq $pres.FullName) {
                                         $verifyOk = $true
                                         break
                                     }
@@ -1703,6 +2847,12 @@ while ($true) {
                 }
                 $verifyMs = [int]([DateTime]::UtcNow - $verifyStart).TotalMilliseconds
                 Log ("open: SlideShowWindows verify ok={0} took={1}ms" -f $verifyOk, $verifyMs)
+
+                # Keep the previous slideshow alive until Electron explicitly
+                # acknowledges this response with commit-open. A timed-out or
+                # rejected IPC can then enqueue abort-open and deterministically
+                # restore the old deck after this serialized command finishes.
+                $script:openTransaction.verified = ($verifyOk -and $newHwnd -ne 0)
 
                 # Diagnostic: dump slideshow state to detect animation issues.
                 # Click index = 0 means "before any click animation". If we see
@@ -1718,17 +2868,160 @@ while ($true) {
                     try { $diagSi = [int]$newSW.View.Slide.SlideIndex } catch {}
                     try { $diagCi = [int]$newSW.View.GetClickIndex() } catch {}
                     try { $diagState = [int]$newSW.View.State } catch {}
-                    try { $diagAnimCount = [int]$pres.Slides($diagSi).TimeLine.MainSequence.Count } catch {}
+                    try { $diagAnimCount = [int]$pres.Slides.Item($diagSi).TimeLine.MainSequence.Count } catch {}
                     try { $diagShowType = [int]$pres.SlideShowSettings.ShowType } catch {}
                     try { $diagAdvMode = [int]$pres.SlideShowSettings.AdvanceMode } catch {}
                     Log ("open: post-Run state slide=$diagSi clickIndex=$diagCi viewState=$diagState animCount=$diagAnimCount showType=$diagShowType advMode=$diagAdvMode")
                 } catch {}
 
-                Reply @{ id = $id; ok = $true; slideCount = $count; slide = $startSlide }
+                if ($verifyOk -and $newHwnd -ne 0) {
+                    $newPid = 0
+                    try { $newPid = [long][PptDaemon.Native]::GetWindowProcessId($newHwnd) } catch {}
+                    $previousPid = 0
+                    try {
+                        if ([long]$script:openTransaction.previousHwnd -ne 0) {
+                            $previousPid = [long][PptDaemon.Native]::GetWindowProcessId(
+                                [long]$script:openTransaction.previousHwnd
+                            )
+                        }
+                    } catch {}
+                    Reply @{
+                        id = $id
+                        ok = $true
+                        slideCount = $count
+                        slide = $startSlide
+                        hwnd = $newHwnd
+                        pid = $newPid
+                        managed = [bool]$script:openTransaction.targetManaged
+                        reusedPrevious = [bool]$script:openTransaction.targetIsPrevious
+                        previousHwnd = [long]$script:openTransaction.previousHwnd
+                        previousPid = $previousPid
+                        previousPath = [string]$script:openTransaction.previousPath
+                        previousSlide = [int]$script:openTransaction.previousSlide
+                        sharesPreviousPresentation = [bool]$script:openTransaction.targetSharesPreviousPresentation
+                        presentationRelationshipKnown = [bool]$script:openTransaction.presentationRelationshipKnown
+                    }
+                } else {
+                    Abort-PowerPointOpenTransaction
+                    $openFailure = "PowerPoint slideshow was not verifiably ready (hwnd=$newHwnd slide=$diagSi)"
+                    if (-not $script:lastOpenTransactionOk) {
+                        $openFailure = "$openFailure; rollback was incomplete"
+                    } else {
+                        Release-IdleOwnedPowerPointHost 'failed-open'
+                        if (-not $script:lastIdleOwnedPowerPointHostReleaseOk) {
+                            $openFailure = "$openFailure; idle PowerPoint host was not released"
+                        }
+                    }
+                    Reply @{
+                        id = $id
+                        ok = $false
+                        error = $openFailure
+                        slideCount = $count
+                        slide = $startSlide
+                    }
+                }
+            }
+            'commit-open' {
+                $transaction = $script:openTransaction
+                $targetHwnd = 0
+                $targetAccepted = $false
+                if ($transaction -and [bool]$transaction.verified) {
+                    try { $targetHwnd = [long]$transaction.targetHwnd } catch {}
+                    $targetAccepted = $targetHwnd -ne 0 -and
+                        [PptDaemon.Native]::IsWindow([System.IntPtr]$targetHwnd) -and
+                        [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$targetHwnd)
+                }
+                if (-not $targetAccepted) {
+                    Reply @{ id = $id; ok = $false; error = 'Verified PowerPoint target window is no longer visible' }
+                } else {
+                    # OPEN has already verified the exact file, slide and HWND.
+                    # A second COM-heavy cleanup before this ACK allowed a busy
+                    # Office process to hold Electron's global output lock for
+                    # minutes.  Commit the visible target first; retirement of
+                    # the old/hidden deck continues below in this same serial
+                    # PowerShell command.  If it cannot finish, the retained
+                    # transaction makes the next CLOSE/OPEN retry idempotently.
+                    $transaction.commitAccepted = $true
+                    Reply @{ id = $id; ok = $true; cleanupPending = $true }
+                    for ($cleanupAttempt = 1; $cleanupAttempt -le 3; $cleanupAttempt++) {
+                        try {
+                            Commit-PowerPointOpenTransaction
+                        } catch {
+                            $script:lastOpenTransactionOk = $false
+                            Log "commit-open: post-ACK retirement failed attempt=${cleanupAttempt}: $($_.Exception.Message)"
+                        }
+                        if ($script:lastOpenTransactionOk) { break }
+                        if ($cleanupAttempt -lt 3) {
+                            Log "commit-open: target accepted; retrying previous presentation cleanup attempt=$($cleanupAttempt + 1)"
+                            Start-Sleep -Milliseconds (150 * $cleanupAttempt)
+                        }
+                    }
+                    if (-not $script:lastOpenTransactionOk) {
+                        Log 'commit-open: target accepted; previous presentation cleanup retained for later CLOSE recovery'
+                    }
+                    Reply @{
+                        id = $id
+                        ok = $script:lastOpenTransactionOk
+                        event = 'command-complete'
+                        error = if ($script:lastOpenTransactionOk) { $null } else { 'Previous PowerPoint cleanup remains pending' }
+                    }
+                }
+            }
+            'abort-open' {
+                Abort-PowerPointOpenTransaction
+                if ($script:lastOpenTransactionOk) {
+                    Release-IdleOwnedPowerPointHost 'abort-open'
+                    if ($script:lastIdleOwnedPowerPointHostReleaseOk) {
+                        Reply @{ id = $id; ok = $true }
+                    } else {
+                        Reply @{ id = $id; ok = $false; error = 'PowerPoint rollback completed but its idle host was not released' }
+                    }
+                } else {
+                    Reply @{ id = $id; ok = $false; error = 'PowerPoint open rollback was incomplete' }
+                }
+            }
+            'open-status' {
+                # A main-process timeout does not cancel a command already read
+                # by this single-threaded host. This status command is queued
+                # immediately behind commit-open and lets Electron reconcile a
+                # late successful commit instead of blindly aborting a target
+                # that is already physically on air.
+                $transactionPending = $null -ne $script:openTransaction
+                $targetPath = ''
+                if ($transactionPending) {
+                    try { $targetPath = [string]$script:openTransaction.targetPath } catch {}
+                }
+                $expectedPath = [string]$req.expectedPath
+                $activePath = ''
+                $liveWindowVerified = $false
+                try {
+                    $statusWindow = Resolve-ActiveSlideShowWindow $script:pptApplication $expectedPath
+                    if ($statusWindow) {
+                        $candidatePath = [string]$statusWindow.Presentation.FullName
+                        $candidateHwnd = [long]$statusWindow.HWND
+                        $candidateSlide = [int]$statusWindow.View.Slide.SlideIndex
+                        $pathMatches = [string]::IsNullOrEmpty($expectedPath) -or
+                            $candidatePath -ieq $expectedPath
+                        if ($pathMatches -and $candidateHwnd -ne 0 -and $candidateSlide -gt 0 -and
+                            [PptDaemon.Native]::IsWindow([System.IntPtr]$candidateHwnd) -and
+                            [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$candidateHwnd)) {
+                            $activePath = $candidatePath
+                            $liveWindowVerified = $true
+                        }
+                    }
+                } catch {}
+                Reply @{
+                    id = $id
+                    ok = $liveWindowVerified
+                    path = $activePath
+                    targetPath = $targetPath
+                    transactionPending = $transactionPending
+                    error = if ($liveWindowVerified) { $null } else { 'No verified live PowerPoint slideshow' }
+                }
             }
             'relocate' {
                 $ppt = Get-PPT
-                $sw = Resolve-ActiveSlideShowWindow $ppt
+                $sw = Resolve-PdmSlideShowWindow $ppt
                 $targetRect = $null
                 try {
                     if ($null -ne $req.bounds) {
@@ -1779,24 +3072,120 @@ while ($true) {
                 }
             }
             'close' {
+                # Establish the user-visible postcondition with Win32 before
+                # any COM cleanup. Once this exact slideshow HWND is hidden,
+                # STOP is authoritative and can be acknowledged immediately;
+                # document/host retirement continues under Electron's daemon
+                # cleanup barrier and can no longer execute as a detached late
+                # close after a JS timeout.
+                $visualHwnd = [long]$script:activeSlideShowHwnd
+                $hasActiveMarker = -not [string]::IsNullOrEmpty([string]$script:activePresentationPath) -or
+                    $null -ne $script:activePresentation -or
+                    $null -ne $script:activeSlideShowWindow
+                $visualStopped = $false
+                if ($visualHwnd -eq 0) {
+                    $visualStopped = -not $hasActiveMarker
+                } elseif (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$visualHwnd) -or
+                    -not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$visualHwnd)) {
+                    $visualStopped = $true
+                } else {
+                    [PptDaemon.Native]::ShowWindow([System.IntPtr]$visualHwnd, 0) | Out-Null
+                    try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                    $hideDeadline = [DateTime]::UtcNow.AddMilliseconds(1000)
+                    do {
+                        $visualStopped = (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$visualHwnd)) -or
+                            (-not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$visualHwnd))
+                        if (-not $visualStopped) { Start-Sleep -Milliseconds 25 }
+                    } while (-not $visualStopped -and [DateTime]::UtcNow -lt $hideDeadline)
+                }
+                if (-not $visualStopped) {
+                    Reply @{ id = $id; ok = $false; error = 'PowerPoint slideshow could not be hidden safely' }
+                    continue
+                }
+
+                Reply @{ id = $id; ok = $true; cleanupPending = $true }
+                $closeOk = $false
+                $remaining = -1
+                try {
                 Reset-SlideVideoClickState
+                $transactionCloseOk = $true
+                if ($script:openTransaction) {
+                    Abort-PowerPointOpenTransaction
+                    $transactionCloseOk = $script:lastOpenTransactionOk
+                }
                 $ppt = Get-PPT
+                $closeOk = $transactionCloseOk
                 if ($ppt) {
-                    $sw = Resolve-ActiveSlideShowWindow $ppt
-                    try { if ($sw) { $sw.View.Exit() } } catch {}
+                    if (-not (Close-UnidentifiedManagedPresentations)) {
+                        $closeOk = $false
+                    }
+                    # An empty expected path makes Resolve pick an arbitrary
+                    # slideshow from a shared Office process. Only PDM's cached
+                    # or path-qualified window is eligible for STOP.
+                    $sw = $script:activeSlideShowWindow
+                    if (-not $sw -and -not [string]::IsNullOrEmpty($script:activePresentationPath)) {
+                        $sw = Resolve-ActiveSlideShowWindow $ppt $script:activePresentationPath
+                    }
+                    $active = $script:activePresentation
+                    if (-not $active -and $sw) {
+                        try { $active = $sw.Presentation } catch {}
+                    }
+                    $activePathForClose = ''
+                    try { if ($active) { $activePathForClose = [string]$active.FullName } } catch {}
+
+                    # Release hidden/prepared PDM decks first. If one of them
+                    # refuses to close in a user-owned PowerPoint host, keep the
+                    # actual on-air slideshow untouched so renderer rollback is
+                    # still truthful and visible.
                     try {
-                        if ($script:activePresentation) {
-                            if (Test-ManagedPresentation $script:activePresentation) {
-                                if (-not (Test-PreparedPresentation $script:activePresentation)) {
-                                    Close-ManagedPresentation $script:activePresentation
+                        for ($i = [int]$ppt.Presentations.Count; $i -ge 1; $i--) {
+                            $candidate = $ppt.Presentations.Item($i)
+                            if (-not (Test-PdmOwnedPresentation $candidate) -or
+                                (Test-PresentationProtectedByOpenTransaction $candidate)) { continue }
+                            $candidatePath = ''
+                            try { $candidatePath = [string]$candidate.FullName } catch {}
+                            if (-not [string]::IsNullOrEmpty($activePathForClose) -and
+                                $candidatePath -ieq $activePathForClose) { continue }
+                            $script:lastManagedPresentationCloseOk = $false
+                            Close-ManagedPresentation $candidate
+                            if (-not $script:lastManagedPresentationCloseOk) { $closeOk = $false }
+                        }
+                    } catch {
+                        $closeOk = $false
+                        Log "close: residual managed document cleanup failed: $($_.Exception.Message)"
+                    }
+
+                    $activeCloseOk = $true
+                    try {
+                        if ($active) {
+                            if (Test-PdmOwnedPresentation $active) {
+                                # A real STOP/CLOSE must release the loaded deck,
+                                # even when it originally came from the channel
+                                # preparation cache. Keep only the empty COM host
+                                # warm; the next TAKE can reopen the file from the
+                                # exported slide cache without retaining its media
+                                # and document model in POWERPNT.EXE.
+                                $script:lastManagedPresentationCloseOk = $false
+                                # Presentation.Close() also exits its slideshow.
+                                # Do not call View.Exit() first: if Close fails,
+                                # the still-live previous picture is the safe
+                                # rollback surface for the renderer.
+                                Close-ManagedPresentation $active
+                                $activeCloseOk = $script:lastManagedPresentationCloseOk
+                            } elseif ($sw) {
+                                # The user opened this document before PDM. End
+                                # only PDM's slideshow; never close their deck.
+                                try { $sw.View.Exit() } catch {
+                                    $activeCloseOk = $false
+                                    Log "close: user-owned slideshow exit failed: $($_.Exception.Message)"
                                 }
                             }
-                        } elseif ($ppt.ActivePresentation -and (Test-ManagedPresentation $ppt.ActivePresentation)) {
-                            if (-not (Test-PreparedPresentation $ppt.ActivePresentation)) {
-                                Close-ManagedPresentation $ppt.ActivePresentation
-                            }
                         }
-                    } catch {}
+                    } catch {
+                        $activeCloseOk = $false
+                        Log "close: managed document cleanup failed: $($_.Exception.Message)"
+                    }
+                    $closeOk = $closeOk -and $activeCloseOk
                     # Visible=1 был выставлен в 'open' для Run() слайдшоу. A
                     # PDM-owned instance can be returned to COM-invisible mode.
                     # Never do this to a user-owned PowerPoint instance: on some
@@ -1805,21 +3194,64 @@ while ($true) {
                     # retries through a dead proxy and falls back to the PDF.
                     if ($script:pptOwnedByRoland) {
                         try { $ppt.Visible = 0 } catch {}
+                    } elseif ($closeOk) {
+                        # TAKE temporarily hides a borrowed editor. Once STOP
+                        # has really released PDM's slideshow/deck, put the
+                        # user's window back exactly where and how it was.
+                        Restore-BorrowedPowerPointEditorState $ppt
                     } else {
-                        # Win32 hiding prevents an empty editor frame from
-                        # flashing without changing the user's COM lifecycle.
+                        # Keep the editor hidden while a failed CLOSE retains
+                        # the slideshow as the rollback surface.
                         Hide-PPEditor $ppt
                     }
                 }
-                $script:activeSlideShowHwnd = 0
-                $script:activeSlideShowWindow = $null
-                $script:activePresentation = $null
-                $script:activePresentationPath = ''
-                Reply @{ id = $id; ok = $true }
+                if (-not $closeOk -and $script:pptOwnedByRoland) {
+                    # It is safe to tear down an instance created by PDM. This
+                    # is the final bounded fallback when Office refuses an
+                    # individual Presentation.Close(): no deck/media memory may
+                    # survive a successful STOP acknowledgement.
+                    Log 'close: managed Close failed; recycling PDM-owned PowerPoint host'
+                    Restore-PowerPointSession
+                    $closeOk = $script:lastPowerPointSessionCleanupOk
+                    $ppt = if ($script:pptSessionInitialized) { $script:pptApplication } else { $null }
+                }
+                if ($closeOk -or $activeCloseOk) {
+                    $script:activeSlideShowHwnd = 0
+                    $script:activeSlideShowWindow = $null
+                    $script:activePresentation = $null
+                    $script:activePresentationPath = ''
+                }
+                if ($closeOk) {
+                    Release-IdleOwnedPowerPointHost 'close'
+                    if (-not $script:lastIdleOwnedPowerPointHostReleaseOk) {
+                        $closeOk = $false
+                    } elseif (-not $script:pptSessionInitialized) {
+                        $ppt = $null
+                    }
+                } else {
+                    Log "close: residual PowerPoint cleanup retained for retry path='$($script:activePresentationPath)'"
+                }
+                $remaining = 0
+                if ($ppt) {
+                    try { $remaining = [int]$ppt.Presentations.Count } catch { $remaining = -1 }
+                }
+                Log "close: END ok=$closeOk remainingPresentations=$remaining prepared=$($script:preparedPresentationKeys.Count) managed=$($script:managedPresentationKeys.Count)"
+                } catch {
+                    $closeOk = $false
+                    Log "close: post-ACK cleanup failed: $($_.Exception.Message)"
+                } finally {
+                    Reply @{
+                        id = $id
+                        ok = $closeOk
+                        event = 'command-complete'
+                        remainingPresentations = $remaining
+                        error = if ($closeOk) { $null } else { 'PowerPoint did not release the managed presentation' }
+                    }
+                }
             }
             'next' {
                 $ppt = Get-PPT
-                $sw = Resolve-ActiveSlideShowWindow $ppt
+                $sw = Resolve-PdmSlideShowWindow $ppt
                 if ($ppt -and $sw) {
                     $view = $sw.View
                     $total = 0
@@ -1882,7 +3314,7 @@ while ($true) {
             }
             'prev' {
                 $ppt = Get-PPT
-                $sw = Resolve-ActiveSlideShowWindow $ppt
+                $sw = Resolve-PdmSlideShowWindow $ppt
                 if ($ppt -and $sw) {
                     $view = $sw.View
                     # См. комментарий к 'next'. Guard $sBefore > 1 — со слайда 1
@@ -1917,7 +3349,7 @@ while ($true) {
             }
             'goto' {
                 $ppt = Get-PPT
-                $sw = Resolve-ActiveSlideShowWindow $ppt
+                $sw = Resolve-PdmSlideShowWindow $ppt
                 if ($ppt -and $sw) {
                     $view = $sw.View
                     $n = [int]$req.slide
@@ -1944,7 +3376,7 @@ while ($true) {
             }
             'current' {
                 $ppt = Get-PPT
-                $sw = Resolve-ActiveSlideShowWindow $ppt
+                $sw = Resolve-PdmSlideShowWindow $ppt
                 if ($ppt -and $sw) {
                     Reply @{ id = $id; ok = $true; slide = [int]$sw.View.Slide.SlideIndex }
                 } else {
@@ -1960,9 +3392,10 @@ while ($true) {
                 $ppt = Get-OrCreatePPT
                 $notesPres = $null
                 $openedForNotes = $false
+                $notesResult = $null
                 try {
                     for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
-                        $candidate = $ppt.Presentations($i)
+                        $candidate = $ppt.Presentations.Item($i)
                         try {
                             if ($candidate.FullName -ieq $notesPath) {
                                 $notesPres = $candidate
@@ -1976,6 +3409,7 @@ while ($true) {
                         Hide-PPEditor $ppt
                         $notesPres = $ppt.Presentations.Open($notesPath, -1, 0, 0)
                         $openedForNotes = $true
+                        Mark-ManagedPresentation $notesPres
                     }
                     $slideCount = [int]$notesPres.Slides.Count
                     if ($slideNumber -lt 1 -or $slideNumber -gt $slideCount) {
@@ -2001,15 +3435,34 @@ while ($true) {
                         }
                     }
                     $notesText = [string]::Join("`n", $parts)
-                    Reply @{ id = $id; ok = $true; slide = $slideNumber; notes = $notesText }
+                    $notesResult = @{ id = $id; ok = $true; slide = $slideNumber; notes = $notesText }
                 } finally {
-                    if ($notesPres -and $openedForNotes) {
-                        try { $notesPres.Close() } catch {}
+                    if ($notesPres -and $openedForNotes -and (Test-PdmOwnedPresentation $notesPres)) {
+                        $script:lastManagedPresentationCloseOk = $false
+                        Close-ManagedPresentation $notesPres
+                        if (-not $script:lastManagedPresentationCloseOk) {
+                            $notesResult = @{
+                                id = $id
+                                ok = $false
+                                error = "PowerPoint did not release notes presentation: $notesPath"
+                            }
+                        }
                     }
                     try {
-                        if (-not (Resolve-ActiveSlideShowWindow $ppt)) { $ppt.Visible = 0 }
+                        if ($script:pptOwnedByRoland -and -not (Test-PowerPointHasAnySlideShow $ppt)) {
+                            $ppt.Visible = 0
+                        }
                     } catch {}
+                    Release-IdleOwnedPowerPointHost 'notes'
+                    if (-not $script:lastIdleOwnedPowerPointHostReleaseOk) {
+                        $notesResult = @{
+                            id = $id
+                            ok = $false
+                            error = "PowerPoint notes were read but its idle host was not released: $notesPath"
+                        }
+                    }
                 }
+                Reply $notesResult
             }
             'export' {
                 # Preview export intentionally runs through this already-running
@@ -2045,12 +3498,13 @@ while ($true) {
 
                 $exportPres = $null
                 $openedForExport = $false
+                $exportCleanupError = ''
                 try {
                     # Reuse a presentation already owned by the live slideshow.
                     # This avoids trying to open the same file twice in one
                     # PowerPoint instance and never closes an on-air deck.
                     for ($i = 1; $i -le $ppt.Presentations.Count; $i++) {
-                        $candidate = $ppt.Presentations($i)
+                        $candidate = $ppt.Presentations.Item($i)
                         try {
                             if ($candidate.FullName -ieq $exportPath) {
                                 $exportPres = $candidate
@@ -2071,6 +3525,7 @@ while ($true) {
                             Hide-PPEditor $ppt
                         }
                         $openedForExport = $true
+                        Mark-ManagedPresentation $exportPres
                     }
 
                     $exportCount = [int]$exportPres.Slides.Count
@@ -2114,17 +3569,29 @@ while ($true) {
                     }
                     [System.IO.File]::WriteAllText((Join-Path $outputDir 'complete.txt'), [string]$exportCount)
                 } finally {
-                    if ($exportPres -and $openedForExport) {
-                        try { $exportPres.Close() } catch {}
+                    if ($exportPres -and $openedForExport -and (Test-PdmOwnedPresentation $exportPres)) {
+                        $script:lastManagedPresentationCloseOk = $false
+                        Close-ManagedPresentation $exportPres
+                        if (-not $script:lastManagedPresentationCloseOk) {
+                            $exportCleanupError = "PowerPoint did not release exported presentation: $exportPath"
+                        }
                     }
                     try {
                         # The collection can say zero during a live slideshow;
                         # hiding PowerPoint then makes a rapid channel switch
                         # appear black. Trust the cached direct window first.
-                        if ($script:pptOwnedByRoland -and -not (Resolve-ActiveSlideShowWindow $ppt)) {
+                        if ($script:pptOwnedByRoland -and -not (Test-PowerPointHasAnySlideShow $ppt)) {
                             $ppt.Visible = 0
                         }
                     } catch {}
+                    Release-IdleOwnedPowerPointHost 'export'
+                    if (-not $script:lastIdleOwnedPowerPointHostReleaseOk -and
+                        [string]::IsNullOrEmpty($exportCleanupError)) {
+                        $exportCleanupError = "PowerPoint exported slides but its idle host was not released: $exportPath"
+                    }
+                    if (-not [string]::IsNullOrEmpty($exportCleanupError)) {
+                        throw $exportCleanupError
+                    }
                 }
                 $exportMs = [int]([DateTime]::UtcNow - $exportStarted).TotalMilliseconds
                 Log "export: END count=$exportCount dur=${exportMs}ms"
@@ -2177,9 +3644,29 @@ while ($true) {
                 }
             }
             'exit' {
-                try { Restore-PowerPointSession } catch { Log "PowerPoint exit cleanup failed: $($_.Exception.Message)" }
-                Reply @{ id = $id; ok = $true }
-                exit 0
+                $exitCleanupOk = $false
+                $exitCleanupError = ''
+                for ($attempt = 1; $attempt -le 3 -and -not $exitCleanupOk; $attempt++) {
+                    try {
+                        Restore-PowerPointSession
+                        $exitCleanupOk = $script:lastPowerPointSessionCleanupOk
+                        if (-not $exitCleanupOk) {
+                            $exitCleanupError = 'PowerPoint session cleanup postcondition was not met'
+                        }
+                    } catch {
+                        $exitCleanupError = $_.Exception.Message
+                        Log "PowerPoint exit cleanup failed attempt=${attempt}: $exitCleanupError"
+                    }
+                    if (-not $exitCleanupOk -and $attempt -lt 3) {
+                        Start-Sleep -Milliseconds (150 * $attempt)
+                    }
+                }
+                Reply @{
+                    id = $id
+                    ok = $exitCleanupOk
+                    error = if ($exitCleanupOk) { $null } else { $exitCleanupError }
+                }
+                if ($exitCleanupOk) { exit 0 } else { exit 2 }
             }
             default {
                 Reply @{ id = $id; ok = $false; error = "unknown cmd: $cmd" }
@@ -2189,18 +3676,42 @@ while ($true) {
         $commandError = $_
         $commandErrorMessage = [string]$commandError.Exception.Message
         Log "cmd '$cmd' failed: $commandErrorMessage"
-        if (Test-FatalPowerPointComError $commandError) {
-            # The Electron side already retries TAKE up to three times. Clear
-            # the dead COM proxy before replying so its next attempt obtains a
-            # genuinely fresh PowerPoint session instead of repeating the same
-            # RPC failure.
-            Invalidate-PowerPointSession "cmd=$cmd error=$commandErrorMessage"
+        if ($cmd -eq 'open' -and $script:openTransaction) {
+            Abort-PowerPointOpenTransaction
+            if (-not $script:lastOpenTransactionOk) {
+                $commandErrorMessage = "$commandErrorMessage; PowerPoint rollback was incomplete"
+            }
         }
-        Reply @{ id = $id; ok = $false; error = $commandErrorMessage }
+        $fatalSessionUncertain = $false
+        if (Test-FatalPowerPointComError $commandError) {
+            $fatalCleanupVerified = Invalidate-PowerPointSession "cmd=$cmd error=$commandErrorMessage"
+            $fatalSessionUncertain = -not $fatalCleanupVerified
+            if ($fatalSessionUncertain) {
+                $commandErrorMessage = "$commandErrorMessage; PowerPoint ownership cleanup was not verified"
+            }
+        }
+        Reply @{
+            id = $id
+            ok = $false
+            error = $commandErrorMessage
+            sessionUncertain = $fatalSessionUncertain
+        }
+        if ($fatalSessionUncertain) {
+            Log 'fatal uncertain session: leaving normal command loop for EOF cleanup retry'
+            break
+        }
     }
 }
 
 # stdin can close without an explicit exit command when the Electron main
 # process is terminated during shutdown. Perform the same ownership-aware
 # cleanup on EOF so a hidden PowerPoint process is never orphaned.
-try { Restore-PowerPointSession } catch { Log "PowerPoint EOF cleanup failed: $($_.Exception.Message)" }
+$eofCleanupOk = $false
+for ($attempt = 1; $attempt -le 3 -and -not $eofCleanupOk; $attempt++) {
+    try {
+        Restore-PowerPointSession
+        $eofCleanupOk = $script:lastPowerPointSessionCleanupOk
+    } catch { Log "PowerPoint EOF cleanup failed attempt=${attempt}: $($_.Exception.Message)" }
+    if (-not $eofCleanupOk -and $attempt -lt 3) { Start-Sleep -Milliseconds (150 * $attempt) }
+}
+if (-not $eofCleanupOk) { Log 'PowerPoint EOF cleanup incomplete after 3 attempts' }

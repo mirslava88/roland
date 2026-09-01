@@ -1,7 +1,30 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+interface DriveInfo {
+  name: string
+  root: string
+  label: string
+  totalSize: number
+  freeSize: number
+  isRemovable: boolean
+}
+
+interface MusicState {
+  playing: boolean
+  currentIndex: number
+  currentTime: number
+  duration: number
+  volume: number
+  loopTrack: boolean
+  loopPlaylist: boolean
+  trackName: string
+  playlistLength: number
+}
+
 const api = {
+  getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
+
   saveAppConfig: (content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('save-app-config', content),
 
@@ -84,8 +107,8 @@ const api = {
   relocatePowerPoint: (displayId: number) =>
     ipcRenderer.invoke('relocate-powerpoint', displayId),
 
-  generatePptxThumbnails: (filePath: string) =>
-    ipcRenderer.invoke('generate-pptx-thumbnails', filePath),
+  generatePptxThumbnails: (filePath: string, keepPrepared?: boolean) =>
+    ipcRenderer.invoke('generate-pptx-thumbnails', filePath, keepPrepared),
 
   getPptxSlideNotes: (filePath: string, slide: number) =>
     ipcRenderer.invoke('get-pptx-slide-notes', filePath, slide),
@@ -100,8 +123,11 @@ const api = {
     displayId?: number,
     freezeImageDataUrl?: string,
     imagePath?: string,
-    placement?: 'cover' | 'underlay'
-  ) => ipcRenderer.invoke('show-overlay', displayId, freezeImageDataUrl, imagePath, placement),
+    placement?: 'cover' | 'underlay',
+    safetyLock?: boolean
+  ) => ipcRenderer.invoke(
+    'show-overlay', displayId, freezeImageDataUrl, imagePath, placement, safetyLock
+  ),
 
   swapOverlayImage: (imagePath: string): Promise<void> =>
     ipcRenderer.invoke('swap-overlay-image', imagePath),
@@ -250,9 +276,11 @@ const api = {
   openFileExternal: (filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('open-file-external', filePath, displayBounds),
 
-  closeExternalFile: (filePath?: string): Promise<void> => ipcRenderer.invoke('close-external-file', filePath),
+  closeExternalFile: (filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }> =>
+    ipcRenderer.invoke('close-external-file', filePath),
 
-  minimizeExternalFile: (filePath?: string): Promise<void> => ipcRenderer.invoke('minimize-external-file', filePath),
+  minimizeExternalFile: (filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }> =>
+    ipcRenderer.invoke('minimize-external-file', filePath),
 
   restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('restore-external-file', filePath, displayBounds),

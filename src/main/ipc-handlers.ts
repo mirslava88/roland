@@ -59,6 +59,35 @@ function enqueuePptxExport<T>(key: string, work: () => Promise<T>): Promise<T> {
   return job
 }
 
+async function syncPreparedPowerPointsInternal(
+  paths: string[],
+  reason: string
+): Promise<{ success: boolean; error?: string }> {
+  if (process.platform !== 'win32') return { success: true }
+  try {
+    let result = await pptDaemon.send('sync-prepared', { paths }, 60_000)
+    for (let attempt = 2; attempt <= 3 && !result.ok; attempt++) {
+      diagnosticLog(
+        'pptx-preload',
+        `sync prepared retry reason=${reason} attempt=${attempt} error=${result.error ?? '-'}`
+      )
+      await new Promise((resolve) => setTimeout(resolve, attempt * 200))
+      result = await pptDaemon.send('sync-prepared', { paths }, 60_000)
+    }
+    diagnosticLog(
+      'pptx-preload',
+      `sync prepared reason=${reason} count=${paths.length} ok=${result.ok} error=${result.error ?? '-'}`
+    )
+    return { success: result.ok, error: result.error }
+  } catch (error) {
+    diagnosticLog(
+      'pptx-preload',
+      `sync prepared failed reason=${reason} ${formatDiagnosticError(error)}`
+    )
+    return { success: false, error: String(error) }
+  }
+}
+
 function pptxExportDirectory(
   kind: 'thumbs' | 'slides',
   filePath: string,
@@ -171,15 +200,313 @@ async function runAudioControlJson<T>(action: 'list' | 'get-default'): Promise<T
   return JSON.parse(json) as T
 }
 
-// Map of file path -> { hwnd, pid } for tracking multiple external windows
-const externalFiles = new Map<string, { hwnd: number; pid: number }>()
+// Exact title/class fingerprint prevents same-process HWND reuse in Word/Excel
+// from making PDM minimize or close a different user document.
+const externalFiles = new Map<string, {
+  hwnd: number
+  pid: number
+  windowTitle: string
+  windowClass: string
+  owned: boolean
+}>()
 
-interface ExternalWindowActionResult {
+// Office may need up to a minute to create its HWND. Serialize every external
+// window mutation so shutdown cannot run its final cleanup before an in-flight
+// open/restore has registered the exact window it created or borrowed.
+let externalOperationTail: Promise<void> = Promise.resolve()
+let externalShutdownStarted = false
+
+function enqueueExternalOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const job = externalOperationTail.then(operation, operation)
+  externalOperationTail = job.then(() => undefined, () => undefined)
+  return job
+}
+
+export interface ExternalWindowActionResult {
   success: boolean
+  error?: string
+  windowGone?: boolean
+}
+
+interface PowerPointEmergencyRollbackResult {
+  visualStopped: boolean
+  cleanupVerified: boolean
+  safeToUncover: boolean
+  previousRestored?: boolean
+  windowGone?: boolean
   error?: string
 }
 
-async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> {
+async function rollbackPowerPointAfterCommitFailure(
+  hwnd: number | undefined,
+  pid: number | undefined,
+  filePath: string,
+  managed: boolean | undefined,
+  reusedPrevious: boolean | undefined,
+  previousHwnd: number | undefined,
+  previousPid: number | undefined,
+  previousPath: string | undefined,
+  previousSlide: number | undefined,
+  sharesPreviousPresentation: boolean | undefined,
+  presentationRelationshipKnown: boolean | undefined
+): Promise<PowerPointEmergencyRollbackResult> {
+  if (!hwnd || !pid || process.platform !== 'win32') {
+    return {
+      visualStopped: false,
+      cleanupVerified: false,
+      safeToUncover: false,
+      error: 'PowerPoint target HWND is unavailable for emergency rollback'
+    }
+  }
+
+  const script = resolveScript('manage-window.ps1')
+  const baseArgs = [
+    '-ExecutionPolicy', 'Bypass',
+    '-NoProfile',
+    '-File', script
+  ]
+
+  type HelperResult = PowerPointEmergencyRollbackResult & {
+    success?: boolean
+    visible?: boolean
+  }
+  const runHelper = async (args: string[], timeout: number): Promise<HelperResult> => {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      [...baseArgs, ...args],
+      { timeout, encoding: 'utf8', maxBuffer: 1024 * 1024 }
+    )
+    const json = String(stdout).trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}'
+    return JSON.parse(json) as HelperResult
+  }
+
+  // Same-file OPEN can be an in-place GotoSlide on the exact last committed
+  // slideshow. It is not a disposable target: restore its prior slide and
+  // visibility, then independently verify the exact HWND fingerprint.
+  if (reusedPrevious === true) {
+    if (
+      previousHwnd !== hwnd || previousPid !== pid ||
+      !previousPath || !previousSlide || previousSlide <= 0
+    ) {
+      return {
+        visualStopped: false,
+        cleanupVerified: false,
+        safeToUncover: false,
+        error: 'Same-file PowerPoint rollback metadata is incomplete or inconsistent'
+      }
+    }
+    let restore: HelperResult
+    try {
+      restore = await runHelper([
+        '-Action', 'restore-powerpoint-slideshow',
+        '-Hwnd', String(hwnd),
+        '-ProcessId', String(pid),
+        '-FilePath', previousPath!,
+        '-RestoreSlide', String(previousSlide)
+      ], 18_000)
+    } catch (error) {
+      restore = {
+        visualStopped: false,
+        cleanupVerified: false,
+        safeToUncover: false,
+        error: `Same-file PowerPoint restore failed: ${String(error)}`
+      }
+    }
+
+    let visibleCheck: HelperResult
+    try {
+      visibleCheck = await runHelper([
+        '-Action', 'verify-window',
+        '-Hwnd', String(hwnd),
+        '-ProcessId', String(pid),
+        '-ExpectedWindowClass', 'screenClass'
+      ], 5_000)
+    } catch (error) {
+      visibleCheck = {
+        visualStopped: false,
+        cleanupVerified: false,
+        safeToUncover: false,
+        error: `Previous PowerPoint visibility recheck failed: ${String(error)}`
+      }
+    }
+    const previousRestored = restore.success === true &&
+      restore.previousRestored === true && visibleCheck.success === true
+    return {
+      visualStopped: false,
+      cleanupVerified: previousRestored,
+      previousRestored,
+      safeToUncover: previousRestored,
+      windowGone: visibleCheck.windowGone,
+      error: previousRestored
+        ? undefined
+        : [restore.error, visibleCheck.error].filter(Boolean).join('; ') ||
+          'Previous PowerPoint slideshow restore was not verified'
+    }
+  }
+
+  // Hide the exact HWND in a separate bounded helper before attempting COM.
+  // Even if Office is hung and the COM helper times out, the uncommitted
+  // target can never become visible when the renderer drops its overlay.
+  let hideResult: HelperResult
+  try {
+    hideResult = await runHelper([
+      '-Action', 'hide-window',
+      '-Hwnd', String(hwnd),
+      '-ProcessId', String(pid),
+      '-ExpectedWindowClass', 'screenClass'
+    ], 5_000)
+  } catch (error) {
+    return {
+      visualStopped: false,
+      cleanupVerified: false,
+      safeToUncover: false,
+      error: `PowerPoint target hide failed: ${String(error)}`
+    }
+  }
+
+  if (hideResult.success !== true || hideResult.visualStopped === false) {
+    return {
+      visualStopped: false,
+      cleanupVerified: false,
+      safeToUncover: false,
+      windowGone: hideResult.windowGone,
+      error: hideResult.error || 'PowerPoint target hide was not verified'
+    }
+  }
+
+  const samePathAsPrevious = Boolean(
+    previousPath && previousPath.toLowerCase() === filePath.toLowerCase()
+  )
+  let cleanupResult: HelperResult
+  let previousRestoreResult: HelperResult | undefined
+  try {
+    if (previousHwnd === hwnd) {
+      cleanupResult = {
+        visualStopped: true,
+        cleanupVerified: false,
+        safeToUncover: false,
+        error: 'Target equals previous HWND but was not marked as a verified reuse'
+      }
+    } else if (samePathAsPrevious && presentationRelationshipKnown !== true) {
+      cleanupResult = {
+        visualStopped: true,
+        cleanupVerified: false,
+        safeToUncover: false,
+        error: 'Same-path PowerPoint presentation identity relationship is unknown'
+      }
+    } else {
+      cleanupResult = await runHelper([
+        '-Action', 'rollback-powerpoint-target',
+        '-Hwnd', String(hwnd),
+        '-ProcessId', String(pid),
+        '-FilePath', filePath,
+        '-OwnershipKnown', typeof managed === 'boolean' ? '1' : '0',
+        // Two slideshow HWNDs can share one Presentation. Exit only the staged
+        // target view; Presentation.Close would also kill previous output.
+        '-PdmManaged', sharesPreviousPresentation === true ? '0' : managed === true ? '1' : '0'
+      ], 18_000)
+
+    }
+  } catch (error) {
+    cleanupResult = {
+      visualStopped: true,
+      cleanupVerified: false,
+      safeToUncover: false,
+      error: `PowerPoint target is hidden, but COM rollback failed: ${String(error)}`
+    }
+  }
+
+  // If a previous PowerPoint output existed, abort semantics require that
+  // exact HWND to be back on its prior slide and visible. An empty previous
+  // marker is the cold-start/Electron-underlay case and needs no PPT restore.
+  const noPreviousPowerPoint = !previousHwnd && !previousPath
+  if (!noPreviousPowerPoint && (!previousHwnd || !previousPid || !previousPath || !previousSlide)) {
+    previousRestoreResult = {
+      visualStopped: false,
+      cleanupVerified: false,
+      safeToUncover: false,
+      error: 'Previous PowerPoint output metadata is unavailable'
+    }
+  } else if (!noPreviousPowerPoint) {
+    try {
+      previousRestoreResult = await runHelper([
+        '-Action', 'restore-powerpoint-slideshow',
+        '-Hwnd', String(previousHwnd),
+        '-ProcessId', String(previousPid),
+        '-FilePath', previousPath!,
+        '-RestoreSlide', String(previousSlide)
+      ], 18_000)
+    } catch (error) {
+      previousRestoreResult = {
+        visualStopped: false,
+        cleanupVerified: false,
+        safeToUncover: false,
+        error: `Previous PowerPoint restore failed: ${String(error)}`
+      }
+    }
+  }
+
+  // COM can recreate/re-show a slideshow HWND after the first SW_HIDE, and a
+  // timed-out helper result is stale by definition. Always make a separate
+  // exact PID/HWND/class visibility check after the COM process terminates.
+  let hiddenCheck: HelperResult
+  try {
+    hiddenCheck = await runHelper([
+      '-Action', 'verify-hidden-window',
+      '-Hwnd', String(hwnd),
+      '-ProcessId', String(pid),
+      '-ExpectedWindowClass', 'screenClass'
+    ], 5_000)
+  } catch (error) {
+    hiddenCheck = {
+      visualStopped: false,
+      cleanupVerified: false,
+      safeToUncover: false,
+      error: `PowerPoint target visibility recheck failed: ${String(error)}`
+    }
+  }
+
+  let previousVisible = noPreviousPowerPoint
+  let previousVisibilityError = ''
+  if (previousRestoreResult?.success === true) {
+    try {
+      const previousCheck = await runHelper([
+        '-Action', 'verify-window',
+        '-Hwnd', String(previousHwnd),
+        '-ProcessId', String(previousPid),
+        '-ExpectedWindowClass', 'screenClass'
+      ], 5_000)
+      previousVisible = previousCheck.success === true
+      previousVisibilityError = previousCheck.error || ''
+    } catch (error) {
+      previousVisible = false
+      previousVisibilityError = `Previous PowerPoint visibility recheck failed: ${String(error)}`
+    }
+  }
+
+  const visualStopped = hiddenCheck.success === true && hiddenCheck.visualStopped !== false
+  const previousRestored = noPreviousPowerPoint || (
+    previousRestoreResult?.success === true &&
+    previousRestoreResult.previousRestored === true && previousVisible
+  )
+  const cleanupVerified = cleanupResult.cleanupVerified === true &&
+    previousRestored
+  const safeToUncover = visualStopped && cleanupVerified
+  return {
+    visualStopped,
+    cleanupVerified,
+    previousRestored,
+    safeToUncover,
+    windowGone: hiddenCheck.windowGone,
+    error: safeToUncover
+      ? undefined
+      : [cleanupResult.error, previousRestoreResult?.error, hiddenCheck.error, previousVisibilityError]
+          .filter(Boolean)
+          .join('; ') || 'PowerPoint emergency rollback was not fully verified'
+  }
+}
+
+async function manageExternalWindowUnlocked(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> {
   const scriptPath = resolveScript('manage-window.ps1')
 
   if (filePath) {
@@ -190,57 +517,82 @@ async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', fi
         : { success: false, error: 'Окно программы больше не найдено.' }
     }
     try {
+      // Start-Process may activate a document that the user already had open.
+      // A logical close removes that borrowed HWND from program output without
+      // sending WM_CLOSE to a user-owned document.
+      const effectiveAction = action === 'close' && !entry.owned ? 'minimize' : action
       const args = [
         '-ExecutionPolicy', 'Bypass',
         '-NoProfile',
         '-File', scriptPath,
-        '-Action', action,
+        '-Action', effectiveAction,
         '-Hwnd', String(entry.hwnd),
         '-ProcessId', String(entry.pid),
-        '-FilePath', filePath
+        '-FilePath', filePath,
+        '-ExpectedWindowTitle', entry.windowTitle,
+        '-ExpectedWindowClass', entry.windowClass
       ]
       if (bounds && action === 'restore') {
         args.push('-X', String(bounds.x), '-Y', String(bounds.y), '-Width', String(bounds.width), '-Height', String(bounds.height))
       }
-      const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 5000 })
+      const timeout = effectiveAction === 'close' ? 8_000 : 5_000
+      const { stdout } = await execFileAsync('powershell.exe', args, { timeout })
       const data = JSON.parse(stdout.trim()) as ExternalWindowActionResult
       if (!data.success) return { success: false, error: data.error || 'Windows не переместила окно программы.' }
+      if ((action === 'close' && entry.owned) || data.windowGone) externalFiles.delete(filePath)
+      return data
     } catch (error) {
       return { success: false, error: String(error) }
     }
-    if (action === 'close') externalFiles.delete(filePath)
-    return { success: true }
   } else {
     // Apply to all tracked files
     let firstError: string | undefined
     for (const [path, entry] of externalFiles) {
+      let actionSucceeded = false
       try {
+        const effectiveAction = action === 'close' && !entry.owned ? 'minimize' : action
         const args = [
           '-ExecutionPolicy', 'Bypass',
           '-NoProfile',
           '-File', scriptPath,
-          '-Action', action,
+          '-Action', effectiveAction,
           '-Hwnd', String(entry.hwnd),
-          '-ProcessId', String(entry.pid)
+          '-ProcessId', String(entry.pid),
+          '-FilePath', path,
+          '-ExpectedWindowTitle', entry.windowTitle,
+          '-ExpectedWindowClass', entry.windowClass
         ]
-        const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 5000 })
+        const timeout = effectiveAction === 'close' ? 8_000 : 5_000
+        const { stdout } = await execFileAsync('powershell.exe', args, { timeout })
         const data = JSON.parse(stdout.trim()) as ExternalWindowActionResult
         if (!data.success && !firstError) firstError = data.error || 'Windows не обработала окно программы.'
+        actionSucceeded = data.success
+        if (data.windowGone) externalFiles.delete(path)
       } catch (error) {
         if (!firstError) firstError = String(error)
       }
-      if (action === 'close') externalFiles.delete(path)
+      if (action === 'close' && entry.owned && actionSucceeded) externalFiles.delete(path)
     }
     return firstError ? { success: false, error: firstError } : { success: true }
   }
 }
 
-export async function closeExternalFile(filePath?: string): Promise<void> {
-  await manageExternalWindow('close', filePath)
+async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> {
+  if (externalShutdownStarted) {
+    return { success: false, error: 'PDM is shutting down; external window operation was cancelled.' }
+  }
+  return enqueueExternalOperation(() => manageExternalWindowUnlocked(action, filePath, bounds))
 }
 
-export async function closeAllExternalFiles(): Promise<void> {
-  await manageExternalWindow('close')
+export async function closeExternalFile(filePath?: string): Promise<ExternalWindowActionResult> {
+  return manageExternalWindow('close', filePath)
+}
+
+export async function closeAllExternalFiles(): Promise<ExternalWindowActionResult> {
+  // Set the gate synchronously before queueing the final pass, so no renderer
+  // request can be appended behind shutdown cleanup.
+  externalShutdownStarted = true
+  return enqueueExternalOperation(() => manageExternalWindowUnlocked('close'))
 }
 
 const SUPPORTED_EXTENSIONS = {
@@ -313,6 +665,11 @@ export function registerIpcHandlers(
   controlWindow: BrowserWindow,
   getPresentationWindow: () => BrowserWindow | null
 ): void {
+  ipcMain.handle('get-app-version', (event): string => {
+    if (event.sender.id !== controlWindow.webContents.id) return ''
+    return app.getVersion()
+  })
+
   ipcMain.handle('save-app-config', async (event, content: string) => {
     if (event.sender.id !== controlWindow.webContents.id) {
       return { success: false, canceled: false, error: 'Сохранение конфигурации запрещено.' }
@@ -563,21 +920,10 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('sync-prepared-powerpoints', async (_event, filePaths: unknown) => {
-    if (process.platform !== 'win32') return { success: true }
     const paths = Array.isArray(filePaths)
       ? filePaths.filter((value): value is string => typeof value === 'string' && value.length > 0)
       : []
-    try {
-      const result = await pptDaemon.send('sync-prepared', { paths }, 60000)
-      diagnosticLog(
-        'pptx-preload',
-        `sync prepared count=${paths.length} ok=${result.ok} error=${result.error ?? '-'}`
-      )
-      return { success: result.ok, error: result.error }
-    } catch (error) {
-      diagnosticLog('pptx-preload', `sync prepared failed ${formatDiagnosticError(error)}`)
-      return { success: false, error: String(error) }
-    }
+    return syncPreparedPowerPointsInternal(paths, 'renderer-request')
   })
 
   ipcMain.handle(
@@ -589,9 +935,16 @@ export function registerIpcHandlers(
           const displays = screen.getAllDisplays()
           const primaryDisplay = screen.getPrimaryDisplay()
           const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
-          const targetDisplay = typeof displayId === 'number'
-            ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
-            : externalDisplay || primaryDisplay
+          const explicitlyRequestedDisplay = typeof displayId === 'number'
+            ? displays.find((d) => d.id === displayId)
+            : undefined
+          if (typeof displayId === 'number' && !explicitlyRequestedDisplay) {
+            return {
+              success: false,
+              error: `Requested PowerPoint display ${displayId} is disconnected`
+            }
+          }
+          const targetDisplay = explicitlyRequestedDisplay || externalDisplay || primaryDisplay
 
           // Electron bounds are DIP while SetWindowPos expects physical pixels.
           args.bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
@@ -605,27 +958,158 @@ export function registerIpcHandlers(
           if (typeof startSlide === 'number' && startSlide > 1) {
             args.slide = startSlide
           }
-          let res: Awaited<ReturnType<typeof pptDaemon.send>> = { id: 0, ok: false, error: 'not attempted' }
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') BEGIN attempt=${attempt} slide=${startSlide ?? 1} display=${targetDisplay.id} bounds=${JSON.stringify(args.bounds)}`)
-            res = await pptDaemon.send('open', args, 60000, (progress) => {
-              if (progress.event === 'slideshow-visible' && !event.sender.isDestroyed()) {
-                event.sender.send('powerpoint-slideshow-visible', filePath)
+          // Keep open + commit/abort indivisible. The PowerShell host processes
+          // stdin serially, but without this main-side lock an export/notes job
+          // could be queued between the two transaction commands. A late
+          // commit would then leave the renderer rolled back while the new
+          // slideshow was physically on air.
+          return await pptDaemon.runExclusive(async (send) => {
+            let res: Awaited<ReturnType<typeof pptDaemon.send>> = {
+              id: 0,
+              ok: false,
+              error: 'not attempted'
+            }
+            let safeToUncoverOnFailure = true
+            let emergencyRollbackAttempted = false
+            try {
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') BEGIN attempt=${attempt} slide=${startSlide ?? 1} display=${targetDisplay.id} bounds=${JSON.stringify(args.bounds)}`)
+                res = await send('open', args, 120000, (progress) => {
+                  if (progress.event === 'slideshow-visible' && !event.sender.isDestroyed()) {
+                    event.sender.send('powerpoint-slideshow-visible', filePath)
+                  }
+                })
+                if (res.ok) {
+                  // Nothing else can enter the daemon queue before this
+                  // acknowledgement. Cleanup is bounded in the PS host; the
+                  // wider timeout avoids reporting rollback while a valid
+                  // commit response is merely delayed by Office COM.
+                  let committed: Awaited<ReturnType<typeof pptDaemon.send>>
+                  try {
+                    // `commit-open` acknowledges immediately after rechecking
+                    // the exact slideshow HWND. All potentially slow COM
+                    // retirement runs after that ACK behind the daemon cleanup
+                    // barrier, so detaching this request on a finite timeout is
+                    // both unnecessary and unsafe.
+                    committed = await send('commit-open', {}, 0)
+                  } catch (commitError) {
+                    // A visible screenClass HWND is not a durable commit: the
+                    // daemon may have exited and lost every COM ownership
+                    // marker. Hide the exact PID/HWND first, then independently
+                    // match HWND + file path through PowerPoint COM and retire
+                    // only the document the daemon identified as PDM-managed.
+                    // User-owned presentations keep their document and only
+                    // exit the exact slideshow.
+                    const rollback = await rollbackPowerPointAfterCommitFailure(
+                      res.hwnd,
+                      res.pid,
+                      filePath,
+                      res.managed,
+                      res.reusedPrevious,
+                      res.previousHwnd,
+                      res.previousPid,
+                      res.previousPath,
+                      res.previousSlide,
+                      res.sharesPreviousPresentation,
+                      res.presentationRelationshipKnown
+                    )
+                    emergencyRollbackAttempted = true
+                    safeToUncoverOnFailure = rollback.safeToUncover
+                    diagnosticLog(
+                      'pptx-lifecycle',
+                      `commit acknowledgement failed file=${filePath} hwnd=${res.hwnd ?? 0} ` +
+                      `pid=${res.pid ?? 0} managed=${String(res.managed)} ` +
+                      `reusedPrevious=${String(res.reusedPrevious)} ` +
+                      `sharesPreviousPresentation=${String(res.sharesPreviousPresentation)} ` +
+                      `visualStopped=${rollback.visualStopped} cleanupVerified=${rollback.cleanupVerified} ` +
+                      `previousRestored=${String(rollback.previousRestored)} ` +
+                      `safeToUncover=${rollback.safeToUncover} ` +
+                      `rollbackError=${rollback.error ?? '-'} commitError=${String(commitError)}`
+                    )
+                    const rollbackState = rollback.previousRestored
+                      ? 'Previous PowerPoint slideshow was restored.'
+                      : rollback.visualStopped
+                        ? rollback.cleanupVerified
+                        ? 'Нецелевой показ PowerPoint остановлен и освобождён.'
+                        : 'Нецелевой показ PowerPoint скрыт, но очистка COM не подтверждена. Перезапустите PDM.'
+                      : 'Не удалось гарантированно скрыть незафиксированный показ PowerPoint. Перезапустите PDM.'
+                    throw new Error(
+                      `PowerPoint commit failed: ${String(commitError)}; ${rollbackState}` +
+                      (rollback.error ? ` ${rollback.error}` : '')
+                    )
+                  }
+                  if (!committed.ok) {
+                    const aborted = await send('abort-open', {}, 150000)
+                    if (!aborted.ok) safeToUncoverOnFailure = false
+                    res = {
+                      ...res,
+                      ok: false,
+                      error: [committed.error || 'PowerPoint commit failed', aborted.ok ? '' : aborted.error]
+                        .filter(Boolean)
+                        .join('; ')
+                    }
+                  }
+                }
+                console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') END attempt=${attempt} ok=${res.ok} error=${res.error ?? '-'}`)
+                if (res.ok) break
+                if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 750))
               }
-            })
-            console.log(`[IPC ${Date.now()}] launch-powerpoint: daemon.send('open') END attempt=${attempt} ok=${res.ok} error=${res.error ?? '-'}`)
-            if (res.ok) break
-            if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 750))
-          }
-          if (!res.ok) return { success: false, error: res.error || 'open failed' }
-          const output = JSON.stringify({
-            Status: 'ok',
-            SlideCount: res.slideCount ?? 0,
-            CurrentSlide: res.slide ?? 1
+              if (!res.ok) {
+                let cleanupError = ''
+                try {
+                  const cleanup = await send('abort-open', {}, 150000)
+                  if (!cleanup.ok) {
+                    cleanupError = cleanup.error || 'PowerPoint cleanup failed'
+                    safeToUncoverOnFailure = false
+                  }
+                } catch (error) {
+                  cleanupError = String(error)
+                  safeToUncoverOnFailure = false
+                }
+                diagnosticLog(
+                  'pptx-lifecycle',
+                  `open failed after retries file=${filePath} cleanupError=${cleanupError || '-'} error=${res.error ?? '-'}`
+                )
+                return {
+                  success: false,
+                  error: [res.error || 'open failed', cleanupError].filter(Boolean).join('; '),
+                  safeToUncover: safeToUncoverOnFailure
+                }
+              }
+              const output = JSON.stringify({
+                Status: 'ok',
+                SlideCount: res.slideCount ?? 0,
+                CurrentSlide: res.slide ?? 1
+              })
+              return { success: true, output }
+            } catch (error: unknown) {
+              let cleanupError = ''
+              try {
+                // A timeout cannot cancel a COM command already being
+                // processed. The raw abort remains under the same exclusive
+                // lock and is therefore the very next daemon command.
+                const cleanup = await send('abort-open', {}, 150000)
+                if (!cleanup.ok) {
+                  cleanupError = cleanup.error || 'PowerPoint rollback failed'
+                  if (!emergencyRollbackAttempted) safeToUncoverOnFailure = false
+                }
+              } catch (cleanupFailure) {
+                cleanupError = String(cleanupFailure)
+                if (!emergencyRollbackAttempted) safeToUncoverOnFailure = false
+              }
+              return {
+                success: false,
+                error: [String(error), cleanupError].filter(Boolean).join('; '),
+                safeToUncover: safeToUncoverOnFailure
+              }
+            }
           })
-          return { success: true, output }
         } catch (error: unknown) {
-          return { success: false, error: String(error) }
+          return {
+            success: false,
+            error: String(error),
+            safeToUncover: false
+          }
         }
       }
 
@@ -757,14 +1241,30 @@ export function registerIpcHandlers(
     console.log(`[IPC ${Date.now()}] powerpoint-command: BEGIN command=${command} arg=${arg}`)
     try {
       const t0 = Date.now()
-      const res = command === 'goto' && typeof arg === 'number'
+      let res = command === 'goto' && typeof arg === 'number'
         ? await pptDaemon.send('goto', { slide: arg })
         : await pptDaemon.send(
           command,
           typeof arg === 'object' && arg !== null
             ? { stopAtBoundary: arg.stopAtBoundary === true }
-            : {}
+            : {},
+          // CLOSE performs only an exact-HWND Win32 hide before its ACK; all
+          // potentially slow COM retirement happens afterward under the
+          // daemon cleanup barrier. Never detach this tiny mutating prefix:
+          // a finite timeout could report failure and then hide the slideshow
+          // later, diverging physical output from renderer state.
+          command === 'close' ? 0 : 20_000
         )
+      if (command === 'close' && !res.ok) {
+        for (let attempt = 2; attempt <= 3 && !res.ok; attempt++) {
+          diagnosticLog(
+            'pptx-lifecycle',
+            `close retry attempt=${attempt} previousError=${res.error ?? '-'}`
+          )
+          await new Promise((resolve) => setTimeout(resolve, attempt * 150))
+          res = await pptDaemon.send('close', {}, 0)
+        }
+      }
       if (command === 'close' && !controlWindow.isDestroyed()) {
         // PowerPoint owns the foreground while its slideshow is running. When
         // that HWND is destroyed Windows can promote Explorer/Start unless a
@@ -780,14 +1280,18 @@ export function registerIpcHandlers(
         Boundary: res.boundary === true,
         Message: res.error
       })
-      return { success: res.ok, output }
+      return {
+        success: res.ok,
+        output,
+        error: res.ok ? undefined : (res.error || `PowerPoint command failed: ${command}`)
+      }
     } catch (error: unknown) {
       console.log(`[IPC ${Date.now()}] powerpoint-command: ERROR ${String(error)}`)
       return { success: false, error: String(error) }
     }
   })
 
-  ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string) => {
+  ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string, keepPrepared = false) => {
     if (process.platform === 'win32') {
       diagnosticLog('pptx-preview', `thumbnail request file=${filePath}`)
       return enqueuePptxExport(`thumbnails:${filePath.toLowerCase()}`, async () => {
@@ -816,6 +1320,16 @@ export function registerIpcHandlers(
           console.error('[IPC] generate-pptx-thumbnails failed:', error)
           diagnosticLog('pptx-preview', `thumbnail failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`)
           return { success: false, error: String(error) }
+        } finally {
+          if (!keepPrepared) {
+            const released = await syncPreparedPowerPointsInternal([], `thumbnail-export:${filePath}`)
+            if (!released.success) {
+              return {
+                success: false,
+                error: released.error || 'PowerPoint thumbnail resources were not released'
+              }
+            }
+          }
         }
       })
     }
@@ -856,6 +1370,14 @@ export function registerIpcHandlers(
     } catch (error) {
       diagnosticLog('pptx-notes', `failed file=${filePath} slide=${slide} ${formatDiagnosticError(error)}`)
       return { success: false, error: String(error) }
+    } finally {
+      const released = await syncPreparedPowerPointsInternal([], `slide-notes:${filePath}:${slide}`)
+      if (!released.success) {
+        return {
+          success: false,
+          error: released.error || 'PowerPoint notes resources were not released'
+        }
+      }
     }
   })
 
@@ -890,6 +1412,14 @@ export function registerIpcHandlers(
         console.error('[IPC] generate-pptx-slides failed:', error)
         diagnosticLog('pptx-preview', `full-slide failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`)
         return { success: false, error: String(error) }
+      } finally {
+        const released = await syncPreparedPowerPointsInternal([], `full-slide-export:${filePath}`)
+        if (!released.success) {
+          return {
+            success: false,
+            error: released.error || 'PowerPoint slide resources were not released'
+          }
+        }
       }
     })
   })
@@ -1017,59 +1547,14 @@ export function registerIpcHandlers(
   })
 
   ipcMain.handle('open-file-external', async (_event, filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
-    if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла для внешнего открытия' }
-    try {
-      if (displayBounds && process.platform === 'win32') {
-        const scriptPath = resolveScript('manage-window.ps1')
-        const { stdout } = await execFileAsync('powershell.exe', [
-          '-ExecutionPolicy', 'Bypass',
-          '-NoProfile',
-          '-File', scriptPath,
-          '-Action', 'open',
-          '-FilePath', filePath,
-          '-X', String(displayBounds.x),
-          '-Y', String(displayBounds.y),
-          '-Width', String(displayBounds.width),
-          '-Height', String(displayBounds.height)
-        ], { timeout: 25000 })
-        const data = JSON.parse(stdout.trim()) as {
-          success?: boolean
-          hwnd?: number
-          pid?: number
-          error?: string
-        }
-        if (data.hwnd) {
-          // Keep a failed-but-created HWND tracked as well. The PowerShell
-          // helper parks it on verification failure, and a later TAKE can
-          // retry or close that exact window instead of leaving an orphan.
-          externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
-        }
-        if (!data.success || !data.hwnd) {
-          return {
-            success: false,
-            error: data.error || 'The application window was not placed on the target display.'
-          }
-        }
-        return { success: true }
-      }
-      await shell.openPath(filePath)
-      return { success: true }
-    } catch (error: unknown) {
-      return { success: false, error: String(error) }
+    if (externalShutdownStarted) {
+      return { success: false, error: 'PDM is shutting down; external file open was cancelled.' }
     }
-  })
-
-  ipcMain.handle('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
-
-  ipcMain.handle('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
-
-  ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> => {
-    // If not tracked yet, open instead of restore
-    if (filePath && !externalFiles.has(filePath)) {
-      if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла.' }
-      if (displayBounds && process.platform === 'win32') {
-        const scriptPath = resolveScript('manage-window.ps1')
-        try {
+    return enqueueExternalOperation(async () => {
+      if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла для внешнего открытия' }
+      try {
+        if (displayBounds && process.platform === 'win32') {
+          const scriptPath = resolveScript('manage-window.ps1')
           const { stdout } = await execFileAsync('powershell.exe', [
             '-ExecutionPolicy', 'Bypass',
             '-NoProfile',
@@ -1080,29 +1565,102 @@ export function registerIpcHandlers(
             '-Y', String(displayBounds.y),
             '-Width', String(displayBounds.width),
             '-Height', String(displayBounds.height)
-          ], { timeout: 25000 })
+          ], { timeout: 70_000 })
           const data = JSON.parse(stdout.trim()) as {
             success?: boolean
             hwnd?: number
             pid?: number
+            windowTitle?: string
+            windowClass?: string
+            owned?: boolean
             error?: string
           }
           if (data.hwnd) {
-            externalFiles.set(filePath, { hwnd: data.hwnd, pid: data.pid || 0 })
+            // Keep a failed-but-created HWND tracked as well. The PowerShell
+            // helper parks it on verification failure, and a later TAKE can
+            // retry or close that exact window instead of leaving an orphan.
+            externalFiles.set(filePath, {
+              hwnd: data.hwnd,
+              pid: data.pid || 0,
+              windowTitle: data.windowTitle || '',
+              windowClass: data.windowClass || '',
+              owned: data.owned === true
+            })
           }
           if (!data.success || !data.hwnd) {
-            return { success: false, error: data.error || 'Окно программы не найдено после открытия.' }
+            return {
+              success: false,
+              error: data.error || 'The application window was not placed on the target display.'
+            }
           }
-        } catch (error) {
-          return { success: false, error: String(error) }
+          return { success: true }
         }
-      } else {
-        const error = await shell.openPath(filePath)
-        if (error) return { success: false, error }
+        await shell.openPath(filePath)
+        return { success: true }
+      } catch (error: unknown) {
+        return { success: false, error: String(error) }
       }
-      return { success: true }
+    })
+  })
+
+  ipcMain.handle('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
+
+  ipcMain.handle('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
+
+  ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> => {
+    if (externalShutdownStarted) {
+      return { success: false, error: 'PDM is shutting down; external file restore was cancelled.' }
     }
-    return manageExternalWindow('restore', filePath, displayBounds || undefined)
+    return enqueueExternalOperation(async () => {
+      // If not tracked yet, open instead of restore
+      if (filePath && !externalFiles.has(filePath)) {
+        if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла.' }
+        if (displayBounds && process.platform === 'win32') {
+          const scriptPath = resolveScript('manage-window.ps1')
+          try {
+            const { stdout } = await execFileAsync('powershell.exe', [
+              '-ExecutionPolicy', 'Bypass',
+              '-NoProfile',
+              '-File', scriptPath,
+              '-Action', 'open',
+              '-FilePath', filePath,
+              '-X', String(displayBounds.x),
+              '-Y', String(displayBounds.y),
+              '-Width', String(displayBounds.width),
+              '-Height', String(displayBounds.height)
+            ], { timeout: 70_000 })
+            const data = JSON.parse(stdout.trim()) as {
+              success?: boolean
+              hwnd?: number
+              pid?: number
+              windowTitle?: string
+              windowClass?: string
+              owned?: boolean
+              error?: string
+            }
+            if (data.hwnd) {
+              externalFiles.set(filePath, {
+                hwnd: data.hwnd,
+                pid: data.pid || 0,
+                windowTitle: data.windowTitle || '',
+                windowClass: data.windowClass || '',
+                owned: data.owned === true
+              })
+            }
+            if (!data.success || !data.hwnd) {
+              return { success: false, error: data.error || 'Окно программы не найдено после открытия.' }
+            }
+          } catch (error) {
+            return { success: false, error: String(error) }
+          }
+        } else {
+          const error = await shell.openPath(filePath)
+          if (error) return { success: false, error }
+        }
+        return { success: true }
+      }
+      return manageExternalWindowUnlocked('restore', filePath, displayBounds || undefined)
+    })
   })
 
   ipcMain.handle('select-sound-file', async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { mediaUrl } from './media'
-import { renderPdfiumPageToCanvas } from './pdfium-renderer'
+import { releasePdfiumResources, renderPdfiumPageToCanvas } from './pdfium-renderer'
 import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
 
@@ -154,6 +154,7 @@ function SpeakerPdfFrame({
   useEffect(() => {
     setFrameUrl(null)
     setFailed(false)
+    return () => releasePdfiumResources(filePath)
   }, [filePath])
 
   useEffect(() => {
@@ -542,6 +543,16 @@ function InformationVideo({
   }, [path, playing])
 
   useEffect(() => {
+    const video = videoRef.current
+    return () => {
+      if (!video) return
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+  }, [])
+
+  useEffect(() => {
     applyRequestedTime()
   // `currentTime` is live feedback from the player. Only a new revision is an
   // operator seek command; otherwise every timeupdate would seek the video.
@@ -837,6 +848,7 @@ function InformationDisplay(): JSX.Element {
         <SpeakerPdfFrame filePath={state.media.path} page={state.media.currentSlide} />
       ) : state.media?.type === 'video' ? (
         <InformationVideo
+          key={state.media.path}
           path={state.media.path}
           playing={state.media.playing}
           currentTime={state.media.currentTime || 0}
@@ -892,6 +904,16 @@ function ProgramNativeVideo({
   onReady: () => void
 }): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    const video = videoRef.current
+    return () => {
+      if (!video) return
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+  }, [])
 
   useEffect(() => {
     const video = videoRef.current

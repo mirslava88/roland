@@ -4,6 +4,11 @@ param(
     [string]$FileName = "",
     [long]$Hwnd = 0,
     [int]$ProcessId = 0,
+    [string]$ExpectedWindowTitle = "",
+    [string]$ExpectedWindowClass = "",
+    [int]$OwnershipKnown = 0,
+    [int]$PdmManaged = 0,
+    [int]$RestoreSlide = 0,
     [int]$X = 0,
     [int]$Y = 0,
     [int]$Width = 1920,
@@ -49,6 +54,9 @@ public class WinMgr {
 
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -138,29 +146,481 @@ function Log($msg) {
     Add-Content -Path $logFile -Value "$ts $msg" -ErrorAction SilentlyContinue
 }
 
+function Get-WindowTitleSafe([IntPtr]$handle) {
+    try {
+        $titleLength = [WinMgr]::GetWindowTextLength($handle)
+        if ($titleLength -le 0) { return '' }
+        $title = New-Object System.Text.StringBuilder -ArgumentList ($titleLength + 1)
+        [WinMgr]::GetWindowText($handle, $title, $title.Capacity) | Out-Null
+        return $title.ToString()
+    } catch { return '' }
+}
+
+function Get-WindowClassSafe([IntPtr]$handle) {
+    try {
+        $className = New-Object System.Text.StringBuilder -ArgumentList 256
+        [WinMgr]::GetClassName($handle, $className, $className.Capacity) | Out-Null
+        return $className.ToString()
+    } catch { return '' }
+}
+
+function Get-WindowProcessIdSafe([IntPtr]$handle) {
+    try {
+        $actualProcessId = 0
+        [WinMgr]::GetWindowThreadProcessId($handle, [ref]$actualProcessId) | Out-Null
+        return [int]$actualProcessId
+    } catch { return 0 }
+}
+
+function Get-NormalizedPathSafe([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return '' }
+    try { return [System.IO.Path]::GetFullPath($path).ToLowerInvariant() } catch {
+        return $path.ToLowerInvariant()
+    }
+}
+
+function Get-ComIdentitySafe($comObject) {
+    if (-not $comObject) { return '' }
+    $unknown = [IntPtr]::Zero
+    try {
+        $unknown = [System.Runtime.InteropServices.Marshal]::GetIUnknownForObject($comObject)
+        if ($unknown -eq [IntPtr]::Zero) { return '' }
+        return ([long]$unknown).ToString('X16')
+    } catch { return '' } finally {
+        if ($unknown -ne [IntPtr]::Zero) {
+            try { [void][System.Runtime.InteropServices.Marshal]::Release($unknown) } catch {}
+        }
+    }
+}
+
+function Test-WindowTitleMatchesRequestedFile([IntPtr]$handle, [string]$path) {
+    $title = Get-WindowTitleSafe $handle
+    if ([string]::IsNullOrEmpty($title)) { return $false }
+    $leaf = [System.IO.Path]::GetFileName($path)
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($path)
+    foreach ($name in @($leaf, $base)) {
+        if ([string]::IsNullOrWhiteSpace($name) -or
+            -not $title.StartsWith($name, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        $remainder = $title.Substring($name.Length)
+        if ([string]::IsNullOrEmpty($remainder) -or
+            $remainder.StartsWith(' - ') -or
+            $remainder.StartsWith(' [') -or
+            $remainder.StartsWith(' (')) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-WindowMatchesFingerprint(
+    [IntPtr]$handle,
+    [string]$path,
+    [string]$expectedTitle,
+    [string]$expectedClass
+) {
+    $actualTitle = Get-WindowTitleSafe $handle
+    $actualClass = Get-WindowClassSafe $handle
+    if (-not [string]::IsNullOrEmpty($expectedTitle) -and $actualTitle -cne $expectedTitle) {
+        Log "tracked HWND title mismatch expected='$expectedTitle' actual='$actualTitle'"
+        return $false
+    }
+    if (-not [string]::IsNullOrEmpty($expectedClass) -and $actualClass -cne $expectedClass) {
+        Log "tracked HWND class mismatch expected='$expectedClass' actual='$actualClass'"
+        return $false
+    }
+    if ([string]::IsNullOrEmpty($expectedTitle) -and -not [string]::IsNullOrWhiteSpace($path)) {
+        $expectedName = [System.IO.Path]::GetFileNameWithoutExtension($path)
+        if (-not [string]::IsNullOrWhiteSpace($expectedName) -and
+            $actualTitle.IndexOf($expectedName, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Log "tracked HWND fallback mismatch expected='$expectedName' actual='$actualTitle'"
+            return $false
+        }
+    }
+    return $true
+}
+
 Log "=== Action=$Action FilePath=$FilePath X=$X Y=$Y W=$Width H=$Height Protected=$ProtectedX,$ProtectedY,$ProtectedWidth,$ProtectedHeight Hwnd=$Hwnd ==="
 
 switch ($Action) {
+    "hide-window" {
+        $visualStopped = $false
+        $windowGone = $false
+        $hideError = ''
+        if ($Hwnd -eq 0) {
+            $hideError = 'Target HWND is missing'
+        } else {
+            $handle = [IntPtr]::new($Hwnd)
+            if (-not [WinMgr]::IsWindow($handle)) {
+                $visualStopped = $true
+                $windowGone = $true
+            } else {
+                $actualClass = Get-WindowClassSafe $handle
+                $actualProcessId = Get-WindowProcessIdSafe $handle
+                if (-not [string]::IsNullOrEmpty($ExpectedWindowClass) -and
+                    $actualClass -cne $ExpectedWindowClass) {
+                    $hideError = "Target HWND class changed (expected '$ExpectedWindowClass', actual '$actualClass')"
+                } elseif ($ProcessId -le 0) {
+                    $hideError = 'Target PowerPoint process fingerprint is missing'
+                } elseif ($actualProcessId -ne $ProcessId) {
+                    $hideError = "Target HWND process changed (expected $ProcessId, actual $actualProcessId)"
+                } else {
+                    [WinMgr]::ShowWindow($handle, [WinMgr]::SW_HIDE) | Out-Null
+                    $deadline = [DateTime]::UtcNow.AddMilliseconds(1200)
+                    do {
+                        $windowGone = -not [WinMgr]::IsWindow($handle)
+                        $visualStopped = $windowGone -or -not [WinMgr]::IsWindowVisible($handle)
+                        if (-not $visualStopped) { Start-Sleep -Milliseconds 25 }
+                    } while (-not $visualStopped -and [DateTime]::UtcNow -lt $deadline)
+                    if (-not $visualStopped) { $hideError = 'Target PowerPoint window remained visible' }
+                }
+            }
+        }
+        Log "hide-window verified stopped=$visualStopped gone=$windowGone hwnd=$Hwnd pid=$ProcessId error='$hideError'"
+        [pscustomobject]@{
+            success = $visualStopped
+            visualStopped = $visualStopped
+            windowGone = $windowGone
+            cleanupVerified = $false
+            error = if ($visualStopped) { $null } else { $hideError }
+        } | ConvertTo-Json -Compress
+    }
+    "restore-powerpoint-slideshow" {
+        $restored = $false
+        $restoreError = ''
+        $handle = if ($Hwnd -ne 0) { [IntPtr]::new($Hwnd) } else { [IntPtr]::Zero }
+        $expectedPath = Get-NormalizedPathSafe $FilePath
+
+        # This is the same-file abort path. The target and the last committed
+        # program are the exact same HWND, so closing/exiting it would destroy
+        # the previous output. Restore only its prior slide and visibility.
+        if ($handle -eq [IntPtr]::Zero) {
+            $restoreError = 'Previous slideshow HWND is missing'
+        } elseif (-not [WinMgr]::IsWindow($handle)) {
+            $restoreError = 'Previous slideshow HWND no longer exists'
+        } elseif ((Get-WindowClassSafe $handle) -cne 'screenClass') {
+            $restoreError = 'Previous HWND is no longer a PowerPoint slideshow'
+        } elseif ($ProcessId -le 0) {
+            $restoreError = 'Previous PowerPoint process fingerprint is missing'
+        } elseif ((Get-WindowProcessIdSafe $handle) -ne $ProcessId) {
+            $restoreError = 'Previous slideshow HWND process changed'
+        } elseif ([string]::IsNullOrEmpty($expectedPath) -or $RestoreSlide -le 0) {
+            $restoreError = 'Previous slideshow path/slide is missing'
+        } else {
+            try {
+                $ppt = [System.Runtime.InteropServices.Marshal]::GetActiveObject('PowerPoint.Application')
+                $targetWindow = $null
+                $findDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+                do {
+                    try {
+                        for ($i = 1; $i -le [int]$ppt.SlideShowWindows.Count; $i++) {
+                            $candidateWindow = $ppt.SlideShowWindows.Item($i)
+                            $candidateHwnd = 0
+                            $candidatePath = ''
+                            try { $candidateHwnd = [long]$candidateWindow.HWND } catch {}
+                            try { $candidatePath = Get-NormalizedPathSafe ([string]$candidateWindow.Presentation.FullName) } catch {}
+                            if ($candidateHwnd -eq $Hwnd -and $candidatePath -eq $expectedPath) {
+                                $targetWindow = $candidateWindow
+                                break
+                            }
+                        }
+                    } catch {
+                        $restoreError = "PowerPoint slideshow enumeration failed: $($_.Exception.Message)"
+                    }
+                    if ($targetWindow) { break }
+                    Start-Sleep -Milliseconds 100
+                } while ([DateTime]::UtcNow -lt $findDeadline)
+
+                if (-not $targetWindow) {
+                    $restoreError = 'Exact previous PowerPoint slideshow HWND/path could not be matched'
+                } else {
+                    try {
+                        if ([int]$targetWindow.View.Slide.SlideIndex -ne $RestoreSlide) {
+                            $targetWindow.View.GotoSlide($RestoreSlide)
+                        }
+                        [WinMgr]::ShowWindow($handle, [WinMgr]::SW_SHOW) | Out-Null
+                    } catch {
+                        $restoreError = "Previous PowerPoint slide restore failed: $($_.Exception.Message)"
+                    }
+
+                    $verifyDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+                    do {
+                        try {
+                            $verifiedPath = Get-NormalizedPathSafe ([string]$targetWindow.Presentation.FullName)
+                            $verifiedSlide = [int]$targetWindow.View.Slide.SlideIndex
+                            $restored = [WinMgr]::IsWindow($handle) -and
+                                (Get-WindowClassSafe $handle) -ceq 'screenClass' -and
+                                (Get-WindowProcessIdSafe $handle) -eq $ProcessId -and
+                                [WinMgr]::IsWindowVisible($handle) -and
+                                $verifiedPath -eq $expectedPath -and
+                                $verifiedSlide -eq $RestoreSlide
+                        } catch { $restored = $false }
+                        if (-not $restored) { Start-Sleep -Milliseconds 100 }
+                    } while (-not $restored -and [DateTime]::UtcNow -lt $verifyDeadline)
+                    if (-not $restored -and [string]::IsNullOrEmpty($restoreError)) {
+                        $restoreError = 'Previous PowerPoint slideshow restore was not verified'
+                    }
+                }
+            } catch {
+                $restoreError = "PowerPoint previous slideshow restore failed: $($_.Exception.Message)"
+            }
+        }
+
+        Log "restore-powerpoint-slideshow restored=$restored hwnd=$Hwnd pid=$ProcessId slide=$RestoreSlide error='$restoreError'"
+        [pscustomobject]@{
+            success = $restored
+            previousRestored = $restored
+            visualStopped = $false
+            cleanupVerified = $restored
+            windowGone = $handle -ne [IntPtr]::Zero -and -not [WinMgr]::IsWindow($handle)
+            error = if ($restored) { $null } else { $restoreError }
+        } | ConvertTo-Json -Compress
+    }
+    "rollback-powerpoint-target" {
+        $visualStopped = $false
+        $windowGone = $false
+        $cleanupVerified = $false
+        $rollbackError = ''
+        $handle = if ($Hwnd -ne 0) { [IntPtr]::new($Hwnd) } else { [IntPtr]::Zero }
+
+        # The caller hides through a separate short-lived helper first. Repeat
+        # the exact class/PID check here so this COM phase is independently
+        # safe even if the numeric HWND was reused between processes.
+        if ($handle -eq [IntPtr]::Zero) {
+            $rollbackError = 'Target HWND is missing'
+        } elseif (-not [WinMgr]::IsWindow($handle)) {
+            $visualStopped = $true
+            $windowGone = $true
+        } else {
+            $actualClass = Get-WindowClassSafe $handle
+            $actualProcessId = Get-WindowProcessIdSafe $handle
+            if ($actualClass -cne 'screenClass') {
+                $rollbackError = "Target HWND is no longer a PowerPoint slideshow (class '$actualClass')"
+            } elseif ($ProcessId -le 0) {
+                $visualStopped = -not [WinMgr]::IsWindowVisible($handle)
+                $rollbackError = 'Target PowerPoint process fingerprint is missing'
+            } elseif ($actualProcessId -ne $ProcessId) {
+                $rollbackError = "Target HWND process changed (expected $ProcessId, actual $actualProcessId)"
+            } else {
+                if ([WinMgr]::IsWindowVisible($handle)) {
+                    [WinMgr]::ShowWindow($handle, [WinMgr]::SW_HIDE) | Out-Null
+                }
+                $visualStopped = -not [WinMgr]::IsWindowVisible($handle)
+                if (-not $visualStopped) { $rollbackError = 'Target PowerPoint window could not be hidden' }
+            }
+        }
+
+        if ($visualStopped) {
+            if ($windowGone) {
+                if ($OwnershipKnown -ne 0 -and $PdmManaged -eq 0) {
+                    # A user-owned presentation must remain open; disappearance
+                    # of its exact slideshow HWND is the required postcondition.
+                    $cleanupVerified = $true
+                } else {
+                    $rollbackError = 'Target window is gone, but managed presentation cleanup cannot be proven'
+                }
+            } else {
+                $ppt = $null
+                $targetWindow = $null
+                $targetPresentation = $null
+                $expectedPath = Get-NormalizedPathSafe $FilePath
+                try {
+                    $ppt = [System.Runtime.InteropServices.Marshal]::GetActiveObject('PowerPoint.Application')
+                    $findDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+                    do {
+                        try {
+                            for ($i = 1; $i -le [int]$ppt.SlideShowWindows.Count; $i++) {
+                                $candidateWindow = $ppt.SlideShowWindows.Item($i)
+                                $candidateHwnd = 0
+                                $candidatePath = ''
+                                try { $candidateHwnd = [long]$candidateWindow.HWND } catch {}
+                                try { $candidatePath = Get-NormalizedPathSafe ([string]$candidateWindow.Presentation.FullName) } catch {}
+                                if ($candidateHwnd -eq $Hwnd -and
+                                    -not [string]::IsNullOrEmpty($expectedPath) -and
+                                    $candidatePath -eq $expectedPath) {
+                                    $targetWindow = $candidateWindow
+                                    $targetPresentation = $candidateWindow.Presentation
+                                    break
+                                }
+                            }
+                        } catch {
+                            $rollbackError = "PowerPoint slideshow enumeration failed: $($_.Exception.Message)"
+                        }
+                        if ($targetWindow) { break }
+                        Start-Sleep -Milliseconds 100
+                    } while ([DateTime]::UtcNow -lt $findDeadline)
+
+                    if (-not $targetWindow -or -not $targetPresentation) {
+                        $windowGone = -not [WinMgr]::IsWindow($handle)
+                        if ($windowGone -and $OwnershipKnown -ne 0 -and $PdmManaged -eq 0) {
+                            $cleanupVerified = $true
+                        } else {
+                            $rollbackError = 'Exact PowerPoint slideshow HWND/path could not be matched for COM rollback'
+                        }
+                    } elseif ($OwnershipKnown -eq 0) {
+                        # Unknown ownership can safely stop only the slideshow;
+                        # it must never close the underlying user document.
+                        try { $targetWindow.View.Exit() } catch {
+                            $rollbackError = "PowerPoint slideshow exit failed: $($_.Exception.Message)"
+                        }
+                        $rollbackError = if ([string]::IsNullOrEmpty($rollbackError)) {
+                            'Presentation ownership is unknown; document cleanup cannot be proven'
+                        } else { $rollbackError }
+                    } elseif ($PdmManaged -ne 0) {
+                        $targetIdentity = Get-ComIdentitySafe $targetPresentation
+                        $targetPath = Get-NormalizedPathSafe ([string]$targetPresentation.FullName)
+                        try { $targetPresentation.Saved = -1 } catch {}
+                        try { $targetPresentation.Close() } catch {
+                            $rollbackError = "Managed PowerPoint presentation close failed: $($_.Exception.Message)"
+                        }
+
+                        $verifyDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+                        do {
+                            $stillOpen = $true
+                            try {
+                                $stillOpen = $false
+                                for ($i = 1; $i -le [int]$ppt.Presentations.Count; $i++) {
+                                    $candidate = $ppt.Presentations.Item($i)
+                                    $candidateMatches = if (-not [string]::IsNullOrEmpty($targetIdentity)) {
+                                        (Get-ComIdentitySafe $candidate) -eq $targetIdentity
+                                    } else {
+                                        (Get-NormalizedPathSafe ([string]$candidate.FullName)) -eq $targetPath
+                                    }
+                                    if ($candidateMatches) {
+                                        $stillOpen = $true
+                                        break
+                                    }
+                                }
+                            } catch {
+                                $stillOpen = $true
+                                $rollbackError = "Managed PowerPoint close verification failed: $($_.Exception.Message)"
+                            }
+                            if ($stillOpen) { Start-Sleep -Milliseconds 100 }
+                        } while ($stillOpen -and [DateTime]::UtcNow -lt $verifyDeadline)
+                        $cleanupVerified = -not $stillOpen
+                        if (-not $cleanupVerified -and [string]::IsNullOrEmpty($rollbackError)) {
+                            $rollbackError = 'Managed PowerPoint presentation remains loaded or unverified'
+                        }
+                    } else {
+                        try { $targetWindow.View.Exit() } catch {
+                            $rollbackError = "User-owned PowerPoint slideshow exit failed: $($_.Exception.Message)"
+                        }
+                        $exitDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+                        do {
+                            $windowGone = -not [WinMgr]::IsWindow($handle)
+                            if (-not $windowGone) { Start-Sleep -Milliseconds 100 }
+                        } while (-not $windowGone -and [DateTime]::UtcNow -lt $exitDeadline)
+                        $cleanupVerified = $windowGone
+                        if (-not $cleanupVerified -and [string]::IsNullOrEmpty($rollbackError)) {
+                            $rollbackError = 'User-owned PowerPoint slideshow exit was not verified'
+                        }
+                    }
+                } catch {
+                    $rollbackError = "PowerPoint COM rollback failed: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        $windowGone = $windowGone -or ($handle -ne [IntPtr]::Zero -and -not [WinMgr]::IsWindow($handle))
+        $visualStopped = $visualStopped -or $windowGone -or
+            ($handle -ne [IntPtr]::Zero -and -not [WinMgr]::IsWindowVisible($handle))
+        Log "rollback-powerpoint-target stopped=$visualStopped cleanup=$cleanupVerified gone=$windowGone hwnd=$Hwnd pid=$ProcessId managed=$PdmManaged known=$OwnershipKnown error='$rollbackError'"
+        [pscustomobject]@{
+            success = $visualStopped
+            visualStopped = $visualStopped
+            cleanupVerified = $cleanupVerified
+            windowGone = $windowGone
+            error = if ($cleanupVerified) { $null } else { $rollbackError }
+        } | ConvertTo-Json -Compress
+    }
+    "verify-hidden-window" {
+        $exists = $Hwnd -ne 0 -and [WinMgr]::IsWindow([IntPtr]::new($Hwnd))
+        $windowGone = $Hwnd -ne 0 -and -not $exists
+        $fingerprintMatches = $false
+        $visible = $false
+        $verifyError = ''
+        if ($Hwnd -eq 0) {
+            $verifyError = 'Target HWND is missing'
+        } elseif ($windowGone) {
+            $fingerprintMatches = $true
+        } else {
+            $handle = [IntPtr]::new($Hwnd)
+            $actualClass = Get-WindowClassSafe $handle
+            $actualProcessId = Get-WindowProcessIdSafe $handle
+            if ([string]::IsNullOrEmpty($ExpectedWindowClass)) {
+                $verifyError = 'Expected window class is missing'
+            } elseif ($ProcessId -le 0) {
+                $verifyError = 'Expected process fingerprint is missing'
+            } elseif ($actualClass -cne $ExpectedWindowClass) {
+                $verifyError = "Target HWND class changed (expected '$ExpectedWindowClass', actual '$actualClass')"
+            } elseif ($actualProcessId -ne $ProcessId) {
+                $verifyError = "Target HWND process changed (expected $ProcessId, actual $actualProcessId)"
+            } else {
+                $fingerprintMatches = $true
+                $visible = [WinMgr]::IsWindowVisible($handle)
+                if ($visible) { $verifyError = 'Exact target PowerPoint window is visible again' }
+            }
+        }
+        $stopped = $fingerprintMatches -and ($windowGone -or -not $visible)
+        [pscustomobject]@{
+            success = $stopped
+            visualStopped = $stopped
+            windowGone = $windowGone
+            visible = $visible
+            error = if ($stopped) { $null } else { $verifyError }
+        } | ConvertTo-Json -Compress
+    }
+    "verify-window" {
+        $exists = $Hwnd -ne 0 -and [WinMgr]::IsWindow([IntPtr]::new($Hwnd))
+        $visible = $exists -and [WinMgr]::IsWindowVisible([IntPtr]::new($Hwnd))
+        $classMatches = $true
+        if ($exists -and -not [string]::IsNullOrEmpty($ExpectedWindowClass)) {
+            $classMatches = (Get-WindowClassSafe ([IntPtr]::new($Hwnd))) -ceq $ExpectedWindowClass
+        }
+        $processMatches = $ProcessId -gt 0 -and $exists -and
+            (Get-WindowProcessIdSafe ([IntPtr]::new($Hwnd))) -eq $ProcessId
+        [pscustomobject]@{
+            success = $exists -and $visible -and $classMatches -and $processMatches
+            windowGone = -not $exists
+            visible = $visible
+            error = if ($exists -and $visible -and $classMatches -and $processMatches) { $null } else { 'Window is not verifiably visible with the expected fingerprint' }
+        } | ConvertTo-Json -Compress
+    }
     "open" {
         $searchName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
         $existingWindows = [WinMgr]::FindWindowsByTitle($searchName)
 
         Start-Process -FilePath $FilePath
 
-        # Wait for window (up to 20 seconds)
+        # Office may spend tens of seconds in add-ins/Protected View before it
+        # creates the document HWND. Keep this helper alive long enough to own
+        # and fingerprint that late window; returning early would leave an
+        # untracked Word/Excel window that can appear after TAKE rollback.
         $newWindow = [IntPtr]::Zero
-        for ($i = 0; $i -lt 200; $i++) {
+        $windowOwnedByPdm = $false
+        for ($i = 0; $i -lt 600; $i++) {
             Start-Sleep -Milliseconds 100
             $windows = [WinMgr]::FindWindowsByTitle($searchName)
             foreach ($w in $windows) {
                 if (-not $existingWindows.Contains($w)) {
                     $newWindow = $w
+                    $windowOwnedByPdm = $true
                     break
                 }
             }
             if ($newWindow -ne [IntPtr]::Zero) { break }
             if ($i -gt 30 -and $windows.Count -gt 0) {
-                $newWindow = $windows[0]
+                $exactWindows = @($windows | Where-Object {
+                    Test-WindowTitleMatchesRequestedFile $_ $FilePath
+                })
+                if ($exactWindows.Count -gt 0) {
+                    $newWindow = $exactWindows[0]
+                    # Start-Process reused a document window that was already
+                    # open before PDM requested it. It may be routed/minimized,
+                    # but PDM must never close the user's document.
+                    $windowOwnedByPdm = $false
+                }
+            }
+            if ($newWindow -ne [IntPtr]::Zero) {
                 break
             }
         }
@@ -168,7 +628,7 @@ switch ($Action) {
         if ($newWindow -ne [IntPtr]::Zero) {
             $procId = 0
             [WinMgr]::GetWindowThreadProcessId($newWindow, [ref]$procId) | Out-Null
-            Log "Found window hwnd=$($newWindow.ToInt64()) pid=$procId"
+            Log "Found window hwnd=$($newWindow.ToInt64()) pid=$procId owned=$windowOwnedByPdm"
 
             $fileExt = [System.IO.Path]::GetExtension($FilePath).ToLower()
             $isWord = $fileExt -in '.doc', '.docx', '.rtf', '.odt'
@@ -214,21 +674,70 @@ switch ($Action) {
                 success = $positionVerified
                 hwnd = $newWindow.ToInt64()
                 pid = $procId
+                windowTitle = Get-WindowTitleSafe $newWindow
+                windowClass = Get-WindowClassSafe $newWindow
+                owned = $windowOwnedByPdm
                 error = if ($positionVerified) { $null } else { "Window did not move to the target monitor" }
             } | ConvertTo-Json -Compress
         } else {
             Log "Window not found for '$searchName'"
-            Write-Output '{"success":false,"hwnd":0,"pid":0,"error":"Window was not found after opening"}'
+            Write-Output '{"success":false,"hwnd":0,"pid":0,"owned":false,"error":"Window was not found after opening"}'
         }
     }
     "minimize" {
-        if ($Hwnd -ne 0) {
+        $minimizeSuccess = $false
+        $windowGone = $false
+        $minimizeError = ""
+        if ($Hwnd -eq 0) {
+            $windowGone = $true
+            $minimizeSuccess = $true
+        } else {
             $handle = [IntPtr]::new($Hwnd)
-            if ([WinMgr]::IsWindow($handle)) {
-                [WinMgr]::ShowWindow($handle, [WinMgr]::SW_MINIMIZE) | Out-Null
+            if (-not [WinMgr]::IsWindow($handle)) {
+                # The tracked window has already gone away. From the output
+                # lifecycle point of view this is a successful release.
+                $windowGone = $true
+                $minimizeSuccess = $true
+            } else {
+                $actualProcessId = 0
+                [WinMgr]::GetWindowThreadProcessId($handle, [ref]$actualProcessId) | Out-Null
+                if ($ProcessId -ne 0 -and $actualProcessId -ne $ProcessId) {
+                    # HWNDs can be reused. Never minimize an unrelated window.
+                    $windowGone = $true
+                    $minimizeSuccess = $true
+                } elseif (-not (Test-WindowMatchesFingerprint $handle $FilePath $ExpectedWindowTitle $ExpectedWindowClass)) {
+                    # Word/Excel host several documents in one process, so PID
+                    # equality alone does not protect against same-process HWND
+                    # reuse. A different title/class is ambiguous (reuse or a
+                    # legitimate title change), so fail closed and let the
+                    # operator retry without touching that window.
+                    $minimizeError = "The tracked document window fingerprint changed; no window was touched"
+                } else {
+                    [WinMgr]::ShowWindow($handle, [WinMgr]::SW_MINIMIZE) | Out-Null
+                    for ($i = 0; $i -lt 20; $i++) {
+                        if (-not [WinMgr]::IsWindow($handle)) {
+                            $windowGone = $true
+                            $minimizeSuccess = $true
+                            break
+                        }
+                        if ([WinMgr]::IsIconic($handle)) {
+                            $minimizeSuccess = $true
+                            break
+                        }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    if (-not $minimizeSuccess) {
+                        $minimizeError = "Window did not enter the minimized state"
+                    }
+                }
             }
         }
-        Write-Output '{"success":true}'
+        Log "minimize verified success=$minimizeSuccess gone=$windowGone hwnd=$Hwnd"
+        [pscustomobject]@{
+            success = $minimizeSuccess
+            windowGone = $windowGone
+            error = if ($minimizeSuccess) { $null } else { $minimizeError }
+        } | ConvertTo-Json -Compress
     }
     "restore" {
         $restoreSuccess = $false
@@ -244,6 +753,8 @@ switch ($Action) {
                 [WinMgr]::GetWindowThreadProcessId($handle, [ref]$actualProcessId) | Out-Null
                 if ($ProcessId -ne 0 -and $actualProcessId -ne $ProcessId) {
                     $restoreError = "Window now belongs to another process"
+                } elseif (-not (Test-WindowMatchesFingerprint $handle $FilePath $ExpectedWindowTitle $ExpectedWindowClass)) {
+                    $restoreError = "The tracked document window is no longer available"
                 } else {
                 $fileExt = [System.IO.Path]::GetExtension($FilePath).ToLower()
                 $isWord = $fileExt -in '.doc', '.docx', '.rtf', '.odt'
@@ -286,22 +797,63 @@ switch ($Action) {
         } | ConvertTo-Json -Compress
     }
     "close" {
-        if ($Hwnd -ne 0) {
+        $closeSuccess = $false
+        $windowGone = $false
+        $closeError = ""
+        if ($Hwnd -eq 0) {
+            $windowGone = $true
+            $closeSuccess = $true
+        } else {
             $handle = [IntPtr]::new($Hwnd)
-            if ([WinMgr]::IsWindow($handle)) {
-                [WinMgr]::PostMessage($handle, [WinMgr]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+            if (-not [WinMgr]::IsWindow($handle)) {
+                $windowGone = $true
+                $closeSuccess = $true
+            } else {
+                $actualProcessId = 0
+                [WinMgr]::GetWindowThreadProcessId($handle, [ref]$actualProcessId) | Out-Null
+                if ($ProcessId -ne 0 -and $actualProcessId -ne $ProcessId) {
+                    # The original window is already gone and its numeric HWND
+                    # now belongs to somebody else. Do not touch the new owner.
+                    $windowGone = $true
+                    $closeSuccess = $true
+                } elseif (-not (Test-WindowMatchesFingerprint $handle $FilePath $ExpectedWindowTitle $ExpectedWindowClass)) {
+                    $closeError = "The tracked document window fingerprint changed; no window was touched"
+                } else {
+                    $posted = [WinMgr]::PostMessage(
+                        $handle,
+                        [WinMgr]::WM_CLOSE,
+                        [IntPtr]::Zero,
+                        [IntPtr]::Zero
+                    )
+                    if ($posted) {
+                        for ($i = 0; $i -lt 50; $i++) {
+                            if (-not [WinMgr]::IsWindow($handle)) {
+                                $windowGone = $true
+                                $closeSuccess = $true
+                                break
+                            }
+                            Start-Sleep -Milliseconds 100
+                        }
+                    }
+                    if (-not $closeSuccess) {
+                        # Never terminate the process here: Word/Excel can be a
+                        # user-owned host with unsaved documents. A save prompt
+                        # or an ignored WM_CLOSE is reported honestly instead.
+                        $closeError = if ($posted) {
+                            "Window did not close (it may be waiting for user confirmation)"
+                        } else {
+                            "Windows rejected the close request"
+                        }
+                    }
+                }
             }
         }
-        if ($ProcessId -ne 0) {
-            Start-Sleep -Milliseconds 500
-            try {
-                $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-                if ($proc -and !$proc.HasExited) {
-                    $proc.CloseMainWindow() | Out-Null
-                }
-            } catch {}
-        }
-        Write-Output '{"success":true}'
+        Log "close verified success=$closeSuccess gone=$windowGone hwnd=$Hwnd"
+        [pscustomobject]@{
+            success = $closeSuccess
+            windowGone = $windowGone
+            error = if ($closeSuccess) { $null } else { $closeError }
+        } | ConvertTo-Json -Compress
     }
     "hide-taskbar" {
         $taskbars = [WinMgr]::FindTaskbars()

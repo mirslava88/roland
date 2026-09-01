@@ -1,5 +1,9 @@
 import * as pdfjsLib from 'pdfjs-dist'
-import { renderPdfiumPageToCanvas, warmPdfiumDocument } from './pdfium-renderer'
+import {
+  releasePdfiumResources,
+  renderPdfiumPageToCanvas,
+  warmPdfiumDocument
+} from './pdfium-renderer'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -22,7 +26,48 @@ export interface PdfLivePrewarmResult {
 }
 
 const pdfLivePrewarmJobs = new Map<string, Promise<PdfLivePrewarmResult>>()
+const pdfLivePrewarmJobFiles = new Map<string, string>()
 let pdfLivePrewarmQueue: Promise<void> = Promise.resolve()
+let pdfLivePrewarmGeneration = 0
+const pdfLiveFileGenerations = new Map<string, number>()
+const pdfLiveLoadingTasks = new Map<pdfjsLib.PDFDocumentLoadingTask, string>()
+
+/**
+ * Stop background PDF preparation when the program output is explicitly
+ * cleared. Channel cards can request it again later; an idle output must not
+ * keep a PDF.js worker/document alive just because a cache job was queued.
+ */
+export function cancelPdfLivePrewarmJobs(): void {
+  pdfLivePrewarmGeneration += 1
+  pdfLivePrewarmJobs.clear()
+  pdfLivePrewarmJobFiles.clear()
+  for (const task of pdfLiveLoadingTasks.keys()) {
+    void task.destroy().catch(() => undefined)
+  }
+  pdfLiveLoadingTasks.clear()
+  window.api.dbgLog('PDF channel cache: cancelled all pending jobs')
+}
+
+/**
+ * Forget one PDF as soon as its last channel assignment disappears. This is
+ * deliberately file-scoped: releasing every PDF here could invalidate a
+ * different document that is still live or being previewed in this renderer.
+ */
+export function cancelPdfLivePrewarmFile(filePath: string): void {
+  pdfLiveFileGenerations.set(filePath, (pdfLiveFileGenerations.get(filePath) || 0) + 1)
+  for (const [cacheKey, jobFilePath] of pdfLivePrewarmJobFiles) {
+    if (jobFilePath !== filePath) continue
+    pdfLivePrewarmJobs.delete(cacheKey)
+    pdfLivePrewarmJobFiles.delete(cacheKey)
+  }
+  for (const [task, taskFilePath] of pdfLiveLoadingTasks) {
+    if (taskFilePath !== filePath) continue
+    pdfLiveLoadingTasks.delete(task)
+    void task.destroy().catch(() => undefined)
+  }
+  releasePdfiumResources(filePath)
+  window.api.dbgLog(`PDF channel cache: cancelled/released file=${filePath}`)
+}
 
 export function getPdfLiveTargetSize(display: DisplayInfo): { width: number; height: number } {
   const scaleFactor = Math.max(1, display.scaleFactor || 1)
@@ -64,15 +109,27 @@ export function ensurePdfLiveCache(
 ): Promise<PdfLivePrewarmResult> {
   const existing = pdfLivePrewarmJobs.get(request.cacheKey)
   if (existing) return existing
+  const generation = pdfLivePrewarmGeneration
+  const fileGeneration = pdfLiveFileGenerations.get(request.filePath) || 0
+  const isCancelled = (): boolean => (
+    generation !== pdfLivePrewarmGeneration ||
+    fileGeneration !== (pdfLiveFileGenerations.get(request.filePath) || 0)
+  )
 
   let job: Promise<PdfLivePrewarmResult>
   const run = async (): Promise<PdfLivePrewarmResult> => {
-    let document: pdfjsLib.PDFDocumentProxy | null = null
+    let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null
     try {
+      if (isCancelled()) {
+        return { success: false, totalPages: 0, cachedPages: 0, error: 'cancelled' }
+      }
       window.api.dbgLog(
         `PDF channel cache: BEGIN file=${request.filePath} target=${request.targetWidth}x${request.targetHeight}`
       )
       const data = await window.api.readFile(request.filePath)
+      if (isCancelled()) {
+        return { success: false, totalPages: 0, cachedPages: 0, error: 'cancelled' }
+      }
       const pdfiumWarm = warmPdfiumDocument(
         request.filePath,
         'interactive',
@@ -81,15 +138,30 @@ export function ensurePdfLiveCache(
         window.api.dbgLog(`PDF channel cache: PDFium warm ERROR ${String(error)}`)
         return 0
       })
-      document = await pdfjsLib.getDocument({ data }).promise
+      loadingTask = pdfjsLib.getDocument({ data })
+      pdfLiveLoadingTasks.set(loadingTask, request.filePath)
+      const document = await loadingTask.promise
+      if (isCancelled()) {
+        return { success: false, totalPages: 0, cachedPages: 0, error: 'cancelled' }
+      }
       await pdfiumWarm
+      if (isCancelled()) {
+        return { success: false, totalPages: 0, cachedPages: 0, error: 'cancelled' }
+      }
 
       const totalPages = document.numPages
       let cachedPages = 0
       for (const pageNumber of pageOrder(totalPages, request.anchorPage)) {
+        if (isCancelled()) {
+          return { success: false, totalPages, cachedPages, error: 'cancelled' }
+        }
         const started = performance.now()
+        let page: pdfjsLib.PDFPageProxy | null = null
         try {
-          const page = await document.getPage(pageNumber)
+          page = await document.getPage(pageNumber)
+          if (isCancelled()) {
+            return { success: false, totalPages, cachedPages, error: 'cancelled' }
+          }
           const viewport = page.getViewport({ scale: 1 })
           const fitScale = Math.min(
             request.targetWidth / viewport.width,
@@ -106,6 +178,9 @@ export function ensurePdfLiveCache(
             pageNumber - 1,
             frameWidth
           )
+          if (isCancelled()) {
+            return { success: false, totalPages, cachedPages, error: 'cancelled' }
+          }
           if (!nativePath) {
             await renderPdfiumPageToCanvas({
               filePath: request.filePath,
@@ -114,6 +189,9 @@ export function ensurePdfLiveCache(
               targetHeight: frameHeight,
               lane: 'interactive'
             })
+            if (isCancelled()) {
+              return { success: false, totalPages, cachedPages, error: 'cancelled' }
+            }
           }
 
           cachedPages += 1
@@ -125,6 +203,8 @@ export function ensurePdfLiveCache(
           window.api.dbgLog(
             `PDF channel cache: page ERROR page=${pageNumber}/${totalPages} error=${String(error)}`
           )
+        } finally {
+          page?.cleanup()
         }
 
         // Yield between heavy pages so video/capture and operator IPC stay
@@ -146,23 +226,20 @@ export function ensurePdfLiveCache(
         error: String(error)
       }
     } finally {
-      // PDF.js cleanup can occasionally wait forever after every page has
-      // already been rendered (notably when another PDF document is open for
-      // thumbnails). Do not let that block the completed cache result, the UI
-      // status or every following document in the prewarm queue.
-      try {
-        if (document) void document.destroy().catch(() => undefined)
-      } catch (error) {
-        // Some PDF.js document states throw synchronously from destroy(). The
-        // exact-size pages are already cached, so cleanup must never turn a
-        // successful preparation into a false "cache not ready" result.
-        window.api.dbgLog(
-          `PDF channel cache: cleanup ignored file=${request.filePath} error=${String(error)}`
-        )
-      } finally {
-        if (pdfLivePrewarmJobs.get(request.cacheKey) === job) {
-          pdfLivePrewarmJobs.delete(request.cacheKey)
-        }
+      if (loadingTask) {
+        pdfLiveLoadingTasks.delete(loadingTask)
+        // pdfjs-dist 6 owns the worker through PDFDocumentLoadingTask. Calling
+        // destroy on PDFDocumentProxy is no longer supported and used to leave
+        // the worker/document alive after a seemingly successful cleanup.
+        await loadingTask.destroy().catch((error) => {
+          window.api.dbgLog(
+            `PDF channel cache: cleanup ignored file=${request.filePath} error=${String(error)}`
+          )
+        })
+      }
+      if (pdfLivePrewarmJobs.get(request.cacheKey) === job) {
+        pdfLivePrewarmJobs.delete(request.cacheKey)
+        pdfLivePrewarmJobFiles.delete(request.cacheKey)
       }
     }
   }
@@ -173,5 +250,6 @@ export function ensurePdfLiveCache(
   job = pdfLivePrewarmQueue.then(run, run)
   pdfLivePrewarmQueue = job.then(() => undefined, () => undefined)
   pdfLivePrewarmJobs.set(request.cacheKey, job)
+  pdfLivePrewarmJobFiles.set(request.cacheKey, request.filePath)
   return job
 }

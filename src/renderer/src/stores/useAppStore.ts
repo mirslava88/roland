@@ -81,6 +81,7 @@ export type OverlayState =
   | { kind: 'hidden' }
   | { kind: 'pinned-pptx'; pptxPath: string }
   | { kind: 'pinned-pdf'; pdfPath: string }
+  | { kind: 'blocked'; reason: string }
 
 export type ChannelGridSize = 4 | 9
 export const DEFAULT_CHANNELS_PER_PAGE: ChannelGridSize = 4

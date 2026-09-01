@@ -1,4 +1,4 @@
-import { warmPdfiumDocument } from './pdfium-renderer'
+import { releasePdfiumResources, warmPdfiumDocument } from './pdfium-renderer'
 import {
   channelIdFromIndex,
   DEFAULT_BROADCAST_TITLES,
@@ -424,7 +424,11 @@ async function restoreInformationMedia(
       totalSlides = result.slideCount || result.slides.length
     } else if (type === 'pdf') {
       const data = await window.api.readFile(path)
-      totalSlides = await warmPdfiumDocument(path, 'background', data.slice(0))
+      try {
+        totalSlides = await warmPdfiumDocument(path, 'background', data.slice(0))
+      } finally {
+        releasePdfiumResources(path)
+      }
     }
   } catch (error) {
     warnings.push(`Контент информационного экрана «${name}» не удалось подготовить: ${String(error)}`)
