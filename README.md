@@ -15,7 +15,7 @@
 [![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?label=загрузки&logo=github)](https://github.com/mirslava88/roland/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
-![Electron](https://img.shields.io/badge/Electron-43.2.0-47848f?logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-44.1.0-47848f?logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=111827)
 ![TypeScript](https://img.shields.io/badge/TypeScript-7-3178c6?logo=typescript&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-7-646cff?logo=vite&logoColor=white)
@@ -35,6 +35,7 @@
 - После временного переключения входа дополнительного монитора его роль сохраняется; при возвращении того же дисплея PDM заново открывает нужное окно и восстанавливает вывод.
 - Показ титра из карточки внешнего источника не переключает канал и не запускает TAKE. Титр синхронно появляется только на тех эфирных копиях и информационных экранах, где уже показывается этот источник.
 - Номер установленной версии теперь отображается внизу окна «Настройки» и записывается в диагностический журнал.
+- Electron обновлён до стабильной версии 44.1.0, PDF.js — до 6.3.289; остальные прямые библиотеки приведены к последним совместимым стабильным версиям без перехода на beta-инструменты сборки.
 
 ---
 
@@ -231,7 +232,7 @@ PDM проверяет каждый путь перед восстановлен
 
 ## Разработка и сборка
 
-Понадобятся Node.js 22.13+ (или 24+) и Windows PowerShell.
+Понадобятся Node.js 24+ и Windows PowerShell.
 
 ```powershell
 npm ci
@@ -254,12 +255,12 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1
 | Слой | Реализация |
 |---|---|
 | Версия приложения | 1.1.4 |
-| Desktop runtime | Electron 43.2.0 |
+| Desktop runtime | Electron 44.1.0 |
 | Интерфейс | React 19.2.8, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
-| Состояние | Zustand 5.0.14 |
-| Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.25, electron-builder 26.15.3, NSIS |
+| Состояние | Zustand 5.0.15 |
+| Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.26, electron-builder 26.15.3, NSIS |
 | PowerPoint | PowerShell, COM Automation, постоянный JSON-демон с восстановлением состояния Office |
-| PDF | PDFium WASM (@hyzyla/pdfium 2.1.13), pdfjs-dist 6.2.108 и Windows.Data.Pdf |
+| PDF | PDFium WASM (@hyzyla/pdfium 2.1.13), pdfjs-dist 6.3.289 и Windows.Data.Pdf |
 | Внешние источники | Electron Desktop Capture, MediaDevices, постоянные видеопотоки и нативное перечисление окон Windows |
 | Таймеры | простой WPF-оверлей через PowerShell и отдельное React-табло мероприятия |
 

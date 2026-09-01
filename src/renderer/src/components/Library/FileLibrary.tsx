@@ -642,7 +642,7 @@ export function FileLibrary(): JSX.Element {
           <div className="text-[10px] text-gray-500 truncate flex-1" title={folderPath}>
             {(() => {
               if (!folderPath) return null
-              // Split path into segments: "C:\Users\mirslava" -> ["C:", "Users", "mirslava"]
+              // Split a Windows path into segments without depending on a real user profile.
               const segments = folderPath.split(/[\\/]/).filter(Boolean)
               return segments.map((seg, i) => {
                 const segPath = segments.slice(0, i + 1).join('\\') + (i === 0 ? '\\' : '')

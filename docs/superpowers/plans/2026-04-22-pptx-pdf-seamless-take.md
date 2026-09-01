@@ -179,7 +179,6 @@ fix: seamless PPTX↔PDF take via unified captureDisplay
 same-file PPTX → captureDisplay. PPTX→не-PPTX больше не падает
 между веток с null, оверлей поднимается с PP-кадром pixel-match.
 
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF
 )"
 ```

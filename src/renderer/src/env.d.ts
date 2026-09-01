@@ -327,10 +327,5 @@ interface Api {
 declare global {
   interface Window {
     api: Api
-    electron: {
-      process: {
-        platform: string
-      }
-    }
   }
 }

@@ -1,55 +1,45 @@
 # Network Behavior — Presentation Display Manager
 
-**Date:** 2026-06-24
-**Scope:** outbound/inbound network behavior of the packaged application (not dev tooling).
+**Date:** 2026-09-01
+
+**Scope:** packaged application 1.1.4 (development tooling is excluded)
 
 ## Summary
 
-**The application makes no outbound network connections by design. It is fully functional offline.**
+The packaged application makes no outbound network connections by design and
+remains functional without network access. It contains no telemetry, analytics,
+auto-updater, or remote-content integration.
 
-There is no telemetry, no analytics, no auto-update, and no remote content loading. All
-processing (presentation rendering, PDF/PPTX handling, audio/video playback, PowerPoint COM
-automation) happens locally on the host.
+## Source and package review
 
-## Evidence (source analysis)
+- The application does not call `http`, `https`, Electron `net.request`,
+  `XMLHttpRequest`, `WebSocket`, `sendBeacon`, or an update service.
+- The renderer's `fetch` call loads the locally bundled PDFium WASM asset.
+- The custom `pdm-media://` protocol reads approved local files through local
+  filesystem streams; it does not make a network request.
+- PDF.js worker code and PDFium WASM are included in the application package.
+- PowerPoint, PDF, image, audio, video, capture, and Office-document processing
+  are local to the Windows host.
 
-A repo-wide scan of the application source (`src/`) for outbound network primitives
-(`fetch`, `XMLHttpRequest`, `WebSocket`, `axios`, `net.request`, `navigator.sendBeacon`,
-`autoUpdater`, `electron-updater`, `http(s)://` endpoints) returned **no outbound calls**:
+## Renderer controls
 
-- The only `net.fetch` call (`src/main/index.ts`) is the handler for the custom
-  `pdm-media://` protocol. It fetches **local** files via the `file://` scheme
-  (`net.fetch(pathToFileURL(localPath))`) — i.e. a disk read, not a network request.
-- `pdf.js` worker is **bundled locally** (`out/renderer/assets/pdf.worker-*.mjs`) — no CDN.
-- No auto-updater is configured (no `electron-updater` / `autoUpdater` usage, no `publish`
-  config in electron-builder).
-- No analytics/telemetry SDKs are present in the dependency tree.
+- `sandbox: true`
+- `contextIsolation: true`
+- `nodeIntegration: false`
+- `webSecurity: true`
+- Content Security Policy and top-level navigation guards
+- External `http`, `https`, or `mailto` links open only through the operating
+  system after an explicit user action
 
-## Renderer / engine
+## Inbound traffic
 
-- Renderers run with `webSecurity: true`, `sandbox: true`, `contextIsolation: true`,
-  `nodeIntegration: false`, and a strict CSP (`default-src 'self'; script-src 'self'`).
-- A global navigation guard denies any top-level navigation away from the app origin
-  (`will-navigate` / `will-redirect`), and `setWindowOpenHandler` only forwards
-  `http/https/mailto` links to the OS browser on explicit user action.
-- Electron does not bundle Chrome's telemetry, component-updater, or safe-browsing services,
-  so there is no default background outbound traffic from the framework.
+The packaged application does not listen on a TCP or UDP port. The localhost
+development server used by electron-vite exists only during development and is
+not part of the packaged release.
 
-## Local-only subsystems
+## Perimeter conclusion
 
-- **PowerPoint control:** spawns `powershell.exe` running local `.ps1` scripts that drive
-  PowerPoint via COM automation. No network.
-- **PDF render:** native Windows.Data.Pdf (WinRT) via local PowerShell. No network.
-- **Media (images/video/audio):** served from local disk via the `pdm-media://` protocol.
-- **IPC:** in-process Electron IPC only.
-
-## Inbound
-
-- None in the packaged build. (The `http://localhost:5173` dev server is **electron-vite HMR,
-  development only** — it is not present in the packaged application.)
-
-## Conclusion for perimeter review
-
-The application can be run with **no network access** and remains fully functional. It is
-suitable for an air-gapped or strictly egress-filtered environment. No firewall allow-rules
-are required for the application itself.
+No firewall allow-rule is required for PDM itself. The application is suitable
+for offline or egress-filtered deployment. Windows, Microsoft Office, and other
+software installed on the same computer may have their own independent network
+behavior outside PDM's control.

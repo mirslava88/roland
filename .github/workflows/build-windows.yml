@@ -28,7 +28,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 22      # >=22.12 required by @electron/fuses v2
+          node-version: 24      # Matches Electron 44's embedded Node major and pdfjs-dist requirements
           cache: npm
 
       - name: Install dependencies
@@ -38,8 +38,8 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "node_modules/electron/dist/electron.exe")) {
-            Write-Host "Electron binary missing after npm ci - running install.js"
-            node node_modules/electron/install.js
+            Write-Host "Electron binary missing after npm ci - rebuilding the package"
+            npm rebuild electron
           }
 
       - name: Build (electron-vite)
@@ -51,13 +51,24 @@ jobs:
       - name: Verify hardened Electron fuses
         shell: pwsh
         run: |
-          $fuses = npx --yes @electron/fuses read --app "dist/win-unpacked/Presentation Display Manager.exe" | Out-String
+          $fuses = npx --no-install @electron/fuses read --app "dist/win-unpacked/Presentation Display Manager.exe" | Out-String
           Write-Host $fuses
-          if (
-            $fuses -notmatch 'EnableEmbeddedAsarIntegrityValidation is Enabled' -or
-            $fuses -notmatch 'OnlyLoadAppFromAsar is Enabled'
-          ) {
-            throw "Required ASAR security fuses are not enabled"
+          $expected = @{
+            RunAsNode = 'Disabled'
+            EnableCookieEncryption = 'Enabled'
+            EnableNodeOptionsEnvironmentVariable = 'Disabled'
+            EnableNodeCliInspectArguments = 'Disabled'
+            EnableEmbeddedAsarIntegrityValidation = 'Enabled'
+            OnlyLoadAppFromAsar = 'Enabled'
+            LoadBrowserProcessSpecificV8Snapshot = 'Disabled'
+            GrantFileProtocolExtraPrivileges = 'Enabled'
+            WasmTrapHandlers = 'Enabled'
+          }
+          foreach ($entry in $expected.GetEnumerator()) {
+            $needle = "$($entry.Key) is $($entry.Value)"
+            if ($fuses -notmatch [regex]::Escape($needle)) {
+              throw "Unexpected Electron fuse state: $needle"
+            }
           }
 
       - name: Build NSIS installer from prepackaged app

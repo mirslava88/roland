@@ -19,25 +19,38 @@ $env:CSC_KEY_PASSWORD = (Get-Content $pwFile -Raw).Trim()
 Set-Location $root
 
 Write-Host "[1/3] electron-vite build + pack app dir (--dir)" -ForegroundColor Cyan
+npm run clean:package
+if ($LASTEXITCODE -ne 0) { throw "clean package output failed" }
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "electron-vite build failed" }
-npx --yes electron-builder --win --dir
+npx --no-install electron-builder --win --dir
 if ($LASTEXITCODE -ne 0) { throw "electron-builder --dir failed" }
 
 Write-Host "[2/3] verifying hardened Electron fuses" -ForegroundColor Cyan
 $exe = Join-Path $root 'dist\win-unpacked\Presentation Display Manager.exe'
-$fuseState = npx --yes @electron/fuses read --app "$exe" | Out-String
+$fuseState = npx --no-install @electron/fuses read --app "$exe" | Out-String
 if ($LASTEXITCODE -ne 0) { throw "fuse verification failed" }
 Write-Host $fuseState
-if (
-  $fuseState -notmatch 'EnableEmbeddedAsarIntegrityValidation is Enabled' -or
-  $fuseState -notmatch 'OnlyLoadAppFromAsar is Enabled'
-) {
-  throw "Required ASAR security fuses are not enabled"
+$expectedFuses = @{
+  RunAsNode = 'Disabled'
+  EnableCookieEncryption = 'Enabled'
+  EnableNodeOptionsEnvironmentVariable = 'Disabled'
+  EnableNodeCliInspectArguments = 'Disabled'
+  EnableEmbeddedAsarIntegrityValidation = 'Enabled'
+  OnlyLoadAppFromAsar = 'Enabled'
+  LoadBrowserProcessSpecificV8Snapshot = 'Disabled'
+  GrantFileProtocolExtraPrivileges = 'Enabled'
+  WasmTrapHandlers = 'Enabled'
+}
+foreach ($entry in $expectedFuses.GetEnumerator()) {
+  $needle = "$($entry.Key) is $($entry.Value)"
+  if ($fuseState -notmatch [regex]::Escape($needle)) {
+    throw "Unexpected Electron fuse state: $needle"
+  }
 }
 
 Write-Host "[3/3] building signed NSIS installer from verified app (--prepackaged)" -ForegroundColor Cyan
-npx --yes electron-builder --win --prepackaged "$root\dist\win-unpacked"
+npx --no-install electron-builder --win --prepackaged "$root\dist\win-unpacked"
 if ($LASTEXITCODE -ne 0) { throw "electron-builder --prepackaged failed" }
 
 Write-Host "DONE" -ForegroundColor Green

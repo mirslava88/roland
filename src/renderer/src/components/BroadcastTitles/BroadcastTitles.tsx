@@ -396,7 +396,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                       maxLength={120}
                       value={selectedSpeaker.name}
                       onChange={(event) => updateSpeaker(selectedSpeaker.id, { name: event.target.value })}
-                      placeholder="Иванов Иван Иванович"
+                      placeholder="Имя выступающего"
                       className="w-full rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-sm text-white outline-hidden placeholder:text-gray-600 focus:border-cyan-500"
                     />
                   </label>

@@ -19,6 +19,7 @@ module.exports = async function afterPack(context) {
 
   await flipFuses(exePath, {
     version: FuseVersion.V1,
+    strictlyRequireAllFuses: true,
     resetAdHocDarwinSignature: false,
     // Disable capabilities the application never uses.
     [FuseV1Options.RunAsNode]: false,
@@ -26,15 +27,24 @@ module.exports = async function afterPack(context) {
     [FuseV1Options.EnableNodeCliInspectArguments]: false,
     // Encrypt cookies at rest.
     [FuseV1Options.EnableCookieEncryption]: true,
-    // Electron 43.2.0 + electron-builder 26.15.3 produce a valid embedded ASAR
+    // Electron 44.1.0 + electron-builder 26.15.3 produce a valid embedded ASAR
     // integrity hash. Keep both protections enabled; the packaged application is
     // smoke-tested with this exact state before release.
     [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
-    [FuseV1Options.OnlyLoadAppFromAsar]: true
+    [FuseV1Options.OnlyLoadAppFromAsar]: true,
+    // electron-builder ships Electron's shared V8 snapshot, not a separate
+    // browser-process snapshot. Enabling this fuse makes Electron 44 fail before
+    // app startup with "Error loading V8 startup snapshot file".
+    [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot]: false,
+    // Keep the local file/WASM capabilities used by the bundled renderer and
+    // PDFium explicit so every Electron fuse is audited.
+    [FuseV1Options.GrantFileProtocolExtraPrivileges]: true,
+    [FuseV1Options.WasmTrapHandlers]: true
   })
 
   console.log(
     '[afterPack] fuses hardened: RunAsNode=off, NodeOptions=off, ' +
-      'NodeCliInspect=off, CookieEncryption=on, AsarIntegrity=on, OnlyLoadFromAsar=on'
+      'NodeCliInspect=off, CookieEncryption=on, AsarIntegrity=on, OnlyLoadFromAsar=on, ' +
+      'BrowserSnapshot=off, FilePrivileges=on, WasmTrapHandlers=on'
   )
 }

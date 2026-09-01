@@ -1,7 +1,6 @@
 # Persistent Overlay, Hide-on-Navigate
 
 **Дата:** 2026-04-21
-**Автор:** mirslava (через Claude)
 **Статус:** черновик, одобрен пользователем
 
 ## Проблема

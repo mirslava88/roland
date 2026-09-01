@@ -28,6 +28,15 @@ test-app/
 tmp_frames/
 scripts/_test-*.ps1
 
+# Local operator/runtime data (may contain names, titles or event content)
+/tmp/
+/outputs/
+/*.png
+*.pdmconfig
+*.dmp
+*.reg
+project-audit-*.md
+
 # Claude / audit local
 .claude/
 audit/

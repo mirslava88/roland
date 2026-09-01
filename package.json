@@ -4,9 +4,18 @@
   "author": "Roland",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=24"
+  },
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
   "scripts": {
+    "clean:out": "node scripts/clean-build-output.mjs",
+    "clean:package": "node scripts/clean-build-output.mjs --package",
+    "prebuild": "npm run clean:out",
+    "prepackage": "npm run clean:package",
+    "prepackage:win": "npm run clean:package",
+    "prepackage:mac": "npm run clean:package",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
@@ -16,22 +25,20 @@
   },
   "dependencies": {
     "@hyzyla/pdfium": "^2.1.13",
-    "pdfjs-dist": "^6.2.108",
-    "zustand": "^5.0.3"
+    "pdfjs-dist": "^6.3.289",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@electron-toolkit/preload": "^3.0.2",
-    "@electron-toolkit/utils": "^4.0.0",
-    "@electron/fuses": "^2.1.2",
+    "@electron/fuses": "^2.1.3",
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^26.1.2",
+    "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^43.2.0",
+    "electron": "^44.1.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
-    "postcss": "^8.5.25",
+    "postcss": "^8.5.26",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3",
@@ -53,7 +60,9 @@
         "from": "scripts",
         "to": "scripts",
         "filter": [
-          "**/*"
+          "*.ps1",
+          "*.scpt",
+          "!_test-*.ps1"
         ]
       },
       {
@@ -67,6 +76,26 @@
       {
         "from": "node_modules/@hyzyla/pdfium/LICENSE.md",
         "to": "licenses/hyzyla-pdfium-LICENSE.md"
+      },
+      {
+        "from": "node_modules/pdfjs-dist/LICENSE",
+        "to": "licenses/pdfjs-dist-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/react/LICENSE",
+        "to": "licenses/react-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/react-dom/LICENSE",
+        "to": "licenses/react-dom-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/scheduler/LICENSE",
+        "to": "licenses/scheduler-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/zustand/LICENSE",
+        "to": "licenses/zustand-LICENSE.txt"
       }
     ],
     "afterPack": "./build/afterPack.js",
