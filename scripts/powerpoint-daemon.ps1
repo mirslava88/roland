@@ -23,6 +23,14 @@ public static extern uint TimeBeginPeriod(uint uPeriod);
 public static extern int DwmFlush();
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern int SetWindowRgn(System.IntPtr hWnd, System.IntPtr hRgn, bool bRedraw);
+[System.Runtime.InteropServices.DllImport("gdi32.dll", SetLastError = true)]
+public static extern System.IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+[System.Runtime.InteropServices.DllImport("gdi32.dll", SetLastError = true)]
+public static extern System.IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
+[System.Runtime.InteropServices.DllImport("gdi32.dll")]
+public static extern bool DeleteObject(System.IntPtr hObject);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern System.IntPtr SetThreadDpiAwarenessContext(System.IntPtr dpiContext);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -323,6 +331,39 @@ function Set-SlideShowBounds([long]$hwnd, $targetRect) {
             0x10
         ) | Out-Null
     } catch {}
+}
+
+function Set-SlideShowClip([long]$hwnd, $targetRect, $clipRect, [int]$cornerRadius) {
+    if ($hwnd -eq 0) { return }
+    if ($null -eq $clipRect -or $clipRect.Count -ne 4 -or
+        $null -eq $targetRect -or $targetRect.Count -ne 4) {
+        try { [PptDaemon.Native]::SetWindowRgn([System.IntPtr]$hwnd, [System.IntPtr]::Zero, $true) | Out-Null } catch {}
+        return
+    }
+    $left = [int]$clipRect[0] - [int]$targetRect[0]
+    $top = [int]$clipRect[1] - [int]$targetRect[1]
+    $right = $left + [int]$clipRect[2]
+    $bottom = $top + [int]$clipRect[3]
+    $region = [System.IntPtr]::Zero
+    try {
+        if ($cornerRadius -gt 0) {
+            $diameter = [Math]::Max(2, $cornerRadius * 2)
+            $region = [PptDaemon.Native]::CreateRoundRectRgn($left, $top, $right + 1, $bottom + 1, $diameter, $diameter)
+        } else {
+            $region = [PptDaemon.Native]::CreateRectRgn($left, $top, $right, $bottom)
+        }
+        if ($region -ne [System.IntPtr]::Zero) {
+            $accepted = [PptDaemon.Native]::SetWindowRgn([System.IntPtr]$hwnd, $region, $true)
+            if ($accepted -ne 0) {
+                # Windows owns the region after a successful SetWindowRgn.
+                $region = [System.IntPtr]::Zero
+            }
+        }
+    } catch {} finally {
+        if ($region -ne [System.IntPtr]::Zero) {
+            try { [PptDaemon.Native]::DeleteObject($region) | Out-Null } catch {}
+        }
+    }
 }
 
 function Get-SlideShowWindowRect([long]$hwnd) {
@@ -2313,6 +2354,16 @@ while ($true) {
                         }
                     }
                 } catch { Log "open: invalid target bounds: $($_.Exception.Message)" }
+                $clipRect = $null
+                $cornerRadius = 0
+                try {
+                    if ($null -ne $req.clipBounds) {
+                        $cx = [int]$req.clipBounds.x; $cy = [int]$req.clipBounds.y
+                        $cw = [int]$req.clipBounds.width; $ch = [int]$req.clipBounds.height
+                        if ($cw -gt 0 -and $ch -gt 0) { $clipRect = @($cx, $cy, $cw, $ch) }
+                    }
+                    if ($null -ne $req.cornerRadius) { $cornerRadius = [Math]::Max(0, [int]$req.cornerRadius) }
+                } catch {}
                 $underlayHwnd = 0
                 try {
                     if ($null -ne $req.underlayHwnd) {
@@ -2320,6 +2371,8 @@ while ($true) {
                     }
                 } catch {}
                 if ($underlayHwnd -ne 0) { Log "open: persistent output HWND=$underlayHwnd" }
+                $deferPromotion = $false
+                try { $deferPromotion = [bool]$req.deferPromotion } catch {}
 
                 $ppt = Get-OrCreatePPT
                 # Hide an existing editor synchronously BEFORE changing its COM
@@ -2768,6 +2821,7 @@ while ($true) {
                         Set-SlideShowBounds $newHwnd $targetRect
                         Hide-PPEditor $ppt
                     }
+                    Set-SlideShowClip $newHwnd $targetRect $clipRect $cornerRadius
                     if ($createdNewSlideShow -and $stagingCoverHwnd -ne 0) {
                         Place-SlideShowBehind $newHwnd $stagingCoverHwnd $targetRect
                     }
@@ -2779,13 +2833,17 @@ while ($true) {
                     Start-Sleep -Milliseconds 50
                     try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
                     Log "warmed slideshow behind HWND=$stagingCoverHwnd"
-                    if ($underlayHwnd -ne 0 -and $underlayHwnd -ne $newHwnd) {
-                        Lower-Window $underlayHwnd
-                        Log "lowered persistent output HWND=$underlayHwnd before slideshow promotion"
+                    if ($deferPromotion) {
+                        Log "staged warmed slideshow behind persistent output HWND=$underlayHwnd"
+                    } else {
+                        if ($underlayHwnd -ne 0 -and $underlayHwnd -ne $newHwnd) {
+                            Lower-Window $underlayHwnd
+                            Log "lowered persistent output HWND=$underlayHwnd before slideshow promotion"
+                        }
+                        Raise-SlideShow $newHwnd $targetRect
+                        try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                        Log "promoted warmed slideshow HWND=$newHwnd"
                     }
-                    Raise-SlideShow $newHwnd $targetRect
-                    try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
-                    Log "promoted warmed slideshow HWND=$newHwnd"
                 }
 
                 # The Win32 slideshow is already created, positioned and stable.
@@ -3032,7 +3090,23 @@ while ($true) {
                         if ($bw -gt 0 -and $bh -gt 0) { $targetRect = @($bx, $by, $bw, $bh) }
                     }
                 } catch {}
+                $clipRect = $null
+                $cornerRadius = 0
+                try {
+                    if ($null -ne $req.clipBounds) {
+                        $cx = [int]$req.clipBounds.x; $cy = [int]$req.clipBounds.y
+                        $cw = [int]$req.clipBounds.width; $ch = [int]$req.clipBounds.height
+                        if ($cw -gt 0 -and $ch -gt 0) { $clipRect = @($cx, $cy, $cw, $ch) }
+                    }
+                    if ($null -ne $req.cornerRadius) { $cornerRadius = [Math]::Max(0, [int]$req.cornerRadius) }
+                } catch {}
                 $hwnd = [long]$script:activeSlideShowHwnd
+                $relocateUnderlayHwnd = 0
+                try {
+                    if ($null -ne $req.underlayHwnd) {
+                        $relocateUnderlayHwnd = [long]$req.underlayHwnd
+                    }
+                } catch {}
                 if ($hwnd -eq 0 -and $sw) { try { $hwnd = [long]$sw.HWND } catch {} }
                 if ($hwnd -eq 0) {
                     try {
@@ -3049,6 +3123,10 @@ while ($true) {
                     $actualRect = $null
                     for ($attempt = 1; $attempt -le 3; $attempt++) {
                         Set-SlideShowBounds $hwnd $targetRect
+                        Set-SlideShowClip $hwnd $targetRect $clipRect $cornerRadius
+                        if ($relocateUnderlayHwnd -ne 0 -and $relocateUnderlayHwnd -ne $hwnd) {
+                            Lower-Window $relocateUnderlayHwnd
+                        }
                         Raise-SlideShow $hwnd $targetRect
                         try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
                         Start-Sleep -Milliseconds 40

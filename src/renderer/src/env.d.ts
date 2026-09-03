@@ -9,6 +9,7 @@ interface FileEntry {
   size: number
   isImage?: boolean
   isAudio?: boolean
+  sceneOnly?: boolean
   capture?: CaptureSourceConfig
 }
 
@@ -225,7 +226,19 @@ interface Api {
     error?: string
   }>
   syncPreparedPowerPoints(filePaths: string[]): Promise<{ success: boolean; error?: string }>
-  launchPowerPoint(filePath: string, displayId?: number, startSlide?: number): Promise<{
+  launchPowerPoint(
+    filePath: string,
+    displayId?: number,
+    startSlide?: number,
+    sceneLayout?: {
+      enabled: boolean
+      placement: import('../../shared/program-scene').ProgramScenePlacement
+      participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
+      cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
+      contentAspectRatio?: number | null
+    },
+    deferPromotion?: boolean
+  ): Promise<{
     success: boolean
     output?: string
     error?: string
@@ -235,7 +248,20 @@ interface Api {
     command: string,
     arg?: number | { stopAtBoundary?: boolean }
   ): Promise<{ success: boolean; output?: string; error?: string }>
-  relocatePowerPoint(displayId: number): Promise<{ success: boolean; error?: string }>
+  relocatePowerPoint(
+    displayId: number,
+    sceneLayout?: {
+      enabled: boolean
+      placement: import('../../shared/program-scene').ProgramScenePlacement
+      participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
+      cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
+      contentAspectRatio?: number | null
+    }
+  ): Promise<{ success: boolean; error?: string }>
+  setPowerPointZoom(
+    displayId: number,
+    zoom: import('../../shared/content-zoom').ContentZoomState
+  ): Promise<{ success: boolean; error?: string }>
   generatePptxThumbnails(filePath: string, keepPrepared?: boolean): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   getPptxSlideNotes(filePath: string, slide: number): Promise<{ success: boolean; notes?: string; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>

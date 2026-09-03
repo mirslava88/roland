@@ -5,6 +5,7 @@ export type NavigationRequest =
 
 let transitionActive = false
 let queuedRequests: NavigationRequest[] = []
+const transitionEndWaiters = new Set<() => void>()
 
 function describeRequest(request: NavigationRequest): string {
   return request.kind === 'relative' ? request.direction : `goto:${request.slide}`
@@ -41,7 +42,14 @@ export function finishNavigationTransition(): NavigationRequest[] {
   window.api.dbgLog(
     `NavigationTransition: END queued=${queued.map(describeRequest).join(',') || 'none'}`
   )
+  for (const resolve of transitionEndWaiters) resolve()
+  transitionEndWaiters.clear()
   return queued
+}
+
+export function waitForNavigationTransitionEnd(): Promise<void> {
+  if (!transitionActive) return Promise.resolve()
+  return new Promise<void>((resolve) => transitionEndWaiters.add(resolve))
 }
 
 export function drainNavigationTransition(): NavigationRequest[] {

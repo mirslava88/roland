@@ -39,6 +39,10 @@ export function CaptureSourcesPanel(): JSX.Element {
     () => devices.filter((device) => device.kind === 'audioinput'),
     [devices]
   )
+  const visibleCaptureSources = useMemo(
+    () => captureSources.filter((source) => source.sceneOnly !== true),
+    [captureSources]
+  )
 
   const loadDevices = useCallback((): void => {
     const generation = ++deviceRequestGenerationRef.current
@@ -117,7 +121,7 @@ export function CaptureSourcesPanel(): JSX.Element {
     const existing = captureSources.find(
       (source) => source.capture?.videoDeviceId === video.deviceId
     )
-    if (existing) {
+    if (existing && !existing.sceneOnly) {
       selectFile(existing)
       setPickerOpen(false)
       setPanelMessage('Это устройство уже добавлено.')
@@ -132,7 +136,7 @@ export function CaptureSourcesPanel(): JSX.Element {
       setError('Выберите аудиовход. Микрофон ноутбука автоматически не включается.')
       return
     }
-    const sourceId = `capture-${crypto.randomUUID()}`
+    const sourceId = existing?.capture?.sourceId || `capture-${crypto.randomUUID()}`
     const capture: CaptureSourceConfig = {
       sourceId,
       videoDeviceId: video.deviceId,
@@ -144,12 +148,14 @@ export function CaptureSourcesPanel(): JSX.Element {
       audioLabel: audio?.label
     }
     const entry: FileEntry = {
+      ...existing,
       id: sourceId,
       name: video.label,
       path: `capture://${sourceId}`,
       type: 'capture',
       extension: 'LIVE',
       size: 0,
+      sceneOnly: undefined,
       capture
     }
     addCaptureSource(entry)
@@ -317,9 +323,9 @@ export function CaptureSourcesPanel(): JSX.Element {
         {panelMessage && (
           <div className="px-3 pb-2 text-[10px] text-yellow-400">{panelMessage}</div>
         )}
-        {captureSources.length > 0 && (
+        {visibleCaptureSources.length > 0 && (
           <div className="max-h-52 overflow-y-auto px-2 pb-2 space-y-2">
-            {captureSources.map((source) => {
+            {visibleCaptureSources.map((source) => {
               const config = source.capture!
               const selected = selectedFile?.capture?.sourceId === config.sourceId
               const active = activeFile?.capture?.sourceId === config.sourceId

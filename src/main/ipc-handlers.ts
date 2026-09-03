@@ -14,6 +14,14 @@ import {
   getDiagnosticLogDirectory
 } from './diagnostic-log'
 import { hideTaskbarForDisplay, showAllTaskbars } from './taskbar-manager'
+import type { ProgramSceneLayoutConfig } from '../shared/program-scene'
+import type { ContentZoomState } from '../shared/content-zoom'
+import {
+  getActivePowerPointSceneLayout,
+  getPowerPointNativePlacement,
+  setActivePowerPointZoom,
+  setActivePowerPointSceneLayout
+} from './program-scene-state'
 
 const execFileAsync = promisify(execFile)
 
@@ -928,7 +936,14 @@ export function registerIpcHandlers(
 
   ipcMain.handle(
     'launch-powerpoint',
-    async (event, filePath: string, displayId?: number, startSlide?: number) => {
+    async (
+      event,
+      filePath: string,
+      displayId?: number,
+      startSlide?: number,
+      sceneLayout?: ProgramSceneLayoutConfig,
+      deferPromotion?: boolean
+    ) => {
       if (process.platform === 'win32') {
         try {
           const args: Record<string, unknown> = { path: filePath }
@@ -947,7 +962,16 @@ export function registerIpcHandlers(
           const targetDisplay = explicitlyRequestedDisplay || externalDisplay || primaryDisplay
 
           // Electron bounds are DIP while SetWindowPos expects physical pixels.
-          args.bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+          const placement = getPowerPointNativePlacement(targetDisplay, sceneLayout, {
+            enabled: false,
+            scale: 1,
+            originX: 0.5,
+            originY: 0.5
+          })
+          args.bounds = placement.bounds
+          args.clipBounds = placement.clipBounds
+          args.cornerRadius = placement.cornerRadius
+          args.deferPromotion = deferPromotion === true
           const presentationWindow = getPresentationWindow()
           if (presentationWindow && !presentationWindow.isDestroyed()) {
             const nativeHandle = presentationWindow.getNativeWindowHandle()
@@ -1081,6 +1105,7 @@ export function registerIpcHandlers(
                 SlideCount: res.slideCount ?? 0,
                 CurrentSlide: res.slide ?? 1
               })
+              setActivePowerPointSceneLayout(sceneLayout?.enabled ? sceneLayout : null)
               return { success: true, output }
             } catch (error: unknown) {
               let cleanupError = ''
@@ -1265,6 +1290,10 @@ export function registerIpcHandlers(
           res = await pptDaemon.send('close', {}, 0)
         }
       }
+      if (command === 'close' && res.ok) {
+        setActivePowerPointSceneLayout(null)
+        setActivePowerPointZoom(null)
+      }
       if (command === 'close' && !controlWindow.isDestroyed()) {
         // PowerPoint owns the foreground while its slideshow is running. When
         // that HWND is destroyed Windows can promote Explorer/Start unless a
@@ -1336,7 +1365,11 @@ export function registerIpcHandlers(
     return { success: false, error: 'Unsupported platform' }
   })
 
-  ipcMain.handle('relocate-powerpoint', async (_event, displayId: number) => {
+  ipcMain.handle('relocate-powerpoint', async (
+    _event,
+    displayId: number,
+    sceneLayout?: ProgramSceneLayoutConfig
+  ) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const displays = screen.getAllDisplays()
@@ -1347,11 +1380,32 @@ export function registerIpcHandlers(
       }
       const targetDisplay = explicitlyRequestedDisplay
       if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
-      const bounds = screen.dipToScreenRect(null, targetDisplay.bounds)
-      const result = await pptDaemon.send('relocate', { bounds }, 5000)
+      const effectiveSceneLayout = sceneLayout === undefined
+        ? getActivePowerPointSceneLayout() ?? undefined
+        : sceneLayout
+      const placement = getPowerPointNativePlacement(targetDisplay, effectiveSceneLayout)
+      const presentationWindow = getPresentationWindow()
+      let underlayHwnd = 0
+      if (
+        effectiveSceneLayout?.enabled &&
+        presentationWindow &&
+        !presentationWindow.isDestroyed()
+      ) {
+        const nativeHandle = presentationWindow.getNativeWindowHandle()
+        underlayHwnd = nativeHandle.length >= 8
+          ? Number(nativeHandle.readBigUInt64LE(0))
+          : nativeHandle.readUInt32LE(0)
+      }
+      const result = await pptDaemon.send('relocate', {
+        ...placement,
+        underlayHwnd
+      }, 5000)
+      if (result.ok && sceneLayout !== undefined) {
+        setActivePowerPointSceneLayout(sceneLayout.enabled ? sceneLayout : null)
+      }
       diagnosticLog(
         'window',
-        `PowerPoint output relocate display=${targetDisplay.id} bounds=${JSON.stringify(bounds)} ok=${result.ok}`
+        `PowerPoint output relocate display=${targetDisplay.id} bounds=${JSON.stringify(placement.bounds)} ok=${result.ok}`
       )
       return { success: result.ok, error: result.error }
     } catch (error) {
@@ -1601,6 +1655,30 @@ export function registerIpcHandlers(
         return { success: false, error: String(error) }
       }
     })
+  })
+
+  ipcMain.handle('set-powerpoint-zoom', async (
+    _event,
+    displayId: number,
+    zoom: Partial<ContentZoomState>
+  ) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    try {
+      const targetDisplay = screen.getAllDisplays().find((display) => display.id === displayId)
+      if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
+      const normalized = setActivePowerPointZoom(zoom)
+      const placement = getPowerPointNativePlacement(targetDisplay, undefined, normalized)
+      const result = await pptDaemon.send('relocate', placement, 5000)
+      diagnosticLog(
+        'window',
+        `PowerPoint magnifier scale=${normalized.scale.toFixed(2)} ` +
+        `origin=${normalized.originX.toFixed(3)},${normalized.originY.toFixed(3)} ok=${result.ok}`
+      )
+      return { success: result.ok, error: result.error }
+    } catch (error) {
+      diagnosticLog('window', `PowerPoint magnifier failed: ${formatDiagnosticError(error)}`)
+      return { success: false, error: String(error) }
+    }
   })
 
   ipcMain.handle('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))

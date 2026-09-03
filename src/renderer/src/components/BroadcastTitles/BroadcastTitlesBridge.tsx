@@ -6,9 +6,29 @@ import {
   type BroadcastTitlesOutput
 } from '../../stores/useAppStore'
 
+function sceneTitleSourceIdentity(state: ReturnType<typeof useAppStore.getState>): string | null {
+  const supportedContent = !!state.activeFile && (
+    state.activeFile.type === 'presentation' ||
+    state.activeFile.type === 'pdf' ||
+    state.activeFile.type === 'video' ||
+    (state.activeFile.type === 'other' && state.activeFile.isImage === true)
+  )
+  if (!state.programScene.enabled || !state.backdropImage || !supportedContent) return null
+  const capture = state.captureSources.find(
+    (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
+  )?.capture
+  return captureSourceIdentity(capture)
+}
+
+function effectiveProgramTitleSourceIdentity(
+  state: ReturnType<typeof useAppStore.getState>
+): string | null {
+  return sceneTitleSourceIdentity(state) || state.programCaptureTitlesSourceIdentity
+}
+
 function currentProgramTitlesOutput(): BroadcastTitlesOutput {
   const state = useAppStore.getState()
-  const sourceIdentity = state.programCaptureTitlesSourceIdentity
+  const sourceIdentity = effectiveProgramTitleSourceIdentity(state)
   const output = sourceIdentity
     ? state.captureTitlesOutputs[sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
@@ -92,6 +112,10 @@ function CaptureTitlesAutoHide({
 export function BroadcastTitlesBridge(): JSX.Element | null {
   const captureOutputs = useAppStore((state) => state.captureTitlesOutputs)
   const activeSourceIdentity = useAppStore((state) => state.programCaptureTitlesSourceIdentity)
+  const activeFile = useAppStore((state) => state.activeFile)
+  const backdropImage = useAppStore((state) => state.backdropImage)
+  const captureSources = useAppStore((state) => state.captureSources)
+  const programScene = useAppStore((state) => state.programScene)
   const informationMedia = useAppStore((state) => state.informationMedia)
   const informationOutputAssigned = useAppStore((state) => (
     state.displays.some((display) => (
@@ -104,15 +128,25 @@ export function BroadcastTitlesBridge(): JSX.Element | null {
   // This is the source actually painted by PresentationApp, not the next TAKE
   // selected in the control store.  Keep its auto-hide clock running until the
   // output renderer confirms the handoff or a native output is revealed.
-  const programSourceIdentity = activeSourceIdentity
-  const output = activeSourceIdentity
-    ? captureOutputs[activeSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+  const sceneSourceIdentity = programScene.enabled && !!backdropImage && !!activeFile && (
+    activeFile.type === 'presentation' ||
+    activeFile.type === 'pdf' ||
+    activeFile.type === 'video' ||
+    (activeFile.type === 'other' && activeFile.isImage === true)
+  )
+    ? captureSourceIdentity(captureSources.find(
+      (entry) => entry.capture?.sourceId === programScene.captureSourceId
+    )?.capture)
+    : null
+  const programSourceIdentity = sceneSourceIdentity || activeSourceIdentity
+  const output = programSourceIdentity
+    ? captureOutputs[programSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
-  const programOutput = { ...output, sourceIdentity: activeSourceIdentity }
+  const programOutput = { ...output, sourceIdentity: programSourceIdentity }
 
   useEffect(() => {
     window.api.sendToPresentation('broadcast-titles-update', programOutput)
-  }, [activeSourceIdentity, output])
+  }, [programSourceIdentity, output])
 
   useEffect(() => window.api.on('broadcast-titles-ready', () => {
     window.api.sendToPresentation(

@@ -1,5 +1,16 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import {
+  DEFAULT_PROGRAM_SCENE_LAYOUT,
+  type ProgramSceneCornerStyle,
+  type ProgramSceneParticipantSize,
+  type ProgramScenePlacement
+} from '../../../shared/program-scene'
+import {
+  DEFAULT_CONTENT_ZOOM,
+  normalizeContentZoom,
+  type ContentZoomState
+} from '../../../shared/content-zoom'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
 // для контекста. inflight = текущая chain promise; pendingTarget = последний
@@ -455,6 +466,14 @@ interface AppState {
   selectedDisplayId: number | null
   informationMedia: InformationMediaConfig | null
   backdropImage: string | null
+  programScene: {
+    enabled: boolean
+    captureSourceId: string | null
+    placement: ProgramScenePlacement
+    participantSize: ProgramSceneParticipantSize
+    cornerStyle: ProgramSceneCornerStyle
+  }
+  contentZoom: ContentZoomState
   globalHookEnabled: boolean
   channelBoundaryNavigationEnabled: boolean
   eventTimer: EventTimerState
@@ -518,6 +537,8 @@ interface AppState {
   setSelectedDisplayId: (id: number | null) => void
   setInformationMedia: (media: InformationMediaConfig | null) => void
   setBackdropImage: (path: string | null) => void
+  setProgramScene: (update: Partial<AppState['programScene']>) => void
+  setContentZoom: (update: Partial<ContentZoomState>) => void
   setGlobalHookEnabled: (enabled: boolean) => void
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
   setEventTimer: (update: Partial<EventTimerState>) => void
@@ -603,6 +624,11 @@ export const useAppStore = create<AppState>()(persist(
   selectedDisplayId: null,
   informationMedia: null,
   backdropImage: null,
+  programScene: {
+    ...DEFAULT_PROGRAM_SCENE_LAYOUT,
+    captureSourceId: null
+  },
+  contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,
   eventTimer: {
@@ -834,10 +860,13 @@ export const useAppStore = create<AppState>()(persist(
   },
 
   removeCaptureSource: (sourceId) => {
-    const { captureSources, selectedFile } = get()
+    const { captureSources, selectedFile, programScene } = get()
     set({
       captureSources: captureSources.filter((item) => item.capture?.sourceId !== sourceId),
-      selectedFile: selectedFile?.capture?.sourceId === sourceId ? null : selectedFile
+      selectedFile: selectedFile?.capture?.sourceId === sourceId ? null : selectedFile,
+      programScene: programScene.captureSourceId === sourceId
+        ? { ...programScene, enabled: false, captureSourceId: null }
+        : programScene
     })
   },
 
@@ -998,6 +1027,12 @@ export const useAppStore = create<AppState>()(persist(
   },
   setInformationMedia: (media) => set({ informationMedia: media }),
   setBackdropImage: (path) => set({ backdropImage: path }),
+  setProgramScene: (update) => set((state) => ({
+    programScene: { ...state.programScene, ...update }
+  })),
+  setContentZoom: (update) => set((state) => ({
+    contentZoom: normalizeContentZoom({ ...state.contentZoom, ...update })
+  })),
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
   setChannelBoundaryNavigationEnabled: (enabled) => set({ channelBoundaryNavigationEnabled: enabled }),
   setEventTimer: (update) => set((state) => ({
@@ -1187,7 +1222,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 14,
+    version: 15,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1282,6 +1317,8 @@ export const useAppStore = create<AppState>()(persist(
       }
       // v13 -> v14: the prepared channel workspace is now included in the
       // automatic crash-recovery snapshot. Runtime/live output stays omitted.
+      // v14 -> v15: add the presentation + participant scene layout. Enabling
+      // an output remains session-only, while the chosen source/layout survive.
       return migrated
     },
     partialize: (state) => ({
@@ -1291,6 +1328,7 @@ export const useAppStore = create<AppState>()(persist(
       currentChannelPage: state.currentChannelPage,
       selectedChannel: state.selectedChannel,
       captureSources: state.captureSources,
+      programScene: { ...state.programScene, enabled: false },
       slidePositions: state.slidePositions,
       selectedDisplayId: state.selectedDisplayId,
       displayAssignments: state.displayAssignments,

@@ -97,14 +97,29 @@ const api = {
   syncPreparedPowerPoints: (filePaths: string[]) =>
     ipcRenderer.invoke('sync-prepared-powerpoints', filePaths),
 
-  launchPowerPoint: (filePath: string, displayId?: number, startSlide?: number) =>
-    ipcRenderer.invoke('launch-powerpoint', filePath, displayId, startSlide),
+  launchPowerPoint: (
+    filePath: string,
+    displayId?: number,
+    startSlide?: number,
+    sceneLayout?: unknown,
+    deferPromotion?: boolean
+  ) => ipcRenderer.invoke(
+    'launch-powerpoint',
+    filePath,
+    displayId,
+    startSlide,
+    sceneLayout,
+    deferPromotion
+  ),
 
   powerpointCommand: (command: string, arg?: number | { stopAtBoundary?: boolean }) =>
     ipcRenderer.invoke('powerpoint-command', command, arg),
 
-  relocatePowerPoint: (displayId: number) =>
-    ipcRenderer.invoke('relocate-powerpoint', displayId),
+  relocatePowerPoint: (displayId: number, sceneLayout?: unknown) =>
+    ipcRenderer.invoke('relocate-powerpoint', displayId, sceneLayout),
+
+  setPowerPointZoom: (displayId: number, zoom: unknown) =>
+    ipcRenderer.invoke('set-powerpoint-zoom', displayId, zoom),
 
   generatePptxThumbnails: (filePath: string, keepPrepared?: boolean) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath, keepPrepared),

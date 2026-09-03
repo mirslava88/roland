@@ -18,6 +18,9 @@ interface PdfViewerProps {
   startSlide?: number
   requestId: number
   onReady?: () => void
+  transparentBackground?: boolean
+  roundedContent?: boolean
+  onAspectRatio?: (aspectRatio: number) => void
 }
 
 type RenderedPageFrame =
@@ -27,9 +30,19 @@ type RenderedPageFrame =
 const NATIVE_FAST_PATH_MS = 150
 const MAX_PDFJS_FRAME_CACHE_PIXELS = 24_000_000
 
-export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewerProps): JSX.Element {
+export function PdfViewer({
+  filePath,
+  startSlide,
+  requestId,
+  onReady,
+  transparentBackground = false,
+  roundedContent = false,
+  onAspectRatio
+}: PdfViewerProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const onAspectRatioRef = useRef(onAspectRatio)
+  onAspectRatioRef.current = onAspectRatio
   const [pdf, setPdf] = useState<pdfjsLib.PDFDocumentProxy | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [totalPages, setTotalPages] = useState(0)
@@ -455,6 +468,7 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
       const fitScale = Math.min(cw / pageMetrics.width, ch / pageMetrics.height)
       const cssWidth = Math.round(pageMetrics.width * fitScale)
       const cssHeight = Math.round(pageMetrics.height * fitScale)
+      onAspectRatioRef.current?.(pageMetrics.width / pageMetrics.height)
       const targetBufW = Math.round(cssWidth * dpr)
       const targetBufH = Math.round(cssHeight * dpr)
 
@@ -736,8 +750,14 @@ export function PdfViewer({ filePath, startSlide, requestId, onReady }: PdfViewe
   }, [currentPage, totalPages])
 
   return (
-    <div ref={containerRef} className="w-full h-full flex items-center justify-center bg-black">
-      <canvas ref={canvasRef} />
+    <div
+      ref={containerRef}
+      className={`w-full h-full flex items-center justify-center ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}
+    >
+      <canvas
+        ref={canvasRef}
+        style={{ borderRadius: roundedContent ? '1.25rem' : 0 }}
+      />
     </div>
   )
 }

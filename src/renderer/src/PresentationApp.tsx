@@ -22,6 +22,18 @@ import {
   type PdfLivePrewarmRequest
 } from './pdf-live-cache'
 import { releasePdfiumResources } from './pdfium-renderer'
+import {
+  DEFAULT_PROGRAM_SCENE_LAYOUT,
+  getProgramSceneRects,
+  type ProgramSceneCornerStyle,
+  type ProgramSceneParticipantSize,
+  type ProgramScenePlacement
+} from '../../shared/program-scene'
+import {
+  DEFAULT_CONTENT_ZOOM,
+  normalizeContentZoom,
+  type ContentZoomState
+} from '../../shared/content-zoom'
 
 interface ContentPayload {
   type: 'presentation' | 'pdf' | 'video' | 'capture' | 'backdrop' | 'other'
@@ -39,6 +51,26 @@ interface ContentPayload {
 interface ContentSlot {
   payload: ContentPayload | null
   revision: number
+}
+
+interface ProgramScenePayload {
+  active: boolean
+  capture: CaptureSourceConfig | null
+  backdropPath: string | null
+  placement: ProgramScenePlacement
+  participantSize: ProgramSceneParticipantSize
+  cornerStyle: ProgramSceneCornerStyle
+  contentAspectRatio: number | null
+}
+
+const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
+  active: false,
+  capture: null,
+  backdropPath: null,
+  placement: DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
+  participantSize: DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize,
+  cornerStyle: DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle,
+  contentAspectRatio: null
 }
 
 type SlotIndex = 0 | 1
@@ -169,6 +201,17 @@ export function PresentationApp(): JSX.Element {
   const [captureAudioSourceId, setCaptureAudioSourceId] = useState<string | null>(null)
   const [captureTakeRequest, setCaptureTakeRequest] = useState<CaptureTakeRequest | null>(null)
   const [broadcastTitles, setBroadcastTitles] = useState<BroadcastTitlesOutput>(HIDDEN_BROADCAST_TITLES)
+  const [programScene, setProgramScene] = useState<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
+  const [contentZoom, setContentZoom] = useState<ContentZoomState>(DEFAULT_CONTENT_ZOOM)
+  const [activeContentSuspended, setActiveContentSuspended] = useState(false)
+  const [slotAspectRatios, setSlotAspectRatios] = useState<[
+    { revision: number; value: number | null },
+    { revision: number; value: number | null }
+  ]>([
+    { revision: 0, value: null },
+    { revision: 0, value: null }
+  ])
+  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
   const broadcastTitlesRef = useRef(broadcastTitles)
   const slotsRef = useRef(slots)
   const activeLayerRef = useRef<ActiveLayer>(activeLayer)
@@ -611,6 +654,19 @@ export function PresentationApp(): JSX.Element {
       window.api.dbgLog(`PresApp: pending content cancelled take=${request.takeId}`)
     })
 
+    const unsubSuspendActive = window.api.on('suspend-active-content', () => {
+      setActiveContentSuspended(true)
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        window.api.sendToControl('presentation-content-suspended')
+        window.api.dbgLog('PresApp: active content suspended and painted for native takeover')
+      }))
+    })
+
+    const unsubResumeActive = window.api.on('resume-active-content', () => {
+      setActiveContentSuspended(false)
+      window.api.dbgLog('PresApp: suspended active content restored after native takeover failure')
+    })
+
     const unsubClearActive = window.api.on('clear-active-content', () => {
       postCommitGenerationRef.current += 1
       cancelPdfLivePrewarmJobs()
@@ -621,13 +677,20 @@ export function PresentationApp(): JSX.Element {
       activePayloadRef.current = null
       activeSlotRef.current = 0
       activeLayerRef.current = { kind: 'slot', slot: 0 }
+      setActiveContentSuspended(false)
       setActiveLayer({ kind: 'slot', slot: 0 })
       setSlots((previous) => [
         { payload: null, revision: previous[0].revision },
         { payload: null, revision: previous[1].revision }
       ])
-      window.api.sendToControl('presentation-content-cleared')
-      window.api.dbgLog('PresApp: active output cleared; document/media resources released; capture sources remain warm')
+      // Notify the controller only after React has committed the empty slots
+      // and Chromium has crossed a paint boundary. The transition cover can
+      // then be removed without exposing one last frame of the old document
+      // underneath a reduced PowerPoint window in the program scene.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        window.api.sendToControl('presentation-content-cleared')
+        window.api.dbgLog('PresApp: active output cleared and painted; document/media resources released; capture sources remain warm')
+      }))
     })
 
     window.api.signalReady()
@@ -639,9 +702,51 @@ export function PresentationApp(): JSX.Element {
       unsubCaptureAudioLive()
       unsubCommit()
       unsubCancel()
+      unsubSuspendActive()
+      unsubResumeActive()
       unsubClearActive()
     }
   }, [commitReadyCapture, loadContent])
+
+  useEffect(() => {
+    const updateViewport = (): void => setViewport({ width: window.innerWidth, height: window.innerHeight })
+    window.addEventListener('resize', updateViewport)
+    return () => window.removeEventListener('resize', updateViewport)
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.api.on('program-scene-update', (...args: unknown[]) => {
+      const raw = args[0] as Partial<ProgramScenePayload> | undefined
+      const capture = raw?.capture?.sourceId ? raw.capture : null
+      setProgramScene({
+        active: raw?.active === true && !!capture,
+        capture,
+        backdropPath: typeof raw?.backdropPath === 'string' ? raw.backdropPath : null,
+        placement: typeof raw?.placement === 'string'
+          ? raw.placement as ProgramScenePlacement
+          : DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
+        participantSize: raw?.participantSize === 'small' ||
+          raw?.participantSize === 'large' ||
+          raw?.participantSize === 'half'
+          ? raw.participantSize
+          : 'medium',
+        cornerStyle: raw?.cornerStyle === 'rounded' ? 'rounded' : 'sharp',
+        contentAspectRatio: typeof raw?.contentAspectRatio === 'number' && Number.isFinite(raw.contentAspectRatio)
+          ? raw.contentAspectRatio
+          : null
+      })
+    })
+    window.api.sendToControl('program-scene-ready')
+    return unsubscribe
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.api.on('content-zoom-update', (...args: unknown[]) => {
+      setContentZoom(normalizeContentZoom(args[0] as Partial<ContentZoomState> | undefined))
+    })
+    window.api.sendToControl('content-zoom-ready')
+    return unsubscribe
+  }, [])
 
   useEffect(() => {
     const unsubscribe = window.api.on('broadcast-titles-update', (...args: unknown[]) => {
@@ -652,6 +757,23 @@ export function PresentationApp(): JSX.Element {
     window.api.sendToControl('broadcast-titles-ready')
     return unsubscribe
   }, [])
+
+  const reportSlotAspectRatio = (
+    index: SlotIndex,
+    revision: number,
+    value: number
+  ): void => {
+    if (!Number.isFinite(value) || value < 0.2 || value > 5) return
+    setSlotAspectRatios((previous) => {
+      const current = previous[index]
+      if (current.revision === revision && current.value !== null && Math.abs(current.value - value) < 0.0001) {
+        return previous
+      }
+      const next = [...previous] as typeof previous
+      next[index] = { revision, value }
+      return next
+    })
+  }
 
   const renderSlot = (slot: ContentSlot, index: SlotIndex): JSX.Element | null => {
     const content = slot.payload
@@ -665,6 +787,9 @@ export function PresentationApp(): JSX.Element {
           startSlide={content.startSlide}
           requestId={slot.revision}
           onReady={onReady}
+          transparentBackground={programScene.active}
+          roundedContent={programScene.active && programScene.cornerStyle === 'rounded'}
+          onAspectRatio={(value) => reportSlotAspectRatio(index, slot.revision, value)}
         />
       )
     }
@@ -676,6 +801,9 @@ export function PresentationApp(): JSX.Element {
           startTime={content.startTime}
           autoplay={content.autoplay}
           onReady={onReady}
+          transparentBackground={programScene.active}
+          roundedContent={programScene.active && programScene.cornerStyle === 'rounded'}
+          onAspectRatio={(value) => reportSlotAspectRatio(index, slot.revision, value)}
         />
       )
     }
@@ -695,9 +823,16 @@ export function PresentationApp(): JSX.Element {
         <img
           src={mediaUrl(content.path)}
           alt={content.name}
-          className="w-full h-full object-contain select-none"
+          className="max-w-full max-h-full w-auto h-auto object-contain select-none"
+          style={{ borderRadius: programScene.active && programScene.cornerStyle === 'rounded' ? '1.25rem' : 0 }}
           draggable={false}
-          onLoad={onReady}
+          onLoad={(event) => {
+            const image = event.currentTarget
+            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+              reportSlotAspectRatio(index, slot.revision, image.naturalWidth / image.naturalHeight)
+            }
+            onReady()
+          }}
         />
       )
     }
@@ -715,28 +850,88 @@ export function PresentationApp(): JSX.Element {
 
   const activeCaptureId = activeLayer.kind === 'capture' ? activeLayer.sourceId : null
   const hasVisibleContent = activeLayer.kind === 'capture' || !!slots[activeLayer.slot].payload
+  const sceneActive = programScene.active && activeLayer.kind !== 'capture'
+  const activeSlotContent = activeLayer.kind === 'slot'
+    ? slots[activeLayer.slot].payload
+    : null
+  const activeSlotAspect = activeLayer.kind === 'slot' &&
+    slotAspectRatios[activeLayer.slot].revision === slots[activeLayer.slot].revision
+    ? slotAspectRatios[activeLayer.slot].value
+    : null
+  // activeFile in the control window changes at TAKE start, while the old
+  // Electron slot intentionally remains visible until the target is ready.
+  // Keep that outgoing PDF/video/image on its own measured aspect instead of
+  // prematurely applying the incoming PowerPoint ratio and visibly resizing
+  // the old frame during the transition.
+  const effectiveContentAspectRatio = activeSlotContent && activeSlotContent.type !== 'presentation'
+    ? activeSlotAspect
+    : programScene.contentAspectRatio ?? activeSlotAspect
+  const sceneRects = getProgramSceneRects(viewport.width, viewport.height, {
+    ...programScene,
+    contentAspectRatio: effectiveContentAspectRatio
+  })
+  const contentStyle = sceneActive
+    ? {
+        left: sceneRects.content.x,
+        top: sceneRects.content.y,
+        width: sceneRects.content.width,
+        height: sceneRects.content.height,
+        borderRadius: '0.5rem'
+      }
+    : { inset: 0 }
+  const participantStyle = {
+    left: sceneRects.participant.x,
+    top: sceneRects.participant.y,
+    width: sceneRects.participant.width,
+    height: sceneRects.participant.height
+  }
+  const sceneBorderRadius = programScene.cornerStyle === 'rounded' ? '1.25rem' : 0
+  const zoomTransform = contentZoom.enabled && contentZoom.scale > 1
+    ? `scale(${contentZoom.scale})`
+    : undefined
+  const zoomOrigin = `${contentZoom.originX * 100}% ${contentZoom.originY * 100}%`
 
   return (
     <div className="relative w-screen h-screen bg-black overflow-hidden">
+      {sceneActive && programScene.backdropPath && (
+        <img
+          src={mediaUrl(programScene.backdropPath)}
+          alt="Program backdrop"
+          className="absolute inset-0 z-0 w-full h-full object-cover select-none"
+          draggable={false}
+        />
+      )}
       {slots.map((slot, index) => {
         const isActive = activeLayer.kind === 'slot' && activeLayer.slot === index
         return (
           <div
             key={index}
-            className="absolute inset-0 flex items-center justify-center bg-black"
+            className={`absolute overflow-hidden shadow-2xl ${sceneActive ? 'bg-transparent' : 'bg-black'}`}
             style={{
-              opacity: isActive ? 1 : 0,
+              ...contentStyle,
+              opacity: isActive && !activeContentSuspended ? 1 : 0,
               zIndex: isActive ? 1 : 0,
-              pointerEvents: isActive ? 'auto' : 'none'
+              pointerEvents: isActive ? 'auto' : 'none',
+              borderRadius: sceneActive ? sceneBorderRadius : 0
             }}
           >
-            {renderSlot(slot, index as SlotIndex)}
+            <div
+              className="flex h-full w-full items-center justify-center"
+              style={{
+                transform: isActive ? zoomTransform : undefined,
+                transformOrigin: zoomOrigin
+              }}
+            >
+              {renderSlot(slot, index as SlotIndex)}
+            </div>
           </div>
         )
       })}
       <CaptureHub
         activeSourceId={activeCaptureId}
         audioSourceId={captureAudioSourceId}
+        sceneSourceId={sceneActive ? programScene.capture?.sourceId ?? null : null}
+        sceneStyle={{ ...participantStyle, borderRadius: sceneBorderRadius }}
         takeRequest={captureTakeRequest}
         onTakeReady={prepareCaptureTake}
         onTakeError={failCaptureTake}
@@ -747,7 +942,22 @@ export function PresentationApp(): JSX.Element {
           titles={broadcastTitles}
         />
       )}
-      {!hasVisibleContent && (
+      {sceneActive && (
+        <div
+          className="absolute overflow-hidden pointer-events-none"
+          style={{
+            ...participantStyle,
+            zIndex: 4,
+            borderRadius: sceneBorderRadius
+          }}
+        >
+          <BroadcastTitlesOverlay
+            key={broadcastTitles.sourceIdentity || 'no-program-scene-title-source'}
+            titles={broadcastTitles}
+          />
+        </div>
+      )}
+      {!hasVisibleContent && !sceneActive && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-700 text-lg select-none">
           Waiting for content...
         </div>

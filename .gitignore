@@ -32,6 +32,7 @@ scripts/_test-*.ps1
 /tmp/
 /outputs/
 /*.png
+/prezcam.jpg
 *.pdmconfig
 *.dmp
 *.reg

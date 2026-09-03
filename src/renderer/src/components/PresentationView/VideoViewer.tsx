@@ -6,12 +6,25 @@ interface VideoViewerProps {
   startTime?: number
   autoplay?: boolean
   onReady?: () => void
+  transparentBackground?: boolean
+  roundedContent?: boolean
+  onAspectRatio?: (aspectRatio: number) => void
 }
 
-export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady }: VideoViewerProps): JSX.Element {
+export function VideoViewer({
+  filePath,
+  startTime = 0,
+  autoplay = true,
+  onReady,
+  transparentBackground = false,
+  roundedContent = false,
+  onAspectRatio
+}: VideoViewerProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
   const onReadyRef = useRef(onReady)
+  const onAspectRatioRef = useRef(onAspectRatio)
   onReadyRef.current = onReady
+  onAspectRatioRef.current = onAspectRatio
   const [isPlaying, setIsPlaying] = useState(false)
 
   useEffect(() => {
@@ -104,6 +117,9 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
     }
 
     const handleLoadedMetadata = (): void => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        onAspectRatioRef.current?.(video.videoWidth / video.videoHeight)
+      }
       const duration = Number.isFinite(video.duration) ? video.duration : 0
       const resumeAt = duration > 0
         ? Math.min(Math.max(startTime, 0), Math.max(0, duration - 0.05))
@@ -335,10 +351,11 @@ export function VideoViewer({ filePath, startTime = 0, autoplay = true, onReady 
   }
 
   return (
-    <div className="w-full h-full flex items-center justify-center bg-black">
+    <div className={`w-full h-full flex items-center justify-center ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}>
       <video
         ref={videoRef}
-        className="w-full h-full object-contain"
+        className="max-w-full max-h-full w-auto h-auto object-contain bg-transparent"
+        style={{ borderRadius: roundedContent ? '1.25rem' : 0 }}
         onEnded={handleVideoEnded}
         preload="auto"
         playsInline

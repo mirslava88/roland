@@ -18,6 +18,12 @@ import {
   type FilterType,
   type InformationMediaConfig
 } from './stores/useAppStore'
+import {
+  DEFAULT_PROGRAM_SCENE_LAYOUT,
+  type ProgramSceneCornerStyle,
+  type ProgramSceneParticipantSize,
+  type ProgramScenePlacement
+} from '../../shared/program-scene'
 
 const CONFIG_FORMAT = 'pdm-configuration'
 const CONFIG_SCHEMA_VERSION = 1
@@ -75,6 +81,13 @@ interface PdmConfigV1 {
   backdropImage: string | null
   informationMedia: InformationMediaConfig | null
   captureSources: FileEntry[]
+  programScene: {
+    enabled: false
+    captureSourceId: string | null
+    placement: ProgramScenePlacement
+    participantSize: ProgramSceneParticipantSize
+    cornerStyle: ProgramSceneCornerStyle
+  }
   slidePositions: Record<string, number>
   input: {
     globalHookEnabled: boolean
@@ -185,6 +198,7 @@ function safeFileEntry(value: unknown): FileEntry | null {
     size: safeNumber(value.size, 0, 0, Number.MAX_SAFE_INTEGER),
     isImage: value.isImage === true || undefined,
     isAudio: value.isAudio === true || undefined,
+    sceneOnly: value.sceneOnly === true || undefined,
     capture
   }
 }
@@ -524,6 +538,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
     backdropImage: state.backdropImage,
     informationMedia: serializableInformationMedia(state.informationMedia),
     captureSources,
+    programScene: { ...state.programScene, enabled: false },
     slidePositions,
     input: {
       globalHookEnabled: state.globalHookEnabled,
@@ -683,6 +698,24 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   const backdropImage = safeString(raw.backdropImage)
   const restoredBackdrop = backdropImage && pathExists(backdropImage, validation) ? backdropImage : null
   if (backdropImage && !restoredBackdrop) warnMissing(warnings, 'Подложка', backdropImage)
+
+  const rawProgramScene = isRecord(raw.programScene) ? raw.programScene : {}
+  const sceneCaptureSourceId = safeString(rawProgramScene.captureSourceId, 256)
+  const scenePlacement = [
+    'right-top', 'right-center', 'right-bottom',
+    'left-top', 'left-center', 'left-bottom'
+  ].includes(String(rawProgramScene.placement))
+    ? rawProgramScene.placement as ProgramScenePlacement
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.placement
+  const sceneParticipantSize = ['small', 'medium', 'large', 'half'].includes(String(rawProgramScene.participantSize))
+    ? rawProgramScene.participantSize as ProgramSceneParticipantSize
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize
+  const sceneCornerStyle = rawProgramScene.cornerStyle === 'rounded'
+    ? 'rounded'
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle
+  const restoredSceneSourceId = sceneCaptureSourceId && restoredCaptureSources.has(sceneCaptureSourceId)
+    ? sceneCaptureSourceId
+    : null
 
   const rawPositions = isRecord(raw.slidePositions) ? raw.slidePositions : {}
   const slidePositions: Record<string, number> = {}
@@ -964,6 +997,13 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     selectedDisplayId: displays.selectedDisplayId,
     informationMedia,
     backdropImage: restoredBackdrop,
+    programScene: {
+      enabled: false,
+      captureSourceId: restoredSceneSourceId,
+      placement: scenePlacement,
+      participantSize: sceneParticipantSize,
+      cornerStyle: sceneCornerStyle
+    },
     globalHookEnabled: actualGlobalHook,
     channelBoundaryNavigationEnabled: safeBoolean(rawInput.channelBoundaryNavigationEnabled, false),
     overlayState: { kind: 'hidden' },

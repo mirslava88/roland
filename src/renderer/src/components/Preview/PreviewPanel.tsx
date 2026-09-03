@@ -25,6 +25,7 @@ import {
   type PdfLivePrewarmRequest
 } from '../../pdf-live-cache'
 import { acquireOutputTransition } from '../../output-transition-lock'
+import { DEFAULT_CONTENT_ZOOM } from '../../../../shared/content-zoom'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -268,7 +269,8 @@ export function PreviewPanel(): JSX.Element {
     clearSlidePosition,
     addChannelPage, removeChannelPage, setCurrentChannelPage, setChannelGridSize,
     pptxThumbnailsMap, pptxSlidesMap, pptxCacheStatuses, setPptxCacheStatuses,
-    displays, selectedDisplayId, setOverlayState
+    displays, selectedDisplayId, setOverlayState,
+    contentZoom, setContentZoom
   } = useAppStore()
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
@@ -309,6 +311,26 @@ export function PreviewPanel(): JSX.Element {
     displays[0]
   const pdfTargetSize = programDisplay ? getPdfLiveTargetSize(programDisplay) : null
   const pdfTargetKey = pdfTargetSize ? `${pdfTargetSize.width}x${pdfTargetSize.height}` : 'none'
+
+  useEffect(() => {
+    window.api.sendToPresentation('content-zoom-update', contentZoom)
+    if (useAppStore.getState().activeFile?.type !== 'presentation') return
+    const timer = setTimeout(() => {
+      const state = useAppStore.getState()
+      if (state.activeFile?.type !== 'presentation') return
+      const target = state.displays.find((display) => display.id === state.selectedDisplayId) ||
+        state.displays.find((display) => !display.isPrimary)
+      if (!target) return
+      void window.api.setPowerPointZoom(target.id, state.contentZoom).catch((error: unknown) => {
+        window.api.dbgLog(`PowerPoint magnifier update failed: ${String(error)}`)
+      })
+    }, 45)
+    return () => clearTimeout(timer)
+  }, [contentZoom])
+
+  useEffect(() => window.api.on('content-zoom-ready', () => {
+    window.api.sendToPresentation('content-zoom-update', useAppStore.getState().contentZoom)
+  }), [])
 
   useEffect(() => {
     const activePaths = new Set(pptxChannelPaths)
@@ -659,6 +681,9 @@ export function PreviewPanel(): JSX.Element {
     const freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
     if (!file) return
+    if (freshState.contentZoom.enabled) {
+      freshState.setContentZoom(DEFAULT_CONTENT_ZOOM)
+    }
     if (freshState.overlayState.kind === 'blocked') {
       setTakeProgress({
         channelId: ch,
@@ -1157,6 +1182,21 @@ export function PreviewPanel(): JSX.Element {
         channel.file.type === 'capture'
       )
     const useSeamlessLayerSwitch = useLiveLayerSwitch || useBufferedElectronSwitch
+    const hasReadyProgramScene = freshState.programScene.enabled &&
+      !!freshState.backdropImage &&
+      freshState.captureSources.some(
+        (entry) => entry.capture?.sourceId === freshState.programScene.captureSourceId
+      )
+    // In the program scene PowerPoint only occupies the presentation pane.
+    // Stage it below the live Chromium output, then suspend just the outgoing
+    // document before promoting the already-painted native window. The scene
+    // backdrop, camera and titles stay live and no bitmap cover is introduced.
+    const stageProgramSceneElectronToPptx =
+      hasReadyProgramScene &&
+      channel.file.type === 'presentation' &&
+      (prevActiveFile?.type === 'pdf' ||
+        prevActiveFile?.type === 'video' ||
+        prevActiveFile?.type === 'capture')
 
     if (useSeamlessLayerSwitch && hadPinnedOverlay) {
       await window.api.hideOverlay()
@@ -1330,6 +1370,44 @@ export function PreviewPanel(): JSX.Element {
     setLiveChannel(ch)
 
     if (channel.file.type === 'presentation') {
+      const selectedSceneCapture = freshState.captureSources.find(
+        (entry) => entry.capture?.sourceId === freshState.programScene.captureSourceId
+      )?.capture ?? null
+      const programSceneActive = freshState.programScene.enabled &&
+        !!freshState.backdropImage &&
+        !!selectedSceneCapture
+      const programSceneContentAspectRatio = freshState.pptxAspectRatios[channel.file.path] ?? null
+      if (programSceneActive) {
+        await window.api.openPresentationWindow(freshState.selectedDisplayId ?? undefined, true)
+        setPresentationWindowOpen(true)
+        window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        window.api.sendToPresentation('program-scene-update', {
+          active: true,
+          capture: selectedSceneCapture,
+          backdropPath: freshState.backdropImage,
+          placement: freshState.programScene.placement,
+          participantSize: freshState.programScene.participantSize,
+          cornerStyle: freshState.programScene.cornerStyle,
+          contentAspectRatio: programSceneContentAspectRatio
+        })
+        // Keep the outgoing PDF/video visible in the program-scene content
+        // pane until native PowerPoint has painted and reached its target
+        // slide. Clearing it here exposed the backdrop for the whole (possibly
+        // slow) Office startup instead of making the TAKE visually atomic.
+        const targetDisplay = freshState.displays.find(
+          (display) => !display.isPrimary && display.id === freshState.selectedDisplayId
+        ) || freshState.displays.find((display) => !display.isPrimary)
+        if (targetDisplay) {
+          // A reduced PowerPoint slideshow no longer covers the Windows
+          // taskbar. Start the comparatively slow shell operation in parallel
+          // with Office startup; waiting for a fresh PowerShell process here
+          // added more than a second to every PDF -> PPTX TAKE.
+          void window.api.hideTaskbar(targetDisplay.bounds).catch((error) => {
+            log(`pre-launch taskbar hide failed: ${String(error)}`)
+          })
+        }
+        log('program scene underlay prepared; outgoing content retained until PowerPoint is ready')
+      }
       window.api.setActiveContentType('presentation')
       // Reset goto-collapse state — старая chain от навигации предыдущего
       // PPTX может быть inflight и блокировать новые goto на новом файле
@@ -1377,7 +1455,17 @@ export function PreviewPanel(): JSX.Element {
         result = await window.api.launchPowerPoint(
           pptxPath,
           freshState.selectedDisplayId ?? undefined,
-          targetSlide
+          targetSlide,
+          programSceneActive
+            ? {
+                enabled: true,
+                placement: freshState.programScene.placement,
+                participantSize: freshState.programScene.participantSize,
+                cornerStyle: freshState.programScene.cornerStyle,
+                contentAspectRatio: programSceneContentAspectRatio
+              }
+            : undefined,
+          stageProgramSceneElectronToPptx
         )
       } finally {
         stopListeningForVisible()
@@ -1486,12 +1574,75 @@ export function PreviewPanel(): JSX.Element {
         const { selectedDisplayId: sid, displays: disps } = useAppStore.getState()
         const td = disps.find((d) => !d.isPrimary && d.id === sid) ||
           disps.find((d) => !d.isPrimary)
-        if (td) void window.api.hideTaskbar(td.bounds)
-      } catch { /* ignore */ }
+        // The program-scene branch already started this operation before the
+        // PowerPoint launch, giving it the whole Office startup interval to
+        // finish. Do not launch and await a duplicate shell process now.
+        if (td && !programSceneActive) await window.api.hideTaskbar(td.bounds)
+      } catch (error) {
+        log(`post-launch taskbar hide failed: ${String(error)}`)
+      }
 
       const slideAfterLaunch = useAppStore.getState().currentSlide
       const userNavigatedDuringLaunch = slideAfterLaunch !== slideBeforeLaunch
       log(`userNavigatedDuringLaunch=${userNavigatedDuringLaunch} (${slideBeforeLaunch}→${slideAfterLaunch})`)
+
+      if (stageProgramSceneElectronToPptx) {
+        const contentSuspended = new Promise<boolean>((resolve) => {
+          let settled = false
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          let unsubscribe = (): void => {}
+          const finish = (confirmed: boolean): void => {
+            if (settled) return
+            settled = true
+            if (timeout) clearTimeout(timeout)
+            unsubscribe()
+            resolve(confirmed)
+          }
+          unsubscribe = window.api.on('presentation-content-suspended', () => finish(true))
+          timeout = setTimeout(() => finish(false), 1_000)
+        })
+        window.api.sendToPresentation('suspend-active-content')
+        const suspendConfirmed = await contentSuspended
+        const currentDisplayState = useAppStore.getState()
+        const targetDisplay = currentDisplayState.displays.find(
+          (display) => display.id === currentDisplayState.selectedDisplayId
+        ) || currentDisplayState.displays.find((display) => !display.isPrimary)
+        const promotion = suspendConfirmed && targetDisplay
+          ? await window.api.relocatePowerPoint(targetDisplay.id, {
+              enabled: true,
+              placement: freshState.programScene.placement,
+              participantSize: freshState.programScene.participantSize,
+              cornerStyle: freshState.programScene.cornerStyle,
+              contentAspectRatio: programSceneContentAspectRatio
+            })
+          : {
+              success: false,
+              error: suspendConfirmed
+                ? 'Эфирный дисплей больше не подключён.'
+                : 'Эфирное окно не подтвердило переключение.'
+            }
+        if (!promotion.success) {
+          window.api.sendToPresentation('resume-active-content')
+          hasPowerPointStartedRef.current = false
+          const stagedClosed = await window.api.powerpointCommand('close').catch(() => ({ success: false }))
+          useAppStore.setState({
+            activeFile: prevActiveFile,
+            liveChannel: freshState.liveChannel,
+            currentSlide: freshState.currentSlide,
+            totalSlides: freshState.totalSlides,
+            isPlaying: freshState.isPlaying
+          })
+          if (prevActiveFile) window.api.setActiveContentType(prevActiveFile.type)
+          log(`staged PowerPoint promotion failed; close=${stagedClosed.success} error=${promotion.error || '-'}`)
+          setTakeProgress({
+            channelId: ch,
+            message: promotion.error || 'Не удалось безопасно показать PowerPoint.'
+          })
+          await new Promise((resolve) => setTimeout(resolve, 3500))
+          return
+        }
+        log('program-scene hand-off complete: outgoing content suspended, warmed PowerPoint promoted')
+      }
 
       // NOW close the Electron presentation window — PowerPoint slideshow is already visible
       // ВСЕГДА закрываем при переходе на PPTX (даже если флаг isPresentationWindowOpen
@@ -1508,7 +1659,25 @@ export function PreviewPanel(): JSX.Element {
         // PowerPoint is fully painted and still covered. Drop the old
         // PDF/video/capture layer now; keeping the empty renderer warm retains
         // fast window activation without retaining the old document/decoder.
-        if (!useLiveLayerSwitch) {
+        if (programSceneActive) {
+          const oldContentCleared = new Promise<boolean>((resolve) => {
+            let settled = false
+            let timeout: ReturnType<typeof setTimeout> | undefined
+            let unsubscribe = (): void => {}
+            const finish = (confirmed: boolean): void => {
+              if (settled) return
+              settled = true
+              if (timeout) clearTimeout(timeout)
+              unsubscribe()
+              resolve(confirmed)
+            }
+            unsubscribe = window.api.on('presentation-content-cleared', () => finish(true))
+            timeout = setTimeout(() => finish(false), 1_000)
+          })
+          window.api.sendToPresentation('clear-active-content')
+          const clearConfirmed = await oldContentCleared
+          log(`presentation output retained as program-scene backdrop under PowerPoint; old content clear=${clearConfirmed ? 'painted' : 'timeout'}`)
+        } else if (!useLiveLayerSwitch) {
           await window.api.closePresentationWindow()
           setPresentationWindowOpen(false)
           log('empty presentation output parked at opacity=0 under ready PowerPoint')
@@ -1574,6 +1743,7 @@ export function PreviewPanel(): JSX.Element {
       }
       clearCommittedCaptureTitleSource('PowerPoint takeover')
       const shouldPinPowerPointTarget =
+        !programSceneActive &&
         !useSeamlessLayerSwitch &&
         (prevActiveFile?.type === 'pdf' ||
           prevActiveFile?.type === 'video' ||
@@ -1597,11 +1767,15 @@ export function PreviewPanel(): JSX.Element {
           log('target snapshot unavailable: live PowerPoint revealed')
         }
       } else {
-        await window.api.hideOverlay()
+        if (!stageProgramSceneElectronToPptx) {
+          await window.api.hideOverlay()
+        }
         setOverlayState({ kind: 'hidden' })
-        log(useLiveLayerSwitch
-          ? 'live-layer switch complete: warmed PowerPoint promoted once'
-          : 'direct reveal: live PowerPoint ready')
+        log(stageProgramSceneElectronToPptx
+          ? 'staged program-scene switch complete without bitmap overlay'
+          : useLiveLayerSwitch
+            ? 'live-layer switch complete: warmed PowerPoint promoted once'
+            : 'direct reveal: live PowerPoint ready')
       }
       // Channel assignment starts preview/full-slide preparation immediately.
       // Do not launch a second export after TAKE: besides being redundant, it
@@ -2669,6 +2843,17 @@ function ChannelPanel({
   } | null>(null)
   const captionInputRef = useRef<HTMLInputElement>(null)
   const cancelCaptionOnBlurRef = useRef(false)
+  const zoomDragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    originX: number
+    originY: number
+    viewportWidth: number
+    viewportHeight: number
+    scale: number
+  } | null>(null)
+  const [isZoomDragging, setIsZoomDragging] = useState(false)
 
   // Keep input synced with channel.slide when not being edited
   useEffect(() => {
@@ -2753,12 +2938,25 @@ function ChannelPanel({
     activeFile: storeActiveFile,
     broadcastTitles,
     captureTitlesOutputs,
+    captureSources,
+    contentZoom,
+    programScene,
     setBroadcastTitles,
-    setCaptureTitlesOutput
+    setCaptureTitlesOutput,
+    setContentZoom
   } = useAppStore()
   const channelSourceIdentity = channel.file?.type === 'capture'
     ? captureSourceIdentity(channel.file.capture)
     : null
+  const sceneCaptureSourceIdentity = programScene.enabled && isLive
+    ? captureSourceIdentity(captureSources.find(
+        (entry) => entry.capture?.sourceId === programScene.captureSourceId
+      )?.capture)
+    : null
+  // A regular PDF/PPTX/video channel has no capture identity of its own, but
+  // while it is live in the program scene its titles belong to the participant
+  // source selected in "Картинка в картинке".
+  const titlesContextSourceIdentity = channelSourceIdentity || sceneCaptureSourceIdentity
   const channelTitlesOutput = channelSourceIdentity
     ? captureTitlesOutputs[channelSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
@@ -2808,19 +3006,19 @@ function ChannelPanel({
   }
 
   useEffect(() => {
-    if (channel.file?.type !== 'capture') {
+    if (!titlesContextSourceIdentity) {
       setTitlesMenu(null)
     }
-  }, [channel.file])
+  }, [titlesContextSourceIdentity])
 
   useEffect(() => {
     setTitlesMenu((current) => (
-      current && current.sourceIdentity !== channelSourceIdentity ? null : current
+      current && current.sourceIdentity !== titlesContextSourceIdentity ? null : current
     ))
-  }, [channelSourceIdentity])
+  }, [titlesContextSourceIdentity])
 
   const handleTitlesContextMenu = (event: React.MouseEvent<HTMLDivElement>): void => {
-    if (channel.file?.type !== 'capture' || !channelSourceIdentity) return
+    if (!titlesContextSourceIdentity) return
     event.preventDefault()
     event.stopPropagation()
     const menuWidth = 310
@@ -2828,7 +3026,7 @@ function ChannelPanel({
     setTitlesMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
-      sourceIdentity: channelSourceIdentity
+      sourceIdentity: titlesContextSourceIdentity
     })
   }
 
@@ -2957,14 +3155,105 @@ function ChannelPanel({
       </div>
 
       {/* Preview area */}
-      <div className="relative flex-1 flex items-center justify-center overflow-hidden bg-black/40">
+      <div
+        className={`relative flex-1 flex items-center justify-center overflow-hidden bg-black/40 ${
+          isLive && contentZoom.enabled &&
+          (channel.file?.type === 'presentation' || channel.file?.type === 'pdf')
+            ? contentZoom.scale > 1
+              ? isZoomDragging ? 'cursor-grabbing' : 'cursor-grab'
+              : 'cursor-zoom-in'
+            : ''
+        }`}
+        style={isLive && contentZoom.enabled ? { touchAction: 'none' } : undefined}
+        onClick={(event) => {
+          if (isLive && contentZoom.enabled) event.stopPropagation()
+        }}
+        onDoubleClick={(event) => {
+          if (isLive && contentZoom.enabled) event.stopPropagation()
+        }}
+        onPointerDown={(event) => {
+          if (
+            event.button !== 0 ||
+            !isLive ||
+            !contentZoom.enabled ||
+            contentZoom.scale <= 1 ||
+            (channel.file?.type !== 'presentation' && channel.file?.type !== 'pdf')
+          ) return
+          event.preventDefault()
+          event.stopPropagation()
+          const rect = event.currentTarget.getBoundingClientRect()
+          zoomDragRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: contentZoom.originX,
+            originY: contentZoom.originY,
+            viewportWidth: Math.max(1, rect.width),
+            viewportHeight: Math.max(1, rect.height),
+            scale: contentZoom.scale
+          }
+          event.currentTarget.setPointerCapture(event.pointerId)
+          setIsZoomDragging(true)
+        }}
+        onPointerMove={(event) => {
+          const drag = zoomDragRef.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          event.preventDefault()
+          event.stopPropagation()
+          const overflowScale = Math.max(0.001, drag.scale - 1)
+          setContentZoom({
+            originX: drag.originX - (event.clientX - drag.startX) / (drag.viewportWidth * overflowScale),
+            originY: drag.originY - (event.clientY - drag.startY) / (drag.viewportHeight * overflowScale)
+          })
+        }}
+        onPointerUp={(event) => {
+          const drag = zoomDragRef.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          event.preventDefault()
+          event.stopPropagation()
+          zoomDragRef.current = null
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+          setIsZoomDragging(false)
+        }}
+        onPointerCancel={(event) => {
+          const drag = zoomDragRef.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          zoomDragRef.current = null
+          setIsZoomDragging(false)
+        }}
+        onWheel={(event) => {
+          if (
+            !isLive ||
+            !contentZoom.enabled ||
+            (channel.file?.type !== 'presentation' && channel.file?.type !== 'pdf')
+          ) return
+          event.preventDefault()
+          event.stopPropagation()
+          const rect = event.currentTarget.getBoundingClientRect()
+          const originX = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)))
+          const originY = Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)))
+          const direction = event.deltaY < 0 ? 1 : -1
+          const scale = Math.max(1, Math.min(3, Math.round((contentZoom.scale + direction * 0.25) * 4) / 4))
+          setContentZoom({ scale, originX, originY })
+        }}
+      >
         {channel.file ? (
-          <SlideRenderer
-            file={channel.file}
-            slideNum={channel.slide}
-            pptxThumbnails={pptxThumbnails}
-            onTotalSlides={onSetTotalSlides}
-          />
+          <div
+            className="flex h-full w-full items-center justify-center"
+            style={isLive && contentZoom.enabled ? {
+              transform: `scale(${contentZoom.scale})`,
+              transformOrigin: `${contentZoom.originX * 100}% ${contentZoom.originY * 100}%`
+            } : undefined}
+          >
+            <SlideRenderer
+              file={channel.file}
+              slideNum={channel.slide}
+              pptxThumbnails={pptxThumbnails}
+              onTotalSlides={onSetTotalSlides}
+            />
+          </div>
         ) : (
           <div className={`${compact ? 'text-[10px] p-1' : 'text-xs p-4'} text-gray-600 text-center select-none`}>
             <div className={`${compact ? 'text-lg mb-0.5' : 'text-2xl mb-2'} opacity-30`}>📥</div>
@@ -2976,6 +3265,33 @@ function ChannelPanel({
             key={channelSourceIdentity || 'no-channel-title-source'}
             titles={channelTitlesOutput}
           />
+        )}
+        {isLive && (channel.file?.type === 'presentation' || channel.file?.type === 'pdf') && (
+          <button
+            type="button"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation()
+              setContentZoom(!contentZoom.enabled
+                ? { enabled: true, scale: 1, originX: 0.5, originY: 0.5 }
+                : contentZoom.scale > 1
+                  ? { enabled: true, scale: 1, originX: 0.5, originY: 0.5 }
+                  : DEFAULT_CONTENT_ZOOM)
+            }}
+            onDoubleClick={(event) => event.stopPropagation()}
+            className={`absolute left-2 top-2 z-20 rounded-md border px-2 py-1 text-[9px] font-semibold shadow-lg ${
+              contentZoom.enabled
+                ? 'border-cyan-400 bg-cyan-700 text-white'
+                : 'border-gray-600 bg-gray-900/85 text-gray-300 hover:bg-gray-700'
+            }`}
+            title={contentZoom.enabled
+              ? contentZoom.scale > 1
+                ? 'Крутите колесо над нужной точкой. Зажмите левую кнопку мыши и двигайте документ. Нажмите, чтобы вернуться к 100%, не выключая лупу.'
+                : 'Лупа включена. Крутите колесо над нужной точкой для увеличения. Нажмите, чтобы выключить лупу.'
+              : 'Включить увеличение презентации колесом мыши'}
+          >
+            🔍 {contentZoom.enabled ? `${Math.round(contentZoom.scale * 100)}%` : 'Лупа'}
+          </button>
         )}
         {isTaking && openingMessage && (
           <div
@@ -3260,7 +3576,7 @@ function ChannelPanel({
   )
 }
 
-function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
+export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
   file: FileEntry
   slideNum: number
   pptxThumbnails: string[]

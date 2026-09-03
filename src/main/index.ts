@@ -20,6 +20,7 @@ import { pathToFileURL } from 'url'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
+import { getPowerPointNativePlacement } from './program-scene-state'
 import {
   hwndFromCaptureSourceId,
   isSameNativeWindow,
@@ -2801,13 +2802,13 @@ function createWindows(): void {
         )
       }
       presentationDisplayId = latestPresentationTarget.id
-      const physicalBounds = screen.dipToScreenRect(null, latestPresentationTarget.bounds)
+      const placement = getPowerPointNativePlacement(latestPresentationTarget)
       try {
-        const result = await pptDaemon.send('relocate', { bounds: physicalBounds }, 5000)
+        const result = await pptDaemon.send('relocate', placement, 5000)
         diagnosticLog(
           'display',
           `PowerPoint metrics relocate display=${latestPresentationTarget.id} ` +
-          `physical=${JSON.stringify(physicalBounds)} ok=${result.ok}`
+          `physical=${JSON.stringify(placement.bounds)} ok=${result.ok}`
         )
       } catch (error) {
         diagnosticLog('display', `PowerPoint metrics relocate failed ${formatDiagnosticError(error)}`)

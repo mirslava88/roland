@@ -7,12 +7,14 @@ import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
 import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
 import { BroadcastTitles } from '../BroadcastTitles/BroadcastTitles'
+import { ProgramSceneModal } from '../ProgramScene/ProgramSceneModal'
 import { acquireOutputTransition } from '../../output-transition-lock'
 
 export function Toolbar(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [auxiliaryDisplaysOpen, setAuxiliaryDisplaysOpen] = useState(false)
   const [outputCloseInFlight, setOutputCloseInFlight] = useState(false)
+  const [programSceneOpen, setProgramSceneOpen] = useState(false)
   const outputCloseInFlightRef = useRef(false)
   const {
     isPresentationWindowOpen,
@@ -33,6 +35,9 @@ export function Toolbar(): JSX.Element {
     pptxCacheStatuses,
     setOverlayState
   } = useAppStore()
+  const programScene = useAppStore((state) => state.programScene)
+  const captureSources = useAppStore((state) => state.captureSources)
+  const setProgramScene = useAppStore((state) => state.setProgramScene)
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 
@@ -54,6 +59,21 @@ export function Toolbar(): JSX.Element {
     .map((display) => displayAssignments[String(display.id)] || 'off')
   const hasAdditionalScreenOutput = assignedModes.some((mode) => mode !== 'program') ||
     assignedModes.filter((mode) => mode === 'program').length > 1
+  const programSceneReady = Boolean(backdropImage) && captureSources.some(
+    (entry) => entry.capture?.sourceId === programScene.captureSourceId
+  )
+
+  const handleQuickProgramSceneToggle = (): void => {
+    if (programScene.enabled) {
+      setProgramScene({ enabled: false })
+      return
+    }
+    if (!programSceneReady) {
+      setProgramSceneOpen(true)
+      return
+    }
+    setProgramScene({ enabled: true })
+  }
 
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
@@ -209,8 +229,9 @@ export function Toolbar(): JSX.Element {
 
   const handleSelectBackdrop = async (): Promise<void> => {
     if (backdropImage) {
-      // The same button is a real toggle. While material is on air, only
-      // remove its future fallback; do not interrupt the current TAKE.
+      // The same button is a real toggle. A program scene cannot exist without
+      // its full-screen backdrop, so disable that layout before removing it.
+      useAppStore.getState().setProgramScene({ enabled: false })
       setBackdropImage(null)
       if (!activeFile) {
         window.api.sendToPresentation('clear-active-content')
@@ -294,6 +315,41 @@ export function Toolbar(): JSX.Element {
         ⇆ Авто: {channelBoundaryNavigationEnabled ? 'Вкл' : 'Выкл'}
       </button>
 
+      <div
+        className="flex shrink-0 items-stretch"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        <button
+          onClick={handleQuickProgramSceneToggle}
+          className={`whitespace-nowrap rounded-l-lg border px-2 py-1 text-[11px] font-medium transition-colors ${
+            programScene.enabled
+              ? 'border-cyan-500 bg-cyan-600/80 text-white hover:bg-cyan-600'
+              : programSceneReady
+                ? 'border-gray-700 bg-surface-100 text-gray-300 hover:bg-gray-700'
+                : 'border-gray-700 bg-surface-100 text-gray-500 hover:bg-gray-700 hover:text-gray-300'
+          }`}
+          title={programScene.enabled
+            ? 'Выключить режим «Картинка в картинке»'
+            : programSceneReady
+              ? 'Включить режим «Картинка в картинке» с сохранёнными настройками'
+              : 'Сначала настройте фон и внешний источник'}
+        >
+          ▣ Картинка в картинке: {programScene.enabled ? 'Вкл' : 'Выкл'}
+        </button>
+        <button
+          onClick={() => setProgramSceneOpen(true)}
+          className={`rounded-r-lg border border-l-0 px-1.5 py-1 text-[12px] transition-colors ${
+            programScene.enabled
+              ? 'border-cyan-500 bg-cyan-700/80 text-white hover:bg-cyan-600'
+              : 'border-gray-700 bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'
+          }`}
+          title="Настройки режима «Картинка в картинке»"
+          aria-label="Настройки режима «Картинка в картинке»"
+        >
+          ⚙
+        </button>
+      </div>
+
       <button
         onClick={handleSelectBackdrop}
         className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
@@ -350,6 +406,7 @@ export function Toolbar(): JSX.Element {
       {auxiliaryDisplaysOpen && (
         <AuxiliaryDisplaysModal onClose={() => setAuxiliaryDisplaysOpen(false)} />
       )}
+      {programSceneOpen && <ProgramSceneModal onClose={() => setProgramSceneOpen(false)} />}
     </div>
   )
 }

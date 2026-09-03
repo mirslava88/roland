@@ -67,10 +67,23 @@ export function BroadcastTitles(): JSX.Element {
       ? state.channels[state.selectedChannel]?.file?.capture
       : undefined
     const activeCapture = state.activeFile?.type === 'capture' ? state.activeFile.capture : undefined
+    const sceneSupportsTitles = state.programScene.enabled && !!state.backdropImage && !!state.activeFile && (
+      state.activeFile.type === 'presentation' ||
+      state.activeFile.type === 'pdf' ||
+      state.activeFile.type === 'video' ||
+      (state.activeFile.type === 'other' && state.activeFile.isImage === true)
+    )
+    const sceneCapture = sceneSupportsTitles
+      ? state.captureSources.find(
+        (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
+      )?.capture
+      : undefined
     const informationCapture = state.informationMedia?.type === 'capture'
       ? state.informationMedia.capture
       : undefined
-    const sourceIdentity = captureSourceIdentity(selectedCapture || activeCapture || informationCapture)
+    const sourceIdentity = captureSourceIdentity(
+      selectedCapture || activeCapture || sceneCapture || informationCapture
+    )
     const output = sourceIdentity
       ? state.captureTitlesOutputs[sourceIdentity]
       : undefined
@@ -108,6 +121,9 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
     channels,
     broadcastTitles,
     captureTitlesOutputs,
+    captureSources,
+    backdropImage,
+    programScene,
     setBroadcastTitles,
     setCaptureTitlesOutput
   } = useAppStore()
@@ -115,11 +131,21 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
   const selectedFile = selectedChannel ? channels[selectedChannel]?.file : null
   const selectedCapture = selectedFile?.type === 'capture' ? selectedFile.capture : undefined
   const activeCapture = activeFile?.type === 'capture' ? activeFile.capture : undefined
+  const sceneSupportsTitles = programScene.enabled && !!backdropImage && !!activeFile && (
+    activeFile.type === 'presentation' ||
+    activeFile.type === 'pdf' ||
+    activeFile.type === 'video' ||
+    (activeFile.type === 'other' && activeFile.isImage === true)
+  )
+  const sceneCapture = sceneSupportsTitles
+    ? captureSources.find((entry) => entry.capture?.sourceId === programScene.captureSourceId)?.capture
+    : undefined
   const informationCapture = informationMedia?.type === 'capture' ? informationMedia.capture : undefined
-  const previewUsesInformationFallback = !selectedCapture && !activeCapture && !!informationCapture
-  const previewCapture = selectedCapture || activeCapture || informationCapture
+  const previewUsesInformationFallback = !selectedCapture && !activeCapture && !sceneCapture && !!informationCapture
+  const previewCapture = selectedCapture || activeCapture || sceneCapture || informationCapture
   const sourceIdentity = captureSourceIdentity(previewCapture)
-  const activeSourceIdentity = programCaptureTitlesSourceIdentity
+  const sceneSourceIdentity = captureSourceIdentity(sceneCapture)
+  const activeSourceIdentity = sceneSourceIdentity || programCaptureTitlesSourceIdentity
   const informationSourceIdentity = informationMedia?.type === 'capture'
     ? captureSourceIdentity(informationMedia.capture)
     : null

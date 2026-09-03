@@ -4,8 +4,22 @@ import {
   DEFAULT_BROADCAST_TITLES_OUTPUT,
   useAppStore
 } from '../../stores/useAppStore'
+import { waitForNavigationTransitionEnd } from '../../navigation-transition'
 
 const notesCache = new Map<string, string>()
+const notesInflight = new Map<string, Promise<string>>()
+
+function getSlideNotes(filePath: string, slide: number): Promise<string> {
+  const key = `${filePath}|${slide}`
+  const existing = notesInflight.get(key)
+  if (existing) return existing
+  const request = window.api.getPptxSlideNotes(filePath, slide)
+    .then((result) => result.success ? result.notes || '' : '')
+    .catch(() => '')
+    .finally(() => notesInflight.delete(key))
+  notesInflight.set(key, request)
+  return request
+}
 
 function currentInformationDisplayState(): InformationDisplayState {
   const state = useAppStore.getState()
@@ -32,6 +46,7 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     isPlaying,
     isPresentationWindowOpen,
     pptxAspectRatios,
+    programScene,
     selectedDisplayId,
     videoLoopTrack,
     videoPlayback
@@ -43,14 +58,31 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
   const playback = activeFile?.type === 'video'
     ? videoPlayback[activeFile.path]
     : undefined
-  const titleSourceIdentity = activeFile?.type === 'capture'
-    ? captureSourceIdentity(activeFile.capture)
-    : null
+  const sceneActive = programScene.enabled && !!backdropImage && !!activeFile && (
+    activeFile.type === 'presentation' ||
+    activeFile.type === 'pdf' ||
+    activeFile.type === 'video' ||
+    (activeFile.type === 'other' && activeFile.isImage === true)
+  )
+  const sceneCapture = sceneActive
+    ? state.captureSources.find(
+      (entry) => entry.capture?.sourceId === programScene.captureSourceId
+    )?.capture
+    : undefined
+  const titleSourceIdentity = sceneCapture
+    ? captureSourceIdentity(sceneCapture)
+    : activeFile?.type === 'capture'
+      ? captureSourceIdentity(activeFile.capture)
+      : null
   const titles = titleSourceIdentity
     ? state.captureTitlesOutputs[titleSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
   let directContent: ProgramDirectContent | null = null
-  if (activeFile?.type === 'pdf') {
+  if (sceneActive) {
+    // A composite spans the Electron underlay and, for PowerPoint, a native
+    // window. Capture the final program display so mirror outputs are exact.
+    directContent = null
+  } else if (activeFile?.type === 'pdf') {
     directContent = {
       type: 'pdf',
       path: activeFile.path,
@@ -168,6 +200,7 @@ export function AuxiliaryDisplayBridge(): null {
     informationMedia,
     captureTitlesOutputs,
     backdropImage,
+    programScene,
     videoLoopTrack,
     videoPlayback,
     timerRemaining,
@@ -349,6 +382,7 @@ export function AuxiliaryDisplayBridge(): null {
     isPlaying,
     isPresentationWindowOpen,
     pptxAspectRatios,
+    programScene,
     selectedDisplayId,
     videoLoopTrack,
     videoPlayback
@@ -357,6 +391,11 @@ export function AuxiliaryDisplayBridge(): null {
   useEffect(() => {
     let cancelled = false
     const sync = async (): Promise<void> => {
+      // Do not touch the PowerPoint COM queue when no speaker display exists.
+      // More importantly, never let a notes request start ahead of a TAKE:
+      // opening/closing a temporary Office session can otherwise delay the
+      // actual slideshow by several seconds.
+      if (roleIds.speaker.length === 0) return
       const supported = activeFile?.type === 'presentation' || activeFile?.type === 'pdf'
       if (!activeFile || !supported) {
         window.api.sendToAuxiliary('speaker', 'speaker-state', {
@@ -403,7 +442,7 @@ export function AuxiliaryDisplayBridge(): null {
       })
       if (cachedNotes !== undefined) return
 
-      const notesResult = await window.api.getPptxSlideNotes(activeFile.path, safeCurrent)
+      await waitForNavigationTransitionEnd()
       if (cancelled) return
       const latest = useAppStore.getState()
       if (
@@ -413,7 +452,8 @@ export function AuxiliaryDisplayBridge(): null {
           !display.isPrimary && latest.displayAssignments[String(display.id)] === 'speaker'
         ))
       ) return
-      const notes = notesResult.success ? notesResult.notes || '' : ''
+      const notes = await getSlideNotes(activeFile.path, safeCurrent)
+      if (cancelled) return
       notesCache.set(cacheKey, notes)
       window.api.sendToAuxiliary('speaker', 'speaker-state', { ...baseState, notes })
     }
@@ -426,6 +466,7 @@ export function AuxiliaryDisplayBridge(): null {
     currentSlide,
     pptxSlidesMap,
     pptxThumbnailsMap,
+    roleIds.speaker,
     totalSlides
   ])
 

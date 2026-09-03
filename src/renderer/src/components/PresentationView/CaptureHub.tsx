@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 
 export interface CaptureTakeRequest {
   sourceId: string
@@ -8,6 +8,8 @@ export interface CaptureTakeRequest {
 interface CaptureHubProps {
   activeSourceId: string | null
   audioSourceId: string | null
+  sceneSourceId?: string | null
+  sceneStyle?: CSSProperties
   takeRequest: CaptureTakeRequest | null
   onTakeReady: (sourceId: string, revision: number) => void
   onTakeError: (sourceId: string, revision: number, message: string) => void
@@ -126,7 +128,8 @@ async function enumerateCaptureDevices(requestId: string): Promise<CaptureDevice
 
 function CaptureSourceLayer({
   config,
-  active,
+  displayMode,
+  sceneStyle,
   audioActive,
   deviceRevision,
   takeRevision,
@@ -134,7 +137,8 @@ function CaptureSourceLayer({
   onTakeError
 }: {
   config: CaptureSourceConfig
-  active: boolean
+  displayMode: 'hidden' | 'fullscreen' | 'scene'
+  sceneStyle?: CSSProperties
   audioActive: boolean
   deviceRevision: number
   takeRevision?: number
@@ -671,11 +675,15 @@ function CaptureSourceLayer({
 
   return (
     <div
-      className="absolute inset-0 flex items-center justify-center bg-black"
+      className="absolute flex items-center justify-center bg-black overflow-hidden shadow-2xl"
       style={{
-        opacity: active ? 1 : 0,
-        zIndex: active ? 2 : 0,
-        pointerEvents: 'none'
+        ...(displayMode === 'scene'
+          ? sceneStyle
+          : { inset: 0 }),
+        opacity: displayMode === 'hidden' ? 0 : 1,
+        zIndex: displayMode === 'scene' ? 3 : displayMode === 'fullscreen' ? 2 : 0,
+        pointerEvents: 'none',
+        borderRadius: displayMode === 'scene' ? (sceneStyle?.borderRadius ?? '0.5rem') : 0
       }}
     >
       <video
@@ -698,6 +706,8 @@ function CaptureSourceLayer({
 export function CaptureHub({
   activeSourceId,
   audioSourceId,
+  sceneSourceId = null,
+  sceneStyle,
   takeRequest,
   onTakeReady,
   onTakeError
@@ -762,7 +772,12 @@ export function CaptureHub({
         <CaptureSourceLayer
           key={config.sourceId}
           config={config}
-          active={activeSourceId === config.sourceId}
+          displayMode={activeSourceId === config.sourceId
+            ? 'fullscreen'
+            : sceneSourceId === config.sourceId
+              ? 'scene'
+              : 'hidden'}
+          sceneStyle={sceneStyle}
           audioActive={audioSourceId === config.sourceId}
           deviceRevision={deviceRevision}
           takeRevision={takeRequest?.sourceId === config.sourceId ? takeRequest.revision : undefined}
