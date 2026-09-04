@@ -15,7 +15,7 @@ import {
 } from './diagnostic-log'
 import { hideTaskbarForDisplay, showAllTaskbars } from './taskbar-manager'
 import type { ProgramSceneLayoutConfig } from '../shared/program-scene'
-import type { ContentZoomState } from '../shared/content-zoom'
+import { normalizeContentZoom, type ContentZoomState } from '../shared/content-zoom'
 import {
   getActivePowerPointSceneLayout,
   getPowerPointNativePlacement,
@@ -234,6 +234,70 @@ export interface ExternalWindowActionResult {
   success: boolean
   error?: string
   windowGone?: boolean
+}
+
+type ExternalDisplayBounds = { x: number; y: number; width: number; height: number }
+
+interface ExternalWindowPlacement {
+  bounds: ExternalDisplayBounds
+  windowed: boolean
+  cornerRadius: number
+}
+
+function getNativeExternalDisplayBounds(bounds?: ExternalDisplayBounds): ExternalDisplayBounds | undefined {
+  if (!bounds || process.platform !== 'win32') return bounds
+  // Renderer display bounds are DIP coordinates. manage-window.ps1 uses
+  // Win32 MoveWindow/GetWindowRect and therefore requires physical pixels.
+  // Passing DIP happened to keep Excel on some mixed-DPI layouts, while Word
+  // jumped back to the primary display after a minimize/restore cycle.
+  return screen.dipToScreenRect(null, bounds)
+}
+
+function getExternalWindowPlacement(
+  displayBounds?: ExternalDisplayBounds,
+  sceneLayout?: ProgramSceneLayoutConfig
+): ExternalWindowPlacement | undefined {
+  const nativeDisplayBounds = getNativeExternalDisplayBounds(displayBounds)
+  if (!nativeDisplayBounds) return undefined
+  if (!sceneLayout?.enabled || !displayBounds) {
+    return { bounds: nativeDisplayBounds, windowed: false, cornerRadius: 0 }
+  }
+  const display = screen.getAllDisplays().find((candidate) => (
+    candidate.bounds.x === displayBounds.x &&
+    candidate.bounds.y === displayBounds.y &&
+    candidate.bounds.width === displayBounds.width &&
+    candidate.bounds.height === displayBounds.height
+  ))
+  if (!display) {
+    diagnosticLog('window', `Office program scene refused: target display bounds not found ${JSON.stringify(displayBounds)}`)
+    return undefined
+  }
+  // Word/Excel perform magnification internally through Office COM. Keep the
+  // native HWND at the unscaled content-pane bounds; applying PowerPoint's
+  // outer-window zoom here would enlarge the title/ribbon instead of the
+  // document and could overlap the independent participant pane.
+  const placement = getPowerPointNativePlacement(display, sceneLayout, {
+    enabled: false,
+    scale: 1,
+    originX: 0.5,
+    originY: 0.5
+  })
+  return {
+    bounds: placement.bounds,
+    windowed: sceneLayout.viewMode !== 'content',
+    cornerRadius: placement.cornerRadius
+  }
+}
+
+function appendExternalPlacementArgs(args: string[], placement: ExternalWindowPlacement): void {
+  args.push(
+    '-X', String(placement.bounds.x),
+    '-Y', String(placement.bounds.y),
+    '-Width', String(placement.bounds.width),
+    '-Height', String(placement.bounds.height),
+    '-Windowed', placement.windowed ? '1' : '0',
+    '-CornerRadius', String(placement.cornerRadius)
+  )
 }
 
 interface PowerPointEmergencyRollbackResult {
@@ -514,7 +578,7 @@ async function rollbackPowerPointAfterCommitFailure(
   }
 }
 
-async function manageExternalWindowUnlocked(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> {
+async function manageExternalWindowUnlocked(action: 'minimize' | 'restore' | 'close', filePath?: string, placement?: ExternalWindowPlacement): Promise<ExternalWindowActionResult> {
   const scriptPath = resolveScript('manage-window.ps1')
 
   if (filePath) {
@@ -540,8 +604,8 @@ async function manageExternalWindowUnlocked(action: 'minimize' | 'restore' | 'cl
         '-ExpectedWindowTitle', entry.windowTitle,
         '-ExpectedWindowClass', entry.windowClass
       ]
-      if (bounds && action === 'restore') {
-        args.push('-X', String(bounds.x), '-Y', String(bounds.y), '-Width', String(bounds.width), '-Height', String(bounds.height))
+      if (placement && action === 'restore') {
+        appendExternalPlacementArgs(args, placement)
       }
       const timeout = effectiveAction === 'close' ? 8_000 : 5_000
       const { stdout } = await execFileAsync('powershell.exe', args, { timeout })
@@ -585,11 +649,11 @@ async function manageExternalWindowUnlocked(action: 'minimize' | 'restore' | 'cl
   }
 }
 
-async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, bounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> {
+async function manageExternalWindow(action: 'minimize' | 'restore' | 'close', filePath?: string, placement?: ExternalWindowPlacement): Promise<ExternalWindowActionResult> {
   if (externalShutdownStarted) {
     return { success: false, error: 'PDM is shutting down; external window operation was cancelled.' }
   }
-  return enqueueExternalOperation(() => manageExternalWindowUnlocked(action, filePath, bounds))
+  return enqueueExternalOperation(() => manageExternalWindowUnlocked(action, filePath, placement))
 }
 
 export async function closeExternalFile(filePath?: string): Promise<ExternalWindowActionResult> {
@@ -1398,8 +1462,12 @@ export function registerIpcHandlers(
       }
       const result = await pptDaemon.send('relocate', {
         ...placement,
-        underlayHwnd
-      }, 5000)
+        underlayHwnd,
+        transitionDurationMs: Math.max(
+          0,
+          Math.min(5000, Math.round(effectiveSceneLayout?.transitionDurationMs ?? 0))
+        )
+      }, Math.max(5000, Math.round(effectiveSceneLayout?.transitionDurationMs ?? 0) + 3000))
       if (result.ok && sceneLayout !== undefined) {
         setActivePowerPointSceneLayout(sceneLayout.enabled ? sceneLayout : null)
       }
@@ -1608,6 +1676,7 @@ export function registerIpcHandlers(
       if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла для внешнего открытия' }
       try {
         if (displayBounds && process.platform === 'win32') {
+          const nativeBounds = getNativeExternalDisplayBounds(displayBounds)!
           const scriptPath = resolveScript('manage-window.ps1')
           const { stdout } = await execFileAsync('powershell.exe', [
             '-ExecutionPolicy', 'Bypass',
@@ -1615,10 +1684,10 @@ export function registerIpcHandlers(
             '-File', scriptPath,
             '-Action', 'open',
             '-FilePath', filePath,
-            '-X', String(displayBounds.x),
-            '-Y', String(displayBounds.y),
-            '-Width', String(displayBounds.width),
-            '-Height', String(displayBounds.height)
+            '-X', String(nativeBounds.x),
+            '-Y', String(nativeBounds.y),
+            '-Width', String(nativeBounds.width),
+            '-Height', String(nativeBounds.height)
           ], { timeout: 70_000 })
           const data = JSON.parse(stdout.trim()) as {
             success?: boolean
@@ -1657,6 +1726,26 @@ export function registerIpcHandlers(
     })
   })
 
+  ipcMain.handle('select-qr-logo', async () => {
+    const result = await dialog.showOpenDialog(controlWindow, {
+      properties: ['openFile'],
+      title: 'Выберите логотип для QR-кода',
+      filters: [{ name: 'Изображения', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'svg'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('select-qr-image', async () => {
+    const result = await dialog.showOpenDialog(controlWindow, {
+      properties: ['openFile'],
+      title: 'Выберите изображение QR-кода',
+      filters: [{ name: 'Изображения', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'svg'] }]
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
   ipcMain.handle('set-powerpoint-zoom', async (
     _event,
     displayId: number,
@@ -1681,32 +1770,89 @@ export function registerIpcHandlers(
     }
   })
 
+  ipcMain.handle('set-external-file-zoom', async (
+    _event,
+    filePath: string,
+    zoom: Partial<ContentZoomState>
+  ): Promise<ExternalWindowActionResult & { zoomPercent?: number }> => {
+    if (externalShutdownStarted) {
+      return { success: false, error: 'PDM is shutting down; Office zoom was cancelled.' }
+    }
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    return enqueueExternalOperation(async () => {
+      const entry = externalFiles.get(filePath)
+      if (!entry) return { success: false, error: 'Окно Word/Excel больше не найдено.' }
+      const extension = extname(filePath).toLowerCase()
+      if (!['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'].includes(extension)) {
+        return { success: false, error: 'Лупа поддерживается только для Word и Excel.' }
+      }
+      const normalized = normalizeContentZoom(zoom)
+      const scriptPath = resolveScript('manage-window.ps1')
+      try {
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-ExecutionPolicy', 'Bypass',
+          '-NoProfile',
+          '-File', scriptPath,
+          '-Action', 'zoom-office',
+          '-Hwnd', String(entry.hwnd),
+          '-ProcessId', String(entry.pid),
+          '-FilePath', filePath,
+          '-ExpectedWindowTitle', entry.windowTitle,
+          '-ExpectedWindowClass', entry.windowClass,
+          '-ZoomEnabled', normalized.enabled ? '1' : '0',
+          '-ZoomPercent', String(Math.round(normalized.scale * 100)),
+          '-OriginX', String(Math.round(normalized.originX * 10_000)),
+          '-OriginY', String(Math.round(normalized.originY * 10_000))
+        ], { timeout: 7_000, encoding: 'utf8', maxBuffer: 1024 * 1024 })
+        const data = JSON.parse(stdout.trim()) as ExternalWindowActionResult & { zoomPercent?: number }
+        diagnosticLog(
+          'window',
+          `Office magnifier file=${basename(filePath)} scale=${normalized.scale.toFixed(2)} ` +
+          `origin=${normalized.originX.toFixed(3)},${normalized.originY.toFixed(3)} ok=${data.success}`
+        )
+        return data.success
+          ? data
+          : { success: false, error: data.error || 'Word/Excel не применил масштаб.' }
+      } catch (error) {
+        diagnosticLog('window', `Office magnifier failed: ${formatDiagnosticError(error)}`)
+        return { success: false, error: String(error) }
+      }
+    })
+  })
+
   ipcMain.handle('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
 
   ipcMain.handle('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
 
-  ipcMain.handle('restore-external-file', async (_event, filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<ExternalWindowActionResult> => {
+  ipcMain.handle('restore-external-file', async (
+    _event,
+    filePath?: string,
+    displayBounds?: ExternalDisplayBounds,
+    sceneLayout?: ProgramSceneLayoutConfig
+  ): Promise<ExternalWindowActionResult> => {
     if (externalShutdownStarted) {
       return { success: false, error: 'PDM is shutting down; external file restore was cancelled.' }
     }
     return enqueueExternalOperation(async () => {
+      const placement = getExternalWindowPlacement(displayBounds, sceneLayout)
+      if (displayBounds && !placement) {
+        return { success: false, error: 'Целевой дисплей для окна Word/Excel больше не найден.' }
+      }
       // If not tracked yet, open instead of restore
       if (filePath && !externalFiles.has(filePath)) {
         if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла.' }
-        if (displayBounds && process.platform === 'win32') {
+        if (placement && process.platform === 'win32') {
           const scriptPath = resolveScript('manage-window.ps1')
           try {
-            const { stdout } = await execFileAsync('powershell.exe', [
+            const args = [
               '-ExecutionPolicy', 'Bypass',
               '-NoProfile',
               '-File', scriptPath,
               '-Action', 'open',
-              '-FilePath', filePath,
-              '-X', String(displayBounds.x),
-              '-Y', String(displayBounds.y),
-              '-Width', String(displayBounds.width),
-              '-Height', String(displayBounds.height)
-            ], { timeout: 70_000 })
+              '-FilePath', filePath
+            ]
+            appendExternalPlacementArgs(args, placement)
+            const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 70_000 })
             const data = JSON.parse(stdout.trim()) as {
               success?: boolean
               hwnd?: number
@@ -1737,7 +1883,7 @@ export function registerIpcHandlers(
         }
         return { success: true }
       }
-      return manageExternalWindowUnlocked('restore', filePath, displayBounds || undefined)
+      return manageExternalWindowUnlocked('restore', filePath, placement)
     })
   })
 

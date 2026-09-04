@@ -60,6 +60,20 @@ function parseSeconds(value: string): number {
   return Number.isFinite(parsed) ? Math.max(0, Math.min(86400, parsed)) : 0
 }
 
+const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
+
+function supportsProgramSceneTitles(file?: FileEntry | null): boolean {
+  return !!file && (
+    file.type === 'presentation' ||
+    file.type === 'pdf' ||
+    file.type === 'video' ||
+    (file.type === 'other' && (
+      file.isImage === true || OFFICE_PROGRAM_EXTENSIONS.has(file.extension.toLowerCase())
+    )) ||
+    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
+  )
+}
+
 export function BroadcastTitles(): JSX.Element {
   const [open, setOpen] = useState(false)
   const isVisible = useAppStore((state) => {
@@ -67,12 +81,8 @@ export function BroadcastTitles(): JSX.Element {
       ? state.channels[state.selectedChannel]?.file?.capture
       : undefined
     const activeCapture = state.activeFile?.type === 'capture' ? state.activeFile.capture : undefined
-    const sceneSupportsTitles = state.programScene.enabled && !!state.backdropImage && !!state.activeFile && (
-      state.activeFile.type === 'presentation' ||
-      state.activeFile.type === 'pdf' ||
-      state.activeFile.type === 'video' ||
-      (state.activeFile.type === 'other' && state.activeFile.isImage === true)
-    )
+    const sceneSupportsTitles = state.programScene.enabled && !!state.backdropImage &&
+      supportsProgramSceneTitles(state.activeFile)
     const sceneCapture = sceneSupportsTitles
       ? state.captureSources.find(
         (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
@@ -82,7 +92,7 @@ export function BroadcastTitles(): JSX.Element {
       ? state.informationMedia.capture
       : undefined
     const sourceIdentity = captureSourceIdentity(
-      selectedCapture || activeCapture || sceneCapture || informationCapture
+      sceneCapture || selectedCapture || activeCapture || informationCapture
     )
     const output = sourceIdentity
       ? state.captureTitlesOutputs[sourceIdentity]
@@ -131,18 +141,14 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
   const selectedFile = selectedChannel ? channels[selectedChannel]?.file : null
   const selectedCapture = selectedFile?.type === 'capture' ? selectedFile.capture : undefined
   const activeCapture = activeFile?.type === 'capture' ? activeFile.capture : undefined
-  const sceneSupportsTitles = programScene.enabled && !!backdropImage && !!activeFile && (
-    activeFile.type === 'presentation' ||
-    activeFile.type === 'pdf' ||
-    activeFile.type === 'video' ||
-    (activeFile.type === 'other' && activeFile.isImage === true)
-  )
+  const sceneSupportsTitles = programScene.enabled && !!backdropImage &&
+    supportsProgramSceneTitles(activeFile)
   const sceneCapture = sceneSupportsTitles
     ? captureSources.find((entry) => entry.capture?.sourceId === programScene.captureSourceId)?.capture
     : undefined
   const informationCapture = informationMedia?.type === 'capture' ? informationMedia.capture : undefined
   const previewUsesInformationFallback = !selectedCapture && !activeCapture && !sceneCapture && !!informationCapture
-  const previewCapture = selectedCapture || activeCapture || sceneCapture || informationCapture
+  const previewCapture = sceneCapture || selectedCapture || activeCapture || informationCapture
   const sourceIdentity = captureSourceIdentity(previewCapture)
   const sceneSourceIdentity = captureSourceIdentity(sceneCapture)
   const activeSourceIdentity = sceneSourceIdentity || programCaptureTitlesSourceIdentity

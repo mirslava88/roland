@@ -59,7 +59,9 @@ export function getPowerPointNativePlacement(
     width,
     height
   }
-  const rounded = sceneLayout?.enabled && sceneLayout.cornerStyle === 'rounded'
+  const rounded = sceneLayout?.enabled &&
+    sceneLayout.viewMode !== 'content' &&
+    sceneLayout.cornerStyle === 'rounded'
   return {
     bounds,
     clipBounds: scale > 1 || rounded ? base : null,

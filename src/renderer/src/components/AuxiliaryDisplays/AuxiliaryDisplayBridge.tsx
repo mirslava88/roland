@@ -62,7 +62,8 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     activeFile.type === 'presentation' ||
     activeFile.type === 'pdf' ||
     activeFile.type === 'video' ||
-    (activeFile.type === 'other' && activeFile.isImage === true)
+    (activeFile.type === 'other' && activeFile.isImage === true) ||
+    (activeFile.type === 'capture' && activeFile.capture?.captureKind === 'desktop')
   )
   const sceneCapture = sceneActive
     ? state.captureSources.find(
@@ -300,6 +301,28 @@ export function AuxiliaryDisplayBridge(): null {
       .then(async () => {
         if (revision !== taskbarSyncRevisionRef.current) return
         if (!taskbarSuppressionActive) {
+          // During a native TAKE Windows can briefly report no external display
+          // or the renderer can pass through an empty activeFile state. Never
+          // turn that transient frame into a global taskbar restore over the
+          // live program output; wait for the topology/output state to settle.
+          await new Promise((resolve) => setTimeout(resolve, 500))
+          if (revision !== taskbarSyncRevisionRef.current) return
+          const latest = useAppStore.getState()
+          const latestExternalDisplays = latest.displays.filter((display) => !display.isPrimary)
+          if (latestExternalDisplays.length === 0) return
+          const stillNeedsSuppression = latest.backdropImage !== null ||
+            latest.activeFile !== null ||
+            latest.isPresentationWindowOpen ||
+            latest.informationMedia !== null ||
+            latest.timerDuration > 0 ||
+            latest.eventTimerOutput?.live === true
+          if (stillNeedsSuppression) {
+            for (const display of latestExternalDisplays) {
+              if (revision !== taskbarSyncRevisionRef.current) return
+              await window.api.hideTaskbar(display.bounds)
+            }
+            return
+          }
           await window.api.showTaskbar()
           return
         }

@@ -20,10 +20,18 @@ import {
 } from './stores/useAppStore'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
+  PROGRAM_SCENE_TRANSITION_DURATION_MS,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
-  type ProgramScenePlacement
+  type ProgramScenePlacement,
+  type ProgramSceneTransitionEffect,
+  type ProgramSceneViewMode
 } from '../../shared/program-scene'
+import {
+  DEFAULT_QR_OVERLAY,
+  normalizeQrOverlay,
+  type QrOverlayConfig
+} from '../../shared/qr-overlay'
 
 const CONFIG_FORMAT = 'pdm-configuration'
 const CONFIG_SCHEMA_VERSION = 1
@@ -87,7 +95,11 @@ interface PdmConfigV1 {
     placement: ProgramScenePlacement
     participantSize: ProgramSceneParticipantSize
     cornerStyle: ProgramSceneCornerStyle
+    viewMode: ProgramSceneViewMode
+    transitionEffect: ProgramSceneTransitionEffect
+    transitionDurationMs: number
   }
+  qrOverlay: QrOverlayConfig
   slidePositions: Record<string, number>
   input: {
     globalHookEnabled: boolean
@@ -265,6 +277,9 @@ function collectConfigPaths(raw: Record<string, unknown>): string[] {
   const media = isRecord(raw.informationMedia) ? raw.informationMedia : null
   if (media && media.type !== 'capture') addPath(media.path)
   addPath(raw.backdropImage)
+  const qrOverlay = isRecord(raw.qrOverlay) ? raw.qrOverlay : {}
+  addPath(qrOverlay.logoPath)
+  addPath(qrOverlay.imagePath)
 
   const slidePositions = isRecord(raw.slidePositions) ? Object.keys(raw.slidePositions).slice(0, MAX_SLIDE_POSITIONS) : []
   for (const path of slidePositions) addPath(path)
@@ -539,6 +554,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
     informationMedia: serializableInformationMedia(state.informationMedia),
     captureSources,
     programScene: { ...state.programScene, enabled: false },
+    qrOverlay: { ...state.qrOverlay, enabled: false },
     slidePositions,
     input: {
       globalHookEnabled: state.globalHookEnabled,
@@ -713,9 +729,30 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   const sceneCornerStyle = rawProgramScene.cornerStyle === 'rounded'
     ? 'rounded'
     : DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle
+  const sceneViewMode = ['participant', 'content', 'both'].includes(String(rawProgramScene.viewMode))
+    ? rawProgramScene.viewMode as ProgramSceneViewMode
+    : 'both'
+  const sceneTransitionEffect = ['smooth', 'zoom-fade', 'instant'].includes(String(rawProgramScene.transitionEffect))
+    ? rawProgramScene.transitionEffect as ProgramSceneTransitionEffect
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth'
+  const sceneTransitionDurationMs = PROGRAM_SCENE_TRANSITION_DURATION_MS
   const restoredSceneSourceId = sceneCaptureSourceId && restoredCaptureSources.has(sceneCaptureSourceId)
     ? sceneCaptureSourceId
     : null
+
+  const rawQrOverlay = isRecord(raw.qrOverlay) ? raw.qrOverlay : {}
+  const parsedQrOverlay = normalizeQrOverlay(rawQrOverlay)
+  const qrLogoPath = parsedQrOverlay.logoPath
+  const qrImagePath = parsedQrOverlay.imagePath
+  const restoredQrOverlay: QrOverlayConfig = {
+    ...DEFAULT_QR_OVERLAY,
+    ...parsedQrOverlay,
+    enabled: false,
+    logoPath: qrLogoPath && pathExists(qrLogoPath, validation) ? qrLogoPath : null,
+    imagePath: qrImagePath && pathExists(qrImagePath, validation) ? qrImagePath : null
+  }
+  if (qrLogoPath && !restoredQrOverlay.logoPath) warnMissing(warnings, 'Логотип QR-кода', qrLogoPath)
+  if (qrImagePath && !restoredQrOverlay.imagePath) warnMissing(warnings, 'Изображение QR-кода', qrImagePath)
 
   const rawPositions = isRecord(raw.slidePositions) ? raw.slidePositions : {}
   const slidePositions: Record<string, number> = {}
@@ -1002,8 +1039,12 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       captureSourceId: restoredSceneSourceId,
       placement: scenePlacement,
       participantSize: sceneParticipantSize,
-      cornerStyle: sceneCornerStyle
+      cornerStyle: sceneCornerStyle,
+      viewMode: sceneViewMode,
+      transitionEffect: sceneTransitionEffect,
+      transitionDurationMs: sceneTransitionDurationMs
     },
+    qrOverlay: restoredQrOverlay,
     globalHookEnabled: actualGlobalHook,
     channelBoundaryNavigationEnabled: safeBoolean(rawInput.channelBoundaryNavigationEnabled, false),
     overlayState: { kind: 'hidden' },

@@ -5,6 +5,7 @@ import {
   createControlWindow,
   createPresentationWindow,
   createOverlayWindow,
+  createQrOverlayWindow,
   createMusicPlayerWindow
 } from './windows'
 import type { AuxiliaryWindowRole } from './windows'
@@ -69,6 +70,9 @@ const programMirrorHoldIntents = new Map<number, {
 }>()
 let programMirrorHoldRevision = 0
 let overlayWindow: BrowserWindow | null = null
+let qrOverlayWindow: BrowserWindow | null = null
+let qrOverlayRevision = 0
+let qrOverlayDisplayId: number | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 let wpfTimerDisplayKey: string | null = null
 let wpfTimerDisplayId: number | null = null
@@ -1637,6 +1641,21 @@ function createWindows(): void {
     }
   })
 
+  ipcMain.handle('raise-presentation-window', (): boolean => {
+    if (!presentationWindow || presentationWindow.isDestroyed()) return false
+    try {
+      if (!presentationWindow.isVisible()) presentationWindow.showInactive()
+      presentationWindow.setOpacity(1)
+      presentationWindow.setAlwaysOnTop(false)
+      presentationWindow.moveTop()
+      diagnosticLog('window', 'presentation output raised above native content for participant focus')
+      return true
+    } catch (error) {
+      diagnosticLog('window', `presentation output raise failed ${formatDiagnosticError(error)}`)
+      return false
+    }
+  })
+
   ipcMain.handle('close-presentation-window', () => {
     presentationWindowRequestedVisible = false
     // This path bypasses renderer `send-to-presentation`, so invalidate any
@@ -2849,6 +2868,12 @@ function createWindows(): void {
     sendDisplays()
     scheduleDisplayMetricsSync('display-removed')
     const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
+    if (qrOverlayDisplayId !== null && !connectedIds.has(qrOverlayDisplayId)) {
+      qrOverlayRevision += 1
+      if (qrOverlayWindow && !qrOverlayWindow.isDestroyed()) qrOverlayWindow.destroy()
+      qrOverlayWindow = null
+      qrOverlayDisplayId = null
+    }
     for (const [displayId, entry] of [...auxiliaryWindows.entries()]) {
       if (!connectedIds.has(displayId)) {
         diagnosticLog('display', `auxiliary display removed role=${entry.role} id=${displayId}`)
@@ -3125,6 +3150,87 @@ app.whenReady().then(() => {
   powerMonitor.on('shutdown', () => {
     if (shutdownTrigger === 'unknown') shutdownTrigger = 'windows-shutdown'
     diagnosticLog('lifecycle', 'Windows shutdown requested')
+  })
+
+  ipcMain.on('qr-overlay-update', async (event, raw: unknown) => {
+    if (
+      !controlWindow || controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id
+    ) return
+    const payload = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const visible = payload.visible === true
+    const displayId = typeof payload.displayId === 'number' ? payload.displayId : null
+    const imageDataUrl = typeof payload.imageDataUrl === 'string' &&
+      payload.imageDataUrl.length <= 8 * 1024 * 1024 &&
+      payload.imageDataUrl.startsWith('data:image/')
+      ? payload.imageDataUrl
+      : ''
+    const sizePercent = typeof payload.sizePercent === 'number'
+      ? Math.max(10, Math.min(100, payload.sizePercent))
+      : 24
+    const xPercent = typeof payload.xPercent === 'number'
+      ? Math.max(0, Math.min(100, payload.xPercent))
+      : 84
+    const yPercent = typeof payload.yPercent === 'number'
+      ? Math.max(0, Math.min(100, payload.yPercent))
+      : 80
+    const rounded = payload.cornerStyle === 'rounded'
+    const revision = ++qrOverlayRevision
+
+    if (!visible || !imageDataUrl || displayId === null) {
+      if (qrOverlayWindow && !qrOverlayWindow.isDestroyed()) {
+        qrOverlayWindow.destroy()
+        diagnosticLog('qr-overlay', 'hidden and renderer released')
+      }
+      qrOverlayWindow = null
+      qrOverlayDisplayId = null
+      return
+    }
+
+    const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
+    if (!display || display.isPrimary) return
+    let win = qrOverlayWindow
+    if (!win || win.isDestroyed()) {
+      win = createQrOverlayWindow(display)
+      qrOverlayWindow = win
+      diagnosticLog('qr-overlay', `created display=${display.id}`)
+      await new Promise<void>((resolve) => {
+        if (!win || win.isDestroyed()) return resolve()
+        if (!win.webContents.isLoading()) return resolve()
+        win.webContents.once('did-finish-load', () => resolve())
+      })
+    }
+    if (revision !== qrOverlayRevision || !win || win.isDestroyed()) return
+
+    win.setBounds(display.bounds, false)
+    qrOverlayDisplayId = display.id
+    const script = `(() => {
+      const el = document.getElementById('qr');
+      const size = Math.round(innerHeight * ${JSON.stringify(sizePercent)} / 100);
+      const halfX = size / innerWidth * 50;
+      const halfY = size / innerHeight * 50;
+      const x = Math.max(halfX + 1, Math.min(100 - halfX - 1, ${JSON.stringify(xPercent)}));
+      const y = halfY >= 50 ? 50 : Math.max(halfY + 1, Math.min(100 - halfY - 1, ${JSON.stringify(yPercent)}));
+      el.src = ${JSON.stringify(imageDataUrl)};
+      el.style.width = size + 'px'; el.style.height = size + 'px';
+      el.style.left = x + '%'; el.style.top = y + '%';
+      el.style.transform = 'translate(-50%, -50%)'; el.style.display = 'block';
+      el.style.borderRadius = ${rounded ? "'10%'" : "'0'"};
+      el.style.filter = 'drop-shadow(0 4px 14px rgba(0,0,0,.34))';
+    })()`
+    try {
+      await win.webContents.executeJavaScript(script)
+      if (revision !== qrOverlayRevision || win.isDestroyed()) return
+      win.setAlwaysOnTop(true, 'screen-saver')
+      win.showInactive()
+      win.moveTop()
+      diagnosticLog(
+        'qr-overlay',
+        `shown display=${display.id} size=${sizePercent}% position=${xPercent},${yPercent}`
+      )
+    } catch (error) {
+      diagnosticLog('qr-overlay', `render failed ${formatDiagnosticError(error)}`)
+    }
   })
   diagnosticLog('display', JSON.stringify(screen.getAllDisplays().map((d) => ({
     id: d.id,

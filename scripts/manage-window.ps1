@@ -16,8 +16,22 @@ param(
     [int]$ProtectedX = 0,
     [int]$ProtectedY = 0,
     [int]$ProtectedWidth = 0,
-    [int]$ProtectedHeight = 0
+    [int]$ProtectedHeight = 0,
+    [int]$ZoomEnabled = 0,
+    [int]$ZoomPercent = 100,
+    [int]$OriginX = 5000,
+    [int]$OriginY = 5000,
+    [int]$Windowed = 0,
+    [int]$CornerRadius = 0
 )
+
+# Windows PowerShell 5.1 otherwise writes native window titles using the
+# active OEM code page. Node reads helper stdout as UTF-8, so a Cyrillic
+# Word/Excel title was registered as "????" and every later fingerprint check
+# rejected the very same HWND. Keep the JSON protocol explicitly UTF-8.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
 
 Add-Type @"
 using System;
@@ -68,6 +82,18 @@ public class WinMgr {
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
+    public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteObject(IntPtr hObject);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hWnd, int attribute, ref int value, int valueSize);
+
+    [DllImport("user32.dll")]
     public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -83,14 +109,75 @@ public class WinMgr {
     public const int SW_RESTORE = 9;
     public const uint WM_CLOSE = 0x0010;
 
+    public static void ClearWindowRegion(IntPtr hWnd) {
+        SetWindowRgn(hWnd, IntPtr.Zero, true);
+    }
+
+    public static bool ApplyRoundedWindowRegion(IntPtr hWnd, int width, int height, int radius) {
+        // On Windows 11 use the compositor's native corner preference. A GDI
+        // region set by this PowerShell helper is DPI-virtualized against the
+        // 150% control display even when the Office HWND lives on a 100%
+        // output display (for example 1354x762 became a 903x509 visible
+        // region). DWM rounds the real HWND without changing its dimensions.
+        const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        const int DWMWCP_DONOTROUND = 1;
+        const int DWMWCP_ROUND = 2;
+        int preference = radius > 0 ? DWMWCP_ROUND : DWMWCP_DONOTROUND;
+        ClearWindowRegion(hWnd);
+        int dwmResult = DwmSetWindowAttribute(
+            hWnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            ref preference,
+            Marshal.SizeOf(typeof(int))
+        );
+        if (dwmResult >= 0) return true;
+
+        // Windows 10 does not expose the DWM corner preference. Keep a GDI
+        // fallback there; mixed-DPI correction can be added if that platform
+        // is used for a program-scene output.
+        if (radius <= 0) {
+            return true;
+        }
+        int diameter = Math.Max(2, radius * 2);
+        IntPtr region = CreateRoundRectRgn(0, 0, Math.Max(1, width) + 1, Math.Max(1, height) + 1, diameter, diameter);
+        if (region == IntPtr.Zero) return false;
+        int applied = SetWindowRgn(hWnd, region, true);
+        // After a successful SetWindowRgn Windows owns the HRGN. Delete it
+        // only when ownership was not transferred.
+        if (applied == 0) DeleteObject(region);
+        return applied != 0;
+    }
+
     // Move window to target monitor and maximize (fills entire screen).
     public static void MoveToMonitorAndMaximize(IntPtr hWnd, int monX, int monY, int monW, int monH) {
+        ClearWindowRegion(hWnd);
         int cx = monX + (monW / 2) - 400;
         int cy = monY + (monH / 2) - 300;
-        ShowWindow(hWnd, SW_SHOWNORMAL);
+        bool wasIconic = IsIconic(hWnd);
+        ShowWindow(hWnd, wasIconic ? SW_RESTORE : SW_SHOWNORMAL);
+        // Word applies its saved normal placement asynchronously while
+        // leaving the minimized state. Moving before that completes appears
+        // to work, then Word overwrites the position back to the primary
+        // monitor. Wait only on the minimized path before routing the HWND.
+        if (wasIconic) System.Threading.Thread.Sleep(350);
         MoveWindow(hWnd, cx, cy, 800, 600, true);
-        System.Threading.Thread.Sleep(200);
+        System.Threading.Thread.Sleep(250);
         ShowWindow(hWnd, SW_SHOWMAXIMIZED);
+    }
+
+    // Place a native Office document inside the independent content pane of
+    // the program scene. It must remain a normal window: maximizing would make
+    // Word/Excel cover the backdrop and participant again.
+    public static bool MoveToRectAndShow(IntPtr hWnd, int x, int y, int width, int height, int cornerRadius) {
+        bool wasIconic = IsIconic(hWnd);
+        ShowWindow(hWnd, wasIconic ? SW_RESTORE : SW_SHOWNORMAL);
+        if (wasIconic) System.Threading.Thread.Sleep(350);
+        ClearWindowRegion(hWnd);
+        bool moved = MoveWindow(hWnd, x, y, Math.Max(1, width), Math.Max(1, height), true);
+        System.Threading.Thread.Sleep(200);
+        bool clipped = ApplyRoundedWindowRegion(hWnd, width, height, cornerRadius);
+        ShowWindow(hWnd, SW_SHOW);
+        return moved && clipped;
     }
 
     // Move window to target monitor with margin so backdrop is visible behind.
@@ -193,6 +280,15 @@ function Get-ComIdentitySafe($comObject) {
     }
 }
 
+function Release-ComObjectSafe($comObject) {
+    if (-not $comObject) { return }
+    try {
+        if ([System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
+        }
+    } catch {}
+}
+
 function Test-WindowTitleMatchesRequestedFile([IntPtr]$handle, [string]$path) {
     $title = Get-WindowTitleSafe $handle
     if ([string]::IsNullOrEmpty($title)) { return $false }
@@ -220,7 +316,16 @@ function Test-WindowMatchesFingerprint(
 ) {
     $actualTitle = Get-WindowTitleSafe $handle
     $actualClass = Get-WindowClassSafe $handle
-    if (-not [string]::IsNullOrEmpty($expectedTitle) -and $actualTitle -cne $expectedTitle) {
+    # Office can legitimately rewrite a title after opening (Protected View,
+    # read-only state, compatibility mode). Exact title remains the fast path;
+    # if it changed, accept it only when the current title still starts with
+    # the exact requested leaf/base name. PID + HWND + class are checked by the
+    # caller, so a different workbook/document in the same Office process is
+    # still rejected.
+    $titleMatchesRequestedFile = Test-WindowTitleMatchesRequestedFile $handle $path
+    if (-not [string]::IsNullOrEmpty($expectedTitle) -and
+        $actualTitle -cne $expectedTitle -and
+        -not $titleMatchesRequestedFile) {
         Log "tracked HWND title mismatch expected='$expectedTitle' actual='$actualTitle'"
         return $false
     }
@@ -239,7 +344,7 @@ function Test-WindowMatchesFingerprint(
     return $true
 }
 
-Log "=== Action=$Action FilePath=$FilePath X=$X Y=$Y W=$Width H=$Height Protected=$ProtectedX,$ProtectedY,$ProtectedWidth,$ProtectedHeight Hwnd=$Hwnd ==="
+Log "=== Action=$Action FilePath=$FilePath X=$X Y=$Y W=$Width H=$Height Windowed=$Windowed Corner=$CornerRadius Protected=$ProtectedX,$ProtectedY,$ProtectedWidth,$ProtectedHeight Hwnd=$Hwnd ==="
 
 switch ($Action) {
     "hide-window" {
@@ -648,8 +753,15 @@ switch ($Action) {
                 Start-Sleep -Milliseconds 500
             }
 
-            # Move to target monitor and maximize
-            [WinMgr]::MoveToMonitorAndMaximize($newWindow, $X, $Y, $Width, $Height)
+            # Fullscreen is the normal Word/Excel output. In the program scene
+            # keep the native window inside the calculated content pane so the
+            # independent participant and backdrop remain visible.
+            $placementApplied = $true
+            if ($Windowed -ne 0) {
+                $placementApplied = [WinMgr]::MoveToRectAndShow($newWindow, $X, $Y, $Width, $Height, $CornerRadius)
+            } else {
+                [WinMgr]::MoveToMonitorAndMaximize($newWindow, $X, $Y, $Width, $Height)
+            }
             [WinMgr]::SetForegroundWindow($newWindow) | Out-Null
 
             # Verify the window by its centre, not by any tiny frame overlap.
@@ -661,12 +773,21 @@ switch ($Action) {
             Log "Target monitor: X=$X Y=$Y W=$Width H=$Height"
             $windowCenterX = [int](($rect.Left + $rect.Right) / 2)
             $windowCenterY = [int](($rect.Top + $rect.Bottom) / 2)
-            $positionVerified = $positionRead -and (
+            $positionVerified = $placementApplied -and $positionRead -and (
                 $windowCenterX -ge $X -and
                 $windowCenterX -lt ($X + $Width) -and
                 $windowCenterY -ge $Y -and
                 $windowCenterY -lt ($Y + $Height)
             )
+            if ($positionVerified -and $Windowed -ne 0) {
+                $tolerance = 40
+                $positionVerified = (
+                    [Math]::Abs($rect.Left - $X) -le $tolerance -and
+                    [Math]::Abs($rect.Top - $Y) -le $tolerance -and
+                    [Math]::Abs(($rect.Right - $rect.Left) - $Width) -le ($tolerance * 2) -and
+                    [Math]::Abs(($rect.Bottom - $rect.Top) - $Height) -le ($tolerance * 2)
+                )
+            }
             if (-not $positionVerified) {
                 [WinMgr]::ShowWindow($newWindow, [WinMgr]::SW_MINIMIZE) | Out-Null
             }
@@ -739,6 +860,130 @@ switch ($Action) {
             error = if ($minimizeSuccess) { $null } else { $minimizeError }
         } | ConvertTo-Json -Compress
     }
+    "zoom-office" {
+        $zoomSuccess = $false
+        $zoomError = ''
+        $actualZoom = 100
+        $handle = if ($Hwnd -ne 0) { [IntPtr]::new($Hwnd) } else { [IntPtr]::Zero }
+        if ($handle -eq [IntPtr]::Zero -or -not [WinMgr]::IsWindow($handle)) {
+            $zoomError = 'The tracked Office window is no longer available'
+        } else {
+            $actualProcessId = Get-WindowProcessIdSafe $handle
+            if ($ProcessId -le 0 -or $actualProcessId -ne $ProcessId) {
+                $zoomError = 'The tracked Office window process fingerprint changed'
+            } elseif (-not (Test-WindowMatchesFingerprint $handle $FilePath $ExpectedWindowTitle $ExpectedWindowClass)) {
+                $zoomError = 'The tracked Office document fingerprint changed; zoom was not applied'
+            } else {
+                $requestedZoom = [Math]::Max(100, [Math]::Min(300, $ZoomPercent))
+                $originXNormalized = [Math]::Max(0.0, [Math]::Min(1.0, $OriginX / 10000.0))
+                $originYNormalized = [Math]::Max(0.0, [Math]::Min(1.0, $OriginY / 10000.0))
+                $normalizedPath = Get-NormalizedPathSafe $FilePath
+                $fileExt = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+                $officeApp = $null
+                $officeDocument = $null
+                $officeWindow = $null
+                $officeSheet = $null
+                $usedRange = $null
+                $visibleRange = $null
+                try {
+                    if ($fileExt -in '.doc', '.docx', '.rtf', '.odt') {
+                        $officeApp = [System.Runtime.InteropServices.Marshal]::GetActiveObject('Word.Application')
+                        for ($i = 1; $i -le [int]$officeApp.Documents.Count -and -not $officeDocument; $i++) {
+                            $candidateDocument = $officeApp.Documents.Item($i)
+                            try {
+                                if ((Get-NormalizedPathSafe ([string]$candidateDocument.FullName)) -eq $normalizedPath) {
+                                    for ($j = 1; $j -le [int]$candidateDocument.Windows.Count; $j++) {
+                                        $candidateWindow = $candidateDocument.Windows.Item($j)
+                                        $candidateHwnd = 0
+                                        try { $candidateHwnd = [long]$candidateWindow.Hwnd } catch {}
+                                        if ($candidateHwnd -eq $Hwnd) {
+                                            $officeDocument = $candidateDocument
+                                            $officeWindow = $candidateWindow
+                                            break
+                                        }
+                                        Release-ComObjectSafe $candidateWindow
+                                    }
+                                }
+                            } catch {}
+                            if (-not $officeDocument) { Release-ComObjectSafe $candidateDocument }
+                        }
+                        if (-not $officeDocument -or -not $officeWindow) {
+                            throw 'The exact Word document window could not be matched'
+                        }
+                        $officeWindow.View.ReadingLayout = $false
+                        $officeWindow.View.Type = 3
+                        $officeWindow.View.Zoom.Percentage = $requestedZoom
+                        if ($ZoomEnabled -ne 0 -and $requestedZoom -gt 100) {
+                            try { $officeWindow.HorizontalPercentScrolled = [int][Math]::Round($originXNormalized * 100) } catch {}
+                            try { $officeWindow.VerticalPercentScrolled = [int][Math]::Round($originYNormalized * 100) } catch {}
+                        }
+                        $actualZoom = [int]$officeWindow.View.Zoom.Percentage
+                        $zoomSuccess = $true
+                    } elseif ($fileExt -in '.xls', '.xlsx', '.ods') {
+                        $officeApp = [System.Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
+                        for ($i = 1; $i -le [int]$officeApp.Workbooks.Count -and -not $officeDocument; $i++) {
+                            $candidateDocument = $officeApp.Workbooks.Item($i)
+                            try {
+                                if ((Get-NormalizedPathSafe ([string]$candidateDocument.FullName)) -eq $normalizedPath) {
+                                    for ($j = 1; $j -le [int]$candidateDocument.Windows.Count; $j++) {
+                                        $candidateWindow = $candidateDocument.Windows.Item($j)
+                                        $candidateHwnd = 0
+                                        try { $candidateHwnd = [long]$candidateWindow.Hwnd } catch {}
+                                        if ($candidateHwnd -eq $Hwnd) {
+                                            $officeDocument = $candidateDocument
+                                            $officeWindow = $candidateWindow
+                                            break
+                                        }
+                                        Release-ComObjectSafe $candidateWindow
+                                    }
+                                }
+                            } catch {}
+                            if (-not $officeDocument) { Release-ComObjectSafe $candidateDocument }
+                        }
+                        if (-not $officeDocument -or -not $officeWindow) {
+                            throw 'The exact Excel workbook window could not be matched'
+                        }
+                        $officeWindow.Zoom = $requestedZoom
+                        if ($ZoomEnabled -ne 0 -and $requestedZoom -gt 100) {
+                            Start-Sleep -Milliseconds 20
+                            $officeSheet = $officeDocument.ActiveSheet
+                            $usedRange = $officeSheet.UsedRange
+                            $visibleRange = $officeWindow.VisibleRange
+                            $firstRow = [int]$usedRange.Row
+                            $firstColumn = [int]$usedRange.Column
+                            $lastRow = $firstRow + [int]$usedRange.Rows.Count - 1
+                            $lastColumn = $firstColumn + [int]$usedRange.Columns.Count - 1
+                            $visibleRows = [Math]::Max(1, [int]$visibleRange.Rows.Count)
+                            $visibleColumns = [Math]::Max(1, [int]$visibleRange.Columns.Count)
+                            $maxScrollRow = [Math]::Max($firstRow, $lastRow - $visibleRows + 1)
+                            $maxScrollColumn = [Math]::Max($firstColumn, $lastColumn - $visibleColumns + 1)
+                            $officeWindow.ScrollRow = [int][Math]::Round($firstRow + ($maxScrollRow - $firstRow) * $originYNormalized)
+                            $officeWindow.ScrollColumn = [int][Math]::Round($firstColumn + ($maxScrollColumn - $firstColumn) * $originXNormalized)
+                        }
+                        $actualZoom = [int]$officeWindow.Zoom
+                        $zoomSuccess = $true
+                    } else {
+                        $zoomError = 'Only Word and Excel documents support Office zoom'
+                    }
+                } catch {
+                    $zoomError = $_.Exception.Message
+                } finally {
+                    Release-ComObjectSafe $visibleRange
+                    Release-ComObjectSafe $usedRange
+                    Release-ComObjectSafe $officeSheet
+                    Release-ComObjectSafe $officeWindow
+                    Release-ComObjectSafe $officeDocument
+                    Release-ComObjectSafe $officeApp
+                }
+            }
+        }
+        Log "zoom-office success=$zoomSuccess zoom=$actualZoom enabled=$ZoomEnabled origin=$OriginX,$OriginY hwnd=$Hwnd error='$zoomError'"
+        [pscustomobject]@{
+            success = $zoomSuccess
+            zoomPercent = $actualZoom
+            error = if ($zoomSuccess) { $null } else { $zoomError }
+        } | ConvertTo-Json -Compress
+    }
     "restore" {
         $restoreSuccess = $false
         $restoreError = ""
@@ -768,25 +1013,46 @@ switch ($Action) {
                     } catch {}
                 }
 
-                [WinMgr]::MoveToMonitorAndMaximize($handle, $X, $Y, $Width, $Height)
+                $placementApplied = $true
+                if ($Windowed -ne 0) {
+                    $placementApplied = [WinMgr]::MoveToRectAndShow($handle, $X, $Y, $Width, $Height, $CornerRadius)
+                } else {
+                    [WinMgr]::MoveToMonitorAndMaximize($handle, $X, $Y, $Width, $Height)
+                }
                 [WinMgr]::SetForegroundWindow($handle) | Out-Null
-                    $rect = New-Object WinMgr+RECT
-                    if ([WinMgr]::GetWindowRect($handle, [ref]$rect)) {
-                        $windowCenterX = [int](($rect.Left + $rect.Right) / 2)
-                        $windowCenterY = [int](($rect.Top + $rect.Bottom) / 2)
-                        $centerIsOnTarget = (
-                            $windowCenterX -ge $X -and
-                            $windowCenterX -lt ($X + $Width) -and
-                            $windowCenterY -ge $Y -and
-                            $windowCenterY -lt ($Y + $Height)
-                        )
-                        if ($centerIsOnTarget) {
-                            $restoreSuccess = $true
-                        } else {
-                            $restoreError = "Window did not move to the target monitor"
+                    # Word restores from an iconic state asynchronously and
+                    # can still report its minimized/off-screen rectangle on
+                    # the first GetWindowRect immediately after SW_MAXIMIZE.
+                    # Verify the final centre for a bounded interval instead
+                    # of turning that harmless delay into a failed TAKE.
+                    $lastRestoreRect = $null
+                    for ($i = 0; $i -lt 20 -and -not $restoreSuccess; $i++) {
+                        $rect = New-Object WinMgr+RECT
+                        if ([WinMgr]::GetWindowRect($handle, [ref]$rect)) {
+                            $lastRestoreRect = "$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
+                            $windowCenterX = [int](($rect.Left + $rect.Right) / 2)
+                            $windowCenterY = [int](($rect.Top + $rect.Bottom) / 2)
+                            $restoreSuccess = $placementApplied -and (
+                                $windowCenterX -ge $X -and
+                                $windowCenterX -lt ($X + $Width) -and
+                                $windowCenterY -ge $Y -and
+                                $windowCenterY -lt ($Y + $Height)
+                            )
+                            if ($restoreSuccess -and $Windowed -ne 0) {
+                                $tolerance = 40
+                                $restoreSuccess = (
+                                    [Math]::Abs($rect.Left - $X) -le $tolerance -and
+                                    [Math]::Abs($rect.Top - $Y) -le $tolerance -and
+                                    [Math]::Abs(($rect.Right - $rect.Left) - $Width) -le ($tolerance * 2) -and
+                                    [Math]::Abs(($rect.Bottom - $rect.Top) - $Height) -le ($tolerance * 2)
+                                )
+                            }
                         }
-                    } else {
-                        $restoreError = "Could not verify the restored window position"
+                        if (-not $restoreSuccess) { Start-Sleep -Milliseconds 100 }
+                    }
+                    if (-not $restoreSuccess) {
+                        $restoreError = "Window did not move to the target monitor"
+                        Log "restore position verify failed rect=$lastRestoreRect target=$X,$Y,$Width,$Height hwnd=$Hwnd"
                     }
                 }
             }

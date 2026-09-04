@@ -8,8 +8,11 @@ export interface CaptureTakeRequest {
 interface CaptureHubProps {
   activeSourceId: string | null
   audioSourceId: string | null
+  activeSceneStyle?: CSSProperties
+  activeZoomStyle?: CSSProperties
   sceneSourceId?: string | null
   sceneStyle?: CSSProperties
+  onActiveAspectRatio?: (sourceId: string, aspectRatio: number) => void
   takeRequest: CaptureTakeRequest | null
   onTakeReady: (sourceId: string, revision: number) => void
   onTakeError: (sourceId: string, revision: number, message: string) => void
@@ -129,7 +132,10 @@ async function enumerateCaptureDevices(requestId: string): Promise<CaptureDevice
 function CaptureSourceLayer({
   config,
   displayMode,
+  activeSceneStyle,
+  activeZoomStyle,
   sceneStyle,
+  onAspectRatio,
   audioActive,
   deviceRevision,
   takeRevision,
@@ -137,8 +143,11 @@ function CaptureSourceLayer({
   onTakeError
 }: {
   config: CaptureSourceConfig
-  displayMode: 'hidden' | 'fullscreen' | 'scene'
+  displayMode: 'hidden' | 'fullscreen' | 'content' | 'scene'
+  activeSceneStyle?: CSSProperties
+  activeZoomStyle?: CSSProperties
   sceneStyle?: CSSProperties
+  onAspectRatio?: (sourceId: string, aspectRatio: number) => void
   audioActive: boolean
   deviceRevision: number
   takeRevision?: number
@@ -549,6 +558,9 @@ function CaptureSourceLayer({
       retryAttemptRef.current = 0
 
       const settings = videoTrack.getSettings()
+      const frameWidth = outputVideo.videoWidth || settings.width
+      const frameHeight = outputVideo.videoHeight || settings.height
+      if (frameWidth && frameHeight) onAspectRatio?.(config.sourceId, frameWidth / frameHeight)
       emitState({
         status: 'ready',
         width: settings.width,
@@ -616,7 +628,8 @@ function CaptureSourceLayer({
     emitState,
     rejectFrameWaiters,
     resolveFrameWaiters,
-    waitForNextFrame
+    waitForNextFrame,
+    onAspectRatio
   ])
 
   useEffect(() => {
@@ -679,11 +692,23 @@ function CaptureSourceLayer({
       style={{
         ...(displayMode === 'scene'
           ? sceneStyle
-          : { inset: 0 }),
-        opacity: displayMode === 'hidden' ? 0 : 1,
-        zIndex: displayMode === 'scene' ? 3 : displayMode === 'fullscreen' ? 2 : 0,
+          : displayMode === 'content'
+            ? activeSceneStyle
+            : { inset: 0 }),
+        opacity: displayMode === 'hidden'
+          ? 0
+          : displayMode === 'scene'
+            ? sceneStyle?.opacity ?? 1
+            : displayMode === 'content'
+              ? activeSceneStyle?.opacity ?? 1
+              : 1,
+        zIndex: displayMode === 'scene' ? 3 : displayMode === 'fullscreen' ? 2 : displayMode === 'content' ? 1 : 0,
         pointerEvents: 'none',
-        borderRadius: displayMode === 'scene' ? (sceneStyle?.borderRadius ?? '0.5rem') : 0
+        borderRadius: displayMode === 'scene'
+          ? (sceneStyle?.borderRadius ?? '0.5rem')
+          : displayMode === 'content'
+            ? (activeSceneStyle?.borderRadius ?? '0.5rem')
+            : 0
       }}
     >
       <video
@@ -692,12 +717,14 @@ function CaptureSourceLayer({
         playsInline
         muted={!audioActive || !hasAudio}
         className="w-full h-full object-contain bg-black select-none"
+        style={displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined}
       />
       <img
         ref={holdImageRef}
         alt="Последний кадр источника"
         draggable={false}
         className="absolute inset-0 w-full h-full object-contain bg-black opacity-0 select-none"
+        style={displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined}
       />
     </div>
   )
@@ -706,8 +733,11 @@ function CaptureSourceLayer({
 export function CaptureHub({
   activeSourceId,
   audioSourceId,
+  activeSceneStyle,
+  activeZoomStyle,
   sceneSourceId = null,
   sceneStyle,
+  onActiveAspectRatio,
   takeRequest,
   onTakeReady,
   onTakeError
@@ -773,11 +803,14 @@ export function CaptureHub({
           key={config.sourceId}
           config={config}
           displayMode={activeSourceId === config.sourceId
-            ? 'fullscreen'
+            ? activeSceneStyle ? 'content' : 'fullscreen'
             : sceneSourceId === config.sourceId
               ? 'scene'
               : 'hidden'}
+          activeSceneStyle={activeSceneStyle}
+          activeZoomStyle={activeZoomStyle}
           sceneStyle={sceneStyle}
+          onAspectRatio={onActiveAspectRatio}
           audioActive={audioSourceId === config.sourceId}
           deviceRevision={deviceRevision}
           takeRevision={takeRequest?.sourceId === config.sourceId ? takeRequest.revision : undefined}

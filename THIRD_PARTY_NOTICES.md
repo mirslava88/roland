@@ -35,6 +35,15 @@ complete license is included at `resources/licenses/zustand-LICENSE.txt`.
 
 Source: https://github.com/pmndrs/zustand
 
+## qr-code-styling 1.9.2 and qrcode-generator 1.5.2
+
+QR-code generation and styling components, distributed under the MIT License.
+The complete qr-code-styling license is included at
+`resources/licenses/qr-code-styling-LICENSE.txt`.
+
+Sources: https://github.com/kozakdenys/qr-code-styling and
+https://github.com/kazuhikoarase/qrcode-generator
+
 ## Electron 44.1.0 and Chromium
 
 The desktop runtime is distributed under the MIT License and includes Chromium

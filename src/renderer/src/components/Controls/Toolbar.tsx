@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { EventTimer } from '../EventTimer/EventTimer'
@@ -8,14 +8,91 @@ import { SettingsModal } from './SettingsModal'
 import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
 import { BroadcastTitles } from '../BroadcastTitles/BroadcastTitles'
 import { ProgramSceneModal } from '../ProgramScene/ProgramSceneModal'
+import { QrOverlayModal } from '../QrOverlay/QrOverlayModal'
+import { hasQrData } from '../../../../shared/qr-overlay'
 import { acquireOutputTransition } from '../../output-transition-lock'
+import {
+  PROGRAM_SCENE_TRANSITION_DURATION_MS,
+  type ProgramSceneViewMode
+} from '../../../../shared/program-scene'
+
+const PROGRAM_SCENE_VIEW_BUTTONS: Array<{ mode: ProgramSceneViewMode; title: string }> = [
+  { mode: 'participant', title: 'Участник на весь экран' },
+  { mode: 'content', title: 'Контент на весь экран' },
+  { mode: 'both', title: 'Участник и контент' }
+]
+
+class ProgramSceneModalBoundary extends Component<
+  { children: ReactNode; onClose: () => void },
+  { error: string | null }
+> {
+  state = { error: null as string | null }
+
+  static getDerivedStateFromError(error: unknown): { error: string } {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    window.api.dbgLog(`ProgramSceneModal render failed: ${String(error)} ${info.componentStack || ''}`)
+  }
+
+  render(): ReactNode {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4">
+        <div className="w-[420px] max-w-[92vw] rounded-xl border border-red-500/60 bg-surface-300 p-4 text-white shadow-2xl">
+          <div className="text-sm font-semibold">Не удалось открыть настройки</div>
+          <div className="mt-2 text-xs text-gray-300">Ошибка записана в диагностический лог.</div>
+          <button
+            type="button"
+            onClick={this.props.onClose}
+            className="mt-4 rounded-lg bg-blue-600 px-4 py-1.5 text-sm hover:bg-blue-500"
+          >
+            Закрыть
+          </button>
+        </div>
+      </div>
+    )
+  }
+}
+
+function ProgramSceneViewIcon({ mode }: { mode: ProgramSceneViewMode }): JSX.Element {
+  if (mode === 'participant') {
+    return (
+      <svg viewBox="0 0 28 20" className="h-4 w-6" fill="none" aria-hidden="true">
+        <rect x="1" y="1" width="26" height="18" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <circle cx="14" cy="7" r="2.6" fill="currentColor" />
+        <path d="M8.8 16c.8-3.2 2.6-4.8 5.2-4.8s4.4 1.6 5.2 4.8" fill="currentColor" />
+      </svg>
+    )
+  }
+  if (mode === 'content') {
+    return (
+      <svg viewBox="0 0 28 20" className="h-4 w-6" fill="none" aria-hidden="true">
+        <rect x="1" y="1" width="26" height="18" rx="2" stroke="currentColor" strokeWidth="1.6" />
+        <rect x="5" y="5" width="8" height="7" rx="1" fill="currentColor" opacity="0.9" />
+        <path d="M16 6h7M16 9h7M5 15h18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    )
+  }
+  return (
+    <svg viewBox="0 0 28 20" className="h-4 w-6" fill="none" aria-hidden="true">
+      <rect x="1" y="1" width="26" height="18" rx="2" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="4" y="4" width="12" height="12" rx="1" fill="currentColor" opacity="0.9" />
+      <circle cx="21.5" cy="7.5" r="2" fill="currentColor" />
+      <path d="M18 15c.5-2.7 1.7-4 3.5-4s3 1.3 3.5 4" fill="currentColor" />
+    </svg>
+  )
+}
 
 export function Toolbar(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [auxiliaryDisplaysOpen, setAuxiliaryDisplaysOpen] = useState(false)
   const [outputCloseInFlight, setOutputCloseInFlight] = useState(false)
   const [programSceneOpen, setProgramSceneOpen] = useState(false)
+  const [qrOverlayOpen, setQrOverlayOpen] = useState(false)
   const outputCloseInFlightRef = useRef(false)
+  const programSceneFocusGenerationRef = useRef(0)
   const {
     isPresentationWindowOpen,
     setPresentationWindowOpen,
@@ -38,6 +115,8 @@ export function Toolbar(): JSX.Element {
   const programScene = useAppStore((state) => state.programScene)
   const captureSources = useAppStore((state) => state.captureSources)
   const setProgramScene = useAppStore((state) => state.setProgramScene)
+  const qrOverlay = useAppStore((state) => state.qrOverlay)
+  const setQrOverlay = useAppStore((state) => state.setQrOverlay)
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 
@@ -72,7 +151,99 @@ export function Toolbar(): JSX.Element {
       setProgramSceneOpen(true)
       return
     }
-    setProgramScene({ enabled: true })
+    const state = useAppStore.getState()
+    const targetDisplay = state.displays.find((display) => (
+      !display.isPrimary && display.id === state.selectedDisplayId
+    )) || state.displays.find((display) => !display.isPrimary)
+    if (targetDisplay) {
+      void window.api.hideTaskbar(targetDisplay.bounds).catch((error: unknown) => {
+        window.api.dbgLog(`program scene taskbar hide failed: ${String(error)}`)
+      })
+    }
+    setProgramScene({ enabled: true, viewMode: 'both' })
+  }
+
+  const showPowerPointTransitionHold = (path: string, requestId: string): Promise<boolean> => (
+    new Promise((resolve) => {
+      let settled = false
+      let readyUnsubscribe = (): void => {}
+      let errorUnsubscribe = (): void => {}
+      const finish = (ready: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        readyUnsubscribe()
+        errorUnsubscribe()
+        resolve(ready)
+      }
+      const timeout = setTimeout(() => finish(false), 1500)
+      readyUnsubscribe = window.api.on('program-scene-powerpoint-hold-ready', (...args: unknown[]) => {
+        if (args[0] === requestId) finish(true)
+      })
+      errorUnsubscribe = window.api.on('program-scene-powerpoint-hold-error', (...args: unknown[]) => {
+        if (args[0] === requestId) finish(false)
+      })
+      window.api.sendToPresentation('program-scene-powerpoint-hold', { requestId, path })
+    })
+  )
+
+  const handleProgramSceneViewMode = async (mode: ProgramSceneViewMode): Promise<void> => {
+    const state = useAppStore.getState()
+    const currentMode = state.programScene.viewMode ?? 'both'
+    if (mode === currentMode) return
+    const generation = ++programSceneFocusGenerationRef.current
+
+    const transitionEffect = state.programScene.transitionEffect ?? 'smooth'
+    const needsPowerPointHold = state.activeFile?.type === 'presentation' && (
+      mode === 'participant' ||
+      currentMode === 'participant' ||
+      (transitionEffect !== 'smooth' && transitionEffect !== 'instant')
+    )
+    if (!needsPowerPointHold) {
+      setProgramScene({ viewMode: mode })
+      return
+    }
+
+    // Full-slide frames are generated while a PowerPoint channel is prepared.
+    // Reuse that ready local frame so the scene starts reacting to the button
+    // immediately. Capture the native slideshow only as a cold-cache fallback.
+    const cachedSnapshotPath = state.activeFile?.type === 'presentation'
+      ? state.pptxSlidesMap[state.activeFile.path]?.[Math.max(0, state.currentSlide - 1)] ?? null
+      : null
+    const snapshotPath = cachedSnapshotPath || await window.api.snapshotSlideshow().catch(() => null)
+    if (generation !== programSceneFocusGenerationRef.current) return
+    let participantFocusPrepared = false
+    if (snapshotPath) {
+      const requestId = `pptx-focus-${Date.now()}-${generation}`
+      const holdReady = await showPowerPointTransitionHold(snapshotPath, requestId)
+      if (generation !== programSceneFocusGenerationRef.current) return
+      if (holdReady && (mode === 'participant' || (transitionEffect !== 'smooth' && transitionEffect !== 'instant'))) {
+        await window.api.raisePresentationWindow()
+        if (generation !== programSceneFocusGenerationRef.current) return
+        participantFocusPrepared = mode === 'participant'
+        const latest = useAppStore.getState()
+        const targetDisplay = latest.displays.find((display) => (
+          !display.isPrimary && display.id === latest.selectedDisplayId
+        )) || latest.displays.find((display) => !display.isPrimary)
+        if (targetDisplay) {
+          void window.api.hideTaskbar(targetDisplay.bounds).catch((error: unknown) => {
+            window.api.dbgLog(`participant focus taskbar hide failed: ${String(error)}`)
+          })
+        }
+      }
+    }
+    // Even if the optional snapshot failed, make the Chromium scene the sole
+    // owner of participant focus before its geometry starts changing.  The
+    // native bridge observes this marker and will not reorder the same two
+    // windows a second time in the middle of the animation.
+    if (mode === 'participant' && !participantFocusPrepared) {
+      await window.api.raisePresentationWindow()
+      if (generation !== programSceneFocusGenerationRef.current) return
+    }
+    setProgramScene({
+      viewMode: mode,
+      transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
+    })
   }
 
   const handleTogglePresentation = async (): Promise<void> => {
@@ -334,7 +505,7 @@ export function Toolbar(): JSX.Element {
               ? 'Включить режим «Картинка в картинке» с сохранёнными настройками'
               : 'Сначала настройте фон и внешний источник'}
         >
-          ▣ Картинка в картинке: {programScene.enabled ? 'Вкл' : 'Выкл'}
+          ▣ PiP: {programScene.enabled ? 'Вкл' : 'Выкл'}
         </button>
         <button
           onClick={() => setProgramSceneOpen(true)}
@@ -345,6 +516,67 @@ export function Toolbar(): JSX.Element {
           }`}
           title="Настройки режима «Картинка в картинке»"
           aria-label="Настройки режима «Картинка в картинке»"
+        >
+          ⚙
+        </button>
+      </div>
+
+      {programScene.enabled && (
+        <div
+          className="flex shrink-0 items-stretch overflow-hidden rounded-lg border border-gray-700 bg-surface-100"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+        >
+          {PROGRAM_SCENE_VIEW_BUTTONS.map(({ mode, title }) => {
+            const selected = (programScene.viewMode ?? 'both') === mode
+            return (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => { void handleProgramSceneViewMode(mode) }}
+                title={title}
+                aria-label={title}
+                aria-pressed={selected}
+                className={`flex h-7 w-9 items-center justify-center border-l border-gray-700 first:border-l-0 transition-colors ${selected
+                  ? 'bg-cyan-600 text-white'
+                  : 'text-gray-400 hover:bg-gray-700 hover:text-white'}`}
+              >
+                <ProgramSceneViewIcon mode={mode} />
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      <div
+        className="flex shrink-0 items-stretch"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
+        <button
+          type="button"
+          onClick={() => {
+            if (qrOverlay.enabled) {
+              setQrOverlay({ enabled: false })
+            } else if (hasQrData(qrOverlay)) {
+              setQrOverlay({ enabled: true })
+            } else {
+              setQrOverlayOpen(true)
+            }
+          }}
+          className={`whitespace-nowrap rounded-l-lg border px-2 py-1 text-[11px] font-medium transition-colors ${qrOverlay.enabled
+            ? 'border-emerald-500 bg-emerald-600/80 text-white hover:bg-emerald-600'
+            : 'border-gray-700 bg-surface-100 text-gray-300 hover:bg-gray-700'}`}
+          title={qrOverlay.enabled ? 'Убрать QR-код из эфира' : hasQrData(qrOverlay) ? 'Показать QR-код с сохранёнными настройками' : 'Сначала настройте QR-код'}
+        >
+          ▦ QR: {qrOverlay.enabled ? 'Вкл' : 'Выкл'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setQrOverlayOpen(true)}
+          className={`rounded-r-lg border border-l-0 px-1.5 py-1 text-[12px] transition-colors ${qrOverlay.enabled
+            ? 'border-emerald-500 bg-emerald-700/80 text-white hover:bg-emerald-600'
+            : 'border-gray-700 bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'}`}
+          title="Настройки QR-кода"
+          aria-label="Настройки QR-кода"
         >
           ⚙
         </button>
@@ -406,7 +638,12 @@ export function Toolbar(): JSX.Element {
       {auxiliaryDisplaysOpen && (
         <AuxiliaryDisplaysModal onClose={() => setAuxiliaryDisplaysOpen(false)} />
       )}
-      {programSceneOpen && <ProgramSceneModal onClose={() => setProgramSceneOpen(false)} />}
+      {programSceneOpen && (
+        <ProgramSceneModalBoundary onClose={() => setProgramSceneOpen(false)}>
+          <ProgramSceneModal onClose={() => setProgramSceneOpen(false)} />
+        </ProgramSceneModalBoundary>
+      )}
+      {qrOverlayOpen && <QrOverlayModal onClose={() => setQrOverlayOpen(false)} />}
     </div>
   )
 }

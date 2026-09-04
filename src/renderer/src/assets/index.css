@@ -90,6 +90,25 @@
   100% { opacity: 0; }
 }
 
+/* Paired names force Chromium to restart the selected scene transition on
+   consecutive layout changes without remounting live video or document panes. */
+@keyframes pdm-scene-smooth-a {
+  from { opacity: 0.55; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes pdm-scene-smooth-b {
+  from { opacity: 0.55; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes pdm-scene-zoom-fade-a {
+  from { opacity: 0.2; transform: scale(0.82); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes pdm-scene-zoom-fade-b {
+  from { opacity: 0.2; transform: scale(0.82); }
+  to { opacity: 1; transform: scale(1); }
+}
+
 @keyframes broadcast-title-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }

@@ -8,12 +8,19 @@ export type ProgramScenePlacement =
 
 export type ProgramSceneParticipantSize = 'small' | 'medium' | 'large' | 'half'
 export type ProgramSceneCornerStyle = 'sharp' | 'rounded'
+export type ProgramSceneViewMode = 'participant' | 'content' | 'both'
+export type ProgramSceneTransitionEffect = 'smooth' | 'zoom-fade' | 'instant'
+
+export const PROGRAM_SCENE_TRANSITION_DURATION_MS = 650
 
 export interface ProgramSceneLayoutConfig {
   enabled: boolean
   placement: ProgramScenePlacement
   participantSize: ProgramSceneParticipantSize
   cornerStyle: ProgramSceneCornerStyle
+  viewMode?: ProgramSceneViewMode
+  transitionEffect?: ProgramSceneTransitionEffect
+  transitionDurationMs?: number
   contentAspectRatio?: number | null
 }
 
@@ -33,7 +40,10 @@ export const DEFAULT_PROGRAM_SCENE_LAYOUT: ProgramSceneLayoutConfig = {
   enabled: false,
   placement: 'right-center',
   participantSize: 'medium',
-  cornerStyle: 'sharp'
+  cornerStyle: 'sharp',
+  viewMode: 'both',
+  transitionEffect: 'smooth',
+  transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
 }
 
 const PARTICIPANT_WIDTH: Record<ProgramSceneParticipantSize, number> = {
@@ -51,7 +61,7 @@ const PARTICIPANT_WIDTH: Record<ProgramSceneParticipantSize, number> = {
 export function getProgramSceneRects(
   width: number,
   height: number,
-  config: Pick<ProgramSceneLayoutConfig, 'placement' | 'participantSize' | 'contentAspectRatio'>
+  config: Pick<ProgramSceneLayoutConfig, 'placement' | 'participantSize' | 'viewMode' | 'contentAspectRatio'>
 ): ProgramSceneRects {
   const participantSize = config.participantSize in PARTICIPANT_WIDTH
     ? config.participantSize
@@ -101,13 +111,19 @@ export function getProgramSceneRects(
       ? safeHeight - marginY - participantHeight
       : Math.round((safeHeight - participantHeight) / 2)
 
-  return {
-    content: { x: contentX, y: contentY, width: contentWidth, height: contentHeight },
-    participant: {
+  const content = { x: contentX, y: contentY, width: contentWidth, height: contentHeight }
+  const participant = {
       x: participantX,
       y: participantY,
       width: participantWidth,
       height: participantHeight
-    }
+  }
+  return {
+    content: config.viewMode === 'content'
+      ? { x: 0, y: 0, width: safeWidth, height: safeHeight }
+      : content,
+    participant: config.viewMode === 'participant'
+      ? { x: 0, y: 0, width: safeWidth, height: safeHeight }
+      : participant
   }
 }

@@ -4,6 +4,8 @@ import {
 } from './stores/useAppStore'
 import { acquireOutputTransition } from './output-transition-lock'
 
+const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
+
 export interface ProgramDisplayRoutingResult {
   success: boolean
   changed: boolean
@@ -88,6 +90,23 @@ async function switchPrimaryProgramDisplayUnlocked(
   const outputIsLive = activeFile !== null || initial.isPresentationWindowOpen
   const activeExternalDocument =
     activeFile?.type === 'other' && !activeFile.isImage && !activeFile.isAudio
+  const selectedSceneCapture = initial.captureSources.find(
+    (entry) => entry.capture?.sourceId === initial.programScene.captureSourceId
+  )?.capture ?? null
+  const activeOfficeSceneLayout = activeExternalDocument && activeFile &&
+    OFFICE_PROGRAM_EXTENSIONS.has(activeFile.extension.toLowerCase()) &&
+    initial.programScene.enabled && initial.backdropImage && selectedSceneCapture
+      ? {
+          enabled: true,
+          placement: initial.programScene.placement,
+          participantSize: initial.programScene.participantSize,
+          cornerStyle: initial.programScene.cornerStyle,
+          viewMode: initial.programScene.viewMode,
+          transitionEffect: initial.programScene.transitionEffect,
+          transitionDurationMs: initial.programScene.transitionDurationMs,
+          contentAspectRatio: null
+        } as const
+      : undefined
   const presentationWindowIsProgramOutput =
     activeFile?.type === 'pdf' ||
     activeFile?.type === 'video' ||
@@ -174,7 +193,11 @@ async function switchPrimaryProgramDisplayUnlocked(
         // restoreExternalFile can likewise partially move a native window and
         // then fail while verifying it. A failed attempt must be rolled back.
         physicalOutputMoved = true
-        const result = await window.api.restoreExternalFile(activeFile.path, targetDisplay.bounds)
+        const result = await window.api.restoreExternalFile(
+          activeFile.path,
+          targetDisplay.bounds,
+          activeOfficeSceneLayout
+        )
         if (!result.success) throw new Error(result.error || 'Окно программы не перенеслось на выбранный дисплей')
       } else {
         if (presentationWindowIsProgramOutput) physicalOutputMoved = true
@@ -238,7 +261,11 @@ async function switchPrimaryProgramDisplayUnlocked(
               throw new Error('фоновое окно эфира не вернулось на прежний дисплей')
             }
           }
-          const rollback = await window.api.restoreExternalFile(activeFile.path, previousDisplay.bounds)
+          const rollback = await window.api.restoreExternalFile(
+            activeFile.path,
+            previousDisplay.bounds,
+            activeOfficeSceneLayout
+          )
           if (!rollback.success) throw new Error(rollback.error || 'окно программы не вернулось на прежний дисплей')
         } else {
           const presentationRolledBack = await window.api.placePresentationWindow(previousDisplayId)

@@ -3,10 +3,15 @@ import { mediaUrl } from '../../media'
 import { useAppStore } from '../../stores/useAppStore'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import { SlideRenderer } from '../Preview/PreviewPanel'
+import {
+  DEFAULT_PROGRAM_SCENE_LAYOUT,
+  PROGRAM_SCENE_TRANSITION_DURATION_MS
+} from '../../../../shared/program-scene'
 import type {
   ProgramSceneCornerStyle,
   ProgramSceneParticipantSize,
-  ProgramScenePlacement
+  ProgramScenePlacement,
+  ProgramSceneTransitionEffect
 } from '../../../../shared/program-scene'
 
 interface Props {
@@ -40,6 +45,22 @@ const CORNERS: Array<{ value: ProgramSceneCornerStyle; label: string }> = [
   { value: 'rounded', label: 'Скруглённые' }
 ]
 
+const TRANSITION_EFFECTS: Array<{ value: ProgramSceneTransitionEffect; label: string }> = [
+  { value: 'smooth', label: 'Плавное изменение' },
+  { value: 'zoom-fade', label: 'Масштаб с затуханием' },
+  { value: 'instant', label: 'Без анимации' }
+]
+
+function TransitionEffectIcon({ effect }: { effect: ProgramSceneTransitionEffect }): JSX.Element {
+  if (effect === 'zoom-fade') {
+    return <span className="relative h-4 w-5"><i className="absolute left-0 top-1 h-2 w-2 rounded-sm border border-current opacity-40" /><i className="absolute bottom-0 right-0 h-3 w-3 rounded-sm border-2 border-current" /></span>
+  }
+  if (effect === 'instant') {
+    return <span className="text-sm font-bold leading-none">⚡</span>
+  }
+  return <span className="relative h-4 w-5"><i className="absolute left-0 top-0 h-3 w-3 rounded-sm border border-current" /><i className="absolute bottom-0 right-0 h-3 w-3 rounded-sm border border-current" /></span>
+}
+
 function captureIsUsedOutsideProgramScene(
   state: ReturnType<typeof useAppStore.getState>,
   sourceId: string
@@ -52,7 +73,30 @@ function captureIsUsedOutsideProgramScene(
 }
 
 export function ProgramSceneModal({ onClose }: Props): JSX.Element {
-  const programScene = useAppStore((state) => state.programScene)
+  const storedProgramScene = useAppStore((state) => state.programScene)
+  const scenePlacement = PLACEMENTS.some((item) => item.value === storedProgramScene?.placement)
+    ? storedProgramScene.placement
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.placement
+  const sceneParticipantSize = SIZES.some((item) => item.value === storedProgramScene?.participantSize)
+    ? storedProgramScene.participantSize
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize
+  const sceneCornerStyle = CORNERS.some((item) => item.value === storedProgramScene?.cornerStyle)
+    ? storedProgramScene.cornerStyle
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle
+  const sceneTransitionEffect = TRANSITION_EFFECTS.some((item) => item.value === storedProgramScene?.transitionEffect)
+    ? storedProgramScene.transitionEffect
+    : DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth'
+  const programScene = {
+    ...DEFAULT_PROGRAM_SCENE_LAYOUT,
+    ...storedProgramScene,
+    enabled: storedProgramScene?.enabled === true,
+    captureSourceId: storedProgramScene?.captureSourceId ?? null,
+    placement: scenePlacement,
+    participantSize: sceneParticipantSize,
+    cornerStyle: sceneCornerStyle,
+    transitionEffect: sceneTransitionEffect,
+    viewMode: storedProgramScene?.viewMode ?? 'both'
+  }
   const setProgramScene = useAppStore((state) => state.setProgramScene)
   const captureSources = useAppStore((state) => state.captureSources)
   const addCaptureSource = useAppStore((state) => state.addCaptureSource)
@@ -66,6 +110,7 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
   const [devices, setDevices] = useState<CaptureDeviceDescriptor[]>([])
   const [devicesLoading, setDevicesLoading] = useState(true)
   const [devicesError, setDevicesError] = useState<string | null>(null)
+  const [transitionPreviewRevision, setTransitionPreviewRevision] = useState(0)
   const requestGenerationRef = useRef(0)
   const videoDevices = useMemo(
     () => devices.filter((device) => device.kind === 'videoinput'),
@@ -83,17 +128,20 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
     candidatePreviewFile.type === 'presentation' ||
     candidatePreviewFile.type === 'pdf' ||
     candidatePreviewFile.type === 'video' ||
+    (candidatePreviewFile.type === 'capture' && candidatePreviewFile.capture?.captureKind === 'desktop') ||
     (candidatePreviewFile.type === 'other' && candidatePreviewFile.isImage)
   ) ? candidatePreviewFile : null
   const previewSlide = activeFile
     ? currentSlide
-    : selectedChannelState?.file?.path === previewFile?.path
+    : selectedChannelState && selectedChannelState.file?.path === previewFile?.path
       ? selectedChannelState.slide
       : 1
   const previewPptxThumbnails = previewFile?.type === 'presentation'
     ? pptxThumbnailsMap[previewFile.path] || []
     : []
-  const canEnable = !!backdropImage && selectedCaptureExists
+  const selectedCaptureMatchesContent = candidatePreviewFile?.type === 'capture' &&
+    candidatePreviewFile.capture?.sourceId === selectedCapture?.sourceId
+  const canEnable = !!backdropImage && selectedCaptureExists && !selectedCaptureMatchesContent
   const participantOnLeft = programScene.placement.startsWith('left-')
   const vertical = programScene.placement.split('-')[1]
   const participantWidthPercent = programScene.participantSize === 'small'
@@ -107,6 +155,20 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
   const contentFarInset = `${4 + participantWidthPercent + 3}%`
   const contentWidth = `${89 - participantWidthPercent}%`
   const previewRadius = programScene.cornerStyle === 'rounded' ? '0.75rem' : 0
+  const previewEffectVariant = transitionPreviewRevision % 2 === 0 ? 'a' : 'b'
+  const previewAnimationName = programScene.transitionEffect === 'smooth'
+    ? `pdm-scene-smooth-${previewEffectVariant}`
+    : programScene.transitionEffect === 'zoom-fade'
+      ? `pdm-scene-zoom-fade-${previewEffectVariant}`
+      : null
+  const previewAnimationStyle = transitionPreviewRevision > 0 && previewAnimationName
+    ? { animation: `${previewAnimationName} ${PROGRAM_SCENE_TRANSITION_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1) backwards` }
+    : undefined
+
+  const selectTransitionEffect = (effect: ProgramSceneTransitionEffect): void => {
+    setProgramScene({ transitionEffect: effect })
+    setTransitionPreviewRevision((revision) => revision + 1)
+  }
 
   useEffect(() => {
     // Builds before sceneOnly existed stored scene-picked devices in the
@@ -273,16 +335,18 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
               borderRadius: previewRadius
             }}
           >
-            {previewFile ? (
-              <SlideRenderer
-                file={previewFile}
-                slideNum={previewSlide}
-                pptxThumbnails={previewPptxThumbnails}
-                onTotalSlides={() => undefined}
-              />
-            ) : (
-              <span className="text-[10px] text-gray-500">ПРЕЗЕНТАЦИЯ НЕ ВЫБРАНА</span>
-            )}
+            <div className="flex h-full w-full items-center justify-center" style={previewAnimationStyle}>
+              {previewFile ? (
+                <SlideRenderer
+                  file={previewFile}
+                  slideNum={previewSlide}
+                  pptxThumbnails={previewPptxThumbnails}
+                  onTotalSlides={() => undefined}
+                />
+              ) : (
+                <span className="text-[10px] text-gray-500">ПРЕЗЕНТАЦИЯ НЕ ВЫБРАНА</span>
+              )}
+            </div>
           </div>
           <div
             className="absolute aspect-video bg-slate-700 text-center text-[10px] text-white shadow-xl flex items-center justify-center overflow-hidden"
@@ -296,11 +360,13 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
               borderRadius: previewRadius
             }}
           >
-            {selectedCapture ? (
-              <CaptureThumbnail config={selectedCapture} className="h-full w-full" />
-            ) : (
-              <span className="px-2">ВНЕШНИЙ ИСТОЧНИК НЕ ВЫБРАН</span>
-            )}
+            <div className="flex h-full w-full items-center justify-center" style={previewAnimationStyle}>
+              {selectedCapture ? (
+                <CaptureThumbnail config={selectedCapture} className="h-full w-full" />
+              ) : (
+                <span className="px-2">ВНЕШНИЙ ИСТОЧНИК НЕ ВЫБРАН</span>
+              )}
+            </div>
           </div>
           {!backdropImage && (
             <button
@@ -413,20 +479,41 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
           </div>
         </div>
 
-        <div className="mb-2">
-          <div className="mb-1 text-xs text-gray-300">Углы презентации и участника</div>
-          <div className="grid grid-cols-2 gap-1">
-            {CORNERS.map((item) => (
-              <button
-                key={item.value}
-                onClick={() => setProgramScene({ cornerStyle: item.value })}
-                className={`rounded px-3 py-0.5 text-[10px] ${programScene.cornerStyle === item.value
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-surface-100 text-gray-300 hover:bg-gray-700'}`}
-              >
-                {item.label}
-              </button>
-            ))}
+        <div className="mb-2 grid grid-cols-2 gap-3">
+          <div>
+            <div className="mb-1 text-xs text-gray-300">Углы</div>
+            <div className="grid grid-cols-2 gap-1">
+              {CORNERS.map((item) => (
+                <button
+                  key={item.value}
+                  onClick={() => setProgramScene({ cornerStyle: item.value })}
+                  className={`rounded px-2 py-0.5 text-[10px] ${programScene.cornerStyle === item.value
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-surface-100 text-gray-300 hover:bg-gray-700'}`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="mb-1 h-4 text-xs text-gray-300">Эффект переключения</div>
+            <div className="grid grid-cols-3 gap-1">
+              {TRANSITION_EFFECTS.map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  title={item.label}
+                  aria-label={item.label}
+                  onClick={() => selectTransitionEffect(item.value)}
+                  className={`flex h-6 items-center justify-center rounded border ${programScene.transitionEffect === item.value
+                    ? 'border-blue-400 bg-blue-600 text-white'
+                    : 'border-gray-700 bg-surface-100 text-gray-300 hover:border-gray-500 hover:bg-gray-700'}`}
+                >
+                  <TransitionEffectIcon effect={item.value} />
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -436,11 +523,15 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
               ? 'Нужен выбранный фон.'
               : !selectedCaptureExists
                 ? 'Выберите внешний источник.'
+                : selectedCaptureMatchesContent
+                  ? 'Для участника выберите источник, отличный от основного окна или экрана.'
                 : 'Режим можно менять прямо во время эфира.'}
           </div>
           <button
             disabled={!canEnable && !programScene.enabled}
-            onClick={() => setProgramScene({ enabled: !programScene.enabled })}
+            onClick={() => setProgramScene(programScene.enabled
+              ? { enabled: false }
+              : { enabled: true, viewMode: 'both' })}
             className={`rounded-lg px-4 py-1 text-sm font-medium ${programScene.enabled
               ? 'bg-red-600 text-white hover:bg-red-500'
               : canEnable

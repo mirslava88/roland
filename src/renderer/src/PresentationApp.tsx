@@ -24,10 +24,14 @@ import {
 import { releasePdfiumResources } from './pdfium-renderer'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
+  PROGRAM_SCENE_TRANSITION_DURATION_MS,
   getProgramSceneRects,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
-  type ProgramScenePlacement
+  type ProgramScenePlacement,
+  type ProgramSceneRect,
+  type ProgramSceneTransitionEffect,
+  type ProgramSceneViewMode
 } from '../../shared/program-scene'
 import {
   DEFAULT_CONTENT_ZOOM,
@@ -60,7 +64,17 @@ interface ProgramScenePayload {
   placement: ProgramScenePlacement
   participantSize: ProgramSceneParticipantSize
   cornerStyle: ProgramSceneCornerStyle
+  viewMode: ProgramSceneViewMode
+  transitionEffect: ProgramSceneTransitionEffect
+  transitionDurationMs: number
   contentAspectRatio: number | null
+}
+
+interface ProgramScenePowerPointHold {
+  requestId: string
+  path: string
+  rect: ProgramSceneRect | null
+  frozen: boolean
 }
 
 const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
@@ -70,6 +84,9 @@ const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
   placement: DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
   participantSize: DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize,
   cornerStyle: DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle,
+  viewMode: DEFAULT_PROGRAM_SCENE_LAYOUT.viewMode ?? 'both',
+  transitionEffect: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth',
+  transitionDurationMs: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionDurationMs ?? 360,
   contentAspectRatio: null
 }
 
@@ -202,7 +219,12 @@ export function PresentationApp(): JSX.Element {
   const [captureTakeRequest, setCaptureTakeRequest] = useState<CaptureTakeRequest | null>(null)
   const [broadcastTitles, setBroadcastTitles] = useState<BroadcastTitlesOutput>(HIDDEN_BROADCAST_TITLES)
   const [programScene, setProgramScene] = useState<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
+  const programSceneRef = useRef<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
+  const [sceneTransitionRevision, setSceneTransitionRevision] = useState(0)
+  const [powerPointHold, setPowerPointHold] = useState<ProgramScenePowerPointHold | null>(null)
+  const programSceneContentRectRef = useRef<ProgramSceneRect | null>(null)
   const [contentZoom, setContentZoom] = useState<ContentZoomState>(DEFAULT_CONTENT_ZOOM)
+  const [captureAspectRatios, setCaptureAspectRatios] = useState<Record<string, number>>({})
   const [activeContentSuspended, setActiveContentSuspended] = useState(false)
   const [slotAspectRatios, setSlotAspectRatios] = useState<[
     { revision: number; value: number | null },
@@ -454,6 +476,11 @@ export function PresentationApp(): JSX.Element {
 
   const loadContent = useCallback((payload: ContentPayload): void => {
     postCommitGenerationRef.current += 1
+    // A PowerPoint transition frame is valid only while the native slideshow
+    // remains the active program source.  Keeping it after a PDF/capture take
+    // would place the old 16:9 bitmap above portrait content and expose its
+    // black letterbox area instead of the selected scene backdrop.
+    if (payload.type !== 'presentation') setPowerPointHold(null)
     const currentLayer = activeLayerRef.current
     const currentPayload = activePayloadRef.current
     const revision = ++revisionRef.current
@@ -609,6 +636,7 @@ export function PresentationApp(): JSX.Element {
       cancelPdfLivePrewarmJobs()
       releasePdfiumResources()
       activePayloadRef.current = null
+      setPowerPointHold(null)
       activeSlotRef.current = layer.slot
       setSlots((previous) => [
         { payload: null, revision: previous[0].revision },
@@ -675,6 +703,7 @@ export function PresentationApp(): JSX.Element {
       setCaptureTakeRequest(null)
       setCaptureAudioSourceId(null)
       activePayloadRef.current = null
+      setPowerPointHold(null)
       activeSlotRef.current = 0
       activeLayerRef.current = { kind: 'slot', slot: 0 }
       setActiveContentSuspended(false)
@@ -718,7 +747,10 @@ export function PresentationApp(): JSX.Element {
     const unsubscribe = window.api.on('program-scene-update', (...args: unknown[]) => {
       const raw = args[0] as Partial<ProgramScenePayload> | undefined
       const capture = raw?.capture?.sourceId ? raw.capture : null
-      setProgramScene({
+      const nextViewMode = raw?.viewMode === 'participant' || raw?.viewMode === 'content'
+        ? raw.viewMode
+        : 'both'
+      const nextProgramScene: ProgramScenePayload = {
         active: raw?.active === true && !!capture,
         capture,
         backdropPath: typeof raw?.backdropPath === 'string' ? raw.backdropPath : null,
@@ -731,13 +763,54 @@ export function PresentationApp(): JSX.Element {
           ? raw.participantSize
           : 'medium',
         cornerStyle: raw?.cornerStyle === 'rounded' ? 'rounded' : 'sharp',
+        viewMode: nextViewMode,
+        transitionEffect: raw?.transitionEffect === 'zoom-fade' ||
+          raw?.transitionEffect === 'instant'
+          ? raw.transitionEffect
+          : 'smooth',
+        transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS,
         contentAspectRatio: typeof raw?.contentAspectRatio === 'number' && Number.isFinite(raw.contentAspectRatio)
           ? raw.contentAspectRatio
           : null
-      })
+      }
+      const previousProgramScene = programSceneRef.current
+      if (
+        previousProgramScene.active &&
+        nextProgramScene.active &&
+        previousProgramScene.viewMode !== nextProgramScene.viewMode
+      ) {
+        setSceneTransitionRevision((revision) => revision + 1)
+      }
+      programSceneRef.current = nextProgramScene
+      setProgramScene(nextProgramScene)
+      if (raw?.active !== true) {
+        setPowerPointHold(null)
+      } else if (nextViewMode !== 'participant') {
+        setPowerPointHold((current) => current ? { ...current, frozen: false } : null)
+      }
     })
     window.api.sendToControl('program-scene-ready')
     return unsubscribe
+  }, [])
+
+  useEffect(() => {
+    const show = window.api.on('program-scene-powerpoint-hold', (...args: unknown[]) => {
+      const raw = args[0] as { requestId?: unknown; path?: unknown } | undefined
+      if (typeof raw?.requestId !== 'string' || typeof raw.path !== 'string') return
+      setPowerPointHold({
+        requestId: raw.requestId,
+        path: raw.path,
+        rect: programSceneContentRectRef.current,
+        frozen: true
+      })
+    })
+    const clear = window.api.on('program-scene-powerpoint-hold-clear', () => {
+      setPowerPointHold(null)
+    })
+    return () => {
+      show()
+      clear()
+    }
   }, [])
 
   useEffect(() => {
@@ -774,6 +847,15 @@ export function PresentationApp(): JSX.Element {
       return next
     })
   }
+
+  const reportCaptureAspectRatio = useCallback((sourceId: string, aspectRatio: number): void => {
+    if (!Number.isFinite(aspectRatio) || aspectRatio < 0.2 || aspectRatio > 5) return
+    setCaptureAspectRatios((current) => (
+      current[sourceId] && Math.abs(current[sourceId] - aspectRatio) < 0.0001
+        ? current
+        : { ...current, [sourceId]: aspectRatio }
+    ))
+  }, [])
 
   const renderSlot = (slot: ContentSlot, index: SlotIndex): JSX.Element | null => {
     const content = slot.payload
@@ -849,8 +931,13 @@ export function PresentationApp(): JSX.Element {
   }
 
   const activeCaptureId = activeLayer.kind === 'capture' ? activeLayer.sourceId : null
+  const activeCapturePayload = activeLayer.kind === 'capture' ? activePayloadRef.current : null
+  const activeCaptureIsDesktop = activeCapturePayload?.type === 'capture' &&
+    activeCapturePayload.capture?.captureKind === 'desktop'
   const hasVisibleContent = activeLayer.kind === 'capture' || !!slots[activeLayer.slot].payload
-  const sceneActive = programScene.active && activeLayer.kind !== 'capture'
+  const sceneActive = programScene.active && (
+    activeLayer.kind !== 'capture' || activeCaptureIsDesktop
+  )
   const activeSlotContent = activeLayer.kind === 'slot'
     ? slots[activeLayer.slot].payload
     : null
@@ -863,29 +950,57 @@ export function PresentationApp(): JSX.Element {
   // Keep that outgoing PDF/video/image on its own measured aspect instead of
   // prematurely applying the incoming PowerPoint ratio and visibly resizing
   // the old frame during the transition.
-  const effectiveContentAspectRatio = activeSlotContent && activeSlotContent.type !== 'presentation'
-    ? activeSlotAspect
-    : programScene.contentAspectRatio ?? activeSlotAspect
+  const activeCaptureAspect = activeCaptureId ? captureAspectRatios[activeCaptureId] ?? null : null
+  const effectiveContentAspectRatio = activeLayer.kind === 'capture'
+    ? activeCaptureAspect
+    : activeSlotContent && activeSlotContent.type !== 'presentation'
+      ? activeSlotAspect
+      : programScene.contentAspectRatio ?? activeSlotAspect
   const sceneRects = getProgramSceneRects(viewport.width, viewport.height, {
     ...programScene,
     contentAspectRatio: effectiveContentAspectRatio
   })
+  programSceneContentRectRef.current = sceneRects.content
+  const sceneViewMode = programScene.viewMode ?? 'both'
+  // Keep content painted underneath the participant. In participant focus the
+  // camera grows over it, so the document is covered naturally instead of
+  // fading out before the geometric transition has finished.
+  const contentVisible = true
+  const participantVisible = sceneViewMode !== 'content'
+  const transitionDurationMs = PROGRAM_SCENE_TRANSITION_DURATION_MS
+  const opacityDurationMs = Math.min(800, Math.max(220, Math.round(transitionDurationMs * 0.35)))
+  const smoothPaneTransition = `left ${transitionDurationMs}ms cubic-bezier(0.42, 0, 0.58, 1), top ${transitionDurationMs}ms cubic-bezier(0.42, 0, 0.58, 1), width ${transitionDurationMs}ms cubic-bezier(0.42, 0, 0.58, 1), height ${transitionDurationMs}ms cubic-bezier(0.42, 0, 0.58, 1), opacity ${opacityDurationMs}ms cubic-bezier(0.42, 0, 0.58, 1), border-radius ${transitionDurationMs}ms cubic-bezier(0.42, 0, 0.58, 1)`
+  const paneTransition = programScene.transitionEffect === 'smooth' ? smoothPaneTransition : 'none'
+  const effectVariant = sceneTransitionRevision % 2 === 0 ? 'a' : 'b'
+  const sceneEffectAnimationName = programScene.transitionEffect === 'zoom-fade'
+    ? `pdm-scene-zoom-fade-${effectVariant}`
+    : null
+  const sceneEffectStyle = sceneTransitionRevision > 0 && sceneEffectAnimationName
+    ? {
+        animation: `${sceneEffectAnimationName} ${transitionDurationMs}ms cubic-bezier(0.22, 1, 0.36, 1) backwards`,
+        willChange: 'transform, opacity'
+      }
+    : {}
   const contentStyle = sceneActive
     ? {
         left: sceneRects.content.x,
         top: sceneRects.content.y,
         width: sceneRects.content.width,
         height: sceneRects.content.height,
-        borderRadius: '0.5rem'
+        borderRadius: '0.5rem',
+        opacity: contentVisible ? 1 : 0,
+        transition: paneTransition
       }
     : { inset: 0 }
   const participantStyle = {
     left: sceneRects.participant.x,
     top: sceneRects.participant.y,
     width: sceneRects.participant.width,
-    height: sceneRects.participant.height
+    height: sceneRects.participant.height,
+    opacity: participantVisible ? 1 : 0,
+    transition: paneTransition
   }
-  const sceneBorderRadius = programScene.cornerStyle === 'rounded' ? '1.25rem' : 0
+  const sceneBorderRadius = sceneViewMode === 'both' && programScene.cornerStyle === 'rounded' ? '1.25rem' : 0
   const zoomTransform = contentZoom.enabled && contentZoom.scale > 1
     ? `scale(${contentZoom.scale})`
     : undefined
@@ -903,13 +1018,17 @@ export function PresentationApp(): JSX.Element {
       )}
       {slots.map((slot, index) => {
         const isActive = activeLayer.kind === 'slot' && activeLayer.slot === index
+        const nativePowerPointSurface = sceneActive && (
+          !slot.payload || slot.payload.type === 'presentation'
+        )
         return (
           <div
             key={index}
-            className={`absolute overflow-hidden shadow-2xl ${sceneActive ? 'bg-transparent' : 'bg-black'}`}
+            className={`absolute overflow-hidden ${nativePowerPointSurface ? '' : 'shadow-2xl'} ${sceneActive ? 'bg-transparent' : 'bg-black'}`}
             style={{
               ...contentStyle,
-              opacity: isActive && !activeContentSuspended ? 1 : 0,
+              ...(isActive ? sceneEffectStyle : {}),
+              opacity: isActive && !activeContentSuspended && contentVisible ? 1 : 0,
               zIndex: isActive ? 1 : 0,
               pointerEvents: isActive ? 'auto' : 'none',
               borderRadius: sceneActive ? sceneBorderRadius : 0
@@ -927,16 +1046,59 @@ export function PresentationApp(): JSX.Element {
           </div>
         )
       })}
+      {sceneActive && powerPointHold && activePayloadRef.current?.type === 'presentation' && (
+        <div
+          className="absolute overflow-hidden bg-transparent"
+          style={{
+            ...(powerPointHold.frozen && powerPointHold.rect
+              ? {
+                  left: powerPointHold.rect.x,
+                  top: powerPointHold.rect.y,
+                  width: powerPointHold.rect.width,
+                  height: powerPointHold.rect.height
+                }
+              : contentStyle),
+            ...(!powerPointHold.frozen ? sceneEffectStyle : {}),
+            opacity: 1,
+            zIndex: 2,
+            pointerEvents: 'none',
+            borderRadius: sceneBorderRadius,
+            transition: paneTransition
+          }}
+        >
+          <img
+            key={powerPointHold.requestId}
+            src={mediaUrl(powerPointHold.path)}
+            alt="PowerPoint transition frame"
+            className="h-full w-full select-none object-contain"
+            draggable={false}
+            onLoad={() => {
+              window.api.sendToControl('program-scene-powerpoint-hold-ready', powerPointHold.requestId)
+            }}
+            onError={() => {
+              window.api.sendToControl('program-scene-powerpoint-hold-error', powerPointHold.requestId)
+            }}
+          />
+        </div>
+      )}
       <CaptureHub
         activeSourceId={activeCaptureId}
         audioSourceId={captureAudioSourceId}
+        activeSceneStyle={sceneActive && activeCaptureIsDesktop
+          ? { ...contentStyle, ...sceneEffectStyle, borderRadius: sceneBorderRadius }
+          : undefined}
+        activeZoomStyle={activeCaptureIsDesktop ? {
+          transform: zoomTransform,
+          transformOrigin: zoomOrigin
+        } : undefined}
         sceneSourceId={sceneActive ? programScene.capture?.sourceId ?? null : null}
-        sceneStyle={{ ...participantStyle, borderRadius: sceneBorderRadius }}
+        sceneStyle={{ ...participantStyle, ...(participantVisible ? sceneEffectStyle : {}), borderRadius: sceneBorderRadius }}
+        onActiveAspectRatio={reportCaptureAspectRatio}
         takeRequest={captureTakeRequest}
         onTakeReady={prepareCaptureTake}
         onTakeError={failCaptureTake}
       />
-      {activeLayer.kind === 'capture' && (
+      {activeLayer.kind === 'capture' && !sceneActive && (
         <BroadcastTitlesOverlay
           key={broadcastTitles.sourceIdentity || 'no-program-title-source'}
           titles={broadcastTitles}
@@ -947,6 +1109,7 @@ export function PresentationApp(): JSX.Element {
           className="absolute overflow-hidden pointer-events-none"
           style={{
             ...participantStyle,
+            ...(participantVisible ? sceneEffectStyle : {}),
             zIndex: 4,
             borderRadius: sceneBorderRadius
           }}

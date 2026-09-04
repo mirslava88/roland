@@ -63,6 +63,9 @@ const api = {
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
     ipcRenderer.invoke('place-presentation-window', displayId),
 
+  raisePresentationWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke('raise-presentation-window'),
+
   openAuxiliaryWindow: (role: 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop', displayId: number) =>
     ipcRenderer.invoke('open-auxiliary-window', role, displayId),
 
@@ -121,6 +124,9 @@ const api = {
   setPowerPointZoom: (displayId: number, zoom: unknown) =>
     ipcRenderer.invoke('set-powerpoint-zoom', displayId, zoom),
 
+  setExternalFileZoom: (filePath: string, zoom: unknown) =>
+    ipcRenderer.invoke('set-external-file-zoom', filePath, zoom),
+
   generatePptxThumbnails: (filePath: string, keepPrepared?: boolean) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath, keepPrepared),
 
@@ -177,6 +183,14 @@ const api = {
     ipcRenderer.invoke('release-browser-fullscreen', keepSourceKey),
 
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
+
+  selectQrLogo: (): Promise<string | null> => ipcRenderer.invoke('select-qr-logo'),
+
+  selectQrImage: (): Promise<string | null> => ipcRenderer.invoke('select-qr-image'),
+
+  updateQrOverlay: (data: unknown): void => {
+    ipcRenderer.send('qr-overlay-update', data)
+  },
 
   selectInformationMedia: (): Promise<string | null> => ipcRenderer.invoke('select-information-media'),
 
@@ -296,8 +310,8 @@ const api = {
   minimizeExternalFile: (filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }> =>
     ipcRenderer.invoke('minimize-external-file', filePath),
 
-  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('restore-external-file', filePath, displayBounds),
+  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }, sceneLayout?: unknown): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('restore-external-file', filePath, displayBounds, sceneLayout),
 
   setActiveContentType: (type: string): void => {
     ipcRenderer.send('set-active-content-type', type)

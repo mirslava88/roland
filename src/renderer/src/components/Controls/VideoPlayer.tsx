@@ -28,10 +28,6 @@ export function VideoPlayer(): JSX.Element {
   const setLoopPlaylistStore = useAppStore((s) => s.setVideoLoopPlaylist)
 
   const activeFile = useAppStore((s) => s.activeFile)
-  const setActiveFile = useAppStore((s) => s.setActiveFile)
-  const isPresentationWindowOpen = useAppStore((s) => s.isPresentationWindowOpen)
-  const setPresentationWindowOpen = useAppStore((s) => s.setPresentationWindowOpen)
-  const selectedDisplayId = useAppStore((s) => s.selectedDisplayId)
 
   const [expanded, setExpanded] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
@@ -40,6 +36,7 @@ export function VideoPlayer(): JSX.Element {
   const panelRef = useRef<HTMLDivElement>(null)
   const toggleRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const returnChannelRef = useRef<string | null>(null)
 
   // Close panel on outside click
   useEffect(() => {
@@ -68,7 +65,8 @@ export function VideoPlayer(): JSX.Element {
   }, [showMenu])
 
   const playTrack = useCallback(async (index: number): Promise<void> => {
-    const { videoPlaylist } = useAppStore.getState()
+    const state = useAppStore.getState()
+    const { videoPlaylist } = state
     if (index < 0 || index >= videoPlaylist.length) return
     const path = videoPlaylist[index]
     const filename = basename(path)
@@ -81,29 +79,27 @@ export function VideoPlayer(): JSX.Element {
       size: 0
     }
 
-    if (!useAppStore.getState().isPresentationWindowOpen) {
-      await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
-      setPresentationWindowOpen(true)
-      await new Promise((r) => setTimeout(r, 300))
+    // Remember the real channel that owned the air before this independent
+    // playlist took over. Advancing within the playlist has liveChannel=null,
+    // so it keeps the original return target intact.
+    if (state.liveChannel && state.channels[state.liveChannel]?.file) {
+      returnChannelRef.current = state.liveChannel
     }
 
-    setActiveFile(fileEntry)
-    useAppStore.setState({ liveChannel: null })
     setCurrentIndex(index)
-    setIsPlayingStore(true)
+    setIsPlayingStore(false)
 
-    window.api.sendToPresentation('load-content', {
-      type: 'video',
-      path,
-      name: filename
-    })
-
-    // Apply loopTrack to video element (video.loop = true → browser handles repeat natively)
-    const { videoLoopTrack } = useAppStore.getState()
-    setTimeout(() => {
-      window.api.sendToPresentation('set-loop', videoLoopTrack)
-    }, 250)
-  }, [selectedDisplayId, setActiveFile, setCurrentIndex, setIsPlayingStore, setPresentationWindowOpen])
+    // Route playlist playback through the same transactional TAKE pipeline as
+    // channel content. It waits for the first decoded frame before releasing
+    // PowerPoint/Word/Excel or the previous capture, so native windows cannot
+    // remain above a video that is already playing underneath.
+    window.dispatchEvent(new CustomEvent('take-playlist-video', {
+      detail: {
+        file: fileEntry,
+        loop: useAppStore.getState().videoLoopTrack
+      }
+    }))
+  }, [setCurrentIndex, setIsPlayingStore])
 
   // Подписка на video-time/video-state от VideoViewer для seek bar.
   // Эти же события слушает ControlBar — они broadcast'ятся обоим,
@@ -212,6 +208,22 @@ export function VideoPlayer(): JSX.Element {
   const handleStop = (): void => {
     window.api.sendToPresentation('stop')
     setIsPlayingStore(false)
+
+    const state = useAppStore.getState()
+    const playlistOwnsOutput =
+      state.activeFile?.type === 'video' &&
+      state.activeFile.id.startsWith('video-playlist-') &&
+      state.liveChannel === null
+    const returnChannel = playlistOwnsOutput ? returnChannelRef.current : null
+    returnChannelRef.current = null
+    if (!returnChannel || !state.channels[returnChannel]?.file) return
+
+    state.setSelectedChannel(returnChannel)
+    const returnIndex = state.channelIds.indexOf(returnChannel)
+    if (returnIndex >= 0) {
+      state.setCurrentChannelPage(Math.floor(returnIndex / state.channelGridSize))
+    }
+    window.dispatchEvent(new CustomEvent('take-channel', { detail: returnChannel }))
   }
 
   const handleNext = async (): Promise<void> => {

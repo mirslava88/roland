@@ -42,6 +42,21 @@ const EXT_TYPE_MAP: Record<string, FileEntry['type']> = {}
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg'])
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'])
+const OFFICE_ZOOM_EXT = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
+
+interface AdHocTakeOptions {
+  channel: ChannelState
+  liveChannel: ChannelId | null
+  videoAutoplay?: boolean
+  videoLoop?: boolean
+}
+
+function supportsContentZoom(file?: FileEntry | null): boolean {
+  return file?.type === 'presentation' ||
+    file?.type === 'pdf' ||
+    (file?.type === 'capture' && file.capture?.captureKind === 'desktop') ||
+    (file?.type === 'other' && OFFICE_ZOOM_EXT.has(file.extension.toLowerCase()))
+}
 
 function desktopWindowSourceKey(file?: FileEntry | null): string | undefined {
   const capture = file?.type === 'capture' ? file.capture : undefined
@@ -314,10 +329,22 @@ export function PreviewPanel(): JSX.Element {
 
   useEffect(() => {
     window.api.sendToPresentation('content-zoom-update', contentZoom)
-    if (useAppStore.getState().activeFile?.type !== 'presentation') return
+    const activeFile = useAppStore.getState().activeFile
+    if (activeFile?.type !== 'presentation' && !(
+      activeFile?.type === 'other' && OFFICE_ZOOM_EXT.has(activeFile.extension.toLowerCase())
+    )) return
     const timer = setTimeout(() => {
       const state = useAppStore.getState()
-      if (state.activeFile?.type !== 'presentation') return
+      const currentFile = state.activeFile
+      if (currentFile?.type === 'other' && OFFICE_ZOOM_EXT.has(currentFile.extension.toLowerCase())) {
+        void window.api.setExternalFileZoom(currentFile.path, state.contentZoom).then((result) => {
+          if (!result.success) window.api.dbgLog(`Office magnifier update failed: ${result.error || 'unknown error'}`)
+        }).catch((error: unknown) => {
+          window.api.dbgLog(`Office magnifier update failed: ${String(error)}`)
+        })
+        return
+      }
+      if (currentFile?.type !== 'presentation') return
       const target = state.displays.find((display) => display.id === state.selectedDisplayId) ||
         state.displays.find((display) => !display.isPrimary)
       if (!target) return
@@ -811,10 +838,15 @@ export function PreviewPanel(): JSX.Element {
     }
   }
 
-  const doTake = async (ch: ChannelId, takeId: string, takeGeneration: number): Promise<void> => {
+  const doTake = async (
+    ch: ChannelId,
+    takeId: string,
+    takeGeneration: number,
+    adHoc?: AdHocTakeOptions
+  ): Promise<void> => {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
-    let channel = freshState.channels[ch]
+    let channel = adHoc?.channel ?? freshState.channels[ch]
     if (!channel?.file) return
 
     // Save previous active file before overwriting
@@ -1187,6 +1219,10 @@ export function PreviewPanel(): JSX.Element {
       freshState.captureSources.some(
         (entry) => entry.capture?.sourceId === freshState.programScene.captureSourceId
       )
+    const keepProgramSceneParticipantOnTop =
+      hasReadyProgramScene &&
+      channel.file.type === 'presentation' &&
+      freshState.programScene.viewMode === 'participant'
     // In the program scene PowerPoint only occupies the presentation pane.
     // Stage it below the live Chromium output, then suspend just the outgoing
     // document before promoting the already-painted native window. The scene
@@ -1194,7 +1230,8 @@ export function PreviewPanel(): JSX.Element {
     const stageProgramSceneElectronToPptx =
       hasReadyProgramScene &&
       channel.file.type === 'presentation' &&
-      (prevActiveFile?.type === 'pdf' ||
+      (keepProgramSceneParticipantOnTop ||
+        prevActiveFile?.type === 'pdf' ||
         prevActiveFile?.type === 'video' ||
         prevActiveFile?.type === 'capture')
 
@@ -1367,7 +1404,14 @@ export function PreviewPanel(): JSX.Element {
     }
 
     setActiveFile(channel.file)
-    setLiveChannel(ch)
+    if (adHoc) {
+      // setLiveChannel only accepts real populated channel IDs. Ad-hoc
+      // playlist playback deliberately has no live channel, so publish that
+      // state directly instead of leaving the previous channel marked live.
+      useAppStore.setState({ liveChannel: adHoc.liveChannel })
+    } else {
+      setLiveChannel(ch)
+    }
 
     if (channel.file.type === 'presentation') {
       const selectedSceneCapture = freshState.captureSources.find(
@@ -1388,6 +1432,9 @@ export function PreviewPanel(): JSX.Element {
           placement: freshState.programScene.placement,
           participantSize: freshState.programScene.participantSize,
           cornerStyle: freshState.programScene.cornerStyle,
+          viewMode: freshState.programScene.viewMode,
+          transitionEffect: freshState.programScene.transitionEffect,
+          transitionDurationMs: freshState.programScene.transitionDurationMs,
           contentAspectRatio: programSceneContentAspectRatio
         })
         // Keep the outgoing PDF/video visible in the program-scene content
@@ -1462,6 +1509,9 @@ export function PreviewPanel(): JSX.Element {
                 placement: freshState.programScene.placement,
                 participantSize: freshState.programScene.participantSize,
                 cornerStyle: freshState.programScene.cornerStyle,
+                viewMode: freshState.programScene.viewMode,
+                transitionEffect: freshState.programScene.transitionEffect,
+                transitionDurationMs: freshState.programScene.transitionDurationMs,
                 contentAspectRatio: programSceneContentAspectRatio
               }
             : undefined,
@@ -1587,6 +1637,13 @@ export function PreviewPanel(): JSX.Element {
       log(`userNavigatedDuringLaunch=${userNavigatedDuringLaunch} (${slideBeforeLaunch}→${slideAfterLaunch})`)
 
       if (stageProgramSceneElectronToPptx) {
+        if (keepProgramSceneParticipantOnTop) {
+          // The daemon has painted and verified the slideshow behind the
+          // persistent Chromium output. Participant focus deliberately keeps
+          // that window above PowerPoint; promotion here would expose the deck
+          // for the remainder of TAKE and only hide it again at the end.
+          log('participant focus retained; warmed PowerPoint remains staged underneath')
+        } else {
         const contentSuspended = new Promise<boolean>((resolve) => {
           let settled = false
           let timeout: ReturnType<typeof setTimeout> | undefined
@@ -1613,6 +1670,9 @@ export function PreviewPanel(): JSX.Element {
               placement: freshState.programScene.placement,
               participantSize: freshState.programScene.participantSize,
               cornerStyle: freshState.programScene.cornerStyle,
+              viewMode: freshState.programScene.viewMode,
+              transitionEffect: freshState.programScene.transitionEffect,
+              transitionDurationMs: freshState.programScene.transitionDurationMs,
               contentAspectRatio: programSceneContentAspectRatio
             })
           : {
@@ -1642,6 +1702,7 @@ export function PreviewPanel(): JSX.Element {
           return
         }
         log('program-scene hand-off complete: outgoing content suspended, warmed PowerPoint promoted')
+        }
       }
 
       // NOW close the Electron presentation window — PowerPoint slideshow is already visible
@@ -1742,6 +1803,12 @@ export function PreviewPanel(): JSX.Element {
         return
       }
       clearCommittedCaptureTitleSource('PowerPoint takeover')
+      if (programSceneActive && freshState.programScene.viewMode === 'participant') {
+        // In participant focus the slideshow was never promoted above the
+        // persistent scene, so there is no late z-order correction (and no
+        // interval in which the audience can see PowerPoint).
+        log('participant focus remained above ready PowerPoint throughout TAKE')
+      }
       const shouldPinPowerPointTarget =
         !programSceneActive &&
         !useSeamlessLayerSwitch &&
@@ -2064,6 +2131,46 @@ export function PreviewPanel(): JSX.Element {
         await new Promise((resolve) => setTimeout(resolve, 3500))
         return
       }
+      const selectedSceneCapture = outputState.captureSources.find(
+        (entry) => entry.capture?.sourceId === outputState.programScene.captureSourceId
+      )?.capture ?? null
+      const officeProgramSceneActive = OFFICE_ZOOM_EXT.has(channel.file.extension.toLowerCase()) &&
+        outputState.programScene.enabled &&
+        !!outputState.backdropImage &&
+        !!selectedSceneCapture
+      const officeSceneLayout = officeProgramSceneActive
+        ? {
+            enabled: true,
+            placement: outputState.programScene.placement,
+            participantSize: outputState.programScene.participantSize,
+            cornerStyle: outputState.programScene.cornerStyle,
+            viewMode: outputState.programScene.viewMode,
+            transitionEffect: outputState.programScene.transitionEffect,
+            transitionDurationMs: outputState.programScene.transitionDurationMs,
+            contentAspectRatio: null
+          } as const
+        : undefined
+      if (officeProgramSceneActive && selectedSceneCapture) {
+        // Prepare the backdrop/camera surface before raising Word/Excel. The
+        // transition cover remains above both windows until the exact Office
+        // HWND has been placed and verified inside its content pane.
+        await window.api.openPresentationWindow(external.id, true)
+        setPresentationWindowOpen(true)
+        window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        window.api.sendToPresentation('program-scene-update', {
+          active: true,
+          capture: selectedSceneCapture,
+          backdropPath: outputState.backdropImage,
+          placement: outputState.programScene.placement,
+          participantSize: outputState.programScene.participantSize,
+          cornerStyle: outputState.programScene.cornerStyle,
+          viewMode: outputState.programScene.viewMode,
+          transitionEffect: outputState.programScene.transitionEffect,
+          transitionDurationMs: outputState.programScene.transitionDurationMs,
+          contentAspectRatio: null
+        })
+        log('Office program scene underlay prepared')
+      }
       // Hide taskbar FIRST, wait for Windows to update work area, then position window
       await window.api.hideTaskbar(external.bounds)
       await new Promise((r) => setTimeout(r, 500))
@@ -2114,7 +2221,7 @@ export function PreviewPanel(): JSX.Element {
         })
         await new Promise((resolve) => setTimeout(resolve, 3500))
       }
-      const restored = await window.api.restoreExternalFile(channel.file.path, external?.bounds)
+      const restored = await window.api.restoreExternalFile(channel.file.path, external.bounds, officeSceneLayout)
       if (!restored.success) {
         log(`external document restore failed: ${restored.error || 'unknown error'}`)
         await settleExternalTakeFailure(
@@ -2130,10 +2237,10 @@ export function PreviewPanel(): JSX.Element {
       // Verify the same HWND a second time before touching the previous
       // output. This absorbs slow Office maximize/focus transitions without
       // turning a failed TAKE into a blank program display.
-      let foregrounded = await window.api.restoreExternalFile(channel.file.path, external.bounds)
+      let foregrounded = await window.api.restoreExternalFile(channel.file.path, external.bounds, officeSceneLayout)
       if (!foregrounded.success) {
         await new Promise((resolve) => setTimeout(resolve, 150))
-        foregrounded = await window.api.restoreExternalFile(channel.file.path, external.bounds)
+        foregrounded = await window.api.restoreExternalFile(channel.file.path, external.bounds, officeSceneLayout)
       }
       if (!foregrounded.success) {
         log(`external document foreground verification failed: ${foregrounded.error || 'unknown error'}`)
@@ -2157,7 +2264,21 @@ export function PreviewPanel(): JSX.Element {
         // PDF/video now; a backdrop load failure must never retain its heavy
         // document/decoder indefinitely behind the native Office window.
         window.api.sendToPresentation('clear-active-content')
-        if (backdropImage) {
+        if (officeProgramSceneActive && selectedSceneCapture) {
+          window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+          window.api.sendToPresentation('program-scene-update', {
+            active: true,
+            capture: selectedSceneCapture,
+            backdropPath: backdropImage,
+            placement: outputState.programScene.placement,
+            participantSize: outputState.programScene.participantSize,
+            cornerStyle: outputState.programScene.cornerStyle,
+            viewMode: outputState.programScene.viewMode,
+            transitionEffect: outputState.programScene.transitionEffect,
+            transitionDurationMs: outputState.programScene.transitionDurationMs,
+            contentAspectRatio: null
+          })
+        } else if (backdropImage) {
           window.api.sendToPresentation('load-content', {
             type: 'backdrop',
             path: backdropImage,
@@ -2200,7 +2321,11 @@ export function PreviewPanel(): JSX.Element {
               error: String(error)
             }))
           }
-          const previousRestored = await window.api.restoreExternalFile(prevActiveFile.path, external.bounds)
+          const previousRestored = await window.api.restoreExternalFile(
+            prevActiveFile.path,
+            external.bounds,
+            OFFICE_ZOOM_EXT.has(prevActiveFile.extension.toLowerCase()) ? officeSceneLayout : undefined
+          )
           const previousIsAuthoritative = targetRemoved.success || previousRestored.success
           if (previousIsAuthoritative) {
             useAppStore.setState({ activeFile: prevActiveFile, liveChannel: freshState.liveChannel })
@@ -2229,6 +2354,24 @@ export function PreviewPanel(): JSX.Element {
       if (isTakeCancelled()) {
         await finishCancelledTake()
         return
+      }
+      // Closing PowerPoint or minimizing the previous Office document can
+      // change foreground ownership. Make the new Word/Excel HWND the final
+      // verified z-order operation before the transition cover disappears.
+      const finalForeground = await window.api.restoreExternalFile(
+        channel.file.path,
+        external.bounds,
+        officeSceneLayout
+      )
+      if (!finalForeground.success) {
+        await settleExternalTakeFailure(
+          finalForeground.error || 'Word/Excel не удалось закрепить поверх фона и камеры.'
+        )
+        return
+      }
+      if (officeProgramSceneActive && outputState.programScene.viewMode === 'participant') {
+        await window.api.raisePresentationWindow()
+        log('participant focus restored above ready Word/Excel window')
       }
       clearCommittedCaptureTitleSource('external document takeover')
       await window.api.hideOverlay()
@@ -2398,7 +2541,7 @@ export function PreviewPanel(): JSX.Element {
       }, timeoutMs)
     })
 
-    const savedVideo = channel.file.type === 'video'
+    const savedVideo = channel.file.type === 'video' && !adHoc
       ? useAppStore.getState().videoPlayback[channel.file.path]
       : undefined
     if (savedVideo) {
@@ -2416,7 +2559,9 @@ export function PreviewPanel(): JSX.Element {
       name: channel.file.name,
       startSlide: channel.slide,
       startTime: savedVideo?.currentTime,
-      autoplay: channel.file.type === 'video' ? false : undefined,
+      autoplay: channel.file.type === 'video'
+        ? adHoc?.videoAutoplay ?? false
+        : undefined,
       isImage: channel.file.isImage,
       capture: channel.file.capture,
       captureAudioOnCommit: channel.file.type === 'capture'
@@ -2429,7 +2574,7 @@ export function PreviewPanel(): JSX.Element {
       // may have been enabled earlier in the independent video playlist;
       // otherwise `ended` never fires and the configured channel transition
       // can never run.
-      window.api.sendToPresentation('set-loop', false)
+      window.api.sendToPresentation('set-loop', adHoc?.videoLoop ?? false)
     }
 
     const readiness = await contentReady
@@ -2582,6 +2727,101 @@ export function PreviewPanel(): JSX.Element {
     setOverlayState({ kind: 'hidden' })
     await releaseInactiveBrowserFullscreen()
   }
+
+  // The toolbar playlist is an ad-hoc source rather than a channel, but it
+  // still changes the same physical program output. Run it through doTake so
+  // native windows and previous captures retire only after the first decoded
+  // video frame has painted.
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{
+        file?: FileEntry
+        loop?: boolean
+      }>).detail
+      if (!detail?.file || detail.file.type !== 'video') return
+
+      const targetFile = detail.file
+      const targetLoop = detail.loop === true
+      void (async () => {
+        const releaseOutputTransition = await acquireOutputTransition(
+          `playlist-video:${targetFile.path}`
+        )
+        const marker: ChannelId = '__playlist_video__'
+        const takeId = crypto.randomUUID()
+        const takeGeneration = ++takeGenerationRef.current
+        takeInFlightRef.current = marker
+        activeTakeIdRef.current = takeId
+        try {
+          beginNavigationTransition()
+          const state = useAppStore.getState()
+          if (state.contentZoom.enabled) state.setContentZoom(DEFAULT_CONTENT_ZOOM)
+          if (state.overlayState.kind === 'blocked') {
+            window.alert(state.overlayState.reason)
+            return
+          }
+
+          await doTake(marker, takeId, takeGeneration, {
+            channel: {
+              file: targetFile,
+              slide: 1,
+              totalSlides: 0,
+              videoEndChannel: null,
+              caption: ''
+            },
+            liveChannel: null,
+            videoAutoplay: true,
+            videoLoop: targetLoop
+          })
+
+          const resultState = useAppStore.getState()
+          if (
+            resultState.activeFile?.type !== 'video' ||
+            resultState.activeFile.path !== targetFile.path ||
+            resultState.liveChannel !== null
+          ) {
+            resultState.setVideoIsPlaying(false)
+            window.alert('Не удалось вывести видеоролик в эфир. Предыдущий источник оставлен без изменений.')
+          } else {
+            // Re-apply after the new VideoViewer has mounted; the immediate
+            // command sent during staging can still be received by the old
+            // slot when React has not committed the spare slot yet.
+            window.api.sendToPresentation('set-loop', targetLoop)
+            window.api.setActiveContentType('video')
+          }
+        } catch (error) {
+          console.error('[PLAYLIST VIDEO TAKE] unhandled error:', error)
+          useAppStore.getState().setVideoIsPlaying(false)
+          try { await window.api.hideOverlay() } catch { /* last resort */ }
+          setOverlayState({ kind: 'hidden' })
+          window.alert(`Не удалось вывести видеоролик в эфир: ${String(error)}`)
+        } finally {
+          try {
+            const mirrorResult = await window.api.completeProgramMirrorTransition(takeId)
+            window.api.dbgLog(
+              `playlist video mirror transition complete id=${takeId} ` +
+              `released=${mirrorResult.released} remaining=${mirrorResult.remaining}`
+            )
+          } catch (error) {
+            window.api.dbgLog(`playlist video mirror transition completion failed id=${takeId}: ${String(error)}`)
+          }
+          finishNavigationTransition()
+          if (takeInFlightRef.current === marker) takeInFlightRef.current = null
+          if (activeTakeIdRef.current === takeId) activeTakeIdRef.current = null
+          if (cancelTakeCleanupRef.current?.takeId === takeId) cancelTakeCleanupRef.current = null
+          releaseOutputTransition()
+
+          const queued = queuedTakeRef.current
+          queuedTakeRef.current = null
+          if (queued && useAppStore.getState().channels[queued]?.file) {
+            void handleTake(queued)
+          }
+        }
+      })()
+    }
+
+    window.addEventListener('take-playlist-video', handler)
+    return () => window.removeEventListener('take-playlist-video', handler)
+  })
 
   // Listen for take-channel events from Toolbar's Open Output button
   useEffect(() => {
@@ -2956,7 +3196,7 @@ function ChannelPanel({
   // A regular PDF/PPTX/video channel has no capture identity of its own, but
   // while it is live in the program scene its titles belong to the participant
   // source selected in "Картинка в картинке".
-  const titlesContextSourceIdentity = channelSourceIdentity || sceneCaptureSourceIdentity
+  const titlesContextSourceIdentity = sceneCaptureSourceIdentity || channelSourceIdentity
   const channelTitlesOutput = channelSourceIdentity
     ? captureTitlesOutputs[channelSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
@@ -3047,6 +3287,7 @@ function ChannelPanel({
   const showSelected = isSelected && !isOutputActive
   const pptxIsPreparing = channel.file?.type === 'presentation' &&
     cacheStatus !== 'ready' && cacheStatus !== 'error'
+  const zoomSupported = supportsContentZoom(channel.file)
 
   return (
     <div
@@ -3158,7 +3399,7 @@ function ChannelPanel({
       <div
         className={`relative flex-1 flex items-center justify-center overflow-hidden bg-black/40 ${
           isLive && contentZoom.enabled &&
-          (channel.file?.type === 'presentation' || channel.file?.type === 'pdf')
+          zoomSupported
             ? contentZoom.scale > 1
               ? isZoomDragging ? 'cursor-grabbing' : 'cursor-grab'
               : 'cursor-zoom-in'
@@ -3177,7 +3418,7 @@ function ChannelPanel({
             !isLive ||
             !contentZoom.enabled ||
             contentZoom.scale <= 1 ||
-            (channel.file?.type !== 'presentation' && channel.file?.type !== 'pdf')
+            !zoomSupported
           ) return
           event.preventDefault()
           event.stopPropagation()
@@ -3227,7 +3468,7 @@ function ChannelPanel({
           if (
             !isLive ||
             !contentZoom.enabled ||
-            (channel.file?.type !== 'presentation' && channel.file?.type !== 'pdf')
+            !zoomSupported
           ) return
           event.preventDefault()
           event.stopPropagation()
@@ -3266,7 +3507,7 @@ function ChannelPanel({
             titles={channelTitlesOutput}
           />
         )}
-        {isLive && (channel.file?.type === 'presentation' || channel.file?.type === 'pdf') && (
+        {isLive && zoomSupported && (
           <button
             type="button"
             onPointerDown={(event) => event.stopPropagation()}

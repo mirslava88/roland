@@ -210,6 +210,7 @@ interface Api {
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
   placePresentationWindow(displayId?: number): Promise<boolean>
+  raisePresentationWindow(): Promise<boolean>
   openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>
   closeAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId?: number): Promise<void>
   sendToAuxiliary(role: AuxiliaryDisplayRole, channel: string, ...args: unknown[]): void
@@ -235,6 +236,9 @@ interface Api {
       placement: import('../../shared/program-scene').ProgramScenePlacement
       participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
       cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
+      viewMode?: import('../../shared/program-scene').ProgramSceneViewMode
+      transitionEffect?: import('../../shared/program-scene').ProgramSceneTransitionEffect
+      transitionDurationMs?: number
       contentAspectRatio?: number | null
     },
     deferPromotion?: boolean
@@ -255,6 +259,9 @@ interface Api {
       placement: import('../../shared/program-scene').ProgramScenePlacement
       participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
       cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
+      viewMode?: import('../../shared/program-scene').ProgramSceneViewMode
+      transitionEffect?: import('../../shared/program-scene').ProgramSceneTransitionEffect
+      transitionDurationMs?: number
       contentAspectRatio?: number | null
     }
   ): Promise<{ success: boolean; error?: string }>
@@ -262,6 +269,10 @@ interface Api {
     displayId: number,
     zoom: import('../../shared/content-zoom').ContentZoomState
   ): Promise<{ success: boolean; error?: string }>
+  setExternalFileZoom(
+    filePath: string,
+    zoom: import('../../shared/content-zoom').ContentZoomState
+  ): Promise<{ success: boolean; zoomPercent?: number; error?: string }>
   generatePptxThumbnails(filePath: string, keepPrepared?: boolean): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
   getPptxSlideNotes(filePath: string, slide: number): Promise<{ success: boolean; notes?: string; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
@@ -288,6 +299,9 @@ interface Api {
   prepareDesktopCaptureSource(sourceId: string): Promise<DesktopCapturePrepareResult>
   releaseBrowserFullscreen(keepSourceKey?: string): Promise<{ released: number; remaining: number }>
   selectBackdropImage(): Promise<string | null>
+  selectQrLogo(): Promise<string | null>
+  selectQrImage(): Promise<string | null>
+  updateQrOverlay(data: unknown): void
   selectInformationMedia(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>
   setAudioDevice(deviceId: string): Promise<{ success: boolean; error?: string }>
@@ -340,7 +354,20 @@ interface Api {
   openFileExternal(filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
   closeExternalFile(filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }>
   minimizeExternalFile(filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }>
-  restoreExternalFile(filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
+  restoreExternalFile(
+    filePath?: string,
+    displayBounds?: { x: number; y: number; width: number; height: number },
+    sceneLayout?: {
+      enabled: boolean
+      placement: import('../../shared/program-scene').ProgramScenePlacement
+      participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
+      cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
+      viewMode?: import('../../shared/program-scene').ProgramSceneViewMode
+      transitionEffect?: import('../../shared/program-scene').ProgramSceneTransitionEffect
+      transitionDurationMs?: number
+      contentAspectRatio?: number | null
+    }
+  ): Promise<{ success: boolean; error?: string }>
   getPathForFile(file: File): string
   setActiveContentType(type: string): void
   sendToPresentation(channel: string, ...args: unknown[]): void

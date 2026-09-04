@@ -6,13 +6,22 @@ import {
   type BroadcastTitlesOutput
 } from '../../stores/useAppStore'
 
-function sceneTitleSourceIdentity(state: ReturnType<typeof useAppStore.getState>): string | null {
-  const supportedContent = !!state.activeFile && (
-    state.activeFile.type === 'presentation' ||
-    state.activeFile.type === 'pdf' ||
-    state.activeFile.type === 'video' ||
-    (state.activeFile.type === 'other' && state.activeFile.isImage === true)
+const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
+
+function supportsProgramSceneTitles(file: ReturnType<typeof useAppStore.getState>['activeFile']): boolean {
+  return !!file && (
+    file.type === 'presentation' ||
+    file.type === 'pdf' ||
+    file.type === 'video' ||
+    (file.type === 'other' && (
+      file.isImage === true || OFFICE_PROGRAM_EXTENSIONS.has(file.extension.toLowerCase())
+    )) ||
+    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
   )
+}
+
+function sceneTitleSourceIdentity(state: ReturnType<typeof useAppStore.getState>): string | null {
+  const supportedContent = supportsProgramSceneTitles(state.activeFile)
   if (!state.programScene.enabled || !state.backdropImage || !supportedContent) return null
   const capture = state.captureSources.find(
     (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
@@ -128,12 +137,7 @@ export function BroadcastTitlesBridge(): JSX.Element | null {
   // This is the source actually painted by PresentationApp, not the next TAKE
   // selected in the control store.  Keep its auto-hide clock running until the
   // output renderer confirms the handoff or a native output is revealed.
-  const sceneSourceIdentity = programScene.enabled && !!backdropImage && !!activeFile && (
-    activeFile.type === 'presentation' ||
-    activeFile.type === 'pdf' ||
-    activeFile.type === 'video' ||
-    (activeFile.type === 'other' && activeFile.isImage === true)
-  )
+  const sceneSourceIdentity = programScene.enabled && !!backdropImage && supportsProgramSceneTitles(activeFile)
     ? captureSourceIdentity(captureSources.find(
       (entry) => entry.capture?.sourceId === programScene.captureSourceId
     )?.capture)

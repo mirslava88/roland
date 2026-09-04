@@ -26,6 +26,7 @@
   "dependencies": {
     "@hyzyla/pdfium": "^2.1.13",
     "pdfjs-dist": "^6.3.289",
+    "qr-code-styling": "^1.9.2",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
@@ -96,6 +97,10 @@
       {
         "from": "node_modules/zustand/LICENSE",
         "to": "licenses/zustand-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/qr-code-styling/LICENSE",
+        "to": "licenses/qr-code-styling-LICENSE.txt"
       }
     ],
     "afterPack": "./build/afterPack.js",

@@ -202,6 +202,44 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
   return win
 }
 
+export function createQrOverlayWindow(display?: Display): BrowserWindow {
+  const target = display || screen.getPrimaryDisplay()
+  const { x, y, width, height } = target.bounds
+  const win = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    resizable: false,
+    show: false,
+    hasShadow: false,
+    title: 'PDM QR Overlay',
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  })
+
+  win.removeMenu()
+  win.setAlwaysOnTop(true, 'screen-saver')
+  win.setIgnoreMouseEvents(true)
+
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
+    #qr{position:fixed;display:none;filter:drop-shadow(0 4px 14px rgba(0,0,0,.34));user-select:none;-webkit-user-drag:none}
+  </style></head><body><img id="qr" alt="" /></body></html>`
+  void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  return win
+}
+
 export function createTimerOverlayWindow(display?: Display): BrowserWindow {
   const target = display || screen.getPrimaryDisplay()
   const { x, y, width, height } = target.bounds

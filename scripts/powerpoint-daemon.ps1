@@ -381,6 +381,47 @@ function Get-SlideShowWindowRect([long]$hwnd) {
     return $null
 }
 
+function Move-SlideShowBoundsAnimated([long]$hwnd, $targetRect, [int]$durationMs) {
+    if ($hwnd -eq 0 -or $null -eq $targetRect -or $targetRect.Count -ne 4) { return }
+    $startRect = Get-SlideShowWindowRect $hwnd
+    $durationMs = [Math]::Max(0, [Math]::Min(5000, $durationMs))
+    if ($durationMs -lt 50 -or $null -eq $startRect -or $startRect.Count -ne 4) {
+        Set-SlideShowBounds $hwnd $targetRect
+        return
+    }
+
+    $changed = $false
+    for ($i = 0; $i -lt 4; $i++) {
+        if ([Math]::Abs([int]$startRect[$i] - [int]$targetRect[$i]) -gt 1) {
+            $changed = $true
+            break
+        }
+    }
+    if (-not $changed) {
+        Set-SlideShowBounds $hwnd $targetRect
+        return
+    }
+
+    # Match the renderer's gentle ease-in-out movement. DwmFlush keeps every
+    # resize aligned to a compositor frame instead of producing a fast Win32
+    # jump followed by the slower camera animation.
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($watch.ElapsedMilliseconds -lt $durationMs) {
+        $progress = [Math]::Min(1.0, [double]$watch.ElapsedMilliseconds / [double]$durationMs)
+        $eased = 0.5 - ([Math]::Cos([Math]::PI * $progress) / 2.0)
+        $frameRect = @(
+            [int][Math]::Round([double]$startRect[0] + ([double]$targetRect[0] - [double]$startRect[0]) * $eased),
+            [int][Math]::Round([double]$startRect[1] + ([double]$targetRect[1] - [double]$startRect[1]) * $eased),
+            [Math]::Max(1, [int][Math]::Round([double]$startRect[2] + ([double]$targetRect[2] - [double]$startRect[2]) * $eased)),
+            [Math]::Max(1, [int][Math]::Round([double]$startRect[3] + ([double]$targetRect[3] - [double]$startRect[3]) * $eased))
+        )
+        Set-SlideShowBounds $hwnd $frameRect
+        try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch { Start-Sleep -Milliseconds 8 }
+    }
+    $watch.Stop()
+    Set-SlideShowBounds $hwnd $targetRect
+}
+
 function Test-SlideShowBounds([long]$hwnd, $targetRect) {
     if ($null -eq $targetRect -or $targetRect.Count -ne 4) { return $false }
     $actual = Get-SlideShowWindowRect $hwnd
@@ -2356,6 +2397,7 @@ while ($true) {
                 } catch { Log "open: invalid target bounds: $($_.Exception.Message)" }
                 $clipRect = $null
                 $cornerRadius = 0
+                $transitionDurationMs = 0
                 try {
                     if ($null -ne $req.clipBounds) {
                         $cx = [int]$req.clipBounds.x; $cy = [int]$req.clipBounds.y
@@ -2363,6 +2405,9 @@ while ($true) {
                         if ($cw -gt 0 -and $ch -gt 0) { $clipRect = @($cx, $cy, $cw, $ch) }
                     }
                     if ($null -ne $req.cornerRadius) { $cornerRadius = [Math]::Max(0, [int]$req.cornerRadius) }
+                    if ($null -ne $req.transitionDurationMs) {
+                        $transitionDurationMs = [Math]::Max(0, [Math]::Min(5000, [int]$req.transitionDurationMs))
+                    }
                 } catch {}
                 $underlayHwnd = 0
                 try {
@@ -3092,6 +3137,7 @@ while ($true) {
                 } catch {}
                 $clipRect = $null
                 $cornerRadius = 0
+                $transitionDurationMs = 0
                 try {
                     if ($null -ne $req.clipBounds) {
                         $cx = [int]$req.clipBounds.x; $cy = [int]$req.clipBounds.y
@@ -3099,6 +3145,9 @@ while ($true) {
                         if ($cw -gt 0 -and $ch -gt 0) { $clipRect = @($cx, $cy, $cw, $ch) }
                     }
                     if ($null -ne $req.cornerRadius) { $cornerRadius = [Math]::Max(0, [int]$req.cornerRadius) }
+                    if ($null -ne $req.transitionDurationMs) {
+                        $transitionDurationMs = [Math]::Max(0, [Math]::Min(5000, [int]$req.transitionDurationMs))
+                    }
                 } catch {}
                 $hwnd = [long]$script:activeSlideShowHwnd
                 $relocateUnderlayHwnd = 0
@@ -3122,7 +3171,19 @@ while ($true) {
                     $placed = $false
                     $actualRect = $null
                     for ($attempt = 1; $attempt -le 3; $attempt++) {
-                        Set-SlideShowBounds $hwnd $targetRect
+                        if ($attempt -eq 1 -and $transitionDurationMs -gt 0) {
+                            # Remove the old crop while the outer HWND changes
+                            # size. The exact final crop/radius is restored
+                            # immediately after the last animation frame.
+                            Set-SlideShowClip $hwnd $targetRect $null 0
+                            if ($relocateUnderlayHwnd -ne 0 -and $relocateUnderlayHwnd -ne $hwnd) {
+                                Lower-Window $relocateUnderlayHwnd
+                            }
+                            Log "relocate: animate HWND=$hwnd durationMs=$transitionDurationMs from=$((Get-SlideShowWindowRect $hwnd) -join ',') to=$($targetRect -join ',')"
+                            Move-SlideShowBoundsAnimated $hwnd $targetRect $transitionDurationMs
+                        } else {
+                            Set-SlideShowBounds $hwnd $targetRect
+                        }
                         Set-SlideShowClip $hwnd $targetRect $clipRect $cornerRadius
                         if ($relocateUnderlayHwnd -ne 0 -and $relocateUnderlayHwnd -ne $hwnd) {
                             Lower-Window $relocateUnderlayHwnd

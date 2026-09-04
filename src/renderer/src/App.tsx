@@ -13,6 +13,7 @@ import { takeAdjacentChannel } from './channel-boundary-navigation'
 import { AuxiliaryDisplayBridge } from './components/AuxiliaryDisplays/AuxiliaryDisplayBridge'
 import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTitlesBridge'
 import { ProgramSceneBridge } from './components/ProgramScene/ProgramSceneBridge'
+import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
 
 export default function App(): JSX.Element {
   const {
@@ -305,6 +306,7 @@ export default function App(): JSX.Element {
       <AuxiliaryDisplayBridge />
       <BroadcastTitlesBridge />
       <ProgramSceneBridge />
+      <QrOverlayBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="flex flex-1 overflow-hidden">
         <FileLibrary />

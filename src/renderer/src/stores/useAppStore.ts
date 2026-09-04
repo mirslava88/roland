@@ -2,15 +2,23 @@ import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
+  PROGRAM_SCENE_TRANSITION_DURATION_MS,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
-  type ProgramScenePlacement
+  type ProgramScenePlacement,
+  type ProgramSceneTransitionEffect,
+  type ProgramSceneViewMode
 } from '../../../shared/program-scene'
 import {
   DEFAULT_CONTENT_ZOOM,
   normalizeContentZoom,
   type ContentZoomState
 } from '../../../shared/content-zoom'
+import {
+  DEFAULT_QR_OVERLAY,
+  normalizeQrOverlay,
+  type QrOverlayConfig
+} from '../../../shared/qr-overlay'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
 // для контекста. inflight = текущая chain promise; pendingTarget = последний
@@ -472,7 +480,11 @@ interface AppState {
     placement: ProgramScenePlacement
     participantSize: ProgramSceneParticipantSize
     cornerStyle: ProgramSceneCornerStyle
+    viewMode: ProgramSceneViewMode
+    transitionEffect: ProgramSceneTransitionEffect
+    transitionDurationMs: number
   }
+  qrOverlay: QrOverlayConfig
   contentZoom: ContentZoomState
   globalHookEnabled: boolean
   channelBoundaryNavigationEnabled: boolean
@@ -538,6 +550,7 @@ interface AppState {
   setInformationMedia: (media: InformationMediaConfig | null) => void
   setBackdropImage: (path: string | null) => void
   setProgramScene: (update: Partial<AppState['programScene']>) => void
+  setQrOverlay: (update: Partial<QrOverlayConfig>) => void
   setContentZoom: (update: Partial<ContentZoomState>) => void
   setGlobalHookEnabled: (enabled: boolean) => void
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
@@ -626,8 +639,12 @@ export const useAppStore = create<AppState>()(persist(
   backdropImage: null,
   programScene: {
     ...DEFAULT_PROGRAM_SCENE_LAYOUT,
+    viewMode: DEFAULT_PROGRAM_SCENE_LAYOUT.viewMode ?? 'both',
+    transitionEffect: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth',
+    transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS,
     captureSourceId: null
   },
+  qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,
@@ -1028,7 +1045,14 @@ export const useAppStore = create<AppState>()(persist(
   setInformationMedia: (media) => set({ informationMedia: media }),
   setBackdropImage: (path) => set({ backdropImage: path }),
   setProgramScene: (update) => set((state) => ({
-    programScene: { ...state.programScene, ...update }
+    programScene: {
+      ...state.programScene,
+      ...update,
+      transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
+    }
+  })),
+  setQrOverlay: (update) => set((state) => ({
+    qrOverlay: normalizeQrOverlay({ ...state.qrOverlay, ...update })
   })),
   setContentZoom: (update) => set((state) => ({
     contentZoom: normalizeContentZoom({ ...state.contentZoom, ...update })
@@ -1222,7 +1246,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 15,
+    version: 27,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1319,6 +1343,133 @@ export const useAppStore = create<AppState>()(persist(
       // automatic crash-recovery snapshot. Runtime/live output stays omitted.
       // v14 -> v15: add the presentation + participant scene layout. Enabling
       // an output remains session-only, while the chosen source/layout survive.
+      // v15 -> v16: add temporary participant/content focus controls. Existing
+      // workspaces always reopen in the safe combined view.
+      if (version < 16) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        migrated.programScene = { ...rawScene, viewMode: 'both' }
+      }
+      // v16 -> v17: make the program-scene expansion speed configurable.
+      if (version < 17) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        migrated.programScene = { ...rawScene, transitionDurationMs: 360 }
+      }
+      // v17 -> v18: repair workspaces saved during the first transition-speed
+      // rollout if the duration field was absent or invalid.
+      if (version < 18) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        const rawDuration = rawScene.transitionDurationMs
+        migrated.programScene = {
+          ...rawScene,
+          transitionDurationMs: typeof rawDuration === 'number' && Number.isFinite(rawDuration)
+            ? Math.max(150, Math.min(5000, Math.round(rawDuration)))
+            : 360
+        }
+      }
+      // v18 -> v19: normalize the complete program-scene block. A partial
+      // object from an older recovery snapshot must not replace the defaults
+      // and crash the settings modal (for example placement.startsWith()).
+      if (version < 19) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        const placement = [
+          'right-top', 'right-center', 'right-bottom',
+          'left-top', 'left-center', 'left-bottom'
+        ].includes(String(rawScene.placement))
+          ? rawScene.placement
+          : DEFAULT_PROGRAM_SCENE_LAYOUT.placement
+        const participantSize = ['small', 'medium', 'large', 'half'].includes(String(rawScene.participantSize))
+          ? rawScene.participantSize
+          : DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize
+        const cornerStyle = rawScene.cornerStyle === 'rounded' ? 'rounded' : 'sharp'
+        const viewMode = ['participant', 'content', 'both'].includes(String(rawScene.viewMode))
+          ? rawScene.viewMode
+          : 'both'
+        const rawDuration = rawScene.transitionDurationMs
+        migrated.programScene = {
+          ...rawScene,
+          enabled: false,
+          captureSourceId: typeof rawScene.captureSourceId === 'string' ? rawScene.captureSourceId : null,
+          placement,
+          participantSize,
+          cornerStyle,
+          viewMode,
+          transitionDurationMs: typeof rawDuration === 'number' && Number.isFinite(rawDuration)
+            ? Math.max(150, Math.min(5000, Math.round(rawDuration)))
+            : 360
+        }
+      }
+      // v19 -> v20: transition speed is intentionally fixed. A single tested
+      // duration keeps native Office windows and renderer panes synchronized.
+      if (version < 20) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        migrated.programScene = {
+          ...rawScene,
+          transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
+        }
+      }
+      // v20 -> v21: add a saved visual transition preset. Older workspaces
+      // retain the previously tested smooth resize and automatic direction.
+      if (version < 21) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        migrated.programScene = {
+          ...rawScene,
+          transitionEffect: ['smooth', 'fade', 'slide', 'zoom-fade', 'instant'].includes(String(rawScene.transitionEffect))
+            ? rawScene.transitionEffect
+            : 'smooth',
+          slideDirection: ['auto', 'left-to-right', 'right-to-left'].includes(String(rawScene.slideDirection))
+            ? rawScene.slideDirection
+            : 'auto'
+        }
+      }
+      // v21 -> v22: retire fade and slide presets. Workspaces that briefly
+      // selected either preset return to the established smooth transition.
+      if (version < 22) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        migrated.programScene = {
+          ...rawScene,
+          transitionEffect: rawScene.transitionEffect === 'zoom-fade' || rawScene.transitionEffect === 'instant'
+            ? rawScene.transitionEffect
+            : 'smooth'
+        }
+        delete (migrated.programScene as Record<string, unknown>).slideDirection
+      }
+      // v22 -> v23: make focus controls react faster while keeping enough
+      // time for a smooth, readable scene movement.
+      if (version < 23) {
+        const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+          ? migrated.programScene as Record<string, unknown>
+          : {}
+        migrated.programScene = {
+          ...rawScene,
+          transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
+        }
+      }
+      // v23 -> v24: add persisted QR design/content preferences. Visibility
+      // always starts disabled so reopening the app never puts stale data live.
+      // v24 -> v25: added an optional transparent QR background.
+      // v25 -> v26: remove that unreliable mode and normalize the larger
+      // QR size range back onto the permanent white reading field.
+      // v26 -> v27: retire the figurative module preset and extend the QR
+      // size range to the full height of the program output.
+      if (version < 24) {
+        migrated.qrOverlay = { ...DEFAULT_QR_OVERLAY }
+      } else {
+        migrated.qrOverlay = normalizeQrOverlay(migrated.qrOverlay)
+      }
       return migrated
     },
     partialize: (state) => ({
@@ -1328,7 +1479,8 @@ export const useAppStore = create<AppState>()(persist(
       currentChannelPage: state.currentChannelPage,
       selectedChannel: state.selectedChannel,
       captureSources: state.captureSources,
-      programScene: { ...state.programScene, enabled: false },
+      programScene: { ...state.programScene, enabled: false, viewMode: 'both' },
+      qrOverlay: { ...state.qrOverlay, enabled: false },
       slidePositions: state.slidePositions,
       selectedDisplayId: state.selectedDisplayId,
       displayAssignments: state.displayAssignments,
