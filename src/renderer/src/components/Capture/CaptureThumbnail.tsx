@@ -4,6 +4,7 @@ interface CaptureThumbnailProps {
   config: CaptureSourceConfig
   className?: string
   showName?: boolean
+  fit?: 'contain' | 'cover'
 }
 
 const STATUS_TEXT: Record<CaptureSourceState['status'], string> = {
@@ -18,7 +19,8 @@ const STATUS_TEXT: Record<CaptureSourceState['status'], string> = {
 export function CaptureThumbnail({
   config,
   className = '',
-  showName = false
+  showName = false,
+  fit = 'contain'
 }: CaptureThumbnailProps): JSX.Element {
   const deferredDesktop = config.captureKind === 'desktop' && !config.desktopSourceId
   const [frame, setFrame] = useState<string | null>(null)
@@ -100,7 +102,7 @@ export function CaptureThumbnail({
           src={frame}
           alt={`Превью: ${config.videoLabel}`}
           draggable={false}
-          className="w-full h-full object-contain select-none"
+          className={`w-full h-full select-none ${fit === 'cover' ? 'object-cover' : 'object-contain'}`}
         />
       ) : (
         <div className="flex flex-col items-center justify-center text-gray-500 select-none px-3 text-center">

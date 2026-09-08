@@ -21,6 +21,7 @@ import {
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
+  normalizeProgramSceneParticipantScale,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
   type ProgramScenePlacement,
@@ -94,6 +95,7 @@ interface PdmConfigV1 {
     captureSourceId: string | null
     placement: ProgramScenePlacement
     participantSize: ProgramSceneParticipantSize
+    participantScale: number
     cornerStyle: ProgramSceneCornerStyle
     viewMode: ProgramSceneViewMode
     transitionEffect: ProgramSceneTransitionEffect
@@ -726,6 +728,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   const sceneParticipantSize = ['small', 'medium', 'large', 'half'].includes(String(rawProgramScene.participantSize))
     ? rawProgramScene.participantSize as ProgramSceneParticipantSize
     : DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize
+  const sceneParticipantScale = normalizeProgramSceneParticipantScale(rawProgramScene.participantScale)
   const sceneCornerStyle = rawProgramScene.cornerStyle === 'rounded'
     ? 'rounded'
     : DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle
@@ -1039,6 +1042,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       captureSourceId: restoredSceneSourceId,
       placement: scenePlacement,
       participantSize: sceneParticipantSize,
+      participantScale: sceneParticipantScale,
       cornerStyle: sceneCornerStyle,
       viewMode: sceneViewMode,
       transitionEffect: sceneTransitionEffect,

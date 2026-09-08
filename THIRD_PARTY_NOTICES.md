@@ -2,6 +2,23 @@
 
 Presentation Display Manager includes third-party open-source software.
 
+## FFmpeg (separate streaming executable)
+
+Only the Stream edition bundles FFmpeg; the standard edition excludes it.
+The streaming module launches FFmpeg as a separate process. The Windows binary
+provided by ffmpeg-static 5.3.0 is FFmpeg 6.1.1, Gyan essentials build, under GPL v3.
+Its complete license and build information are shipped in `resources/ffmpeg/`
+as `ffmpeg.exe.LICENSE` and `ffmpeg.exe.README`. The ffmpeg-static package license
+is shipped there as `LICENSE`. The application does not link to libav libraries.
+
+Binary distributor and corresponding source/build references:
+https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1
+https://www.gyan.dev/ffmpeg/builds/
+https://github.com/FFmpeg/FFmpeg/commit/e38092ef93
+
+When redistributing binaries, retain these notices, the bundled license texts,
+and satisfy the corresponding-source requirements of the executable's license.
+
 ## @hyzyla/pdfium 2.1.13
 
 TypeScript/JavaScript wrapper for PDFium, distributed under the MIT License.
@@ -44,7 +61,7 @@ The complete qr-code-styling license is included at
 Sources: https://github.com/kozakdenys/qr-code-styling and
 https://github.com/kazuhikoarase/qrcode-generator
 
-## Electron 44.1.0 and Chromium
+## Electron 44.1.1 and Chromium
 
 The desktop runtime is distributed under the MIT License and includes Chromium
 and other third-party components under their respective licenses. The complete

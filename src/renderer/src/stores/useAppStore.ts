@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
+  normalizeProgramSceneParticipantScale,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
   type ProgramScenePlacement,
@@ -144,7 +145,28 @@ export interface VideoPlaybackState {
 
 export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 'capture'
 export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer' | 'event-timer'
+export type AppTheme = 'classic' | 'broadcast-pro'
 export type DisplayAssignments = Record<string, DisplayOutputMode>
+
+const APP_THEME_STORAGE_KEY = 'pdm-operator-theme'
+
+function readStoredAppTheme(): AppTheme | null {
+  try {
+    const value = localStorage.getItem(APP_THEME_STORAGE_KEY)
+    return value === 'classic' || value === 'broadcast-pro' ? value : null
+  } catch {
+    return null
+  }
+}
+
+function writeStoredAppTheme(theme: AppTheme): void {
+  try {
+    localStorage.setItem(APP_THEME_STORAGE_KEY, theme)
+  } catch {
+    // The theme still applies for the current session if browser storage is
+    // temporarily unavailable; the operator workflow must remain unaffected.
+  }
+}
 
 export type EventTimerCentralMode = 'current' | 'timer' | 'to-start' | 'to-end'
 export type EventTimerHeadings = Record<EventTimerCentralMode, string>
@@ -479,6 +501,7 @@ interface AppState {
     captureSourceId: string | null
     placement: ProgramScenePlacement
     participantSize: ProgramSceneParticipantSize
+    participantScale: number
     cornerStyle: ProgramSceneCornerStyle
     viewMode: ProgramSceneViewMode
     transitionEffect: ProgramSceneTransitionEffect
@@ -486,6 +509,7 @@ interface AppState {
   }
   qrOverlay: QrOverlayConfig
   contentZoom: ContentZoomState
+  appTheme: AppTheme
   globalHookEnabled: boolean
   channelBoundaryNavigationEnabled: boolean
   eventTimer: EventTimerState
@@ -552,6 +576,7 @@ interface AppState {
   setProgramScene: (update: Partial<AppState['programScene']>) => void
   setQrOverlay: (update: Partial<QrOverlayConfig>) => void
   setContentZoom: (update: Partial<ContentZoomState>) => void
+  setAppTheme: (theme: AppTheme) => void
   setGlobalHookEnabled: (enabled: boolean) => void
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
   setEventTimer: (update: Partial<EventTimerState>) => void
@@ -646,6 +671,7 @@ export const useAppStore = create<AppState>()(persist(
   },
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
+  appTheme: readStoredAppTheme() ?? 'classic',
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,
   eventTimer: {
@@ -1048,6 +1074,9 @@ export const useAppStore = create<AppState>()(persist(
     programScene: {
       ...state.programScene,
       ...update,
+      participantScale: normalizeProgramSceneParticipantScale(
+        update.participantScale ?? state.programScene.participantScale
+      ),
       transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
     }
   })),
@@ -1057,6 +1086,11 @@ export const useAppStore = create<AppState>()(persist(
   setContentZoom: (update) => set((state) => ({
     contentZoom: normalizeContentZoom({ ...state.contentZoom, ...update })
   })),
+  setAppTheme: (theme) => {
+    const normalizedTheme: AppTheme = theme === 'broadcast-pro' ? 'broadcast-pro' : 'classic'
+    writeStoredAppTheme(normalizedTheme)
+    set({ appTheme: normalizedTheme })
+  },
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
   setChannelBoundaryNavigationEnabled: (enabled) => set({ channelBoundaryNavigationEnabled: enabled }),
   setEventTimer: (update) => set((state) => ({
@@ -1246,7 +1280,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 27,
+    version: 35,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1465,10 +1499,33 @@ export const useAppStore = create<AppState>()(persist(
       // QR size range back onto the permanent white reading field.
       // v26 -> v27: retire the figurative module preset and extend the QR
       // size range to the full height of the program output.
+      // v30 -> v31: add an optional description beside the QR code.
+      // v31 -> v32: add description typography and width controls.
+      // v32 -> v33: add description background color and transparency.
+      // v33 -> v34: add automatic description background color from the active slide.
+      // v34 -> v35: allow automatic text contrast to be disabled independently.
       if (version < 24) {
         migrated.qrOverlay = { ...DEFAULT_QR_OVERLAY }
       } else {
         migrated.qrOverlay = normalizeQrOverlay(migrated.qrOverlay)
+      }
+      // v28 -> v29: keep the operator theme outside the workspace recovery
+      // snapshot. Older application versions may still rewrite that snapshot,
+      // but they must never reset the selected visual theme.
+      const legacyTheme = migrated.appTheme
+      if (
+        readStoredAppTheme() === null
+        && (legacyTheme === 'classic' || legacyTheme === 'broadcast-pro')
+      ) {
+        writeStoredAppTheme(legacyTheme)
+      }
+      delete migrated.appTheme
+      const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
+        ? migrated.programScene as Record<string, unknown>
+        : {}
+      migrated.programScene = {
+        ...rawScene,
+        participantScale: normalizeProgramSceneParticipantScale(rawScene.participantScale)
       }
       return migrated
     },

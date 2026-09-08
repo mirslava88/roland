@@ -26,6 +26,7 @@ import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
   getProgramSceneRects,
+  normalizeProgramSceneParticipantScale,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
   type ProgramScenePlacement,
@@ -63,6 +64,7 @@ interface ProgramScenePayload {
   backdropPath: string | null
   placement: ProgramScenePlacement
   participantSize: ProgramSceneParticipantSize
+  participantScale: number
   cornerStyle: ProgramSceneCornerStyle
   viewMode: ProgramSceneViewMode
   transitionEffect: ProgramSceneTransitionEffect
@@ -83,6 +85,7 @@ const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
   backdropPath: null,
   placement: DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
   participantSize: DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize,
+  participantScale: DEFAULT_PROGRAM_SCENE_LAYOUT.participantScale,
   cornerStyle: DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle,
   viewMode: DEFAULT_PROGRAM_SCENE_LAYOUT.viewMode ?? 'both',
   transitionEffect: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth',
@@ -762,6 +765,7 @@ export function PresentationApp(): JSX.Element {
           raw?.participantSize === 'half'
           ? raw.participantSize
           : 'medium',
+        participantScale: normalizeProgramSceneParticipantScale(raw?.participantScale),
         cornerStyle: raw?.cornerStyle === 'rounded' ? 'rounded' : 'sharp',
         viewMode: nextViewMode,
         transitionEffect: raw?.transitionEffect === 'zoom-fade' ||

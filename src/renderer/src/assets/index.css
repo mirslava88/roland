@@ -22,6 +22,327 @@
   --color-accent-dim: #4a44b3;
 }
 
+/* Operator-only visual theme. The class is mounted by App, so presentation,
+   mirror, timer and QR output windows keep their tested on-air appearance. */
+.pdm-operator-shell.theme-broadcast-pro {
+  color-scheme: dark;
+  --color-surface-50: #f7f9fb;
+  --color-surface-100: #171c22;
+  --color-surface-200: #11161b;
+  --color-surface-300: #0b0f13;
+  --color-surface-400: #06090c;
+  --color-accent: #167dff;
+  --color-accent-hover: #2b8cff;
+  --color-accent-dim: #0c4f9f;
+  --color-blue-400: #45a0ff;
+  --color-blue-500: #2189ff;
+  --color-blue-600: #116fdc;
+  --color-blue-700: #0e57ad;
+  --color-gray-200: #dce2e8;
+  --color-gray-300: #c1c9d1;
+  --color-gray-400: #929da8;
+  --color-gray-500: #6d7883;
+  --color-gray-600: #46515c;
+  --color-gray-700: #2c353e;
+  --color-gray-800: #1c242b;
+  --color-gray-900: #11171c;
+  --color-red-400: #ff6670;
+  --color-red-500: #ff3545;
+  --color-red-900: #4a0b13;
+  --radius-sm: 0.2rem;
+  --radius-md: 0.32rem;
+  --radius-lg: 0.45rem;
+  --radius-xl: 0.58rem;
+  background:
+    radial-gradient(circle at 70% -20%, rgba(22, 125, 255, .08), transparent 36%),
+    #080b0f;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar {
+  background: linear-gradient(180deg, #11171d 0%, #0b0f13 100%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .025), 0 8px 22px rgba(0, 0, 0, .28);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card {
+  background: #0d1217;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .2), inset 0 1px 0 rgba(255, 255, 255, .018);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-header {
+  border-bottom: 1px solid rgba(104, 121, 137, .12);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live {
+  border-color: #ff3545;
+  box-shadow: 0 0 0 1px rgba(255, 53, 69, .28), 0 9px 24px rgba(0, 0, 0, .28);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected {
+  border-color: #26bd64;
+  box-shadow: 0 0 0 1px rgba(38, 189, 100, .2), 0 9px 24px rgba(0, 0, 0, .24);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-header {
+  background: rgba(20, 87, 50, .28);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-state-dot {
+  background: #31d879;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-status {
+  color: #63e59a;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .panel {
+  border-color: rgba(102, 119, 135, .24);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+}
+
+.pdm-operator-shell.theme-broadcast-pro :is(input, select, textarea) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+
+/* Broadcast Pro is intentionally a full operator-console skin rather than a
+   small palette swap. Only semantic classes inside the operator shell are
+   touched, so output renderers and all control behavior remain unchanged. */
+.pdm-operator-shell.theme-broadcast-pro {
+  color: #dce4eb;
+  letter-spacing: .005em;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar {
+  height: 50px;
+  padding-inline: 10px;
+  gap: 5px;
+  border-bottom-color: #27323c;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar::before {
+  content: '';
+  width: 4px;
+  height: 26px;
+  margin-right: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #32a2ff, #126be0);
+  box-shadow: 0 0 16px rgba(29, 133, 255, .55);
+  flex: 0 0 auto;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar button {
+  border-radius: 4px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 1px 2px rgba(0, 0, 0, .28);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-now-playing {
+  height: 34px;
+  padding-inline: 14px;
+  background: linear-gradient(90deg, #161d24 0%, #10161b 60%, #0d1217 100%);
+  border-bottom-color: #242e37;
+  box-shadow: inset 4px 0 0 #f23b48;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-now-playing > span:first-child {
+  box-shadow: 0 0 0 4px rgba(255, 53, 69, .1), 0 0 12px rgba(255, 53, 69, .7);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-main-workspace {
+  min-height: 0;
+  gap: 9px;
+  padding: 9px;
+  background:
+    linear-gradient(rgba(255, 255, 255, .012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, .012) 1px, transparent 1px),
+    #070a0d;
+  background-size: 28px 28px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library,
+.pdm-operator-shell.theme-broadcast-pro .pdm-stage,
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator {
+  border: 1px solid #27313a;
+  border-radius: 7px;
+  background: #0e1318;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .018);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library {
+  width: 264px;
+  overflow: hidden;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator {
+  width: 180px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-stage {
+  min-width: 0;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-header,
+.pdm-operator-shell.theme-broadcast-pro .pdm-preview-header,
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator-header {
+  min-height: 38px;
+  border-color: #25303a;
+  background: linear-gradient(180deg, #171e25 0%, #12181e 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-header > div:first-child > span:first-child,
+.pdm-operator-shell.theme-broadcast-pro .pdm-preview-header > span:first-child,
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator-header {
+  color: #d9e1e8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-header > div:first-child > span:first-child::after {
+  content: '  / MEDIA';
+  color: #318eff;
+  font-size: 8px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-preview-header > span:first-child::after {
+  content: '  / SWITCHER';
+  color: #318eff;
+  font-size: 8px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator-header::after {
+  content: '  / CUE';
+  color: #318eff;
+  font-size: 8px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-content {
+  background: linear-gradient(180deg, #0d1217, #0a0f13);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-content > div {
+  border-radius: 4px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-content > div:hover {
+  background-color: #18222b;
+  border-color: #34424e;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-footer,
+.pdm-operator-shell.theme-broadcast-pro .pdm-pagination,
+.pdm-operator-shell.theme-broadcast-pro .pdm-control-bar {
+  border-color: #25303a;
+  background: linear-gradient(180deg, #12181e 0%, #0d1217 100%);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-preview-panel {
+  background: #090d11;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-grid {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(35, 128, 235, .055), transparent 45%),
+    #090d11;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card {
+  position: relative;
+  border-radius: 5px;
+  border-width: 1px;
+  border-color: #2a3540;
+  background: linear-gradient(180deg, #10161c 0%, #0b1015 100%);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .02);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card:hover {
+  border-color: #40505e;
+  background: linear-gradient(180deg, #131b22 0%, #0d1319 100%);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-header {
+  min-height: 31px;
+  border-bottom-color: #26313a;
+  background: linear-gradient(180deg, #171f26 0%, #12191f 100%);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-status {
+  letter-spacing: .075em;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live {
+  border-width: 2px;
+  border-color: #ff3c49;
+  box-shadow: 0 0 0 1px rgba(255, 60, 73, .2), 0 0 22px rgba(255, 45, 60, .09), 0 10px 24px rgba(0, 0, 0, .34);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live .pdm-channel-header {
+  background: linear-gradient(90deg, rgba(113, 19, 29, .72), rgba(54, 18, 24, .52));
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected {
+  border-width: 2px;
+  border-color: #2ed16f;
+  box-shadow: 0 0 0 1px rgba(46, 209, 111, .16), 0 0 22px rgba(38, 189, 100, .07), 0 10px 24px rgba(0, 0, 0, .32);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-header {
+  background: linear-gradient(90deg, rgba(16, 93, 49, .7), rgba(16, 55, 35, .48));
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-control-bar {
+  height: 58px;
+  margin: 0 7px 7px;
+  border: 1px solid #27323c;
+  border-radius: 5px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-control-bar .btn-icon {
+  border: 1px solid #2c3741;
+  border-radius: 4px;
+  background: #151c22;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator > div:nth-child(2) {
+  background: linear-gradient(180deg, #0c1116, #090d11);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb {
+  border-radius: 4px;
+  border-color: #26323c;
+  background: #11171d;
+  box-shadow: 0 5px 12px rgba(0, 0, 0, .22);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb:hover {
+  border-color: #52616e;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb.border-accent {
+  border-color: #238cff;
+  box-shadow: 0 0 0 1px rgba(35, 140, 255, .18), 0 6px 16px rgba(0, 0, 0, .28);
+}
+
+.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-navigator > div:nth-child(2))::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-navigator > div:nth-child(2))::-webkit-scrollbar-track {
+  background: #090d11;
+}
+
+.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-navigator > div:nth-child(2))::-webkit-scrollbar-thumb {
+  border: 2px solid #090d11;
+  border-radius: 8px;
+  background: #33414d;
+}
+
 /*
   The default border color has changed to `currentcolor` in Tailwind CSS v4,
   so we've added these compatibility styles to make sure everything still

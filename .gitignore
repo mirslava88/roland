@@ -7,6 +7,8 @@ dist/
 *.key
 id_rsa
 credentials*.json
+stream-settings*
+*.enc
 *.log
 
 # Test media files
@@ -33,6 +35,8 @@ scripts/_test-*.ps1
 /outputs/
 /*.png
 /prezcam.jpg
+/*.jpg
+/*.jpeg
 *.pdmconfig
 *.dmp
 *.reg

@@ -20,6 +20,7 @@ import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
+import { StreamingManager } from './streaming'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
 import { getPowerPointNativePlacement } from './program-scene-state'
 import {
@@ -28,6 +29,14 @@ import {
   nativeWindowDaemon
 } from './native-window-daemon'
 import type { NativeTopLevelWindow } from './native-window-daemon'
+
+// Separate profiles let both editions be installed without overwriting settings.
+// Do this before Chromium sessions, diagnostics or streaming settings are opened.
+if (__PDM_STREAM_ENABLED__) {
+  app.setPath('userData', join(app.getPath('appData'), 'presentation-display-manager-stream'))
+  app.setName('presentation-display-manager-stream')
+  if (process.platform === 'win32') app.setAppUserModelId('com.roland.presentation-display-manager.stream')
+}
 
 interface DesktopCaptureSourceInfo {
   id: string
@@ -53,6 +62,7 @@ interface NativeDesktopSourceRegistryEntry {
 }
 
 let controlWindow: BrowserWindow | null = null
+let streamingManager: StreamingManager | null = null
 let presentationWindow: BrowserWindow | null = null
 const auxiliaryWindows = new Map<number, {
   role: AuxiliaryWindowRole
@@ -73,6 +83,7 @@ let overlayWindow: BrowserWindow | null = null
 let qrOverlayWindow: BrowserWindow | null = null
 let qrOverlayRevision = 0
 let qrOverlayDisplayId: number | null = null
+let qrOverlayLayoutKey: string | null = null
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 let wpfTimerDisplayKey: string | null = null
 let wpfTimerDisplayId: number | null = null
@@ -1378,6 +1389,7 @@ function createWindows(): void {
   })
 
   controlWindow.on('closed', () => {
+    streamingManager?.stop()
     diagnosticLog('lifecycle', `control window closed trigger=${shutdownTrigger}`)
     cancelMemoryReleaseSnapshots()
     controlWindow = null
@@ -2873,6 +2885,7 @@ function createWindows(): void {
       if (qrOverlayWindow && !qrOverlayWindow.isDestroyed()) qrOverlayWindow.destroy()
       qrOverlayWindow = null
       qrOverlayDisplayId = null
+      qrOverlayLayoutKey = null
     }
     for (const [displayId, entry] of [...auxiliaryWindows.entries()]) {
       if (!connectedIds.has(displayId)) {
@@ -3174,6 +3187,22 @@ app.whenReady().then(() => {
     const yPercent = typeof payload.yPercent === 'number'
       ? Math.max(0, Math.min(100, payload.yPercent))
       : 80
+    const description = typeof payload.description === 'string'
+      ? payload.description.slice(0, 160).trim()
+      : ''
+    const descriptionColor = typeof payload.descriptionColor === 'string' && /^#[0-9a-f]{6}$/i.test(payload.descriptionColor)
+      ? payload.descriptionColor
+      : '#ffffff'
+    const descriptionBackgroundColor = typeof payload.descriptionBackgroundColor === 'string' && /^#[0-9a-f]{6}$/i.test(payload.descriptionBackgroundColor)
+      ? payload.descriptionBackgroundColor
+      : '#030712'
+    const descriptionBackgroundTransparent = payload.descriptionBackgroundTransparent === true
+    const descriptionFontScale = typeof payload.descriptionFontScale === 'number'
+      ? Math.max(0.5, Math.min(2, payload.descriptionFontScale))
+      : 1
+    const descriptionWidthPercent = typeof payload.descriptionWidthPercent === 'number'
+      ? Math.max(40, Math.min(160, payload.descriptionWidthPercent))
+      : 65
     const rounded = payload.cornerStyle === 'rounded'
     const revision = ++qrOverlayRevision
 
@@ -3184,15 +3213,19 @@ app.whenReady().then(() => {
       }
       qrOverlayWindow = null
       qrOverlayDisplayId = null
+      qrOverlayLayoutKey = null
       return
     }
 
     const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
     if (!display || display.isPrimary) return
     let win = qrOverlayWindow
+    let freshlyCreated = false
     if (!win || win.isDestroyed()) {
       win = createQrOverlayWindow(display)
       qrOverlayWindow = win
+      freshlyCreated = true
+      qrOverlayLayoutKey = null
       diagnosticLog('qr-overlay', `created display=${display.id}`)
       await new Promise<void>((resolve) => {
         if (!win || win.isDestroyed()) return resolve()
@@ -3202,31 +3235,83 @@ app.whenReady().then(() => {
     }
     if (revision !== qrOverlayRevision || !win || win.isDestroyed()) return
 
-    win.setBounds(display.bounds, false)
+    // Reapplying identical mixed-DPI bounds on every slide change can make the
+    // transparent native window jump for a frame. Resize only when the target
+    // display geometry has actually changed.
+    const currentBounds = win.getBounds()
+    if (
+      currentBounds.x !== display.bounds.x ||
+      currentBounds.y !== display.bounds.y ||
+      currentBounds.width !== display.bounds.width ||
+      currentBounds.height !== display.bounds.height
+    ) {
+      win.setBounds(display.bounds, false)
+    }
     qrOverlayDisplayId = display.id
+    const layoutKey = JSON.stringify([
+      display.id,
+      display.bounds.x,
+      display.bounds.y,
+      display.bounds.width,
+      display.bounds.height,
+      sizePercent,
+      xPercent,
+      yPercent,
+      rounded,
+      description,
+      descriptionFontScale,
+      descriptionWidthPercent
+    ])
+    const preserveLayout = !freshlyCreated && qrOverlayLayoutKey === layoutKey
     const script = `(() => {
+      const block = document.getElementById('qr-block');
       const el = document.getElementById('qr');
-      const size = Math.round(innerHeight * ${JSON.stringify(sizePercent)} / 100);
-      const halfX = size / innerWidth * 50;
-      const halfY = size / innerHeight * 50;
-      const x = Math.max(halfX + 1, Math.min(100 - halfX - 1, ${JSON.stringify(xPercent)}));
-      const y = halfY >= 50 ? 50 : Math.max(halfY + 1, Math.min(100 - halfY - 1, ${JSON.stringify(yPercent)}));
-      el.src = ${JSON.stringify(imageDataUrl)};
-      el.style.width = size + 'px'; el.style.height = size + 'px';
-      el.style.left = x + '%'; el.style.top = y + '%';
-      el.style.transform = 'translate(-50%, -50%)'; el.style.display = 'block';
-      el.style.borderRadius = ${rounded ? "'10%'" : "'0'"};
-      el.style.filter = 'drop-shadow(0 4px 14px rgba(0,0,0,.34))';
+      const label = document.getElementById('qr-description');
+      const imageDataUrl = ${JSON.stringify(imageDataUrl)};
+      if (el.getAttribute('src') !== imageDataUrl) el.src = imageDataUrl;
+      label.style.color = ${JSON.stringify(descriptionColor)};
+      label.style.backgroundColor = ${descriptionBackgroundTransparent ? "'transparent'" : JSON.stringify(descriptionBackgroundColor)};
+      label.style.textShadow = ${descriptionBackgroundTransparent ? "'0 1px 3px rgba(0,0,0,.95), 0 0 8px rgba(0,0,0,.72)'" : "'none'"};
+      if (!${JSON.stringify(preserveLayout)}) {
+        const size = Math.round(innerHeight * ${JSON.stringify(sizePercent)} / 100);
+        const description = ${JSON.stringify(description)};
+        const gap = description ? Math.max(8, Math.round(size * .045)) : 0;
+        const labelWidth = description
+          ? Math.min(
+              Math.round(size * ${JSON.stringify(descriptionWidthPercent)} / 100),
+              Math.max(0, innerWidth - size - gap - 16)
+            )
+          : 0;
+        el.style.width = size + 'px'; el.style.height = size + 'px';
+        el.style.borderRadius = ${rounded ? "'10%'" : "'0'"};
+        label.textContent = description;
+        label.style.display = description ? 'flex' : 'none';
+        label.style.width = labelWidth + 'px';
+        label.style.maxHeight = size + 'px';
+        label.style.padding = Math.max(6, Math.round(size * .055)) + 'px';
+        label.style.fontSize = Math.max(10, Math.round(size * .075 * ${JSON.stringify(descriptionFontScale)})) + 'px';
+        label.style.borderRadius = ${rounded ? "'clamp(10px, 8%, 42px)'" : "'0'"};
+        block.style.gap = gap + 'px';
+        block.style.display = 'flex';
+        const bounds = block.getBoundingClientRect();
+        const halfX = bounds.width / innerWidth * 50;
+        const halfY = bounds.height / innerHeight * 50;
+        const x = Math.max(halfX + 1, Math.min(100 - halfX - 1, ${JSON.stringify(xPercent)}));
+        const y = halfY >= 50 ? 50 : Math.max(halfY + 1, Math.min(100 - halfY - 1, ${JSON.stringify(yPercent)}));
+        block.style.left = x + '%'; block.style.top = y + '%';
+        block.style.transform = 'translate(-50%, -50%)';
+      }
     })()`
     try {
       await win.webContents.executeJavaScript(script)
       if (revision !== qrOverlayRevision || win.isDestroyed()) return
+      qrOverlayLayoutKey = layoutKey
       win.setAlwaysOnTop(true, 'screen-saver')
       win.showInactive()
       win.moveTop()
       diagnosticLog(
         'qr-overlay',
-        `shown display=${display.id} size=${sizePercent}% position=${xPercent},${yPercent}`
+        `shown display=${display.id} size=${sizePercent}% position=${xPercent},${yPercent} description=${description ? 'yes' : 'no'} layout=${preserveLayout ? 'preserved' : 'updated'}`
       )
     } catch (error) {
       diagnosticLog('qr-overlay', `render failed ${formatDiagnosticError(error)}`)
@@ -3375,6 +3460,7 @@ app.whenReady().then(() => {
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
     contents.on('render-process-gone', (_event, details) => {
       const isControl = controlWindow?.webContents.id === contents.id
+      if (isControl) streamingManager?.stop()
       const isPresentation = presentationWindow?.webContents.id === contents.id
       diagnosticLog(
         'renderer-failure',
@@ -3404,6 +3490,9 @@ app.whenReady().then(() => {
     // only media for the two trusted app renderers and denies everything else.
   })
 
+  if (__PDM_STREAM_ENABLED__) {
+    streamingManager = new StreamingManager(() => controlWindow, () => presentationDisplayId)
+  }
   createWindows()
   prewarmPresentationWindow()
   pptDaemon.warmup()
@@ -3440,6 +3529,7 @@ app.on('before-quit', (event) => {
   if (quitCleanupStarted) return
 
   quitCleanupStarted = true
+  streamingManager?.stop()
   diagnosticLog('shutdown', 'waiting for PowerPoint, browser fullscreen and window-enumerator cleanup')
   void Promise.allSettled([
     pptDaemon.shutdown(),

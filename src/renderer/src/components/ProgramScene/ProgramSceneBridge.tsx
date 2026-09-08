@@ -60,13 +60,14 @@ export function ProgramSceneBridge(): null {
       backdropPath: backdropImage,
       placement: programScene.placement,
       participantSize: programScene.participantSize,
+      participantScale: programScene.participantScale,
       cornerStyle: programScene.cornerStyle,
       viewMode: programScene.viewMode,
       transitionEffect: programScene.transitionEffect,
       transitionDurationMs,
       contentAspectRatio
     })
-  }, [active, backdropImage, contentAspectRatio, programScene.cornerStyle, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, selectedCapture, transitionDurationMs])
+  }, [active, backdropImage, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, selectedCapture, transitionDurationMs])
 
   const sendStateRef = useRef(sendState)
   sendStateRef.current = sendState
@@ -147,6 +148,7 @@ export function ProgramSceneBridge(): null {
             enabled: active,
             placement: programScene.placement,
             participantSize: programScene.participantSize,
+            participantScale: programScene.participantScale,
             cornerStyle: programScene.cornerStyle,
             viewMode: programScene.viewMode,
             transitionEffect: programScene.transitionEffect,
@@ -167,6 +169,7 @@ export function ProgramSceneBridge(): null {
           enabled: true,
           placement: programScene.placement,
           participantSize: programScene.participantSize,
+          participantScale: programScene.participantScale,
           cornerStyle: programScene.cornerStyle,
           viewMode: programScene.viewMode,
           transitionEffect: programScene.transitionEffect,
@@ -191,6 +194,7 @@ export function ProgramSceneBridge(): null {
         enabled: false,
         placement: programScene.placement,
         participantSize: programScene.participantSize,
+        participantScale: programScene.participantScale,
         cornerStyle: programScene.cornerStyle,
         viewMode: programScene.viewMode,
         transitionEffect: programScene.transitionEffect,
@@ -208,7 +212,7 @@ export function ProgramSceneBridge(): null {
       window.api.dbgLog(`program scene native content update failed: ${String(error)}`)
     })
     return () => { cancelled = true }
-  }, [active, activeFile?.extension, activeFile?.path, activeFile?.type, contentAspectRatio, programScene.cornerStyle, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, targetDisplayId, transitionDurationMs])
+  }, [active, activeFile?.extension, activeFile?.path, activeFile?.type, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, targetDisplayId, transitionDurationMs])
 
   return null
 }

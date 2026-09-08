@@ -369,8 +369,8 @@ export function SlideNavigator(): JSX.Element {
   }
 
   return (
-    <div className="w-48 border-l border-gray-800 bg-surface-300 flex flex-col shrink-0 overflow-hidden">
-      <div className="px-3 py-2 border-b border-gray-800 text-xs text-gray-400 font-medium">
+    <div className="pdm-slide-navigator w-48 border-l border-gray-800 bg-surface-300 flex flex-col shrink-0 overflow-hidden">
+      <div className="pdm-slide-navigator-header px-3 py-2 border-b border-gray-800 text-xs text-gray-400 font-medium">
         Слайды
       </div>
 
@@ -394,7 +394,7 @@ export function SlideNavigator(): JSX.Element {
             key={thumb.index}
             ref={thumb.index === currentSlide ? activeRef : undefined}
             onClick={() => handleClick(thumb.index)}
-            className={`cursor-pointer rounded-lg overflow-hidden border-2 transition-colors ${
+            className={`pdm-slide-thumb cursor-pointer rounded-lg overflow-hidden border-2 transition-colors ${
               thumb.index === currentSlide
                 ? 'border-accent'
                 : 'border-transparent hover:border-gray-600'

@@ -1431,6 +1431,7 @@ export function PreviewPanel(): JSX.Element {
           backdropPath: freshState.backdropImage,
           placement: freshState.programScene.placement,
           participantSize: freshState.programScene.participantSize,
+          participantScale: freshState.programScene.participantScale,
           cornerStyle: freshState.programScene.cornerStyle,
           viewMode: freshState.programScene.viewMode,
           transitionEffect: freshState.programScene.transitionEffect,
@@ -1508,6 +1509,7 @@ export function PreviewPanel(): JSX.Element {
                 enabled: true,
                 placement: freshState.programScene.placement,
                 participantSize: freshState.programScene.participantSize,
+                participantScale: freshState.programScene.participantScale,
                 cornerStyle: freshState.programScene.cornerStyle,
                 viewMode: freshState.programScene.viewMode,
                 transitionEffect: freshState.programScene.transitionEffect,
@@ -1669,6 +1671,7 @@ export function PreviewPanel(): JSX.Element {
               enabled: true,
               placement: freshState.programScene.placement,
               participantSize: freshState.programScene.participantSize,
+              participantScale: freshState.programScene.participantScale,
               cornerStyle: freshState.programScene.cornerStyle,
               viewMode: freshState.programScene.viewMode,
               transitionEffect: freshState.programScene.transitionEffect,
@@ -2143,6 +2146,7 @@ export function PreviewPanel(): JSX.Element {
             enabled: true,
             placement: outputState.programScene.placement,
             participantSize: outputState.programScene.participantSize,
+            participantScale: outputState.programScene.participantScale,
             cornerStyle: outputState.programScene.cornerStyle,
             viewMode: outputState.programScene.viewMode,
             transitionEffect: outputState.programScene.transitionEffect,
@@ -2163,6 +2167,7 @@ export function PreviewPanel(): JSX.Element {
           backdropPath: outputState.backdropImage,
           placement: outputState.programScene.placement,
           participantSize: outputState.programScene.participantSize,
+          participantScale: outputState.programScene.participantScale,
           cornerStyle: outputState.programScene.cornerStyle,
           viewMode: outputState.programScene.viewMode,
           transitionEffect: outputState.programScene.transitionEffect,
@@ -2272,6 +2277,7 @@ export function PreviewPanel(): JSX.Element {
             backdropPath: backdropImage,
             placement: outputState.programScene.placement,
             participantSize: outputState.programScene.participantSize,
+            participantScale: outputState.programScene.participantScale,
             cornerStyle: outputState.programScene.cornerStyle,
             viewMode: outputState.programScene.viewMode,
             transitionEffect: outputState.programScene.transitionEffect,
@@ -2874,8 +2880,8 @@ export function PreviewPanel(): JSX.Element {
   })
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="shrink-0 h-8 bg-surface-300 border-b border-gray-800 flex items-center justify-between px-3 select-none">
+    <div className="pdm-preview-panel flex-1 flex flex-col overflow-hidden">
+      <div className="pdm-preview-header shrink-0 h-8 bg-surface-300 border-b border-gray-800 flex items-center justify-between px-3 select-none">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Каналы</span>
         <div className="flex items-center gap-2">
           <button
@@ -2910,7 +2916,7 @@ export function PreviewPanel(): JSX.Element {
         </div>
       </div>
 
-      <div className={`flex-1 grid overflow-hidden relative ${
+      <div className={`pdm-channel-grid flex-1 grid overflow-hidden relative ${
         channelGridSize === 9
           ? 'grid-cols-3 grid-rows-3 gap-1.5 p-2'
           : 'grid-cols-2 grid-rows-2 gap-2 p-3'
@@ -2954,7 +2960,7 @@ export function PreviewPanel(): JSX.Element {
           выталкивали кнопку удаления за край окна. ✕ delete placed вне
           scrollable — всегда доступен на правом краю. */}
       {totalPages > 1 && (
-        <div className="shrink-0 h-8 bg-surface-300 border-t border-gray-800 flex items-center gap-1 px-3 select-none">
+        <div className="pdm-pagination shrink-0 h-8 bg-surface-300 border-t border-gray-800 flex items-center gap-1 px-3 select-none">
           <button
             onClick={() => setCurrentChannelPage(currentChannelPage - 1)}
             disabled={currentChannelPage === 0}
@@ -3291,7 +3297,7 @@ function ChannelPanel({
 
   return (
     <div
-      className={`flex-1 flex flex-col overflow-hidden ${compact ? 'rounded-md border' : 'rounded-lg border-2'} transition-colors cursor-pointer ${
+      className={`pdm-channel-card ${isLive ? 'is-live' : showSelected ? 'is-selected' : ''} flex-1 flex flex-col overflow-hidden ${compact ? 'rounded-md border' : 'rounded-lg border-2'} transition-colors cursor-pointer ${
         dragOver ? 'border-accent bg-accent/5' :
         isLive ? 'border-red-500/60' :
         showSelected ? 'border-blue-500/60' : 'border-gray-700/50'
@@ -3307,9 +3313,9 @@ function ChannelPanel({
       {/* Header. min-w-0 на flex-контейнере + shrink-0 на фиксированных
           элементах (dot, label, ✕). Имя файла с flex-1 + min-w-0 + truncate
           — сжимается и обрезается многоточием вместо выталкивания ✕. */}
-      <div className={`flex items-center min-w-0 ${compact ? 'gap-1 px-2 py-1' : 'gap-2 px-3 py-1.5'} ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
-        <span className={`${compact ? 'w-1.5 h-1.5' : 'w-2 h-2'} rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : showSelected ? 'bg-blue-500' : 'bg-gray-600'}`} />
-        <span className={`shrink-0 ${compact ? 'text-[9px]' : 'text-[10px]'} font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
+      <div className={`pdm-channel-header flex items-center min-w-0 ${compact ? 'gap-1 px-2 py-1' : 'gap-2 px-3 py-1.5'} ${isLive ? 'bg-red-900/30' : showSelected ? 'bg-blue-900/20' : 'bg-surface-200'}`}>
+        <span className={`pdm-channel-state-dot ${compact ? 'w-1.5 h-1.5' : 'w-2 h-2'} rounded-full shrink-0 ${isLive ? 'bg-red-500 animate-pulse' : showSelected ? 'bg-blue-500' : 'bg-gray-600'}`} />
+        <span className={`pdm-channel-status shrink-0 ${compact ? 'text-[9px]' : 'text-[10px]'} font-bold uppercase ${isLive ? 'text-red-400' : showSelected ? 'text-blue-400' : 'text-gray-500'}`}>
           Канал {label} {isLive ? '• В ЭФИРЕ' : showSelected ? '• ВЫБРАНО' : ''}
         </span>
         {captionEditing ? (

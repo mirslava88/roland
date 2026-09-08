@@ -42,9 +42,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     displayAssignments,
     displayNames,
     selectedDisplayId,
-    setDisplayName
+    setDisplayName,
+    appTheme,
+    setAppTheme
   } = useAppStore()
-  const [tab, setTab] = useState<'audio' | 'display' | 'config' | 'diagnostics' | 'help'>('audio')
+  const [tab, setTab] = useState<'appearance' | 'audio' | 'display' | 'config' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
   const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
@@ -198,6 +200,14 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700">
           <div className="flex gap-1">
             <button
+              onClick={() => setTab('appearance')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                tab === 'appearance' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
+              }`}
+            >
+              Вид
+            </button>
+            <button
               onClick={() => setTab('audio')}
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
                 tab === 'audio' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
@@ -249,6 +259,89 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
+          {tab === 'appearance' && (
+            <div>
+              <h3 className="mb-1 text-sm font-semibold text-gray-200">Тема интерфейса</h3>
+              <p className="mb-4 text-[10px] leading-4 text-gray-500">
+                Меняется только оформление рабочего окна оператора. Эфир, размеры панелей и расположение элементов остаются без изменений.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setAppTheme('classic')}
+                  aria-pressed={appTheme === 'classic'}
+                  className={`overflow-hidden rounded-lg border text-left transition-colors ${
+                    appTheme === 'classic'
+                      ? 'border-accent ring-2 ring-accent/25'
+                      : 'border-gray-700 hover:border-gray-500'
+                  }`}
+                >
+                  <div className="h-28 bg-[#11111b] p-2.5">
+                    <div className="mb-2 flex gap-1.5">
+                      <span className="h-2 w-12 rounded-sm bg-[#6c63ff]" />
+                      <span className="h-2 w-8 rounded-sm bg-[#29283b]" />
+                      <span className="h-2 w-8 rounded-sm bg-[#29283b]" />
+                    </div>
+                    <div className="grid h-[76px] grid-cols-[34px_1fr] gap-2">
+                      <span className="rounded-md border border-[#353449] bg-[#181825]" />
+                      <span className="grid grid-cols-2 gap-1.5 rounded-md border border-[#302f43] bg-[#181825] p-1.5">
+                        <i className="rounded-sm border border-[#6c63ff]/70 bg-[#24233a]" />
+                        <i className="rounded-sm border border-[#353449] bg-[#202033]" />
+                        <i className="rounded-sm border border-[#353449] bg-[#202033]" />
+                        <i className="rounded-sm border border-[#353449] bg-[#202033]" />
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between bg-surface-100 px-3 py-2">
+                    <div>
+                      <div className="text-xs font-medium text-white">Классическая</div>
+                      <div className="text-[9px] text-gray-500">Текущий дизайн PDM</div>
+                    </div>
+                    {appTheme === 'classic' && <span className="text-xs text-accent">✓</span>}
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setAppTheme('broadcast-pro')}
+                  aria-pressed={appTheme === 'broadcast-pro'}
+                  className={`overflow-hidden rounded-lg border text-left transition-colors ${
+                    appTheme === 'broadcast-pro'
+                      ? 'border-[#1684ff] ring-2 ring-[#1684ff]/25'
+                      : 'border-gray-700 hover:border-gray-500'
+                  }`}
+                >
+                  <div className="h-28 bg-[#080b0f] p-2.5">
+                    <div className="mb-2 flex gap-1.5">
+                      <span className="h-2 w-12 rounded-[2px] bg-[#167dff]" />
+                      <span className="h-2 w-8 rounded-[2px] bg-[#20262d]" />
+                      <span className="h-2 w-8 rounded-[2px] bg-[#20262d]" />
+                    </div>
+                    <div className="grid h-[76px] grid-cols-[34px_1fr] gap-2">
+                      <span className="rounded-[3px] border border-[#29313a] bg-[#101419]" />
+                      <span className="grid grid-cols-2 gap-1.5 rounded-[3px] border border-[#29313a] bg-[#101419] p-1.5 shadow-lg shadow-black/40">
+                        <i className="rounded-[2px] border-2 border-[#ef3434] bg-[#19212a]" />
+                        <i className="rounded-[2px] border-2 border-[#25b85a] bg-[#19212a]" />
+                        <i className="rounded-[2px] border border-[#303a45] bg-[#171d24]" />
+                        <i className="rounded-[2px] border border-[#303a45] bg-[#171d24]" />
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between bg-surface-100 px-3 py-2">
+                    <div>
+                      <div className="text-xs font-medium text-white">Broadcast Pro</div>
+                      <div className="text-[9px] text-gray-500">Графитовая эфирная консоль</div>
+                    </div>
+                    {appTheme === 'broadcast-pro' && <span className="text-xs text-[#2890ff]">✓</span>}
+                  </div>
+                </button>
+              </div>
+              <div className="mt-4 rounded-lg border border-gray-700 bg-surface-100 px-3 py-2.5 text-[10px] leading-4 text-gray-400">
+                Тема применяется сразу и сохраняется отдельно от каналов и эфира. Классическую тему можно вернуть в любой момент.
+              </div>
+            </div>
+          )}
+
           {tab === 'audio' && (
             <div>
               <h3 className="text-sm font-semibold text-gray-200 mb-3">Выберите аудиоустройство вывода</h3>
@@ -559,6 +652,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>PPTX и PDF начинают готовиться сразу после добавления в канал: PPTX скрыто открывается в PowerPoint и получает готовые эфирные слайды, а PDF — страницы под разрешение выбранного дисплея. Пока идёт подготовка, на карточке виден статус <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Кэширование…</code>, а запуск этого PPTX в эфир временно недоступен</li>
                   <li>В карточке видеоканала слева от кнопки «В эфир» находится список «После». Выберите другой непустой канал для автоматического перехода либо «Не переключать»</li>
                   <li>Раздельная кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">▣ PiP</code> (картинка в картинке) слева от кнопки «Фон» быстро включает и выключает режим с сохранёнными параметрами; соседняя шестерёнка открывает предварительную настройку</li>
+                  <li>В настройках PiP ползунок «Высота камеры» увеличивает участника от 100 до 250%. Пропорции кадра сохраняются; камера заполняет выбранную область без растягивания изображения</li>
                   <li>В панели управления видео доступны воспроизведение, пауза, остановка, переход по таймлайну и зацикливание ролика либо всего видеоплейлиста. Ролик после выхода в эфир запускается только вручную</li>
                   <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью закрывает показанный материал и освобождает его тяжёлые ресурсы: PDF-документ и кэши, видеодекодер либо презентацию PowerPoint, открытую PDM</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
@@ -649,7 +743,17 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
 
               <section>
-                <h4 className="text-xs font-semibold text-accent mb-1.5">7. Настройки — вкладка «Дисплеи»</h4>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">7. Настройки — вкладка «Вид»</h4>
+                <ul className="list-disc pl-4 space-y-1 text-gray-400">
+                  <li>Тема «Классическая» полностью сохраняет прежнее оформление PDM</li>
+                  <li>Тема «Broadcast Pro» превращает рабочее окно в графитовую эфирную консоль: медиатека, каналы и слайды разделены на модули, а состояния Preview и Program выделены зелёным и красным</li>
+                  <li>Тема применяется только к окну оператора и не меняет картинку на эфирных, зеркальных, информационных дисплеях и суфлёрах</li>
+                  <li>Выбор сохраняется автоматически между запусками и не влияет на подготовленные материалы или конфигурацию мероприятия</li>
+                </ul>
+              </section>
+
+              <section>
+                <h4 className="text-xs font-semibold text-accent mb-1.5">7.1. Настройки — вкладка «Дисплеи»</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Основной экран ноутбука с интерфейсом PDM назначается автоматически и не используется как дополнительный выход</li>
                   <li>Для каждого внешнего монитора выберите режим: «Основной эфир», «Суфлёр», «Информационный экран», «Таймер», «Таймер мероприятия» или «Выключен»</li>

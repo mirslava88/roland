@@ -5,7 +5,10 @@ import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import { SlideRenderer } from '../Preview/PreviewPanel'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
-  PROGRAM_SCENE_TRANSITION_DURATION_MS
+  PROGRAM_SCENE_PARTICIPANT_SCALE_MAX,
+  PROGRAM_SCENE_PARTICIPANT_SCALE_MIN,
+  PROGRAM_SCENE_TRANSITION_DURATION_MS,
+  normalizeProgramSceneParticipantScale
 } from '../../../../shared/program-scene'
 import type {
   ProgramSceneCornerStyle,
@@ -83,6 +86,10 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
   const sceneCornerStyle = CORNERS.some((item) => item.value === storedProgramScene?.cornerStyle)
     ? storedProgramScene.cornerStyle
     : DEFAULT_PROGRAM_SCENE_LAYOUT.cornerStyle
+  const sceneParticipantScale = normalizeProgramSceneParticipantScale(
+    storedProgramScene?.participantScale
+  )
+  const [participantScaleDraft, setParticipantScaleDraft] = useState(sceneParticipantScale)
   const sceneTransitionEffect = TRANSITION_EFFECTS.some((item) => item.value === storedProgramScene?.transitionEffect)
     ? storedProgramScene.transitionEffect
     : DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth'
@@ -93,6 +100,7 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
     captureSourceId: storedProgramScene?.captureSourceId ?? null,
     placement: scenePlacement,
     participantSize: sceneParticipantSize,
+    participantScale: participantScaleDraft,
     cornerStyle: sceneCornerStyle,
     transitionEffect: sceneTransitionEffect,
     viewMode: storedProgramScene?.viewMode ?? 'both'
@@ -144,13 +152,14 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
   const canEnable = !!backdropImage && selectedCaptureExists && !selectedCaptureMatchesContent
   const participantOnLeft = programScene.placement.startsWith('left-')
   const vertical = programScene.placement.split('-')[1]
-  const participantWidthPercent = programScene.participantSize === 'small'
+  const participantBaseWidthPercent = programScene.participantSize === 'small'
     ? 20
     : programScene.participantSize === 'large'
       ? 33
       : programScene.participantSize === 'half'
         ? 44.5
         : 26
+  const participantWidthPercent = participantBaseWidthPercent
   const participantWidth = `${participantWidthPercent}%`
   const contentFarInset = `${4 + participantWidthPercent + 3}%`
   const contentWidth = `${89 - participantWidthPercent}%`
@@ -349,9 +358,10 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
             </div>
           </div>
           <div
-            className="absolute aspect-video bg-slate-700 text-center text-[10px] text-white shadow-xl flex items-center justify-center overflow-hidden"
+            className="absolute bg-slate-700 text-center text-[10px] text-white shadow-xl flex items-center justify-center overflow-hidden"
             style={{
               width: participantWidth,
+              aspectRatio: `16 / ${9 * programScene.participantScale}`,
               left: participantOnLeft ? '4%' : undefined,
               right: participantOnLeft ? undefined : '4%',
               top: vertical === 'top' ? '10%' : vertical === 'center' ? '50%' : undefined,
@@ -362,7 +372,11 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
           >
             <div className="flex h-full w-full items-center justify-center" style={previewAnimationStyle}>
               {selectedCapture ? (
-                <CaptureThumbnail config={selectedCapture} className="h-full w-full" />
+                <CaptureThumbnail
+                  config={selectedCapture}
+                  className="h-full w-full"
+                  fit={selectedCapture.captureKind === 'device' ? 'cover' : 'contain'}
+                />
               ) : (
                 <span className="px-2">ВНЕШНИЙ ИСТОЧНИК НЕ ВЫБРАН</span>
               )}
@@ -476,6 +490,29 @@ export function ProgramSceneModal({ onClose }: Props): JSX.Element {
                 </button>
               ))}
             </div>
+            <div className="mt-2 flex items-center justify-between text-[10px] text-gray-400">
+              <span>Высота камеры</span>
+              <span className="tabular-nums text-gray-300">{Math.round(programScene.participantScale * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min={PROGRAM_SCENE_PARTICIPANT_SCALE_MIN * 100}
+              max={PROGRAM_SCENE_PARTICIPANT_SCALE_MAX * 100}
+              step={5}
+              value={Math.round(programScene.participantScale * 100)}
+              onChange={(event) => setParticipantScaleDraft(Number(event.target.value) / 100)}
+              onPointerUp={(event) => setProgramScene({
+                participantScale: Number(event.currentTarget.value) / 100
+              })}
+              onKeyUp={(event) => setProgramScene({
+                participantScale: Number(event.currentTarget.value) / 100
+              })}
+              onBlur={(event) => setProgramScene({
+                participantScale: Number(event.currentTarget.value) / 100
+              })}
+              className="h-1.5 w-full cursor-pointer accent-blue-500"
+              title="Окно камеры увеличивается по высоте; видео не деформируется, а аккуратно обрезается по бокам"
+            />
           </div>
         </div>
 

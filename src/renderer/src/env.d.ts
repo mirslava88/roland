@@ -188,6 +188,7 @@ interface DriveInfo {
 }
 
 interface Api {
+  streaming: import('../../shared/streaming').StreamingApi
   getAppVersion(): Promise<string>
   saveAppConfig(content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }>
   loadAppConfig(): Promise<{ success: boolean; canceled: boolean; path?: string; content?: string; error?: string }>
@@ -235,6 +236,7 @@ interface Api {
       enabled: boolean
       placement: import('../../shared/program-scene').ProgramScenePlacement
       participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
+      participantScale: number
       cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
       viewMode?: import('../../shared/program-scene').ProgramSceneViewMode
       transitionEffect?: import('../../shared/program-scene').ProgramSceneTransitionEffect
@@ -258,6 +260,7 @@ interface Api {
       enabled: boolean
       placement: import('../../shared/program-scene').ProgramScenePlacement
       participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
+      participantScale: number
       cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
       viewMode?: import('../../shared/program-scene').ProgramSceneViewMode
       transitionEffect?: import('../../shared/program-scene').ProgramSceneTransitionEffect
@@ -361,6 +364,7 @@ interface Api {
       enabled: boolean
       placement: import('../../shared/program-scene').ProgramScenePlacement
       participantSize: import('../../shared/program-scene').ProgramSceneParticipantSize
+      participantScale: number
       cornerStyle: import('../../shared/program-scene').ProgramSceneCornerStyle
       viewMode?: import('../../shared/program-scene').ProgramSceneViewMode
       transitionEffect?: import('../../shared/program-scene').ProgramSceneTransitionEffect
@@ -377,8 +381,12 @@ interface Api {
   on(channel: string, callback: (...args: unknown[]) => void): () => void
 }
 
-declare global {
-  interface Window {
-    api: Api
-  }
+interface Window {
+  api: Api
+}
+
+// This declaration file is a global script, not an external module.
+// React 19 exposes JSX under React.JSX; keep existing JSX.Element annotations valid.
+declare namespace JSX {
+  type Element = import('react').JSX.Element
 }

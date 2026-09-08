@@ -10,7 +10,7 @@ export function createControlWindow(): BrowserWindow {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#11111b',
-    title: 'Presentation Display Manager',
+    title: __PDM_PRODUCT_NAME__,
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -23,6 +23,8 @@ export function createControlWindow(): BrowserWindow {
   })
 
   win.removeMenu()
+  // Keep the edition visible even when index.html supplies its generic title.
+  win.on('page-title-updated', (event) => event.preventDefault())
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     // Only hand real web/mail links to the OS; deny file: and custom schemes
@@ -234,8 +236,10 @@ export function createQrOverlayWindow(display?: Display): BrowserWindow {
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
-    #qr{position:fixed;display:none;filter:drop-shadow(0 4px 14px rgba(0,0,0,.34));user-select:none;-webkit-user-drag:none}
-  </style></head><body><img id="qr" alt="" /></body></html>`
+    #qr-block{position:fixed;display:none;align-items:center;filter:drop-shadow(0 4px 14px rgba(0,0,0,.34));user-select:none}
+    #qr{display:block;flex:none;user-select:none;-webkit-user-drag:none}
+    #qr-description{display:none;flex:none;align-items:center;overflow:hidden;background:rgba(3,7,18,.88);color:#fff;font-family:Arial,sans-serif;font-weight:700;line-height:1.15;overflow-wrap:anywhere;white-space:pre-wrap}
+  </style></head><body><div id="qr-block"><img id="qr" alt="" /><div id="qr-description"></div></div></body></html>`
   void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   return win
 }

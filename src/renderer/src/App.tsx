@@ -18,6 +18,7 @@ import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
 export default function App(): JSX.Element {
   const {
     captureSources,
+    appTheme,
     setPresentationWindowOpen,
     setDisplays,
     setCurrentSlide,
@@ -53,6 +54,10 @@ export default function App(): JSX.Element {
       document.removeEventListener('drop', onDrop)
     }
   }, [])
+
+  useEffect(() => {
+    window.api.dbgLog(`operator theme applied=${appTheme}`)
+  }, [appTheme])
 
   // Validate the synchronously restored crash-recovery snapshot. Missing or
   // renamed files are cleared from their channels, while capture:// sources
@@ -300,7 +305,7 @@ export default function App(): JSX.Element {
   }, [])
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden dark">
+    <div className={`pdm-operator-shell h-screen flex flex-col overflow-hidden dark ${appTheme === 'broadcast-pro' ? 'theme-broadcast-pro' : 'theme-classic'}`}>
       <Toolbar />
       <NowPlaying />
       <AuxiliaryDisplayBridge />
@@ -308,9 +313,9 @@ export default function App(): JSX.Element {
       <ProgramSceneBridge />
       <QrOverlayBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
-      <div className="flex flex-1 overflow-hidden">
+      <div className="pdm-main-workspace flex flex-1 overflow-hidden">
         <FileLibrary />
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="pdm-stage flex-1 flex flex-col overflow-hidden">
           <PreviewPanel />
           <ControlBar />
         </div>

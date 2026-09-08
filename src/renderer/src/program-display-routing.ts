@@ -100,6 +100,7 @@ async function switchPrimaryProgramDisplayUnlocked(
           enabled: true,
           placement: initial.programScene.placement,
           participantSize: initial.programScene.participantSize,
+          participantScale: initial.programScene.participantScale,
           cornerStyle: initial.programScene.cornerStyle,
           viewMode: initial.programScene.viewMode,
           transitionEffect: initial.programScene.transitionEffect,

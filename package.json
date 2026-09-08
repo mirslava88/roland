@@ -1,6 +1,6 @@
 {
   "name": "presentation-display-manager",
-  "version": "1.1.5",
+  "version": "1.1.5-stream",
   "author": "Roland",
   "license": "MIT",
   "private": true,
@@ -10,18 +10,22 @@
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
   "scripts": {
+    "test:streaming": "node scripts/test-streaming.mjs && node scripts/test-streaming-handshake.mjs && node scripts/test-streaming-keyframes.mjs",
+    "test:streaming:capture": "node scripts/run-streaming-capture-test.mjs",
+    "test:streaming:latency": "node scripts/run-streaming-latency-test.mjs",
     "clean:out": "node scripts/clean-build-output.mjs",
     "clean:package": "node scripts/clean-build-output.mjs --package",
     "prebuild": "npm run clean:out",
-    "prepackage": "npm run clean:package",
-    "prepackage:win": "npm run clean:package",
-    "prepackage:mac": "npm run clean:package",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "package": "electron-vite build && electron-builder",
-    "package:win": "electron-vite build && electron-builder --win",
-    "package:mac": "electron-vite build && electron-builder --mac"
+    "build:standard": "node scripts/build-edition.mjs standard",
+    "build:stream": "node scripts/build-edition.mjs stream",
+    "package": "npm run package:stream",
+    "package:win": "npm run package:stream",
+    "package:standard": "node scripts/build-edition.mjs standard package win",
+    "package:stream": "node scripts/build-edition.mjs stream package win",
+    "package:mac": "node scripts/build-edition.mjs standard package mac"
   },
   "dependencies": {
     "@hyzyla/pdfium": "^2.1.13",
@@ -39,6 +43,7 @@
     "electron": "^44.1.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "ffmpeg-static": "^5.3.0",
     "postcss": "^8.5.27",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -54,9 +59,22 @@
     },
     "files": [
       "out/**/*",
+      "!out/main/streaming-smoke.cjs",
+      "!out/main/streaming-latency.cjs",
       "!**/*.map"
     ],
     "extraResources": [
+      {
+        "from": "node_modules/ffmpeg-static",
+        "to": "ffmpeg",
+        "filter": [
+          "ffmpeg",
+          "ffmpeg.exe",
+          "ffmpeg*.LICENSE",
+          "ffmpeg*.README",
+          "LICENSE"
+        ]
+      },
       {
         "from": "scripts",
         "to": "scripts",

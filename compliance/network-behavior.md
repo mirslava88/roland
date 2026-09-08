@@ -1,45 +1,42 @@
-# Network Behavior — Presentation Display Manager
+# Network Behavior — PDM standard and Stream
 
-**Date:** 2026-09-01
+**Date:** 2026-09-08. **Scope:** current 1.1.5 / 1.1.5-stream source and packaging configuration.
+This note supersedes the 1.1.4 offline-only description for Stream. It is not a packet-capture audit.
 
-**Scope:** packaged application 1.1.4 (development tooling is excluded)
+## Local presentation features (both editions)
 
-## Summary
+Local presentation, PDF, Office, camera, timer and QR processing work offline.
+There is no telemetry, automatic update client or automatic stream start.
+Bundled PDF workers/WASM and the `pdm-media://` filesystem protocol load local assets.
+External web/mail links are handed to the OS only after user action. Windows,
+Office and other applications can have independent network activity.
 
-The packaged application makes no outbound network connections by design and
-remains functional without network access. It contains no telemetry, analytics,
-auto-updater, or remote-content integration.
+## Standard edition
 
-## Source and package review
+The standard build removes the streaming controller, IPC API, worker and FFmpeg
+resource. Local display operation does not require an outbound firewall rule.
 
-- The application does not call `http`, `https`, Electron `net.request`,
-  `XMLHttpRequest`, `WebSocket`, `sendBeacon`, or an update service.
-- The renderer's `fetch` call loads the locally bundled PDFium WASM asset.
-- The custom `pdm-media://` protocol reads approved local files through local
-  filesystem streams; it does not make a network request.
-- PDF.js worker code and PDFium WASM are included in the application package.
-- PowerPoint, PDF, image, audio, video, capture, and Office-document processing
-  are local to the Windows host.
+## Stream edition — explicit operator actions
 
-## Renderer controls
+- Address checks open TCP/TLS connections to the selected destinations without
+  sending video, audio or the stream key. They cannot verify stream credentials.
+- Starting a stream sends the selected display and audio to operator-configured
+  RTMP/RTMPS endpoints through separate FFmpeg processes. DNS lookup, outbound TCP
+  and (for RTMPS) TLS are required. RTMP without TLS is unencrypted in transit.
+- Each destination may reconnect while streaming remains active. Closing the
+  settings panel does not stop it; Stop or application shutdown terminates sending.
+- RTMPS validates certificates; errors are reported without displaying private URLs
+  or keys. Saved keys use Electron safeStorage in the Stream user profile and are
+  excluded from `.pdmconfig` exports and diagnostic messages.
+- The entire selected display and, if enabled, system audio are captured, including
+  unrelated windows and notifications. Choose a dedicated output screen.
 
-- `sandbox: true`
-- `contextIsolation: true`
-- `nodeIntegration: false`
-- `webSecurity: true`
-- Content Security Policy and top-level navigation guards
-- External `http`, `https`, or `mailto` links open only through the operating
-  system after an explicit user action
+No public listening port is opened by the packaged application. Development and
+RTMP test scripts can listen on localhost; they are not shipped as application features.
 
-## Inbound traffic
+## Renderer protection
 
-The packaged application does not listen on a TCP or UDP port. The localhost
-development server used by electron-vite exists only during development and is
-not part of the packaged release.
-
-## Perimeter conclusion
-
-No firewall allow-rule is required for PDM itself. The application is suitable
-for offline or egress-filtered deployment. Windows, Microsoft Office, and other
-software installed on the same computer may have their own independent network
-behavior outside PDM's control.
+Sandboxing, context isolation, disabled Node integration, web security, CSP and
+navigation guards remain enabled in both editions. Electron fuse verification is
+part of packaging. Internet access is required only when the operator uses a
+network-dependent action, not for ordinary local presentation output.

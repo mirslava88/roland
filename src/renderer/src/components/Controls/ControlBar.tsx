@@ -41,7 +41,7 @@ export function ControlBar(): JSX.Element {
 
   if (!activeFile) {
     return (
-      <div className="h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center text-gray-600 text-sm shrink-0">
+      <div className="pdm-control-bar h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center text-gray-600 text-sm shrink-0">
         Трансляция остановлена
       </div>
     )
@@ -186,7 +186,7 @@ export function ControlBar(): JSX.Element {
   }
 
   return (
-    <div className="h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center px-4 gap-4 shrink-0">
+    <div className="pdm-control-bar h-16 bg-surface-300 border-t border-gray-800 flex items-center justify-center px-4 gap-4 shrink-0">
       {activeFile.type === 'video' && (
         <div className="flex items-center gap-2 flex-1">
           <button onClick={handlePlayPause} className="btn-icon text-lg">

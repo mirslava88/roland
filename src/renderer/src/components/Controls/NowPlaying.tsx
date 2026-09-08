@@ -24,7 +24,7 @@ export function NowPlaying(): JSX.Element | null {
     : TYPE_LABELS[activeFile.type] || activeFile.extension
 
   return (
-    <div className="h-9 bg-surface-200 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0">
+    <div className="pdm-now-playing h-9 bg-surface-200 border-b border-gray-800 flex items-center px-4 gap-3 shrink-0">
       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
       <span className="text-[10px] font-bold uppercase text-gray-500 shrink-0">Сейчас в эфире</span>
 

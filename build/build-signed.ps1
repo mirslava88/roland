@@ -6,6 +6,7 @@
 #
 # PRODUCTION: point CSC_LINK at the corporate-CA .pfx instead of the dev placeholder.
 
+param([ValidateSet('standard', 'stream')][string]$Edition = 'stream')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot   # build\ -> project root
 
@@ -19,15 +20,13 @@ $env:CSC_KEY_PASSWORD = (Get-Content $pwFile -Raw).Trim()
 Set-Location $root
 
 Write-Host "[1/3] electron-vite build + pack app dir (--dir)" -ForegroundColor Cyan
-npm run clean:package
-if ($LASTEXITCODE -ne 0) { throw "clean package output failed" }
-npm run build
-if ($LASTEXITCODE -ne 0) { throw "electron-vite build failed" }
-npx --no-install electron-builder --win --dir
+$env:PDM_EDITION = $Edition
+node scripts/build-edition.mjs $Edition dir win
 if ($LASTEXITCODE -ne 0) { throw "electron-builder --dir failed" }
 
 Write-Host "[2/3] verifying hardened Electron fuses" -ForegroundColor Cyan
-$exe = Join-Path $root 'dist\win-unpacked\Presentation Display Manager.exe'
+$productName = if ($Edition -eq 'stream') { 'Presentation Display Manager Stream' } else { 'Presentation Display Manager' }
+$exe = Join-Path $root "dist\$Edition\win-unpacked\$productName.exe"
 $fuseState = npx --no-install @electron/fuses read --app "$exe" | Out-String
 if ($LASTEXITCODE -ne 0) { throw "fuse verification failed" }
 Write-Host $fuseState
@@ -50,7 +49,7 @@ foreach ($entry in $expectedFuses.GetEnumerator()) {
 }
 
 Write-Host "[3/3] building signed NSIS installer from verified app (--prepackaged)" -ForegroundColor Cyan
-npx --no-install electron-builder --win --prepackaged "$root\dist\win-unpacked"
+npx --no-install electron-builder --win --config build/edition-builder.cjs --prepackaged "$root\dist\$Edition\win-unpacked" --publish never
 if ($LASTEXITCODE -ne 0) { throw "electron-builder --prepackaged failed" }
 
 Write-Host "DONE" -ForegroundColor Green

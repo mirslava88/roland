@@ -12,11 +12,23 @@ export type ProgramSceneViewMode = 'participant' | 'content' | 'both'
 export type ProgramSceneTransitionEffect = 'smooth' | 'zoom-fade' | 'instant'
 
 export const PROGRAM_SCENE_TRANSITION_DURATION_MS = 650
+export const PROGRAM_SCENE_PARTICIPANT_SCALE_MIN = 1
+export const PROGRAM_SCENE_PARTICIPANT_SCALE_MAX = 2.5
+
+export function normalizeProgramSceneParticipantScale(value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return 1
+  return Math.max(
+    PROGRAM_SCENE_PARTICIPANT_SCALE_MIN,
+    Math.min(PROGRAM_SCENE_PARTICIPANT_SCALE_MAX, Math.round(numeric * 100) / 100)
+  )
+}
 
 export interface ProgramSceneLayoutConfig {
   enabled: boolean
   placement: ProgramScenePlacement
   participantSize: ProgramSceneParticipantSize
+  participantScale: number
   cornerStyle: ProgramSceneCornerStyle
   viewMode?: ProgramSceneViewMode
   transitionEffect?: ProgramSceneTransitionEffect
@@ -40,6 +52,7 @@ export const DEFAULT_PROGRAM_SCENE_LAYOUT: ProgramSceneLayoutConfig = {
   enabled: false,
   placement: 'right-center',
   participantSize: 'medium',
+  participantScale: 1,
   cornerStyle: 'sharp',
   viewMode: 'both',
   transitionEffect: 'smooth',
@@ -54,14 +67,15 @@ const PARTICIPANT_WIDTH: Record<ProgramSceneParticipantSize, number> = {
 }
 
 /**
- * Builds two independent panes inside the program canvas. The participant is
- * 16:9; presentation content uses its real aspect ratio when known. The full
- * canvas remains uncovered around them so the backdrop stays visible.
+ * Builds two independent panes inside the program canvas. The participant
+ * starts at 16:9 and can grow vertically into a portrait crop while keeping
+ * its width. Presentation content uses its real aspect ratio when known. The
+ * full canvas remains uncovered around them so the backdrop stays visible.
  */
 export function getProgramSceneRects(
   width: number,
   height: number,
-  config: Pick<ProgramSceneLayoutConfig, 'placement' | 'participantSize' | 'viewMode' | 'contentAspectRatio'>
+  config: Pick<ProgramSceneLayoutConfig, 'placement' | 'participantSize' | 'participantScale' | 'viewMode' | 'contentAspectRatio'>
 ): ProgramSceneRects {
   const participantSize = config.participantSize in PARTICIPANT_WIDTH
     ? config.participantSize
@@ -78,12 +92,15 @@ export function getProgramSceneRects(
   const marginY = Math.round(safeHeight * 0.06)
   const gap = Math.round(safeWidth * 0.025)
   const availableWidth = safeWidth - marginX * 2 - gap
-  const participantWidth = participantSize === 'half'
+  const baseParticipantWidth = participantSize === 'half'
     ? Math.round(availableWidth / 2)
     : Math.round(safeWidth * PARTICIPANT_WIDTH[participantSize])
+  const participantScale = normalizeProgramSceneParticipantScale(config.participantScale)
+  const maxParticipantHeight = safeHeight - marginY * 2
+  const participantWidth = baseParticipantWidth
   const participantHeight = Math.min(
-    Math.round(participantWidth * 9 / 16),
-    safeHeight - marginY * 2
+    maxParticipantHeight,
+    Math.round(participantWidth * 9 / 16 * participantScale)
   )
   const contentAreaWidth = safeWidth - marginX * 2 - gap - participantWidth
   const contentAreaHeight = safeHeight - marginY * 2

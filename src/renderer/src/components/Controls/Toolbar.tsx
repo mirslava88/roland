@@ -1,6 +1,7 @@
 import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
+import { StreamControl } from './StreamControl'
 import { EventTimer } from '../EventTimer/EventTimer'
 import { MusicPlayer } from './MusicPlayer'
 import { VideoPlayer } from './VideoPlayer'
@@ -436,7 +437,7 @@ export function Toolbar(): JSX.Element {
   }
 
   return (
-    <div className="relative h-11 bg-surface-300 border-b border-gray-800 flex items-center px-3 gap-1.5 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+    <div className="pdm-toolbar relative h-11 bg-surface-300 border-b border-gray-800 flex items-center px-3 gap-1.5 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
       <div className="flex shrink-0 items-center gap-1">
         <button
           onClick={() => setSettingsOpen(true)}
@@ -470,6 +471,8 @@ export function Toolbar(): JSX.Element {
       <MusicPlayer />
 
       <VideoPlayer />
+
+      {__PDM_STREAM_ENABLED__ && <StreamControl />}
 
       <BroadcastTitles />
 

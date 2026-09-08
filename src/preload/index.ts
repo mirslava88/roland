@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { streamingApi } from './streaming-api'
 
 interface DriveInfo {
   name: string
@@ -22,6 +23,7 @@ interface MusicState {
 }
 
 const api = {
+  ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
 
   saveAppConfig: (content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }> =>

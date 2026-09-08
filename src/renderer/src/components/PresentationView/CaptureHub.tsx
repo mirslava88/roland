@@ -716,14 +716,14 @@ function CaptureSourceLayer({
         autoPlay
         playsInline
         muted={!audioActive || !hasAudio}
-        className="w-full h-full object-contain bg-black select-none"
+        className={`w-full h-full bg-black select-none ${displayMode === 'scene' && config.captureKind === 'device' ? 'object-cover' : 'object-contain'}`}
         style={displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined}
       />
       <img
         ref={holdImageRef}
         alt="Последний кадр источника"
         draggable={false}
-        className="absolute inset-0 w-full h-full object-contain bg-black opacity-0 select-none"
+        className={`absolute inset-0 w-full h-full bg-black opacity-0 select-none ${displayMode === 'scene' && config.captureKind === 'device' ? 'object-cover' : 'object-contain'}`}
         style={displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined}
       />
     </div>

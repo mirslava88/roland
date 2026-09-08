@@ -5,7 +5,16 @@ import {
   type QrModuleStyle,
   type QrOverlayConfig
 } from '../../../../shared/qr-overlay'
+import { getProgramSceneRects } from '../../../../shared/program-scene'
+import { mediaUrl } from '../../media'
 import { useAppStore } from '../../stores/useAppStore'
+import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
+import { SlideRenderer } from '../Preview/PreviewPanel'
+import {
+  contrastingQrDescriptionTextColor,
+  detectQrDescriptionBackgroundColor
+} from './auto-background-color'
+import { setQrLivePreviewActive } from './qr-live-preview-session'
 import { renderQrImage } from './qr-render'
 
 const MODULE_STYLES: Array<{ value: QrModuleStyle; label: string }> = [
@@ -20,10 +29,80 @@ const POSITIONS = [
   [16, 80], [50, 80], [84, 80]
 ] as const
 
+type QrColorField = 'color' | 'descriptionColor' | 'descriptionBackgroundColor'
+type EyeDropperConstructor = new () => {
+  open: () => Promise<{ sRGBHex: string }>
+}
+
+const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
+const EMPTY_THUMBNAILS: string[] = []
+
+function fittedRect(
+  containerWidth: number,
+  containerHeight: number,
+  aspectRatio: number | null
+): { x: number; y: number; width: number; height: number } {
+  if (!aspectRatio || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return { x: 0, y: 0, width: containerWidth, height: containerHeight }
+  }
+  const width = Math.min(containerWidth, containerHeight * aspectRatio)
+  const height = Math.min(containerHeight, width / aspectRatio)
+  return {
+    x: (containerWidth - width) / 2,
+    y: (containerHeight - height) / 2,
+    width,
+    height
+  }
+}
+
+function supportsProgramScene(file: ReturnType<typeof useAppStore.getState>['activeFile']): boolean {
+  return !!file && (
+    file.type === 'presentation' ||
+    file.type === 'pdf' ||
+    file.type === 'video' ||
+    (file.type === 'other' && (
+      file.isImage === true || OFFICE_PROGRAM_EXTENSIONS.has(file.extension.toLowerCase())
+    )) ||
+    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
+  )
+}
+
+function EyeDropperButton({
+  onClick,
+  disabled,
+  available
+}: {
+  onClick: () => void
+  disabled?: boolean
+  available: boolean
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || !available}
+      className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded border border-gray-600 text-[15px] leading-none text-gray-200 hover:border-blue-400 hover:bg-blue-600/30 disabled:cursor-not-allowed disabled:opacity-30"
+      title={available ? 'Взять цвет пипеткой из предпросмотра' : 'Пипетка недоступна в этой версии системы'}
+      aria-label="Взять цвет пипеткой из предпросмотра"
+    >
+      ⌾
+    </button>
+  )
+}
+
 export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Element {
   const stored = useAppStore((state) => state.qrOverlay)
   const setQrOverlay = useAppStore((state) => state.setQrOverlay)
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
+  const activeFile = useAppStore((state) => state.activeFile)
+  const currentSlide = useAppStore((state) => state.currentSlide)
+  const pptxThumbnailsMap = useAppStore((state) => state.pptxThumbnailsMap)
+  const pptxAspectRatios = useAppStore((state) => state.pptxAspectRatios)
+  const docPreviewsMap = useAppStore((state) => state.docPreviewsMap)
+  const displays = useAppStore((state) => state.displays)
+  const programScene = useAppStore((state) => state.programScene)
+  const captureSources = useAppStore((state) => state.captureSources)
+  const backdropImage = useAppStore((state) => state.backdropImage)
   const outputAvailable = useAppStore((state) => (
     (state.activeFile !== null || state.isPresentationWindowOpen) &&
     state.displays.some((display) => !display.isPrimary && display.id === state.selectedDisplayId)
@@ -32,14 +111,123 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
   const [preview, setPreview] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState('')
   const [livePreview, setLivePreview] = useState(false)
+  const [detectedBackgroundColor, setDetectedBackgroundColor] = useState<string | null>(null)
   const initialConfigRef = useRef<QrOverlayConfig>({ ...stored })
   const livePreviewRef = useRef(false)
   const savedRef = useRef(false)
   const valid = hasQrData(draft)
+  const eyeDropperConstructor = (window as typeof window & {
+    EyeDropper?: EyeDropperConstructor
+  }).EyeDropper
+  const eyeDropperAvailable = typeof eyeDropperConstructor === 'function'
+  const activePptxThumbnails = activeFile?.type === 'presentation'
+    ? pptxThumbnailsMap[activeFile.path] || EMPTY_THUMBNAILS
+    : EMPTY_THUMBNAILS
+  const activeDocPreviewPath = activeFile?.type === 'other'
+    ? docPreviewsMap[activeFile.path] ?? null
+    : null
+  const outputDisplay = displays.find(
+    (display) => !display.isPrimary && display.id === selectedDisplayId
+  ) ?? displays.find((display) => !display.isPrimary)
+  const outputWidth = Math.max(1, outputDisplay?.bounds.width ?? 1920)
+  const outputHeight = Math.max(1, outputDisplay?.bounds.height ?? 1080)
+  const outputAspectRatio = outputWidth / outputHeight
+  const selectedSceneCapture = captureSources.find(
+    (entry) => entry.capture?.sourceId === programScene.captureSourceId
+  )?.capture ?? null
+  const activeSourceIsParticipant = activeFile?.type === 'capture' &&
+    activeFile.capture?.sourceId === selectedSceneCapture?.sourceId
+  const sceneActive = programScene.enabled && !!selectedSceneCapture && !!backdropImage &&
+    supportsProgramScene(activeFile) && !activeSourceIsParticipant
+  const sceneContentAspectRatio = activeFile?.type === 'presentation'
+    ? pptxAspectRatios[activeFile.path] ?? null
+    : null
+  const sceneRects = useMemo(() => getProgramSceneRects(outputWidth, outputHeight, {
+    placement: programScene.placement,
+    participantSize: programScene.participantSize,
+    participantScale: programScene.participantScale,
+    viewMode: programScene.viewMode,
+    contentAspectRatio: sceneContentAspectRatio
+  }), [
+    outputWidth,
+    outputHeight,
+    programScene.placement,
+    programScene.participantSize,
+    programScene.participantScale,
+    programScene.viewMode,
+    sceneContentAspectRatio
+  ])
+  const standalonePptxRect = useMemo(
+    () => fittedRect(outputWidth, outputHeight, sceneContentAspectRatio),
+    [outputWidth, outputHeight, sceneContentAspectRatio]
+  )
 
   const update = (patch: Partial<QrOverlayConfig>): void => {
     setDraft((current) => normalizeQrOverlay({ ...current, ...patch }))
   }
+
+  const pickColor = async (field: QrColorField): Promise<void> => {
+    if (!eyeDropperConstructor) return
+    try {
+      const result = await new eyeDropperConstructor().open()
+      update({ [field]: result.sRGBHex })
+    } catch (error) {
+      if (!(error instanceof DOMException) || error.name !== 'AbortError') {
+        window.api.dbgLog(`QR color picker failed: ${String(error)}`)
+      }
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    if (!draft.descriptionBackgroundAuto || !draft.description.trim()) {
+      setDetectedBackgroundColor(null)
+      return
+    }
+    void detectQrDescriptionBackgroundColor({
+      file: activeFile,
+      currentSlide,
+      pptxThumbnails: activePptxThumbnails,
+      docPreviewPath: activeDocPreviewPath,
+      layout: {
+        outputWidth,
+        outputHeight,
+        contentRect: sceneActive ? sceneRects.content : undefined,
+        contentAspectRatio: sceneContentAspectRatio,
+        config: draft
+      }
+    }).then((color) => {
+      if (!cancelled) setDetectedBackgroundColor(color)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    draft.descriptionBackgroundAuto,
+    draft.description,
+    activeFile,
+    currentSlide,
+    activePptxThumbnails,
+    activeDocPreviewPath,
+    outputWidth,
+    outputHeight,
+    sceneActive,
+    sceneRects.content,
+    sceneContentAspectRatio,
+    draft.descriptionFontScale,
+    draft.descriptionWidthPercent,
+    draft.sizePercent,
+    draft.xPercent,
+    draft.yPercent
+  ])
+
+  const effectiveDescriptionBackgroundColor = draft.descriptionBackgroundAuto
+    ? detectedBackgroundColor ?? draft.descriptionBackgroundColor
+    : draft.descriptionBackgroundColor
+  const effectiveDescriptionColor = draft.descriptionBackgroundAuto &&
+    draft.descriptionTextAutoContrast && detectedBackgroundColor
+    ? contrastingQrDescriptionTextColor(effectiveDescriptionBackgroundColor)
+    : draft.descriptionColor
 
   useEffect(() => {
     let cancelled = false
@@ -77,7 +265,11 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
     valid
   ])
 
-  const sendLiveImage = (config: QrOverlayConfig, imageDataUrl: string): void => {
+  const sendLiveImage = (
+    config: QrOverlayConfig,
+    imageDataUrl: string,
+    resolvedColors?: { background: string; text: string }
+  ): void => {
     const state = useAppStore.getState()
     const targetExists = state.displays.some(
       (display) => !display.isPrimary && display.id === state.selectedDisplayId
@@ -93,7 +285,13 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
       sizePercent: config.sizePercent,
       xPercent: config.xPercent,
       yPercent: config.yPercent,
-      cornerStyle: config.cornerStyle
+      cornerStyle: config.cornerStyle,
+      description: config.description,
+      descriptionColor: resolvedColors?.text ?? config.descriptionColor,
+      descriptionBackgroundColor: resolvedColors?.background ?? config.descriptionBackgroundColor,
+      descriptionBackgroundTransparent: config.descriptionBackgroundTransparent,
+      descriptionFontScale: config.descriptionFontScale,
+      descriptionWidthPercent: config.descriptionWidthPercent
     })
   }
 
@@ -104,8 +302,61 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
       return
     }
     try {
-      const imageDataUrl = await renderQrImage(config)
-      sendLiveImage(config, imageDataUrl)
+      const state = useAppStore.getState()
+      const pptxThumbnails = state.activeFile?.type === 'presentation'
+        ? state.pptxThumbnailsMap[state.activeFile.path] || EMPTY_THUMBNAILS
+        : EMPTY_THUMBNAILS
+      const docPreviewPath = state.activeFile?.type === 'other'
+        ? state.docPreviewsMap[state.activeFile.path] ?? null
+        : null
+      const outputDisplay = state.displays.find(
+        (display) => !display.isPrimary && display.id === state.selectedDisplayId
+      ) ?? state.displays.find((display) => !display.isPrimary)
+      const restoreOutputWidth = Math.max(1, outputDisplay?.bounds.width ?? 1920)
+      const restoreOutputHeight = Math.max(1, outputDisplay?.bounds.height ?? 1080)
+      const selectedCapture = state.captureSources.find(
+        (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
+      )?.capture ?? null
+      const activeIsParticipant = state.activeFile?.type === 'capture' &&
+        state.activeFile.capture?.sourceId === selectedCapture?.sourceId
+      const restoreSceneActive = state.programScene.enabled && !!selectedCapture && !!state.backdropImage &&
+        supportsProgramScene(state.activeFile) && !activeIsParticipant
+      const restoreSceneRects = getProgramSceneRects(restoreOutputWidth, restoreOutputHeight, {
+        placement: state.programScene.placement,
+        participantSize: state.programScene.participantSize,
+        participantScale: state.programScene.participantScale,
+        viewMode: state.programScene.viewMode,
+        contentAspectRatio: state.activeFile?.type === 'presentation'
+          ? state.pptxAspectRatios[state.activeFile.path] ?? null
+          : null
+      })
+      const [imageDataUrl, automaticColor] = await Promise.all([
+        renderQrImage(config),
+        config.descriptionBackgroundAuto
+          ? detectQrDescriptionBackgroundColor({
+              file: state.activeFile,
+              currentSlide: state.currentSlide,
+              pptxThumbnails,
+              docPreviewPath,
+              layout: {
+                outputWidth: restoreOutputWidth,
+                outputHeight: restoreOutputHeight,
+                contentRect: restoreSceneActive ? restoreSceneRects.content : undefined,
+                contentAspectRatio: state.activeFile?.type === 'presentation'
+                  ? state.pptxAspectRatios[state.activeFile.path] ?? null
+                  : null,
+                config
+              }
+            })
+          : Promise.resolve(null)
+      ])
+      const background = automaticColor ?? config.descriptionBackgroundColor
+      sendLiveImage(config, imageDataUrl, {
+        background,
+        text: config.descriptionBackgroundAuto && config.descriptionTextAutoContrast && automaticColor
+          ? contrastingQrDescriptionTextColor(background)
+          : config.descriptionColor
+      })
     } catch (error) {
       window.api.dbgLog(`QR live preview restore failed: ${String(error)}`)
       window.api.updateQrOverlay({ visible: false })
@@ -114,12 +365,16 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
 
   useEffect(() => {
     livePreviewRef.current = livePreview
+    setQrLivePreviewActive(livePreview)
     if (!livePreview) return
     if (!draft.enabled || !valid || !preview || !outputAvailable) {
       window.api.updateQrOverlay({ visible: false })
       return
     }
-    sendLiveImage(draft, preview)
+    sendLiveImage(draft, preview, {
+      background: effectiveDescriptionBackgroundColor,
+      text: effectiveDescriptionColor
+    })
   }, [
     livePreview,
     draft.enabled,
@@ -130,24 +385,51 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
     draft.sizePercent,
     draft.xPercent,
     draft.yPercent,
-    draft.cornerStyle
+    draft.cornerStyle,
+    draft.description,
+    draft.descriptionColor,
+    draft.descriptionBackgroundColor,
+    draft.descriptionBackgroundAuto,
+    draft.descriptionTextAutoContrast,
+    draft.descriptionBackgroundTransparent,
+    draft.descriptionFontScale,
+    draft.descriptionWidthPercent,
+    effectiveDescriptionBackgroundColor,
+    effectiveDescriptionColor
   ])
 
   useEffect(() => () => {
+    setQrLivePreviewActive(false)
     if (livePreviewRef.current && !savedRef.current) void restoreSavedOutput()
   }, [])
 
   const activePosition = useMemo(() => POSITIONS.findIndex(([x, y]) => (
     Math.abs(x - draft.xPercent) < 2 && Math.abs(y - draft.yPercent) < 2
   )), [draft.xPercent, draft.yPercent])
+  const visibleDescription = draft.description.trim()
+  // The live overlay sizes the QR square from the output height. Convert that
+  // size to a width percentage using the selected display's real aspect ratio.
+  const previewQrWidthPercent = draft.sizePercent / outputAspectRatio
+  const descriptionWidthRatio = draft.descriptionWidthPercent / 100
+  const previewGapWidthPercent = visibleDescription ? previewQrWidthPercent * 0.045 : 0
+  const previewRightInsetPercent = 16 / outputWidth * 100
+  const previewDescriptionWidthPercent = visibleDescription
+    ? Math.max(0, Math.min(
+        previewQrWidthPercent * descriptionWidthRatio,
+        100 - previewQrWidthPercent - previewGapWidthPercent - previewRightInsetPercent
+      ))
+    : 0
+  const previewBlockWidthPercent = previewQrWidthPercent + previewGapWidthPercent + previewDescriptionWidthPercent
+  const previewQrSharePercent = previewQrWidthPercent / previewBlockWidthPercent * 100
+  const previewGapSharePercent = previewGapWidthPercent / previewBlockWidthPercent * 100
   const previewPosition = useMemo(() => {
-    const halfX = draft.sizePercent * 9 / 32
+    const halfX = previewBlockWidthPercent / 2
     const halfY = draft.sizePercent / 2
     return {
       x: Math.max(halfX + 1, Math.min(99 - halfX, draft.xPercent)),
       y: halfY >= 50 ? 50 : Math.max(halfY + 1, Math.min(99 - halfY, draft.yPercent))
     }
-  }, [draft.sizePercent, draft.xPercent, draft.yPercent])
+  }, [draft.sizePercent, draft.xPercent, draft.yPercent, previewBlockWidthPercent])
 
   const movePreviewQr = (event: React.PointerEvent<HTMLDivElement>): void => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -169,9 +451,47 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
 
   const save = (): void => {
     savedRef.current = true
+    setQrLivePreviewActive(false)
     setQrOverlay(draft)
     onClose()
   }
+
+  const renderActiveContent = (): JSX.Element => {
+    const thumbnail = activeFile?.type === 'presentation'
+      ? activePptxThumbnails[Math.max(0, currentSlide - 1)]
+      : null
+    if (thumbnail) {
+      // PowerPoint's exported thumbnail can carry its own padding/aspect. The
+      // actual slide-show follows the presentation geometry, so fill that exact
+      // rectangle here as well to keep the QR preview spatially identical.
+      return (
+        <img
+          src={mediaUrl(thumbnail)}
+          alt=""
+          draggable={false}
+          className="h-full w-full select-none object-fill"
+        />
+      )
+    }
+    return (
+      <SlideRenderer
+        file={activeFile!}
+        slideNum={currentSlide}
+        pptxThumbnails={activePptxThumbnails}
+        onTotalSlides={() => undefined}
+      />
+    )
+  }
+
+  const previewRectStyle = (rect: typeof sceneRects.content): React.CSSProperties => ({
+    left: `${rect.x / outputWidth * 100}%`,
+    top: `${rect.y / outputHeight * 100}%`,
+    width: `${rect.width / outputWidth * 100}%`,
+    height: `${rect.height / outputHeight * 100}%`
+  })
+  const sceneRadius = programScene.viewMode === 'both' && programScene.cornerStyle === 'rounded'
+    ? '0.45rem'
+    : 0
 
   return (
     <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/70 p-3" onMouseDown={onClose}>
@@ -225,6 +545,126 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
               </div>
             )}
 
+            <label className="block text-xs text-gray-300">Описание рядом с QR-кодом
+              <input
+                value={draft.description}
+                maxLength={160}
+                onChange={(event) => update({ description: event.target.value })}
+                placeholder="Например: Задать вопрос спикеру"
+                className="mt-1 w-full rounded-md border border-gray-700 bg-surface-100 px-2.5 py-1.5 text-sm text-white outline-none focus:border-blue-500"
+              />
+            </label>
+
+            <div className={`space-y-2 ${visibleDescription ? '' : 'opacity-45'}`}>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block text-[11px] text-gray-300">Цвет текста
+                  <div className="mt-1 flex items-center gap-2 rounded-md border border-gray-700 bg-surface-100 px-2 py-1">
+                    <input
+                      type="color"
+                      value={effectiveDescriptionColor}
+                      disabled={!visibleDescription || (
+                        draft.descriptionBackgroundAuto && draft.descriptionTextAutoContrast
+                      )}
+                      onChange={(event) => update({ descriptionColor: event.target.value })}
+                      className="h-5 w-7 cursor-pointer bg-transparent disabled:cursor-not-allowed"
+                    />
+                    <span className="font-mono text-[10px] uppercase">{effectiveDescriptionColor}</span>
+                    <EyeDropperButton
+                      available={eyeDropperAvailable}
+                      disabled={!visibleDescription || (
+                        draft.descriptionBackgroundAuto && draft.descriptionTextAutoContrast
+                      )}
+                      onClick={() => { void pickColor('descriptionColor') }}
+                    />
+                  </div>
+                </label>
+                <label className={`block text-[11px] text-gray-300 ${draft.descriptionBackgroundTransparent || draft.descriptionBackgroundAuto ? 'opacity-45' : ''}`}>Цвет подложки
+                  <div className="mt-1 flex items-center gap-2 rounded-md border border-gray-700 bg-surface-100 px-2 py-1">
+                    <input
+                      type="color"
+                      value={effectiveDescriptionBackgroundColor}
+                      disabled={!visibleDescription || draft.descriptionBackgroundTransparent || draft.descriptionBackgroundAuto}
+                      onChange={(event) => update({ descriptionBackgroundColor: event.target.value })}
+                      className="h-5 w-7 cursor-pointer bg-transparent disabled:cursor-not-allowed"
+                    />
+                    <span className="font-mono text-[10px] uppercase">{effectiveDescriptionBackgroundColor}</span>
+                    <EyeDropperButton
+                      available={eyeDropperAvailable}
+                      disabled={!visibleDescription || draft.descriptionBackgroundTransparent || draft.descriptionBackgroundAuto}
+                      onClick={() => { void pickColor('descriptionBackgroundColor') }}
+                    />
+                  </div>
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <label className="flex items-center gap-2 text-[11px] text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={draft.descriptionBackgroundAuto}
+                    disabled={!visibleDescription}
+                    onChange={(event) => update({
+                      descriptionBackgroundAuto: event.target.checked,
+                      descriptionBackgroundTransparent: event.target.checked
+                        ? false
+                        : draft.descriptionBackgroundTransparent
+                    })}
+                  />
+                  Автоцвет со слайда
+                </label>
+                <label className={`flex items-center gap-2 text-[11px] text-gray-300 ${draft.descriptionBackgroundAuto ? '' : 'opacity-45'}`}>
+                  <input
+                    type="checkbox"
+                    checked={draft.descriptionTextAutoContrast}
+                    disabled={!visibleDescription || !draft.descriptionBackgroundAuto}
+                    onChange={(event) => update({
+                      descriptionTextAutoContrast: event.target.checked
+                    })}
+                  />
+                  Автоконтраст текста
+                </label>
+                <label className="flex items-center gap-2 text-[11px] text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={draft.descriptionBackgroundTransparent}
+                    disabled={!visibleDescription}
+                    onChange={(event) => update({
+                      descriptionBackgroundTransparent: event.target.checked,
+                      descriptionBackgroundAuto: event.target.checked
+                        ? false
+                        : draft.descriptionBackgroundAuto
+                    })}
+                  />
+                  Прозрачная подложка
+                </label>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block text-[11px] text-gray-300">Размер шрифта: {Math.round(draft.descriptionFontScale * 100)}%
+                  <input
+                    type="range"
+                    min="50"
+                    max="200"
+                    step="5"
+                    value={Math.round(draft.descriptionFontScale * 100)}
+                    disabled={!visibleDescription}
+                    onChange={(event) => update({ descriptionFontScale: Number(event.target.value) / 100 })}
+                    className="block h-2 w-full accent-blue-500 disabled:cursor-not-allowed"
+                  />
+                </label>
+                <label className="block text-[11px] text-gray-300">Ширина описания: {Math.round(draft.descriptionWidthPercent)}%
+                  <input
+                    type="range"
+                    min="40"
+                    max="160"
+                    step="5"
+                    value={Math.round(draft.descriptionWidthPercent)}
+                    disabled={!visibleDescription}
+                    onChange={(event) => update({ descriptionWidthPercent: Number(event.target.value) })}
+                    className="block h-2 w-full accent-blue-500 disabled:cursor-not-allowed"
+                  />
+                </label>
+              </div>
+            </div>
+
             {draft.contentType !== 'file' && <div>
               <div className="mb-1 text-xs text-gray-300">Рисунок QR-кода</div>
               <div className="grid grid-cols-3 gap-1">
@@ -244,6 +684,10 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
                 <div className="mt-1 flex items-center gap-2 rounded-md border border-gray-700 bg-surface-100 px-2 py-1">
                   <input type="color" value={draft.color} onChange={(event) => update({ color: event.target.value })} className="h-6 w-8 cursor-pointer bg-transparent" />
                   <span className="font-mono text-[11px] uppercase">{draft.color}</span>
+                  <EyeDropperButton
+                    available={eyeDropperAvailable}
+                    onClick={() => { void pickColor('color') }}
+                  />
                 </div>
               </label>}
             </div>
@@ -279,6 +723,8 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
                   disabled={!draft.enabled || !outputAvailable}
                   onChange={(event) => {
                     const checked = event.target.checked
+                    livePreviewRef.current = checked
+                    setQrLivePreviewActive(checked)
                     setLivePreview(checked)
                     if (!checked) void restoreSavedOutput()
                   }}
@@ -287,7 +733,11 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
               </label>
             </div>
             <div
-              className="relative aspect-video touch-none overflow-hidden rounded-lg border border-gray-700 bg-[radial-gradient(circle_at_center,#374151_0,#111827_70%)]"
+              className="relative touch-none overflow-hidden rounded-lg border border-gray-700 bg-gray-950"
+              style={{
+                aspectRatio: `${outputWidth} / ${outputHeight}`,
+                containerType: 'size'
+              }}
               onPointerDown={(event) => {
                 event.currentTarget.setPointerCapture(event.pointerId)
                 movePreviewQr(event)
@@ -301,9 +751,108 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
                 update({ sizePercent: draft.sizePercent + direction * 2 })
               }}
             >
-              {preview ? <img src={preview} draggable={false} className="pointer-events-none absolute" style={{ width: `${draft.sizePercent * 9 / 16}%`, left: `${previewPosition.x}%`, top: `${previewPosition.y}%`, transform: 'translate(-50%, -50%)', borderRadius: draft.cornerStyle === 'rounded' ? '10%' : 0 }} /> : <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-3 text-center text-[11px] text-gray-400">{previewError || 'Подготовка…'}</div>}
+              {sceneActive && selectedSceneCapture && backdropImage ? (
+                <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                  <img
+                    src={mediaUrl(backdropImage)}
+                    alt=""
+                    draggable={false}
+                    className="absolute inset-0 h-full w-full select-none object-cover"
+                  />
+                  <div
+                    className="absolute z-[1] overflow-hidden bg-transparent"
+                    style={{
+                      ...previewRectStyle(sceneRects.content),
+                      borderRadius: sceneRadius
+                    }}
+                  >
+                    {renderActiveContent()}
+                  </div>
+                  {programScene.viewMode !== 'content' && (
+                    <div
+                      className="absolute z-[2] overflow-hidden bg-black"
+                      style={{
+                        ...previewRectStyle(sceneRects.participant),
+                        borderRadius: sceneRadius
+                      }}
+                    >
+                      <CaptureThumbnail
+                        config={selectedSceneCapture}
+                        className="h-full w-full"
+                        fit={selectedSceneCapture.captureKind === 'device' ? 'cover' : 'contain'}
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : activeFile ? (
+                <div
+                  className="pointer-events-none absolute flex items-center justify-center overflow-hidden"
+                  style={activeFile.type === 'presentation'
+                    ? previewRectStyle(standalonePptxRect)
+                    : { inset: 0 }}
+                >
+                  {renderActiveContent()}
+                </div>
+              ) : (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[radial-gradient(circle_at_center,#374151_0,#111827_70%)] px-3 text-center text-[10px] text-gray-400">
+                  Сначала выведите материал в эфир
+                </div>
+              )}
+              {preview ? (
+                <div
+                  className="pointer-events-none absolute z-10 flex items-center"
+                  style={{
+                    width: `${previewBlockWidthPercent}%`,
+                    height: `${draft.sizePercent}%`,
+                    left: `${previewPosition.x}%`,
+                    top: `${previewPosition.y}%`,
+                    transform: 'translate(-50%, -50%)',
+                    gap: visibleDescription ? `${previewGapSharePercent}%` : 0
+                  }}
+                >
+                  <img
+                    src={preview}
+                    draggable={false}
+                    className="h-full shrink-0 select-none"
+                    style={{
+                      width: visibleDescription ? `${previewQrSharePercent}%` : '100%',
+                      borderRadius: draft.cornerStyle === 'rounded' ? '10%' : 0
+                    }}
+                  />
+                  {visibleDescription && (
+                    <div
+                      className="flex max-h-full flex-1 items-center overflow-hidden text-left shadow-lg"
+                      style={{
+                        color: effectiveDescriptionColor,
+                        backgroundColor: draft.descriptionBackgroundTransparent
+                          ? 'transparent'
+                          : effectiveDescriptionBackgroundColor,
+                        textShadow: draft.descriptionBackgroundTransparent
+                          ? '0 1px 3px rgba(0,0,0,.95), 0 0 8px rgba(0,0,0,.72)'
+                          : 'none',
+                        padding: `${Math.max(
+                          6 / outputHeight * 100,
+                          draft.sizePercent * 0.055
+                        )}cqh`,
+                        fontFamily: 'Arial, sans-serif',
+                        fontWeight: 700,
+                        lineHeight: 1.15,
+                        overflowWrap: 'anywhere',
+                        whiteSpace: 'pre-wrap',
+                        fontSize: `${Math.max(
+                          10 / outputHeight * 100,
+                          draft.sizePercent * 0.075 * draft.descriptionFontScale
+                        )}cqh`,
+                        borderRadius: draft.cornerStyle === 'rounded' ? '0.45rem' : 0
+                      }}
+                    >
+                      {visibleDescription}
+                    </div>
+                  )}
+                </div>
+              ) : <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-3 text-center text-[11px] text-gray-400">{previewError || 'Подготовка…'}</div>}
             </div>
-            <p className="mt-2 text-[10px] leading-4 text-gray-400">Перетащите QR для точного положения, вращайте колесо мыши для изменения размера. Белое поле вокруг кода нужно для надёжного считывания.</p>
+            <p className="mt-2 text-[10px] leading-4 text-gray-400">Перетащите весь блок для точного положения, вращайте колесо мыши для изменения размера. Белое поле вокруг кода нужно для надёжного считывания.</p>
           </div>
         </div>
 
@@ -314,6 +863,7 @@ export function QrOverlayModal({ onClose }: { onClose: () => void }): JSX.Elemen
             if (!checked && livePreview) {
               setLivePreview(false)
               livePreviewRef.current = false
+              setQrLivePreviewActive(false)
               void restoreSavedOutput()
             }
           }} /> Показывать в эфире</label>

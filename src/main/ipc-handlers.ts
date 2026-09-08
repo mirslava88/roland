@@ -739,7 +739,7 @@ export function registerIpcHandlers(
 ): void {
   ipcMain.handle('get-app-version', (event): string => {
     if (event.sender.id !== controlWindow.webContents.id) return ''
-    return app.getVersion()
+    return __PDM_DISPLAY_VERSION__
   })
 
   ipcMain.handle('save-app-config', async (event, content: string) => {

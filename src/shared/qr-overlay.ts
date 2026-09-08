@@ -16,6 +16,14 @@ export interface QrOverlayConfig {
   cornerStyle: QrCornerStyle
   color: string
   logoPath: string | null
+  description: string
+  descriptionColor: string
+  descriptionBackgroundColor: string
+  descriptionBackgroundAuto: boolean
+  descriptionTextAutoContrast: boolean
+  descriptionBackgroundTransparent: boolean
+  descriptionFontScale: number
+  descriptionWidthPercent: number
   sizePercent: number
   xPercent: number
   yPercent: number
@@ -40,6 +48,14 @@ export const DEFAULT_QR_OVERLAY: QrOverlayConfig = {
   cornerStyle: 'sharp',
   color: '#000000',
   logoPath: null,
+  description: '',
+  descriptionColor: '#ffffff',
+  descriptionBackgroundColor: '#030712',
+  descriptionBackgroundAuto: false,
+  descriptionTextAutoContrast: true,
+  descriptionBackgroundTransparent: false,
+  descriptionFontScale: 1,
+  descriptionWidthPercent: 65,
   sizePercent: 24,
   xPercent: 84,
   yPercent: 80
@@ -70,6 +86,12 @@ export function normalizeQrOverlay(value: unknown): QrOverlayConfig {
   const color = typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color)
     ? raw.color
     : DEFAULT_QR_OVERLAY.color
+  const descriptionColor = typeof raw.descriptionColor === 'string' && /^#[0-9a-f]{6}$/i.test(raw.descriptionColor)
+    ? raw.descriptionColor
+    : DEFAULT_QR_OVERLAY.descriptionColor
+  const descriptionBackgroundColor = typeof raw.descriptionBackgroundColor === 'string' && /^#[0-9a-f]{6}$/i.test(raw.descriptionBackgroundColor)
+    ? raw.descriptionBackgroundColor
+    : DEFAULT_QR_OVERLAY.descriptionBackgroundColor
   const number = (entry: unknown, fallback: number, min: number, max: number): number => (
     typeof entry === 'number' && Number.isFinite(entry)
       ? Math.max(min, Math.min(max, entry))
@@ -94,6 +116,29 @@ export function normalizeQrOverlay(value: unknown): QrOverlayConfig {
     logoPath: typeof raw.logoPath === 'string' && raw.logoPath.length > 0 && raw.logoPath.length < 32768
       ? raw.logoPath
       : null,
+    description: typeof raw.description === 'string'
+      ? raw.description.slice(0, 160)
+      : DEFAULT_QR_OVERLAY.description,
+    descriptionColor,
+    descriptionBackgroundColor,
+    descriptionBackgroundAuto: raw.descriptionBackgroundAuto === true,
+    // Keep the established automatic contrast for configurations saved before
+    // this preference existed. It can now be disabled independently in the UI.
+    descriptionTextAutoContrast: raw.descriptionTextAutoContrast !== false,
+    descriptionBackgroundTransparent: raw.descriptionBackgroundAuto !== true &&
+      raw.descriptionBackgroundTransparent === true,
+    descriptionFontScale: number(
+      raw.descriptionFontScale,
+      DEFAULT_QR_OVERLAY.descriptionFontScale,
+      0.5,
+      2
+    ),
+    descriptionWidthPercent: number(
+      raw.descriptionWidthPercent,
+      DEFAULT_QR_OVERLAY.descriptionWidthPercent,
+      40,
+      160
+    ),
     sizePercent: number(raw.sizePercent, DEFAULT_QR_OVERLAY.sizePercent, 10, 100),
     xPercent: number(raw.xPercent, DEFAULT_QR_OVERLAY.xPercent, 0, 100),
     yPercent: number(raw.yPercent, DEFAULT_QR_OVERLAY.yPercent, 0, 100)

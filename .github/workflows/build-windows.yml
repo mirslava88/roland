@@ -1,25 +1,29 @@
 name: Build Windows Installer
 
-# Trigger:
-#   - manually from the Actions tab ("Run workflow")
-#   - automatically on a version tag push (v*) -> also publishes a GitHub Release
 on:
   workflow_dispatch:
+    inputs:
+      edition:
+        description: PDM edition
+        required: true
+        default: stream
+        type: choice
+        options:
+          - stream
+          - standard
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: write   # required to create a Release on tag builds
+  contents: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
     env:
-      # Build UNSIGNED in CI (no signing cert in the repo). This disables
-      # electron-builder's signing auto-discovery so signtool is never invoked
-      # (otherwise it tries to sign elevate/uninstaller/Setup and fails).
       CSC_IDENTITY_AUTO_DISCOVERY: false
+      REQUESTED_EDITION: ${{ inputs.edition }}
 
     steps:
       - name: Checkout
@@ -28,8 +32,23 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 24      # Matches Electron 44's embedded Node major and pdfjs-dist requirements
+          node-version: 24
           cache: npm
+
+      - name: Select and validate edition
+        shell: pwsh
+        run: |
+          $edition = if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME.EndsWith('-stream')) { 'stream' } else { 'standard' }
+          } elseif ($env:REQUESTED_EDITION) { $env:REQUESTED_EDITION } else { 'stream' }
+          if ($edition -notin @('standard', 'stream')) { throw 'Invalid edition' }
+          $env:PDM_EDITION = $edition
+          "PDM_EDITION=$edition" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $version = node -e "console.log(require('./build/editions.cjs').editionInfo().version)"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve edition version' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag does not match edition version v$version"
+          }
 
       - name: Install dependencies
         run: npm ci
@@ -38,69 +57,52 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "node_modules/electron/dist/electron.exe")) {
-            Write-Host "Electron binary missing after npm ci - rebuilding the package"
             npm rebuild electron
+            if ($LASTEXITCODE -ne 0) { throw 'Electron download failed' }
           }
 
-      - name: Build (electron-vite)
-        run: npx electron-vite build
+      - name: Local streaming regression tests
+        if: env.PDM_EDITION == 'stream'
+        run: npm run test:streaming
 
-      - name: Pack app directory (no installer yet)
-        run: npx electron-builder --win --dir --publish never
-
-      - name: Verify hardened Electron fuses
+      - name: Build installer and verify edition, resources and fuses
         shell: pwsh
-        run: |
-          $fuses = npx --no-install @electron/fuses read --app "dist/win-unpacked/Presentation Display Manager.exe" | Out-String
-          Write-Host $fuses
-          $expected = @{
-            RunAsNode = 'Disabled'
-            EnableCookieEncryption = 'Enabled'
-            EnableNodeOptionsEnvironmentVariable = 'Disabled'
-            EnableNodeCliInspectArguments = 'Disabled'
-            EnableEmbeddedAsarIntegrityValidation = 'Enabled'
-            OnlyLoadAppFromAsar = 'Enabled'
-            LoadBrowserProcessSpecificV8Snapshot = 'Disabled'
-            GrantFileProtocolExtraPrivileges = 'Enabled'
-            WasmTrapHandlers = 'Enabled'
-          }
-          foreach ($entry in $expected.GetEnumerator()) {
-            $needle = "$($entry.Key) is $($entry.Value)"
-            if ($fuses -notmatch [regex]::Escape($needle)) {
-              throw "Unexpected Electron fuse state: $needle"
-            }
-          }
-
-      - name: Build NSIS installer from prepackaged app
-        run: npx electron-builder --win --prepackaged "dist/win-unpacked" --publish never
+        run: node scripts/build-edition.mjs $env:PDM_EDITION package win
 
       - name: Upload installer as workflow artifact
+        if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: windows-installer
+          name: windows-installer-${{ env.PDM_EDITION }}
           path: |
-            dist/*.exe
-            dist/*.exe.blockmap
+            dist/${{ env.PDM_EDITION }}/*.exe
+            dist/${{ env.PDM_EDITION }}/*.exe.blockmap
           if-no-files-found: error
 
-      - name: Publish or update GitHub Release (tag builds only)
+      - name: Verify packaged startup and Settings version on isolated runner
+        shell: pwsh
+        run: node scripts/test-packaged-startup.mjs $env:PDM_EDITION
+
+      - name: Publish GitHub Release (new tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          $title = "Presentation Display Manager $tag"
-          $notes = 'Windows x64 installer built by GitHub Actions. The installer is unsigned, so Windows SmartScreen may show "Unknown Publisher".'
-          $installer = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
-          $assetPath = Join-Path $installer.DirectoryName ($installer.Name.Replace(' ', '.'))
-          Copy-Item $installer.FullName $assetPath -Force
-
           gh release view $tag *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
-          if ($releaseExists) {
-            gh release edit $tag --title $title
-            gh release upload $tag $assetPath --clobber
-          } else {
-            gh release create $tag $assetPath --title $title --notes $notes
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'Release already exists; preserving its notes and assets.'
+            exit 0
           }
+          $installers = @(Get-ChildItem -LiteralPath "dist/$env:PDM_EDITION" -Filter *.exe)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
+          $displayVersion = $tag.Substring(1).Replace('-stream', ' stream')
+          $args = @('release', 'create', $tag, $installers[0].FullName,
+            '--verify-tag', '--title', "PDM $displayVersion")
+          $notes = "docs/releases/$($tag.Substring(1)).md"
+          if (Test-Path -LiteralPath $notes) { $args += @('--notes-file', $notes) }
+          else { $args += @('--notes', "PDM $displayVersion. Windows x64. Unsigned installer; SmartScreen may warn about an unknown publisher.") }
+          if ($env:PDM_EDITION -eq 'stream') { $args += '--latest=false' }
+          & gh @args
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed' }
