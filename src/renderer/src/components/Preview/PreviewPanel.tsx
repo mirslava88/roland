@@ -26,6 +26,8 @@ import {
 } from '../../pdf-live-cache'
 import { acquireOutputTransition } from '../../output-transition-lock'
 import { DEFAULT_CONTENT_ZOOM } from '../../../../shared/content-zoom'
+import { hasQrData } from '../../../../shared/qr-overlay'
+import { resolveProgramSceneBackground } from '../../program-scene-background'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -1214,11 +1216,14 @@ export function PreviewPanel(): JSX.Element {
         channel.file.type === 'capture'
       )
     const useSeamlessLayerSwitch = useLiveLayerSwitch || useBufferedElectronSwitch
+    const readySceneBackground = resolveProgramSceneBackground(freshState)
+    const readySceneCapture = freshState.captureSources.find(
+      (entry) => entry.capture?.sourceId === freshState.programScene.captureSourceId
+    )?.capture ?? null
     const hasReadyProgramScene = freshState.programScene.enabled &&
-      !!freshState.backdropImage &&
-      freshState.captureSources.some(
-        (entry) => entry.capture?.sourceId === freshState.programScene.captureSourceId
-      )
+      !!readySceneBackground && !!readySceneCapture &&
+      !(readySceneBackground.type === 'capture' &&
+        readySceneBackground.capture.sourceId === readySceneCapture.sourceId)
     const keepProgramSceneParticipantOnTop =
       hasReadyProgramScene &&
       channel.file.type === 'presentation' &&
@@ -1417,18 +1422,47 @@ export function PreviewPanel(): JSX.Element {
       const selectedSceneCapture = freshState.captureSources.find(
         (entry) => entry.capture?.sourceId === freshState.programScene.captureSourceId
       )?.capture ?? null
+      const sceneBackground = resolveProgramSceneBackground(freshState)
       const programSceneActive = freshState.programScene.enabled &&
-        !!freshState.backdropImage &&
-        !!selectedSceneCapture
+        !!sceneBackground &&
+        !(sceneBackground.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
       const programSceneContentAspectRatio = freshState.pptxAspectRatios[channel.file.path] ?? null
+      const powerPointTargetDisplay = freshState.displays.find(
+        (display) => !display.isPrimary && display.id === freshState.selectedDisplayId
+      ) || freshState.displays.find((display) => !display.isPrimary)
+      const taskbarHideStartedAt = Date.now()
+      const taskbarHidePromise = powerPointTargetDisplay
+        ? window.api.hideTaskbar(powerPointTargetDisplay.bounds).then(
+            () => {
+              log(`PowerPoint taskbar hide: END dur=${Date.now() - taskbarHideStartedAt}ms`)
+            },
+            (error) => {
+              log(`PowerPoint taskbar hide failed: ${String(error)}`)
+            }
+          )
+        : Promise.resolve()
+      if (powerPointTargetDisplay) {
+        // Hiding a secondary Windows taskbar starts a separate PowerShell
+        // helper and can take several seconds on a cold system. Start it in
+        // parallel with Office, then join it immediately before revealing the
+        // slideshow. This preserves the no-taskbar-flash boundary without
+        // adding the two independent startup times together.
+        log('PowerPoint taskbar hide: BEGIN (parallel)')
+      }
       if (programSceneActive) {
         await window.api.openPresentationWindow(freshState.selectedDisplayId ?? undefined, true)
         setPresentationWindowOpen(true)
-        window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        if (selectedSceneCapture) {
+          window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        }
+        if (selectedSceneCapture && sceneBackground.type === 'capture') {
+          window.api.sendToPresentation('capture-source-register', sceneBackground.capture)
+        }
         window.api.sendToPresentation('program-scene-update', {
           active: true,
           capture: selectedSceneCapture,
           backdropPath: freshState.backdropImage,
+          background: sceneBackground,
           placement: freshState.programScene.placement,
           participantSize: freshState.programScene.participantSize,
           participantScale: freshState.programScene.participantScale,
@@ -1436,24 +1470,18 @@ export function PreviewPanel(): JSX.Element {
           viewMode: freshState.programScene.viewMode,
           transitionEffect: freshState.programScene.transitionEffect,
           transitionDurationMs: freshState.programScene.transitionDurationMs,
-          contentAspectRatio: programSceneContentAspectRatio
+          contentAspectRatio: programSceneContentAspectRatio,
+          textOverlays: freshState.programScene.textOverlays,
+          textOverlaysVisible: freshState.programScene.textOverlaysVisible,
+          mediaLayers: freshState.programScene.mediaLayers,
+          mediaLayersVisible: freshState.programScene.mediaLayersVisible,
+          externalMediaOverlayActive: freshState.programScene.mediaLayersVisible && freshState.programScene.mediaLayers.some((layer) => layer.visible && layer.aboveContent),
+          chromaKey: freshState.programScene.chromaKey
         })
         // Keep the outgoing PDF/video visible in the program-scene content
         // pane until native PowerPoint has painted and reached its target
         // slide. Clearing it here exposed the backdrop for the whole (possibly
         // slow) Office startup instead of making the TAKE visually atomic.
-        const targetDisplay = freshState.displays.find(
-          (display) => !display.isPrimary && display.id === freshState.selectedDisplayId
-        ) || freshState.displays.find((display) => !display.isPrimary)
-        if (targetDisplay) {
-          // A reduced PowerPoint slideshow no longer covers the Windows
-          // taskbar. Start the comparatively slow shell operation in parallel
-          // with Office startup; waiting for a fresh PowerShell process here
-          // added more than a second to every PDF -> PPTX TAKE.
-          void window.api.hideTaskbar(targetDisplay.bounds).catch((error) => {
-            log(`pre-launch taskbar hide failed: ${String(error)}`)
-          })
-        }
         log('program scene underlay prepared; outgoing content retained until PowerPoint is ready')
       }
       window.api.setActiveContentType('presentation')
@@ -1622,17 +1650,10 @@ export function PreviewPanel(): JSX.Element {
       // идёт HWND_TOPMOST, но во время GotoSlide/Next transition-гонок
       // таскбар иногда проскакивает поверх — юзер видит его на слайде.
       // Прячем явно через ShowWindow(SW_HIDE); восстанавливаем на exit.
-      try {
-        const { selectedDisplayId: sid, displays: disps } = useAppStore.getState()
-        const td = disps.find((d) => !d.isPrimary && d.id === sid) ||
-          disps.find((d) => !d.isPrimary)
-        // The program-scene branch already started this operation before the
-        // PowerPoint launch, giving it the whole Office startup interval to
-        // finish. Do not launch and await a duplicate shell process now.
-        if (td && !programSceneActive) await window.api.hideTaskbar(td.bounds)
-      } catch (error) {
-        log(`post-launch taskbar hide failed: ${String(error)}`)
-      }
+      // In the regular layout this is the final reveal barrier. Program Scene
+      // historically lets the already-started helper finish in the background
+      // because its reduced native window remains covered by Chromium.
+      if (!programSceneActive) await taskbarHidePromise
 
       const slideAfterLaunch = useAppStore.getState().currentSlide
       const userNavigatedDuringLaunch = slideAfterLaunch !== slideBeforeLaunch
@@ -2137,10 +2158,11 @@ export function PreviewPanel(): JSX.Element {
       const selectedSceneCapture = outputState.captureSources.find(
         (entry) => entry.capture?.sourceId === outputState.programScene.captureSourceId
       )?.capture ?? null
+      const officeSceneBackground = resolveProgramSceneBackground(outputState)
       const officeProgramSceneActive = OFFICE_ZOOM_EXT.has(channel.file.extension.toLowerCase()) &&
         outputState.programScene.enabled &&
-        !!outputState.backdropImage &&
-        !!selectedSceneCapture
+        !!officeSceneBackground &&
+        !(officeSceneBackground.type === 'capture' && officeSceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
       const officeSceneLayout = officeProgramSceneActive
         ? {
             enabled: true,
@@ -2154,17 +2176,23 @@ export function PreviewPanel(): JSX.Element {
             contentAspectRatio: null
           } as const
         : undefined
-      if (officeProgramSceneActive && selectedSceneCapture) {
+      if (officeProgramSceneActive) {
         // Prepare the backdrop/camera surface before raising Word/Excel. The
         // transition cover remains above both windows until the exact Office
         // HWND has been placed and verified inside its content pane.
         await window.api.openPresentationWindow(external.id, true)
         setPresentationWindowOpen(true)
-        window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        if (selectedSceneCapture) {
+          window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        }
+        if (selectedSceneCapture && officeSceneBackground?.type === 'capture') {
+          window.api.sendToPresentation('capture-source-register', officeSceneBackground.capture)
+        }
         window.api.sendToPresentation('program-scene-update', {
           active: true,
           capture: selectedSceneCapture,
           backdropPath: outputState.backdropImage,
+          background: officeSceneBackground,
           placement: outputState.programScene.placement,
           participantSize: outputState.programScene.participantSize,
           participantScale: outputState.programScene.participantScale,
@@ -2172,7 +2200,13 @@ export function PreviewPanel(): JSX.Element {
           viewMode: outputState.programScene.viewMode,
           transitionEffect: outputState.programScene.transitionEffect,
           transitionDurationMs: outputState.programScene.transitionDurationMs,
-          contentAspectRatio: null
+          contentAspectRatio: null,
+          textOverlays: outputState.programScene.textOverlays,
+          textOverlaysVisible: outputState.programScene.textOverlaysVisible,
+          mediaLayers: outputState.programScene.mediaLayers,
+          mediaLayersVisible: outputState.programScene.mediaLayersVisible,
+          externalMediaOverlayActive: outputState.programScene.mediaLayersVisible && outputState.programScene.mediaLayers.some((layer) => layer.visible && layer.aboveContent),
+          chromaKey: outputState.programScene.chromaKey
         })
         log('Office program scene underlay prepared')
       }
@@ -2269,12 +2303,15 @@ export function PreviewPanel(): JSX.Element {
         // PDF/video now; a backdrop load failure must never retain its heavy
         // document/decoder indefinitely behind the native Office window.
         window.api.sendToPresentation('clear-active-content')
-        if (officeProgramSceneActive && selectedSceneCapture) {
-          window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+        if (officeProgramSceneActive) {
+          if (selectedSceneCapture) {
+            window.api.sendToPresentation('capture-source-register', selectedSceneCapture)
+          }
           window.api.sendToPresentation('program-scene-update', {
             active: true,
             capture: selectedSceneCapture,
             backdropPath: backdropImage,
+            background: officeSceneBackground,
             placement: outputState.programScene.placement,
             participantSize: outputState.programScene.participantSize,
             participantScale: outputState.programScene.participantScale,
@@ -2282,7 +2319,13 @@ export function PreviewPanel(): JSX.Element {
             viewMode: outputState.programScene.viewMode,
             transitionEffect: outputState.programScene.transitionEffect,
             transitionDurationMs: outputState.programScene.transitionDurationMs,
-            contentAspectRatio: null
+            contentAspectRatio: null,
+            textOverlays: outputState.programScene.textOverlays,
+            textOverlaysVisible: outputState.programScene.textOverlaysVisible,
+            mediaLayers: outputState.programScene.mediaLayers,
+            mediaLayersVisible: outputState.programScene.mediaLayersVisible,
+            externalMediaOverlayActive: outputState.programScene.mediaLayersVisible && outputState.programScene.mediaLayers.some((layer) => layer.visible && layer.aboveContent),
+            chromaKey: outputState.programScene.chromaKey
           })
         } else if (backdropImage) {
           window.api.sendToPresentation('load-content', {
@@ -2734,6 +2777,32 @@ export function PreviewPanel(): JSX.Element {
     await releaseInactiveBrowserFullscreen()
   }
 
+  useEffect(() => window.api.on('powerpoint-output-recovery-needed', (...args: unknown[]) => {
+    const request = args[0] as { displayId?: number } | undefined
+    const state = useAppStore.getState()
+    const liveChannelId = state.liveChannel
+    const liveFile = liveChannelId ? state.channels[liveChannelId]?.file : null
+    const targetConnected = state.displays.some((display) => (
+      !display.isPrimary &&
+      (request?.displayId === undefined || display.id === request.displayId)
+    ))
+    if (!targetConnected || !liveChannelId || liveFile?.type !== 'presentation') return
+    if (takeInFlightRef.current) {
+      window.api.dbgLog(
+        `PowerPoint display recovery skipped: TAKE already active channel=${takeInFlightRef.current}`
+      )
+      return
+    }
+    if (state.overlayState.kind === 'blocked') {
+      window.api.dbgLog('PowerPoint display recovery skipped: safety cover is locked')
+      return
+    }
+    window.api.dbgLog(
+      `PowerPoint display recovery BEGIN channel=${liveChannelId} display=${request?.displayId ?? '-'}`
+    )
+    void handleTake(liveChannelId)
+  }), [])
+
   // The toolbar playlist is an ad-hoc source rather than a channel, but it
   // still changes the same physical program output. Run it through doTake so
   // native windows and previous captures retire only after the first decoded
@@ -3085,8 +3154,9 @@ function ChannelPanel({
   const [titlesMenu, setTitlesMenu] = useState<{
     x: number
     y: number
-    sourceIdentity: string
+    sourceIdentity: string | null
   } | null>(null)
+  const [showAllSpeakerPicker, setShowAllSpeakerPicker] = useState(false)
   const captionInputRef = useRef<HTMLInputElement>(null)
   const cancelCaptionOnBlurRef = useRef(false)
   const zoomDragRef = useRef<{
@@ -3187,9 +3257,11 @@ function ChannelPanel({
     captureSources,
     contentZoom,
     programScene,
+    qrOverlay,
     setBroadcastTitles,
     setCaptureTitlesOutput,
-    setContentZoom
+    setContentZoom,
+    setQrOverlay
   } = useAppStore()
   const channelSourceIdentity = channel.file?.type === 'capture'
     ? captureSourceIdentity(channel.file.capture)
@@ -3206,9 +3278,12 @@ function ChannelPanel({
   const channelTitlesOutput = channelSourceIdentity
     ? captureTitlesOutputs[channelSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
-  const titlesMenuOutput = titlesMenu
+  const titlesMenuOutput = titlesMenu?.sourceIdentity
     ? captureTitlesOutputs[titlesMenu.sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : channelTitlesOutput
+  const selectedTitlesMenuSpeaker = broadcastTitles.speakers.find(
+    (speaker) => speaker.id === broadcastTitles.selectedSpeakerId
+  ) || null
 
   const publishSpeaker = (sourceIdentity: string, speakerId: string): void => {
     const speaker = useAppStore.getState().broadcastTitles.speakers.find((item) => item.id === speakerId)
@@ -3252,23 +3327,19 @@ function ChannelPanel({
   }
 
   useEffect(() => {
-    if (!titlesContextSourceIdentity) {
-      setTitlesMenu(null)
-    }
-  }, [titlesContextSourceIdentity])
-
-  useEffect(() => {
     setTitlesMenu((current) => (
-      current && current.sourceIdentity !== titlesContextSourceIdentity ? null : current
+      current?.sourceIdentity && current.sourceIdentity !== titlesContextSourceIdentity ? null : current
     ))
   }, [titlesContextSourceIdentity])
 
   const handleTitlesContextMenu = (event: React.MouseEvent<HTMLDivElement>): void => {
-    if (!titlesContextSourceIdentity) return
     event.preventDefault()
     event.stopPropagation()
     const menuWidth = 310
-    const menuHeight = Math.min(610, 270 + broadcastTitles.speakers.length * 54)
+    const menuHeight = titlesContextSourceIdentity
+      ? Math.min(710, 380 + broadcastTitles.speakers.length * 54)
+      : 150
+    setShowAllSpeakerPicker(false)
     setTitlesMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -3288,6 +3359,17 @@ function ChannelPanel({
     setTitlesMenu(null)
     if (!broadcastTitles.eventInfo.trim()) return
     if (sourceIdentity) publishEventTitle(sourceIdentity)
+  }
+
+  const publishChannelAllTitles = (speakerId: string): void => {
+    const sourceIdentity = titlesMenu?.sourceIdentity
+    const speaker = broadcastTitles.speakers.find((item) => item.id === speakerId)
+    setTitlesMenu(null)
+    setShowAllSpeakerPicker(false)
+    if (!sourceIdentity || !speaker?.name.trim() || !broadcastTitles.eventInfo.trim()) return
+    setBroadcastTitles({ selectedSpeakerId: speakerId })
+    publishSpeaker(sourceIdentity, speakerId)
+    publishEventTitle(sourceIdentity)
   }
   const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation' || (storeActiveFile?.type === 'other' && !storeActiveFile.isImage)
   const showSelected = isSelected && !isOutputActive
@@ -3403,7 +3485,7 @@ function ChannelPanel({
 
       {/* Preview area */}
       <div
-        className={`relative flex-1 flex items-center justify-center overflow-hidden bg-black/40 ${
+        className={`pdm-channel-preview relative flex-1 flex items-center justify-center overflow-hidden bg-black/40 ${
           isLive && contentZoom.enabled &&
           zoomSupported
             ? contentZoom.scale > 1
@@ -3672,7 +3754,7 @@ function ChannelPanel({
             }}
           />
           <div
-            className="fixed z-[241] w-[310px] overflow-hidden rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"
+            className="fixed z-[241] max-h-[calc(100vh-16px)] w-[310px] overflow-y-auto rounded-xl border border-gray-700 bg-surface-300 shadow-2xl"
             style={{ left: titlesMenu.x, top: titlesMenu.y }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
@@ -3683,10 +3765,80 @@ function ChannelPanel({
             }}
           >
             <div className="border-b border-gray-700 px-3 py-2.5">
-              <div className="text-xs font-semibold text-white">Титры внешнего источника</div>
+              <div className="text-xs font-semibold text-white">Действия канала</div>
               <div className="mt-0.5 text-[10px] text-gray-500">
-                Канал {label} · основной эфир не переключается
+                Канал {label} · основной материал не переключается
               </div>
+            </div>
+
+            <div className="border-b border-gray-700 p-1.5">
+              <button
+                data-channel-toggle-qr
+                type="button"
+                onClick={() => {
+                  if (!hasQrData(qrOverlay)) {
+                    window.dispatchEvent(new CustomEvent('open-program-scene', { detail: { editor: 'qr' } }))
+                    setTitlesMenu(null)
+                    return
+                  }
+                  const show = !qrOverlay.enabled
+                  setQrOverlay(show
+                    ? { enabled: true, sceneVisible: true }
+                    : { enabled: false })
+                  setTitlesMenu(null)
+                }}
+                className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition-colors ${qrOverlay.enabled
+                  ? 'bg-red-950/65 text-red-200 hover:bg-red-800'
+                  : 'bg-blue-700 text-white hover:bg-blue-600'}`}
+                title={hasQrData(qrOverlay) ? undefined : 'Открыть настройки QR-кода в Сцене'}
+              >
+                <span aria-hidden="true">▦</span>
+                {qrOverlay.enabled ? 'Скрыть QR-код' : 'Отобразить QR-код'}
+              </button>
+            </div>
+
+            {titlesMenu.sourceIdentity && <>
+            <div className="border-b border-gray-700 p-1.5">
+              <button
+                data-channel-show-all-titles
+                type="button"
+                disabled={!broadcastTitles.speakers.some((speaker) => speaker.name.trim()) || !broadcastTitles.eventInfo.trim()}
+                onClick={() => setShowAllSpeakerPicker((visible) => !visible)}
+                className="flex w-full items-center gap-2 rounded-lg bg-blue-700 px-2.5 py-2 text-left text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-gray-800 disabled:text-gray-600"
+                title="Выбрать выступающего и одновременно показать его титр с информацией о мероприятии"
+              >
+                <span className="text-sm" aria-hidden="true">▰</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs font-semibold">Показать всё</span>
+                  <span className="block truncate text-[10px] opacity-75">
+                    {showAllSpeakerPicker
+                      ? 'Выберите ФИО ниже'
+                      : `${selectedTitlesMenuSpeaker?.name.trim() || 'Выберите ФИО'} + мероприятие`}
+                  </span>
+                </span>
+                <span aria-hidden="true" className="text-[10px]">{showAllSpeakerPicker ? '▲' : '▼'}</span>
+              </button>
+              {showAllSpeakerPicker && (
+                <div data-channel-show-all-speaker-picker className="mt-1.5 max-h-44 overflow-y-auto rounded-lg border border-blue-500/40 bg-gray-950/70 p-1">
+                  <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-[.1em] text-blue-300">
+                    Выберите выступающего
+                  </div>
+                  {broadcastTitles.speakers.filter((speaker) => speaker.name.trim()).map((speaker) => (
+                    <button
+                      key={speaker.id}
+                      type="button"
+                      data-channel-show-all-speaker={speaker.id}
+                      onClick={() => publishChannelAllTitles(speaker.id)}
+                      className="block w-full rounded-md px-2 py-1.5 text-left hover:bg-blue-700"
+                    >
+                      <span className="block truncate text-xs font-medium text-white">{speaker.name.trim()}</span>
+                      {speaker.role.trim() && (
+                        <span className="block truncate text-[10px] text-gray-400">{speaker.role.trim()}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="border-b border-gray-700 p-1.5">
@@ -3778,6 +3930,7 @@ function ChannelPanel({
                 Скрыть титр выступающего
               </button>
             )}
+            </>}
           </div>
         </>,
         document.body
@@ -3823,13 +3976,14 @@ function ChannelPanel({
   )
 }
 
-export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }: {
+export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides, onAspectRatio }: {
   file: FileEntry
   slideNum: number
   pptxThumbnails: string[]
   onTotalSlides: (total: number) => void
+  onAspectRatio?: (aspectRatio: number) => void
 }): JSX.Element {
-  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} />
+  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} onAspectRatio={onAspectRatio} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
   if (file.type === 'video') return <VideoPreview key={file.path} file={file} />
   if (file.type === 'capture') {
@@ -3841,8 +3995,11 @@ export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides }:
   return <div className="text-gray-500 text-xs">Unsupported</div>
 }
 
-function PdfPreview({ file, currentSlide, onTotalSlides }: {
-  file: FileEntry; currentSlide: number; onTotalSlides: (t: number) => void
+function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio }: {
+  file: FileEntry
+  currentSlide: number
+  onTotalSlides: (t: number) => void
+  onAspectRatio?: (aspectRatio: number) => void
 }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -3850,7 +4007,9 @@ function PdfPreview({ file, currentSlide, onTotalSlides }: {
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null)
   const renderGenerationRef = useRef(0)
   const onTotalSlidesRef = useRef(onTotalSlides)
+  const onAspectRatioRef = useRef(onAspectRatio)
   onTotalSlidesRef.current = onTotalSlides
+  onAspectRatioRef.current = onAspectRatio
 
   useEffect(() => {
     let cancelled = false
@@ -3886,13 +4045,23 @@ function PdfPreview({ file, currentSlide, onTotalSlides }: {
         const canvas = canvasRef.current
         const ctx = canvas.getContext('2d')
         if (!ctx) return
+        const viewport = page.getViewport({ scale: 1 })
+        const aspectRatio = viewport.width / Math.max(1, viewport.height)
+        if (Number.isFinite(aspectRatio) && aspectRatio >= 0.2 && aspectRatio <= 5) {
+          onAspectRatioRef.current?.(aspectRatio)
+          await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+          if (cancelled || generation !== renderGenerationRef.current || !containerRef.current) return
+        }
         const containerWidth = Math.max(1, containerRef.current.clientWidth)
         const containerHeight = Math.max(1, containerRef.current.clientHeight)
-        const viewport = page.getViewport({ scale: 1 })
-        const scale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
+        const displayScale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
+        const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1))
+        const scale = displayScale * pixelRatio
         const scaledViewport = page.getViewport({ scale })
         canvas.width = Math.max(1, Math.round(scaledViewport.width))
         canvas.height = Math.max(1, Math.round(scaledViewport.height))
+        canvas.style.width = `${Math.max(1, Math.round(scaledViewport.width / pixelRatio))}px`
+        canvas.style.height = `${Math.max(1, Math.round(scaledViewport.height / pixelRatio))}px`
 
         renderTask = page.render({ canvas, canvasContext: ctx, viewport: scaledViewport })
         renderTaskRef.current = renderTask

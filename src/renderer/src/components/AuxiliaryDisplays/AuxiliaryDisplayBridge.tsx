@@ -5,6 +5,7 @@ import {
   useAppStore
 } from '../../stores/useAppStore'
 import { waitForNavigationTransitionEnd } from '../../navigation-transition'
+import { resolveProgramSceneBackground } from '../../program-scene-background'
 
 const notesCache = new Map<string, string>()
 const notesInflight = new Map<string, Promise<string>>()
@@ -37,6 +38,19 @@ function currentInformationDisplayState(): InformationDisplayState {
   }
 }
 
+function currentInformationTitlesState(): Pick<InformationDisplayState, 'titleSourceIdentity' | 'titles'> {
+  const state = useAppStore.getState()
+  const titleSourceIdentity = state.informationMedia?.type === 'capture'
+    ? captureSourceIdentity(state.informationMedia.capture)
+    : null
+  return {
+    titleSourceIdentity,
+    titles: titleSourceIdentity
+      ? state.captureTitlesOutputs[titleSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
+      : DEFAULT_BROADCAST_TITLES_OUTPUT
+  }
+}
+
 function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>): void {
   const {
     activeFile,
@@ -58,18 +72,22 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
   const playback = activeFile?.type === 'video'
     ? videoPlayback[activeFile.path]
     : undefined
-  const sceneActive = programScene.enabled && !!backdropImage && !!activeFile && (
+  const sceneBackground = resolveProgramSceneBackground(state)
+  const selectedSceneCapture = state.captureSources.find(
+    (entry) => entry.capture?.sourceId === programScene.captureSourceId
+  )?.capture
+  const sceneContentSupported = !activeFile || (
     activeFile.type === 'presentation' ||
     activeFile.type === 'pdf' ||
     activeFile.type === 'video' ||
     (activeFile.type === 'other' && activeFile.isImage === true) ||
     (activeFile.type === 'capture' && activeFile.capture?.captureKind === 'desktop')
   )
-  const sceneCapture = sceneActive
-    ? state.captureSources.find(
-      (entry) => entry.capture?.sourceId === programScene.captureSourceId
-    )?.capture
-    : undefined
+  const sceneActive = programScene.enabled && !!sceneBackground &&
+    sceneContentSupported &&
+    !(activeFile?.type === 'capture' && activeFile.capture?.sourceId === selectedSceneCapture?.sourceId) &&
+    !(sceneBackground.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
+  const sceneCapture = sceneActive ? selectedSceneCapture : undefined
   const titleSourceIdentity = sceneCapture
     ? captureSourceIdentity(sceneCapture)
     : activeFile?.type === 'capture'
@@ -359,6 +377,7 @@ export function AuxiliaryDisplayBridge(): null {
     const data = args[0] as { displayId?: number | null } | undefined
     window.api.dbgLog(`information display state listener ready display=${data?.displayId ?? 'unknown'}`)
     window.api.sendToAuxiliary('info', 'information-state', currentInformationDisplayState())
+    window.api.sendToAuxiliary('info', 'information-titles-update', currentInformationTitlesState())
   }), [])
 
   useEffect(() => window.api.on('information-video-ended', (...args: unknown[]) => {
@@ -503,6 +522,15 @@ export function AuxiliaryDisplayBridge(): null {
       titleSourceIdentity: null
     } satisfies InformationDisplayState)
   }, [backdropImage, informationMedia, informationTitles, timerDuration])
+
+  useEffect(() => {
+    const titlesState = currentInformationTitlesState()
+    window.api.sendToAuxiliary('info', 'information-titles-update', titlesState)
+    window.api.dbgLog(
+      `information titles sent source=${titlesState.titleSourceIdentity ? 'set' : 'none'} ` +
+      `speaker=${titlesState.titles?.speakerVisible === true} event=${titlesState.titles?.eventVisible === true}`
+    )
+  }, [informationSourceIdentity, informationTitles])
 
   useEffect(() => {
     const timerState = {

@@ -3,6 +3,7 @@ import {
   type DisplayOutputMode
 } from './stores/useAppStore'
 import { acquireOutputTransition } from './output-transition-lock'
+import { resolveProgramSceneBackground } from './program-scene-background'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -93,9 +94,11 @@ async function switchPrimaryProgramDisplayUnlocked(
   const selectedSceneCapture = initial.captureSources.find(
     (entry) => entry.capture?.sourceId === initial.programScene.captureSourceId
   )?.capture ?? null
+  const sceneBackground = resolveProgramSceneBackground(initial)
   const activeOfficeSceneLayout = activeExternalDocument && activeFile &&
     OFFICE_PROGRAM_EXTENSIONS.has(activeFile.extension.toLowerCase()) &&
-    initial.programScene.enabled && initial.backdropImage && selectedSceneCapture
+    initial.programScene.enabled && sceneBackground &&
+    !(sceneBackground.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
       ? {
           enabled: true,
           placement: initial.programScene.placement,

@@ -21,6 +21,7 @@ export function StreamControl(): JSX.Element {
   const mounted = useRef(true)
   const selectedDisplayId = useAppStore((s) => s.selectedDisplayId)
   const displays = useAppStore((s) => s.displays)
+  const pipAudioEnabled = useAppStore((s) => s.programScene.enabled && s.programScene.audio?.enabled)
   const active = status?.phase === 'running' || status?.phase === 'starting'
   const locked = busy || active
 
@@ -82,6 +83,7 @@ export function StreamControl(): JSX.Element {
                 <button type="button" className="mt-1 text-xs text-blue-300 underline" onClick={() => void run(async () => setDevices(await window.api.streaming.devices()))}>Обновить аудиовходы</button></div>}
             </div>
             {(settings.audio === 'system' || settings.audio === 'both') && <p className="text-xs text-amber-200">Системный захват включает звуки других программ и уведомлений с текущего устройства воспроизведения Windows.</p>}
+            {pipAudioEnabled && settings.audio === 'both' && <p className="text-xs text-amber-200">Звук камеры PiP уже входит в системный звук. Не выбирайте тот же аудиовход здесь повторно — иначе голос будет дублироваться. Для звука PiP и роликов достаточно «Весь системный звук».</p>}
             <div className="space-y-2">
               {settings.destinations.map((d) => <div key={d.id} className="rounded-lg border border-gray-600 p-2">
                 <div className="mb-2 flex items-center gap-2 text-sm"><label className="flex flex-1 items-center gap-2"><input type="checkbox" checked={d.enabled} onChange={(e) => update({ destinations: settings.destinations.map((item) => item.id === d.id ? { ...item, enabled: e.target.checked } : item) })} />{d.name}</label>

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { waitForNavigationTransitionEnd } from '../../navigation-transition'
 import { PROGRAM_SCENE_TRANSITION_DURATION_MS } from '../../../../shared/program-scene'
+import { resolveProgramSceneBackground } from '../../program-scene-background'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -16,7 +17,9 @@ function supportsProgramScene(file: ReturnType<typeof useAppStore.getState>['act
     file.type === 'video' ||
     (file.type === 'other' && file.isImage === true) ||
     isOfficeProgramDocument(file) ||
-    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
+    (file.type === 'capture' && (
+      file.capture?.captureKind === 'desktop'
+    ))
   )
 }
 
@@ -27,6 +30,13 @@ export function ProgramSceneBridge(): null {
     : PROGRAM_SCENE_TRANSITION_DURATION_MS
   const captureSources = useAppStore((state) => state.captureSources)
   const backdropImage = useAppStore((state) => state.backdropImage)
+  const channels = useAppStore((state) => state.channels)
+  const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
+  const pptxThumbnailsMap = useAppStore((state) => state.pptxThumbnailsMap)
+  const background = useMemo(
+    () => resolveProgramSceneBackground(useAppStore.getState()),
+    [backdropImage, channels, pptxSlidesMap, pptxThumbnailsMap, programScene.background]
+  )
   const activeFile = useAppStore((state) => state.activeFile)
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
   const displays = useAppStore((state) => state.displays)
@@ -38,8 +48,11 @@ export function ProgramSceneBridge(): null {
   )?.capture ?? null
   const activeSourceIsParticipant = activeFile?.type === 'capture' &&
     activeFile.capture?.sourceId === selectedCapture?.sourceId
-  const active = programScene.enabled && !!selectedCapture && !!backdropImage &&
-    supportsProgramScene(activeFile) && !activeSourceIsParticipant
+  const backgroundSourceIsParticipant = background?.type === 'capture' &&
+    background.capture.sourceId === selectedCapture?.sourceId
+  const active = programScene.enabled && !!background &&
+    (!activeFile || supportsProgramScene(activeFile)) &&
+    !activeSourceIsParticipant && !backgroundSourceIsParticipant
   const contentAspectRatio = activeFile?.type === 'presentation'
     ? pptxAspectRatios[activeFile.path] ?? null
     : null
@@ -49,15 +62,26 @@ export function ProgramSceneBridge(): null {
   const targetDisplayId = connectedSelectedDisplay?.id ??
     displays.find((display) => !display.isPrimary)?.id ??
     null
+  const nativeContentActive = activeFile?.type === 'presentation' || isOfficeProgramDocument(activeFile)
+  const upperMediaLayers = useMemo(
+    () => programScene.mediaLayers.filter((layer) => layer.visible && layer.aboveContent),
+    [programScene.mediaLayers]
+  )
+  const externalMediaOverlayActive = programScene.mediaLayersVisible &&
+    nativeContentActive && targetDisplayId !== null && upperMediaLayers.length > 0
 
   const sendState = useCallback((): void => {
     if (selectedCapture) {
       window.api.sendToPresentation('capture-source-register', selectedCapture)
     }
+    if (selectedCapture && background?.type === 'capture') {
+      window.api.sendToPresentation('capture-source-register', background.capture)
+    }
     window.api.sendToPresentation('program-scene-update', {
       active,
       capture: selectedCapture,
       backdropPath: backdropImage,
+      background,
       placement: programScene.placement,
       participantSize: programScene.participantSize,
       participantScale: programScene.participantScale,
@@ -65,9 +89,30 @@ export function ProgramSceneBridge(): null {
       viewMode: programScene.viewMode,
       transitionEffect: programScene.transitionEffect,
       transitionDurationMs,
-      contentAspectRatio
+      contentAspectRatio,
+      textOverlays: programScene.textOverlays,
+      textOverlaysVisible: programScene.textOverlaysVisible,
+      mediaLayers: programScene.mediaLayers,
+      mediaLayersVisible: programScene.mediaLayersVisible,
+      externalMediaOverlayActive,
+      chromaKey: programScene.chromaKey
     })
-  }, [active, backdropImage, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, selectedCapture, transitionDurationMs])
+    void window.api.updateProgramSceneMediaOverlay({
+      visible: externalMediaOverlayActive,
+      displayId: targetDisplayId,
+      layers: upperMediaLayers
+    }).catch((error) => {
+      window.api.dbgLog(`program scene media overlay update failed: ${String(error)}`)
+    })
+  }, [active, backdropImage, background, contentAspectRatio, externalMediaOverlayActive, programScene.chromaKey, programScene.cornerStyle, programScene.mediaLayers, programScene.mediaLayersVisible, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.textOverlays, programScene.textOverlaysVisible, programScene.transitionEffect, programScene.viewMode, selectedCapture, targetDisplayId, transitionDurationMs, upperMediaLayers])
+
+  // Audio changes must not touch native Office placement, video registration or
+  // the held PowerPoint frame used for smooth PiP transitions.
+  const sendAudio = useCallback(() => {
+    window.api.sendToPresentation('program-scene-audio-update', programScene.audio)
+  }, [programScene.audio])
+  useEffect(sendAudio, [sendAudio])
+  useEffect(() => window.api.on('program-scene-audio-ready', sendAudio), [sendAudio])
 
   const sendStateRef = useRef(sendState)
   sendStateRef.current = sendState
@@ -77,6 +122,10 @@ export function ProgramSceneBridge(): null {
   }, [sendState])
 
   useEffect(() => window.api.on('program-scene-ready', sendState), [sendState])
+
+  useEffect(() => () => {
+    void window.api.updateProgramSceneMediaOverlay({ visible: false, displayId: null, layers: [] })
+  }, [])
 
   useEffect(() => {
     const livePowerPoint = activeFile?.type === 'presentation'

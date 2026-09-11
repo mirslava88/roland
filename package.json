@@ -10,6 +10,12 @@
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
   "scripts": {
+    "test:pip-audio": "node scripts/test-program-scene-audio.mjs",
+    "test:pip-audio:ui": "node scripts/test-program-scene-audio-ui.mjs",
+    "test:pip-video:ui": "node scripts/test-program-scene-video-ui.mjs",
+    "test:program-scene-background": "node scripts/test-program-scene-background.mjs",
+    "test:toolbar:ui": "node scripts/test-toolbar-ui.mjs",
+    "test:powerpoint-display-recovery": "node scripts/test-powerpoint-display-recovery.mjs",
     "test:streaming": "node scripts/test-streaming.mjs && node scripts/test-streaming-handshake.mjs && node scripts/test-streaming-keyframes.mjs",
     "test:streaming:capture": "node scripts/run-streaming-capture-test.mjs",
     "test:streaming:latency": "node scripts/run-streaming-latency-test.mjs",

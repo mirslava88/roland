@@ -139,6 +139,7 @@ export function CaptureSourcesPanel(): JSX.Element {
     const sourceId = existing?.capture?.sourceId || `capture-${crypto.randomUUID()}`
     const capture: CaptureSourceConfig = {
       sourceId,
+      captureKind: 'device',
       videoDeviceId: video.deviceId,
       videoLabel: video.label,
       videoGroupId: video.groupId || undefined,
@@ -488,6 +489,7 @@ export function CaptureSourcesPanel(): JSX.Element {
           onSelect={addDesktopSource}
         />
       )}
+
     </>
   )
 }

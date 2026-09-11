@@ -892,7 +892,12 @@ function Test-ManagedPresentation($presentation) {
         -not $script:managedPresentationIdentities.ContainsKey($identity)) { return $false }
     $expectedKey = [string]$script:managedPresentationIdentities[$identity]
     $currentKey = Get-PresentationKey $presentation
-    return (-not [string]::IsNullOrEmpty($currentKey)) -and $currentKey -eq $expectedKey
+    # After Windows removes a display, PowerPoint can destroy the slideshow
+    # and invalidate FullName on the retained RCW before PDM gets a chance to
+    # close it.  The exact IUnknown identity is still the ownership proof we
+    # registered when opening the deck.  Do not reclassify that stale PDM RCW
+    # as a user document merely because its path can no longer be queried.
+    return [string]::IsNullOrEmpty($currentKey) -or $currentKey -eq $expectedKey
 }
 
 function Test-PdmOwnedPresentation($presentation) {
@@ -1013,9 +1018,18 @@ function Close-ManagedPresentation($presentation) {
     $key = Get-PresentationKey $presentation
     $identity = Get-PresentationIdentity $presentation
     $unidentifiedRecord = Get-UnidentifiedManagedPresentationRecord $presentation
-    $identityTracked = (-not [string]::IsNullOrEmpty($identity)) -and
-        $script:managedPresentationIdentities.ContainsKey($identity) -and
-        (([string]$script:managedPresentationIdentities[$identity]) -eq $key)
+    $trackedKey = ''
+    if (-not [string]::IsNullOrEmpty($identity) -and
+        $script:managedPresentationIdentities.ContainsKey($identity)) {
+        $trackedKey = [string]$script:managedPresentationIdentities[$identity]
+    }
+    $identityTracked = (-not [string]::IsNullOrEmpty($trackedKey)) -and
+        ([string]::IsNullOrEmpty($key) -or $trackedKey -eq $key)
+    if ([string]::IsNullOrEmpty($key) -and $identityTracked) {
+        # Preserve the registration key for retiring all path-based tracking
+        # after the underlying COM object has already disappeared.
+        $key = $trackedKey
+    }
     $closed = $false
     if (-not $identityTracked -and -not $unidentifiedRecord) {
         $script:lastManagedPresentationCloseOk = $false
@@ -3261,10 +3275,12 @@ while ($true) {
                     # An empty expected path makes Resolve pick an arbitrary
                     # slideshow from a shared Office process. Only PDM's cached
                     # or path-qualified window is eligible for STOP.
-                    $sw = $script:activeSlideShowWindow
-                    if (-not $sw -and -not [string]::IsNullOrEmpty($script:activePresentationPath)) {
-                        $sw = Resolve-ActiveSlideShowWindow $ppt $script:activePresentationPath
-                    }
+                    # Validate the cached slideshow before deciding whether it
+                    # belongs to a user. A monitor disconnect can leave a
+                    # truthy but dead RCW; calling View.Exit() on that object
+                    # used to turn an already-stopped show into endless CLOSE
+                    # failures and block every later PPTX TAKE.
+                    $sw = Resolve-PdmSlideShowWindow $ppt
                     $active = $script:activePresentation
                     if (-not $active -and $sw) {
                         try { $active = $sw.Presentation } catch {}

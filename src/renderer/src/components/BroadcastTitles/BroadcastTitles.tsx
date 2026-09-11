@@ -10,7 +10,9 @@ import {
   type BroadcastTitlesOutput
 } from '../../stores/useAppStore'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
+import { SceneLayerControlBar, SceneLayerToggleButton } from '../ProgramScene/SceneLayerControlBar'
 import { BroadcastTitlesOverlay } from './BroadcastTitlesOverlay'
+import { resolveProgramSceneBackground } from '../../program-scene-background'
 
 const ENTER_EFFECT_OPTIONS: Array<{ value: BroadcastTitleEffect; label: string }> = [
   { value: 'instant', label: 'Мгновенно' },
@@ -70,7 +72,9 @@ function supportsProgramSceneTitles(file?: FileEntry | null): boolean {
     (file.type === 'other' && (
       file.isImage === true || OFFICE_PROGRAM_EXTENSIONS.has(file.extension.toLowerCase())
     )) ||
-    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
+    (file.type === 'capture' && (
+      file.capture?.captureKind === 'desktop'
+    ))
   )
 }
 
@@ -81,8 +85,9 @@ export function BroadcastTitles(): JSX.Element {
       ? state.channels[state.selectedChannel]?.file?.capture
       : undefined
     const activeCapture = state.activeFile?.type === 'capture' ? state.activeFile.capture : undefined
-    const sceneSupportsTitles = state.programScene.enabled && !!state.backdropImage &&
-      supportsProgramSceneTitles(state.activeFile)
+    const sceneBackground = resolveProgramSceneBackground(state)
+    const sceneSupportsTitles = state.programScene.enabled && !!sceneBackground &&
+      (!state.activeFile || supportsProgramSceneTitles(state.activeFile))
     const sceneCapture = sceneSupportsTitles
       ? state.captureSources.find(
         (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
@@ -91,9 +96,19 @@ export function BroadcastTitles(): JSX.Element {
     const informationCapture = state.informationMedia?.type === 'capture'
       ? state.informationMedia.capture
       : undefined
-    const sourceIdentity = captureSourceIdentity(
-      sceneCapture || selectedCapture || activeCapture || informationCapture
+    const sceneCaptureConflicts = !!sceneCapture && (
+      (state.activeFile?.type === 'capture' && state.activeFile.capture?.sourceId === sceneCapture.sourceId) ||
+      (sceneBackground?.type === 'capture' && sceneBackground.capture.sourceId === sceneCapture.sourceId)
     )
+    const sceneSourceIdentity = sceneCaptureConflicts ? null : captureSourceIdentity(sceneCapture)
+    const informationSourceIdentity = captureSourceIdentity(informationCapture)
+    const informationOutputAssigned = state.displays.some((display) => (
+      !display.isPrimary && state.displayAssignments[String(display.id)] === 'information'
+    ))
+    const sourceIdentity = sceneSourceIdentity || state.programCaptureTitlesSourceIdentity ||
+      (informationOutputAssigned ? informationSourceIdentity : null) ||
+      captureSourceIdentity(selectedCapture) || captureSourceIdentity(activeCapture) ||
+      informationSourceIdentity
     const output = sourceIdentity
       ? state.captureTitlesOutputs[sourceIdentity]
       : undefined
@@ -120,7 +135,12 @@ export function BroadcastTitles(): JSX.Element {
   )
 }
 
-function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element {
+interface BroadcastTitlesModalProps {
+  onClose: () => void
+  embedded?: boolean
+}
+
+export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTitlesModalProps): JSX.Element {
   const {
     activeFile,
     informationMedia,
@@ -141,20 +161,34 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
   const selectedFile = selectedChannel ? channels[selectedChannel]?.file : null
   const selectedCapture = selectedFile?.type === 'capture' ? selectedFile.capture : undefined
   const activeCapture = activeFile?.type === 'capture' ? activeFile.capture : undefined
-  const sceneSupportsTitles = programScene.enabled && !!backdropImage &&
-    supportsProgramSceneTitles(activeFile)
+  const sceneBackground = resolveProgramSceneBackground(useAppStore.getState())
+  const sceneSupportsTitles = programScene.enabled && !!sceneBackground &&
+    (!activeFile || supportsProgramSceneTitles(activeFile))
   const sceneCapture = sceneSupportsTitles
     ? captureSources.find((entry) => entry.capture?.sourceId === programScene.captureSourceId)?.capture
     : undefined
   const informationCapture = informationMedia?.type === 'capture' ? informationMedia.capture : undefined
-  const previewUsesInformationFallback = !selectedCapture && !activeCapture && !sceneCapture && !!informationCapture
-  const previewCapture = sceneCapture || selectedCapture || activeCapture || informationCapture
-  const sourceIdentity = captureSourceIdentity(previewCapture)
-  const sceneSourceIdentity = captureSourceIdentity(sceneCapture)
+  const sceneCaptureConflicts = !!sceneCapture && (
+    (activeFile?.type === 'capture' && activeFile.capture?.sourceId === sceneCapture.sourceId) ||
+    (sceneBackground?.type === 'capture' && sceneBackground.capture.sourceId === sceneCapture.sourceId)
+  )
+  const sceneSourceIdentity = sceneCaptureConflicts ? null : captureSourceIdentity(sceneCapture)
   const activeSourceIdentity = sceneSourceIdentity || programCaptureTitlesSourceIdentity
-  const informationSourceIdentity = informationMedia?.type === 'capture'
-    ? captureSourceIdentity(informationMedia.capture)
-    : null
+  const informationSourceIdentity = captureSourceIdentity(informationCapture)
+  const informationOutputAssigned = displays.some((display) => (
+    !display.isPrimary && displayAssignments[String(display.id)] === 'information'
+  ))
+  // Target what is actually visible before considering a merely selected
+  // channel. Otherwise a selected, off-air capture steals title commands from
+  // the camera currently shown on the information display.
+  const sourceIdentity = activeSourceIdentity ||
+    (informationOutputAssigned ? informationSourceIdentity : null) ||
+    captureSourceIdentity(selectedCapture) || captureSourceIdentity(activeCapture) ||
+    informationSourceIdentity
+  const previewCapture = [sceneCapture, activeCapture, selectedCapture, ...captureSources.map((entry) => entry.capture), informationCapture]
+    .find((capture) => captureSourceIdentity(capture) === sourceIdentity)
+  const previewUsesInformationFallback = previewCapture === informationCapture &&
+    sourceIdentity === informationSourceIdentity && !activeSourceIdentity
   const broadcastTitlesOutput = sourceIdentity
     ? captureTitlesOutputs[sourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
@@ -164,42 +198,14 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
   const captureOnAir = !!sourceIdentity && (
     sourceIdentity === activeSourceIdentity || (
       sourceIdentity === informationSourceIdentity &&
-      displays.some((display) => (
-        !display.isPrimary && displayAssignments[String(display.id)] === 'information'
-      ))
+      informationOutputAssigned
     )
   )
+  const targetsInformationOutput = !!sourceIdentity && !activeSourceIdentity &&
+    informationOutputAssigned && sourceIdentity === informationSourceIdentity
   const selectedSpeaker = broadcastTitles.speakers.find(
     (speaker) => speaker.id === broadcastTitles.selectedSpeakerId
   ) || null
-  const selectedSpeakerIsLive = !!selectedSpeaker &&
-    broadcastTitlesOutput.speakerVisible &&
-    broadcastTitlesOutput.speakerId === selectedSpeaker.id
-  const speakerHasChanges = !!selectedSpeaker && (
-    selectedSpeaker.name !== broadcastTitlesOutput.speakerName ||
-    selectedSpeaker.role !== broadcastTitlesOutput.speakerRole ||
-    broadcastTitles.speakerEnterEffect !== broadcastTitlesOutput.speakerEnterEffect ||
-    broadcastTitles.speakerExitEffect !== broadcastTitlesOutput.speakerExitEffect ||
-    broadcastTitles.speakerAutoHideSeconds !== broadcastTitlesOutput.speakerAutoHideSeconds ||
-    broadcastTitles.speakerStyle !== broadcastTitlesOutput.speakerStyle ||
-    broadcastTitles.speakerTextColor !== broadcastTitlesOutput.speakerTextColor ||
-    broadcastTitles.speakerBackgroundStart !== broadcastTitlesOutput.speakerBackgroundStart ||
-    broadcastTitles.speakerBackgroundEnd !== broadcastTitlesOutput.speakerBackgroundEnd ||
-    broadcastTitles.speakerAccentStart !== broadcastTitlesOutput.speakerAccentStart ||
-    broadcastTitles.speakerAccentEnd !== broadcastTitlesOutput.speakerAccentEnd
-  )
-  const eventHasChanges = broadcastTitles.eventLabel !== broadcastTitlesOutput.eventLabel ||
-    broadcastTitles.eventInfo !== broadcastTitlesOutput.eventInfo ||
-    broadcastTitles.eventEnterEffect !== broadcastTitlesOutput.eventEnterEffect ||
-    broadcastTitles.eventExitEffect !== broadcastTitlesOutput.eventExitEffect ||
-    broadcastTitles.eventAutoHideSeconds !== broadcastTitlesOutput.eventAutoHideSeconds ||
-    broadcastTitles.eventPosition !== broadcastTitlesOutput.eventPosition ||
-    broadcastTitles.eventStyle !== broadcastTitlesOutput.eventStyle ||
-    broadcastTitles.eventTextColor !== broadcastTitlesOutput.eventTextColor ||
-    broadcastTitles.eventBackgroundStart !== broadcastTitlesOutput.eventBackgroundStart ||
-    broadcastTitles.eventBackgroundEnd !== broadcastTitlesOutput.eventBackgroundEnd ||
-    broadcastTitles.eventAccentStart !== broadcastTitlesOutput.eventAccentStart ||
-    broadcastTitles.eventAccentEnd !== broadcastTitlesOutput.eventAccentEnd
   const anythingVisible = broadcastTitlesOutput.speakerVisible || broadcastTitlesOutput.eventVisible
 
   const previewTitles = useMemo<BroadcastTitlesOutput>(() => ({
@@ -295,10 +301,18 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
     })
   }
 
+  const publishAllTitles = (): void => {
+    if (!sourceIdentity || !selectedSpeaker?.name.trim() || !broadcastTitles.eventInfo.trim()) return
+    publishSpeaker()
+    publishEvent()
+  }
+
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4">
-      <div className="flex h-[min(900px,96vh)] w-[min(1320px,97vw)] flex-col overflow-hidden rounded-2xl border border-gray-700 bg-surface-300 shadow-2xl">
-        <div className="flex shrink-0 items-center gap-3 border-b border-gray-800 px-5 py-3">
+    <div className={embedded ? 'contents' : 'fixed inset-0 z-[200] flex items-center justify-center bg-black/70 p-4'}>
+      <div data-broadcast-titles-editor={embedded ? true : undefined} className={embedded
+        ? 'flex min-h-0 w-full flex-1 flex-col overflow-hidden text-white'
+        : 'flex h-[min(900px,96vh)] w-[min(1320px,97vw)] flex-col overflow-hidden rounded-2xl border border-gray-700 bg-surface-300 shadow-2xl'}>
+        {!embedded && <div className="flex shrink-0 items-center gap-3 border-b border-gray-800 px-5 py-3">
           <div>
             <h2 className="text-base font-semibold text-white">Титры внешнего источника</h2>
             <p className="mt-0.5 text-[11px] text-gray-500">Список выступающих и информация о мероприятии</p>
@@ -326,10 +340,67 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
           >
             ✕
           </button>
-        </div>
+        </div>}
 
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.35fr)_minmax(440px,.9fr)] gap-4 p-4">
-          <section className="flex min-h-0 flex-col rounded-xl border border-gray-700 bg-black/40 p-3">
+        <SceneLayerControlBar
+          active={anythingVisible}
+          status={!anythingVisible
+            ? 'Титры скрыты'
+            : broadcastTitlesOutput.speakerVisible && broadcastTitlesOutput.eventVisible
+              ? 'Выступающий и мероприятие в эфире'
+              : broadcastTitlesOutput.speakerVisible
+                ? 'Выступающий в эфире'
+                : 'Мероприятие в эфире'}
+          detail={!sourceIdentity
+            ? 'Выберите внешний источник'
+            : captureOnAir
+              ? targetsInformationOutput
+                ? 'Слой виден на информационном экране'
+                : 'Слой виден на программном экране'
+              : 'Слой подготовлен для внешнего источника'}
+        >
+          <button
+            data-broadcast-titles-show-all
+            type="button"
+            disabled={!sourceIdentity || !selectedSpeaker?.name.trim() || !broadcastTitles.eventInfo.trim()}
+            onClick={publishAllTitles}
+            title="Показать титр выступающего и информацию о мероприятии"
+            className="h-7 rounded-md border border-red-400 bg-red-600 px-3 text-[10px] font-semibold text-white shadow-[0_0_10px_rgba(220,38,38,.35)] transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:border-gray-800 disabled:bg-surface-100 disabled:text-gray-600 disabled:shadow-none"
+          >
+            Показать все
+          </button>
+          <SceneLayerToggleButton
+            buttonProps={{ 'data-broadcast-titles-speaker-visible': true }}
+            pressed={broadcastTitlesOutput.speakerVisible}
+            tone="air"
+            disabled={!broadcastTitlesOutput.speakerVisible && (!sourceIdentity || !selectedSpeaker?.name.trim())}
+            title="Показать или скрыть титр выступающего"
+            onPressedChange={(pressed) => {
+              if (pressed) publishSpeaker()
+              else setTargetTitlesOutput({ speakerVisible: false })
+            }}
+          >
+            Выступающий
+          </SceneLayerToggleButton>
+          <SceneLayerToggleButton
+            buttonProps={{ 'data-broadcast-titles-event-visible': true }}
+            pressed={broadcastTitlesOutput.eventVisible}
+            tone="air"
+            disabled={!broadcastTitlesOutput.eventVisible && (!sourceIdentity || !broadcastTitles.eventInfo.trim())}
+            title="Показать или скрыть информацию о мероприятии"
+            onPressedChange={(pressed) => {
+              if (pressed) publishEvent()
+              else setTargetTitlesOutput({ eventVisible: false })
+            }}
+          >
+            Мероприятие
+          </SceneLayerToggleButton>
+        </SceneLayerControlBar>
+
+        <div className={`grid min-h-0 flex-1 ${embedded
+          ? 'grid-cols-[minmax(420px,2fr)_minmax(0,3fr)] gap-3'
+          : 'grid-cols-[minmax(0,3fr)_minmax(440px,2fr)] gap-4 p-4'}`}>
+          <section data-broadcast-titles-preview className="flex min-h-0 flex-col rounded-xl border border-gray-700 bg-black/40 p-3">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-[11px] font-semibold uppercase tracking-[.16em] text-gray-400">Предварительный просмотр</span>
               <span className="text-[10px] text-gray-600">Изменения здесь не меняют эфир</span>
@@ -342,7 +413,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
               ) : previewCapture ? (
                 <div className="absolute inset-0 flex items-center justify-center bg-[radial-gradient(circle_at_50%_35%,#244050_0%,#111827_52%,#05070b_100%)]">
                   <div className="max-w-[80%] text-center text-gray-400">
-                    <div className="text-4xl font-light tracking-[.18em] text-gray-300">LIVE</div>
+                    <div className="text-4xl font-light tracking-[.18em] text-gray-300">ЭФИР</div>
                     <div className="mt-2 truncate text-xs text-gray-400">{previewCapture.videoLabel}</div>
                     <div className="mt-1 text-[10px] text-gray-600">Информационный внешний источник</div>
                   </div>
@@ -359,8 +430,10 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
             </div>
           </section>
 
-          <aside className="min-h-0 space-y-3 overflow-y-auto pr-1">
-            <section className="rounded-xl border border-gray-700 bg-surface-200 p-4">
+          <aside className={embedded
+            ? 'grid min-h-0 grid-cols-2 gap-3 overflow-hidden'
+            : 'min-h-0 space-y-3 overflow-y-auto pr-1'}>
+            <section className={`rounded-xl border border-gray-700 bg-surface-200 ${embedded ? 'min-h-0 overflow-hidden p-3' : 'p-4'}`}>
               <div className="mb-3 flex items-center gap-2">
                 <span className="h-2 w-2 rounded-full bg-gradient-to-b from-emerald-400 to-cyan-500" />
                 <h3 className="text-sm font-semibold text-white">Выступающие</h3>
@@ -420,7 +493,9 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
               )}
 
               {selectedSpeaker && (
-                <div className="space-y-3 border-t border-gray-700 pt-3">
+                <div className={embedded
+                  ? 'grid grid-cols-2 gap-2 border-t border-gray-700 pt-2'
+                  : 'space-y-3 border-t border-gray-700 pt-3'}>
                   <label className="block">
                     <span className="mb-1 block text-[10px] text-gray-400">ФИО выступающего</span>
                     <input
@@ -444,62 +519,46 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                     />
                   </label>
 
-                  <EffectControls
-                    enterEffect={broadcastTitles.speakerEnterEffect}
-                    exitEffect={broadcastTitles.speakerExitEffect}
-                    autoHideSeconds={broadcastTitles.speakerAutoHideSeconds}
-                    onEnterEffect={(speakerEnterEffect) => setBroadcastTitles({ speakerEnterEffect })}
-                    onExitEffect={(speakerExitEffect) => setBroadcastTitles({ speakerExitEffect })}
-                    onAutoHide={(speakerAutoHideSeconds) => setBroadcastTitles({ speakerAutoHideSeconds })}
-                  />
-
-                  <DesignControls
-                    style={broadcastTitles.speakerStyle}
-                    textColor={broadcastTitles.speakerTextColor}
-                    backgroundStart={broadcastTitles.speakerBackgroundStart}
-                    backgroundEnd={broadcastTitles.speakerBackgroundEnd}
-                    accentStart={broadcastTitles.speakerAccentStart}
-                    accentEnd={broadcastTitles.speakerAccentEnd}
-                    accentLabel="Полоска слева"
-                    accentSide="left"
-                    onChange={(update) => setBroadcastTitles({
-                      speakerStyle: update.style ?? broadcastTitles.speakerStyle,
-                      speakerTextColor: update.textColor ?? broadcastTitles.speakerTextColor,
-                      speakerBackgroundStart: update.backgroundStart ?? broadcastTitles.speakerBackgroundStart,
-                      speakerBackgroundEnd: update.backgroundEnd ?? broadcastTitles.speakerBackgroundEnd,
-                      speakerAccentStart: update.accentStart ?? broadcastTitles.speakerAccentStart,
-                      speakerAccentEnd: update.accentEnd ?? broadcastTitles.speakerAccentEnd
-                    })}
-                  />
-
-                  {selectedSpeakerIsLive && speakerHasChanges && (
-                    <p className="text-[10px] text-amber-400">В эфире остаётся предыдущий вариант — нажмите «Обновить».</p>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={publishSpeaker}
-                      disabled={!sourceIdentity || !selectedSpeaker.name.trim()}
-                      className="rounded-lg bg-cyan-700 px-3 py-2 text-xs font-semibold text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-35"
-                    >
-                      {selectedSpeakerIsLive ? 'Обновить' : 'Показать'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTargetTitlesOutput({ speakerVisible: false })}
-                      disabled={!broadcastTitlesOutput.speakerVisible}
-                      className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs font-semibold text-gray-300 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
-                    >
-                      Скрыть
-                    </button>
+                  <div>
+                    <EffectControls
+                      enterEffect={broadcastTitles.speakerEnterEffect}
+                      exitEffect={broadcastTitles.speakerExitEffect}
+                      autoHideSeconds={broadcastTitles.speakerAutoHideSeconds}
+                      onEnterEffect={(speakerEnterEffect) => setBroadcastTitles({ speakerEnterEffect })}
+                      onExitEffect={(speakerExitEffect) => setBroadcastTitles({ speakerExitEffect })}
+                      onAutoHide={(speakerAutoHideSeconds) => setBroadcastTitles({ speakerAutoHideSeconds })}
+                    />
                   </div>
+
+                  <div>
+                    <DesignControls
+                      style={broadcastTitles.speakerStyle}
+                      textColor={broadcastTitles.speakerTextColor}
+                      backgroundStart={broadcastTitles.speakerBackgroundStart}
+                      backgroundEnd={broadcastTitles.speakerBackgroundEnd}
+                      accentStart={broadcastTitles.speakerAccentStart}
+                      accentEnd={broadcastTitles.speakerAccentEnd}
+                      accentLabel="Полоска слева"
+                      accentSide="left"
+                      onChange={(update) => setBroadcastTitles({
+                        speakerStyle: update.style ?? broadcastTitles.speakerStyle,
+                        speakerTextColor: update.textColor ?? broadcastTitles.speakerTextColor,
+                        speakerBackgroundStart: update.backgroundStart ?? broadcastTitles.speakerBackgroundStart,
+                        speakerBackgroundEnd: update.backgroundEnd ?? broadcastTitles.speakerBackgroundEnd,
+                        speakerAccentStart: update.accentStart ?? broadcastTitles.speakerAccentStart,
+                        speakerAccentEnd: update.accentEnd ?? broadcastTitles.speakerAccentEnd
+                      })}
+                    />
+                  </div>
+
                 </div>
               )}
             </section>
 
-            <section className="rounded-xl border border-gray-700 bg-surface-200 p-4">
-              <div className="mb-3 flex items-center gap-2">
+            <section className={`rounded-xl border border-gray-700 bg-surface-200 ${embedded
+              ? 'grid min-h-0 grid-cols-2 content-start gap-x-3 gap-y-2 overflow-hidden p-2.5'
+              : 'p-4'}`}>
+              <div className={`${embedded ? 'col-span-2' : 'mb-3'} flex items-center gap-2`}>
                 <span className="h-2 w-2 rounded-full bg-emerald-400" />
                 <h3 className="text-sm font-semibold text-white">Информация о мероприятии</h3>
                 {broadcastTitlesOutput.eventVisible && (
@@ -507,7 +566,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                 )}
               </div>
 
-              <label className="mb-3 block">
+              <label className={embedded ? 'block' : 'mb-3 block'}>
                 <span className="mb-1 block text-[10px] text-gray-400">Заголовок над информацией</span>
                 <input
                   type="text"
@@ -521,14 +580,14 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
 
               <textarea
                 maxLength={320}
-                rows={3}
+                rows={embedded ? 2 : 3}
                 value={broadcastTitles.eventInfo}
                 onChange={(event) => setBroadcastTitles({ eventInfo: event.target.value })}
                 placeholder={'Ежегодная конференция\nМосква • 2026'}
                 className="w-full resize-none rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-sm leading-snug text-white outline-hidden placeholder:text-gray-600 focus:border-emerald-500"
               />
 
-              <div className="mt-3">
+              <div className={embedded ? 'col-start-1' : 'mt-3'}>
                 <span className="mb-1.5 block text-[10px] text-gray-400">Положение на экране</span>
                 <div className="grid grid-cols-3 gap-1.5">
                   {POSITION_OPTIONS.map((position) => (
@@ -549,7 +608,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                 </div>
               </div>
 
-              <div className="mt-3">
+              <div className={embedded ? 'col-start-2 row-start-2 row-span-3' : 'mt-3'}>
                 <EffectControls
                   enterEffect={broadcastTitles.eventEnterEffect}
                   exitEffect={broadcastTitles.eventExitEffect}
@@ -558,7 +617,7 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                   onExitEffect={(eventExitEffect) => setBroadcastTitles({ eventExitEffect })}
                   onAutoHide={(eventAutoHideSeconds) => setBroadcastTitles({ eventAutoHideSeconds })}
                 />
-                <div className="mt-3">
+                <div className={embedded ? 'mt-2' : 'mt-3'}>
                   <DesignControls
                     style={broadcastTitles.eventStyle}
                     textColor={broadcastTitles.eventTextColor}
@@ -580,35 +639,13 @@ function BroadcastTitlesModal({ onClose }: { onClose: () => void }): JSX.Element
                 </div>
               </div>
 
-              {broadcastTitlesOutput.eventVisible && eventHasChanges && (
-                <p className="mt-2 text-[10px] text-amber-400">В эфире остаётся предыдущий вариант — нажмите «Обновить».</p>
-              )}
-
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={publishEvent}
-                  disabled={!sourceIdentity || !broadcastTitles.eventInfo.trim()}
-                  className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-35"
-                >
-                  {broadcastTitlesOutput.eventVisible ? 'Обновить' : 'Показать'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTargetTitlesOutput({ eventVisible: false })}
-                  disabled={!broadcastTitlesOutput.eventVisible}
-                  className="rounded-lg border border-gray-700 bg-surface-100 px-3 py-2 text-xs font-semibold text-gray-300 hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-30"
-                >
-                  Скрыть
-                </button>
-              </div>
             </section>
 
             <button
               type="button"
               onClick={() => setTargetTitlesOutput({ speakerVisible: false, eventVisible: false })}
               disabled={!anythingVisible}
-              className="w-full rounded-lg border border-red-900/70 bg-red-950/30 px-3 py-2.5 text-xs font-semibold text-red-300 hover:bg-red-950/60 disabled:cursor-not-allowed disabled:opacity-30"
+              className={`${embedded ? 'col-span-2' : 'w-full'} rounded-lg border border-red-900/70 bg-red-950/30 px-3 py-2.5 text-xs font-semibold text-red-300 hover:bg-red-950/60 disabled:cursor-not-allowed disabled:opacity-30`}
             >
               Скрыть все титры
             </button>
@@ -658,8 +695,12 @@ function EffectControls({
           {EXIT_EFFECT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       </label>
-      <label className="col-span-2 flex items-center gap-2 rounded-lg border border-gray-700 bg-surface-100 px-2.5 py-2">
-        <span className="min-w-0 flex-1 text-[10px] text-gray-400">Автоматически скрыть через</span>
+      <label
+        data-broadcast-titles-auto-hide
+        className="col-span-2 grid grid-cols-[minmax(0,1fr)_56px_auto] items-center gap-1.5 rounded-lg border border-gray-700 bg-surface-100 px-2 py-1.5"
+        title="0 секунд — не скрывать автоматически"
+      >
+        <span className="min-w-0 text-[10px] leading-tight text-gray-400">Автоматически скрыть через</span>
         <input
           type="number"
           min={0}
@@ -667,9 +708,9 @@ function EffectControls({
           step={1}
           value={autoHideSeconds}
           onChange={(event) => onAutoHide(parseSeconds(event.target.value))}
-          className="w-20 rounded-md border border-gray-700 bg-surface-200 px-2 py-1 text-right text-xs text-white outline-hidden focus:border-cyan-500"
+          className="h-7 w-14 rounded-md border border-gray-700 bg-surface-200 px-1.5 text-center text-xs text-white outline-hidden focus:border-cyan-500"
         />
-        <span className="text-[10px] text-gray-500">сек. (0 — выкл.)</span>
+        <span className="whitespace-nowrap text-[10px] text-gray-500">сек.</span>
       </label>
     </div>
   )
@@ -790,16 +831,17 @@ function ColorControl({
   onChange: (value: string) => void
 }): JSX.Element {
   return (
-    <label className="flex min-w-0 items-center gap-1.5 rounded-md border border-gray-700 bg-surface-100 px-1.5 py-1.5">
+    <label data-broadcast-titles-color={label} className="flex min-w-0 flex-col items-stretch gap-0.5 rounded-md border border-gray-700 bg-surface-100 px-1 py-1">
+      <span className="whitespace-nowrap text-center text-[9px] font-medium leading-none text-gray-300" title={`${label}: ${value}`}>
+        {label}
+      </span>
       <input
         type="color"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-5 w-6 shrink-0 cursor-pointer border-0 bg-transparent p-0"
+        aria-label={label}
+        className="h-4 w-full cursor-pointer border-0 bg-transparent p-0"
       />
-      <span className="min-w-0 truncate text-[9px] text-gray-400" title={`${label}: ${value}`}>
-        {label}
-      </span>
     </label>
   )
 }

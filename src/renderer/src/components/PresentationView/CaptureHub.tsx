@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import type { ProgramSceneChromaKeyConfig } from '../../../../shared/program-scene'
+import { ChromaKeyRenderer } from '../Capture/chroma-key-renderer'
 
 export interface CaptureTakeRequest {
   sourceId: string
@@ -11,7 +13,10 @@ interface CaptureHubProps {
   activeSceneStyle?: CSSProperties
   activeZoomStyle?: CSSProperties
   sceneSourceId?: string | null
+  backgroundSourceId?: string | null
   sceneStyle?: CSSProperties
+  backgroundSceneStyle?: CSSProperties
+  sceneChromaKey: ProgramSceneChromaKeyConfig
   onActiveAspectRatio?: (sourceId: string, aspectRatio: number) => void
   takeRequest: CaptureTakeRequest | null
   onTakeReady: (sourceId: string, revision: number) => void
@@ -20,6 +25,7 @@ interface CaptureHubProps {
 
 interface CaptureDevicesRequest {
   requestId: string
+  includeAudio?: boolean
 }
 
 interface CaptureDevicesResponse {
@@ -71,13 +77,14 @@ function stopStream(stream: MediaStream | null): void {
   }
 }
 
-async function enumerateCaptureDevices(requestId: string): Promise<CaptureDevicesResponse> {
+async function enumerateCaptureDevices(requestId: string, includeAudio = false): Promise<CaptureDevicesResponse> {
   if (!navigator.mediaDevices?.enumerateDevices || !navigator.mediaDevices?.getUserMedia) {
     return { requestId, devices: [], error: 'Захват видео не поддерживается на этом компьютере.' }
   }
 
   let probe: MediaStream | null = null
   let permissionError: string | undefined
+  let audioPermissionError: string | undefined
   try {
     // Do not probe again once labels have already been unlocked. Reopening the
     // default camera whenever the picker is shown can disturb inexpensive UVC
@@ -98,6 +105,19 @@ async function enumerateCaptureDevices(requestId: string): Promise<CaptureDevice
   }
 
   try {
+    // Only an explicit audio-picker action may unlock microphone labels.
+    // This probe never plays audio and is released immediately.
+    if (includeAudio) {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      if (!devices.some((device) => device.kind === 'audioinput' && device.label)) {
+        let audioProbe: MediaStream | null = null
+        try {
+          audioProbe = await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
+        } catch {
+          audioPermissionError = 'Нет доступа к аудиовходу. Проверьте разрешение на микрофон.'
+        } finally { stopStream(audioProbe) }
+      }
+    }
     const rawDevices = await navigator.mediaDevices.enumerateDevices()
     let videoIndex = 0
     let audioIndex = 0
@@ -122,7 +142,7 @@ async function enumerateCaptureDevices(requestId: string): Promise<CaptureDevice
     return {
       requestId,
       devices,
-      error: hasVideo ? undefined : permissionError || 'Камеры и платы видеозахвата не найдены.'
+      error: hasVideo ? audioPermissionError : permissionError || 'Камеры и платы видеозахвата не найдены.'
     }
   } catch (error) {
     return { requestId, devices: [], error: permissionError || describeMediaError(error) }
@@ -135,6 +155,8 @@ function CaptureSourceLayer({
   activeSceneStyle,
   activeZoomStyle,
   sceneStyle,
+  backgroundSceneStyle,
+  sceneChromaKey,
   onAspectRatio,
   audioActive,
   deviceRevision,
@@ -143,10 +165,12 @@ function CaptureSourceLayer({
   onTakeError
 }: {
   config: CaptureSourceConfig
-  displayMode: 'hidden' | 'fullscreen' | 'content' | 'scene'
+  displayMode: 'hidden' | 'fullscreen' | 'content' | 'scene' | 'background'
   activeSceneStyle?: CSSProperties
   activeZoomStyle?: CSSProperties
   sceneStyle?: CSSProperties
+  backgroundSceneStyle?: CSSProperties
+  sceneChromaKey: ProgramSceneChromaKeyConfig
   onAspectRatio?: (sourceId: string, aspectRatio: number) => void
   audioActive: boolean
   deviceRevision: number
@@ -161,6 +185,9 @@ function CaptureSourceLayer({
   const holdImageRef = useRef<HTMLImageElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const chromaCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const chromaRendererRef = useRef<ChromaKeyRenderer | null>(null)
+  const chromaReadyRef = useRef(false)
   const generationRef = useRef(0)
   const retryAttemptRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -177,6 +204,76 @@ function CaptureSourceLayer({
     message: isDesktopCapture ? `Подключение ${desktopTarget}…` : 'Подключение видеовхода…'
   })
   const [hasAudio, setHasAudio] = useState(false)
+  const [chromaReady, setChromaReady] = useState(false)
+  const chromaActive = displayMode === 'scene' && !isDesktopCapture && sceneChromaKey.enabled
+
+  useEffect(() => {
+    chromaReadyRef.current = chromaReady
+  }, [chromaReady])
+
+  useEffect(() => {
+    if (!chromaActive) {
+      chromaRendererRef.current?.dispose()
+      chromaRendererRef.current = null
+      chromaReadyRef.current = false
+      setChromaReady(false)
+      return
+    }
+
+    let cancelled = false
+    let videoFrameHandle: number | null = null
+    let animationFrameHandle: number | null = null
+    let reportedFailure = false
+    const video = videoRef.current
+    const canvas = chromaCanvasRef.current
+    if (!video || !canvas) return
+
+    const draw = (): void => {
+      if (cancelled || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+      try {
+        const renderer = chromaRendererRef.current ?? new ChromaKeyRenderer(canvas)
+        chromaRendererRef.current = renderer
+        if (renderer.draw(video, sceneChromaKey) && !chromaReadyRef.current) {
+          chromaReadyRef.current = true
+          setChromaReady(true)
+        }
+      } catch (error) {
+        if (!reportedFailure) {
+          reportedFailure = true
+          window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: chroma key unavailable: ${String(error)}`)
+        }
+      }
+    }
+
+    if (video.requestVideoFrameCallback) {
+      const tick = (): void => {
+        if (cancelled) return
+        draw()
+        videoFrameHandle = video.requestVideoFrameCallback!(tick)
+      }
+      videoFrameHandle = video.requestVideoFrameCallback(tick)
+    } else {
+      const tick = (): void => {
+        if (cancelled) return
+        draw()
+        animationFrameHandle = requestAnimationFrame(tick)
+      }
+      animationFrameHandle = requestAnimationFrame(tick)
+    }
+
+    return () => {
+      cancelled = true
+      if (videoFrameHandle !== null && video.cancelVideoFrameCallback) {
+        video.cancelVideoFrameCallback(videoFrameHandle)
+      }
+      if (animationFrameHandle !== null) cancelAnimationFrame(animationFrameHandle)
+    }
+  }, [chromaActive, config.sourceId, sceneChromaKey])
+
+  useEffect(() => () => {
+    chromaRendererRef.current?.dispose()
+    chromaRendererRef.current = null
+  }, [])
 
   const emitState = useCallback((state: Omit<CaptureSourceState, 'sourceId'>): void => {
     const nextState: CaptureSourceState = { sourceId: config.sourceId, ...state }
@@ -262,20 +359,19 @@ function CaptureSourceLayer({
 
       const canvas = canvasRef.current || document.createElement('canvas')
       canvasRef.current = canvas
-      const width = 640
-      const height = 360
+      // Preserve the source aspect ratio: baking a 4:3/portrait camera into a
+      // black 16:9 frame makes PiP crop/scale those bars along with the image.
+      // Keep the same thumbnail pixel budget and cadence as before.
+      const scale = Math.min(640 / video.videoWidth, 360 / video.videoHeight)
+      const width = Math.max(1, Math.round(video.videoWidth * scale))
+      const height = Math.max(1, Math.round(video.videoHeight * scale))
       if (canvas.width !== width) canvas.width = width
       if (canvas.height !== height) canvas.height = height
       const context = canvas.getContext('2d', { alpha: false })
       if (!context) return
       context.fillStyle = '#000000'
       context.fillRect(0, 0, width, height)
-      const scale = Math.min(width / video.videoWidth, height / video.videoHeight)
-      const drawWidth = video.videoWidth * scale
-      const drawHeight = video.videoHeight * scale
-      const left = (width - drawWidth) / 2
-      const top = (height - drawHeight) / 2
-      context.drawImage(video, left, top, drawWidth, drawHeight)
+      context.drawImage(video, 0, 0, width, height)
       try {
         const dataUrl = canvas.toDataURL('image/jpeg', 0.72)
         lastFrameDataUrlRef.current = dataUrl
@@ -688,10 +784,12 @@ function CaptureSourceLayer({
 
   return (
     <div
-      className="absolute flex items-center justify-center bg-black overflow-hidden shadow-2xl"
+      className={`absolute flex items-center justify-center overflow-hidden shadow-2xl ${chromaActive && chromaReady ? 'bg-transparent' : 'bg-black'}`}
       style={{
         ...(displayMode === 'scene'
           ? sceneStyle
+          : displayMode === 'background'
+            ? (backgroundSceneStyle ?? { inset: 0 })
           : displayMode === 'content'
             ? activeSceneStyle
             : { inset: 0 }),
@@ -699,13 +797,17 @@ function CaptureSourceLayer({
           ? 0
           : displayMode === 'scene'
             ? sceneStyle?.opacity ?? 1
+            : displayMode === 'background'
+              ? backgroundSceneStyle?.opacity ?? 1
             : displayMode === 'content'
               ? activeSceneStyle?.opacity ?? 1
               : 1,
-        zIndex: displayMode === 'scene' ? 3 : displayMode === 'fullscreen' ? 2 : displayMode === 'content' ? 1 : 0,
+        zIndex: displayMode === 'scene' ? 4 : displayMode === 'background' ? 3 : displayMode === 'fullscreen' ? 2 : displayMode === 'content' ? 1 : 0,
         pointerEvents: 'none',
         borderRadius: displayMode === 'scene'
           ? (sceneStyle?.borderRadius ?? '0.5rem')
+          : displayMode === 'background'
+            ? (backgroundSceneStyle?.borderRadius ?? '0.5rem')
           : displayMode === 'content'
             ? (activeSceneStyle?.borderRadius ?? '0.5rem')
             : 0
@@ -716,15 +818,26 @@ function CaptureSourceLayer({
         autoPlay
         playsInline
         muted={!audioActive || !hasAudio}
-        className={`w-full h-full bg-black select-none ${displayMode === 'scene' && config.captureKind === 'device' ? 'object-cover' : 'object-contain'}`}
-        style={displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined}
+        className={`w-full h-full bg-black select-none ${(displayMode === 'scene' && !isDesktopCapture) || displayMode === 'background' ? 'object-cover' : 'object-contain'}`}
+        style={{
+          ...(displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined),
+          opacity: chromaActive && chromaReady ? 0 : 1
+        }}
+      />
+      <canvas
+        ref={chromaCanvasRef}
+        data-chroma-key-canvas="program"
+        className={`absolute inset-0 h-full w-full select-none object-cover ${chromaActive && chromaReady ? 'opacity-100' : 'opacity-0'}`}
       />
       <img
         ref={holdImageRef}
         alt="Последний кадр источника"
         draggable={false}
-        className={`absolute inset-0 w-full h-full bg-black opacity-0 select-none ${displayMode === 'scene' && config.captureKind === 'device' ? 'object-cover' : 'object-contain'}`}
-        style={displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined}
+        className={`absolute inset-0 w-full h-full bg-black opacity-0 select-none ${(displayMode === 'scene' && !isDesktopCapture) || displayMode === 'background' ? 'object-cover' : 'object-contain'}`}
+        style={{
+          ...(displayMode === 'content' || displayMode === 'fullscreen' ? activeZoomStyle : undefined),
+          visibility: chromaActive && chromaReady ? 'hidden' : 'visible'
+        }}
       />
     </div>
   )
@@ -736,7 +849,10 @@ export function CaptureHub({
   activeSceneStyle,
   activeZoomStyle,
   sceneSourceId = null,
+  backgroundSourceId = null,
   sceneStyle,
+  backgroundSceneStyle,
+  sceneChromaKey,
   onActiveAspectRatio,
   takeRequest,
   onTakeReady,
@@ -771,7 +887,7 @@ export function CaptureHub({
     const unsubDevices = window.api.on('capture-devices-request', (...args: unknown[]) => {
       const request = args[0] as CaptureDevicesRequest
       if (!request?.requestId) return
-      void enumerateCaptureDevices(request.requestId).then((response) => {
+      void enumerateCaptureDevices(request.requestId, request.includeAudio === true).then((response) => {
         window.api.sendToControl('capture-devices-response', response)
         window.api.dbgLog(
           `CaptureHub: devices response video=${response.devices.filter((d) => d.kind === 'videoinput').length} ` +
@@ -798,26 +914,32 @@ export function CaptureHub({
 
   return (
     <>
-      {sources.map((config) => (
-        <CaptureSourceLayer
-          key={config.sourceId}
-          config={config}
-          displayMode={activeSourceId === config.sourceId
-            ? activeSceneStyle ? 'content' : 'fullscreen'
-            : sceneSourceId === config.sourceId
-              ? 'scene'
-              : 'hidden'}
-          activeSceneStyle={activeSceneStyle}
-          activeZoomStyle={activeZoomStyle}
-          sceneStyle={sceneStyle}
-          onAspectRatio={onActiveAspectRatio}
-          audioActive={audioSourceId === config.sourceId}
-          deviceRevision={deviceRevision}
-          takeRevision={takeRequest?.sourceId === config.sourceId ? takeRequest.revision : undefined}
-          onTakeReady={onTakeReady}
-          onTakeError={onTakeError}
-        />
-      ))}
+      {sources.map((config) => {
+        const displayMode = activeSourceId === config.sourceId
+          ? activeSceneStyle ? 'content' : 'fullscreen'
+          : sceneSourceId === config.sourceId
+            ? 'scene'
+            : backgroundSourceId === config.sourceId ? 'background' : 'hidden'
+        const takeRevision = takeRequest?.sourceId === config.sourceId ? takeRequest.revision : undefined
+        return (
+          <CaptureSourceLayer
+            key={config.sourceId}
+            config={config}
+            displayMode={displayMode}
+            activeSceneStyle={activeSceneStyle}
+            activeZoomStyle={activeZoomStyle}
+            sceneStyle={sceneStyle}
+            backgroundSceneStyle={backgroundSceneStyle}
+            sceneChromaKey={sceneChromaKey}
+            onAspectRatio={onActiveAspectRatio}
+            audioActive={audioSourceId === config.sourceId}
+            deviceRevision={deviceRevision}
+            takeRevision={takeRevision}
+            onTakeReady={onTakeReady}
+            onTakeError={onTakeError}
+          />
+        )
+      })}
     </>
   )
 }

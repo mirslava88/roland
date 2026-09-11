@@ -26,321 +26,470 @@
    mirror, timer and QR output windows keep their tested on-air appearance. */
 .pdm-operator-shell.theme-broadcast-pro {
   color-scheme: dark;
-  --color-surface-50: #f7f9fb;
-  --color-surface-100: #171c22;
-  --color-surface-200: #11161b;
-  --color-surface-300: #0b0f13;
-  --color-surface-400: #06090c;
-  --color-accent: #167dff;
-  --color-accent-hover: #2b8cff;
-  --color-accent-dim: #0c4f9f;
-  --color-blue-400: #45a0ff;
-  --color-blue-500: #2189ff;
-  --color-blue-600: #116fdc;
-  --color-blue-700: #0e57ad;
-  --color-gray-200: #dce2e8;
-  --color-gray-300: #c1c9d1;
-  --color-gray-400: #929da8;
-  --color-gray-500: #6d7883;
-  --color-gray-600: #46515c;
-  --color-gray-700: #2c353e;
-  --color-gray-800: #1c242b;
-  --color-gray-900: #11171c;
-  --color-red-400: #ff6670;
-  --color-red-500: #ff3545;
-  --color-red-900: #4a0b13;
-  --radius-sm: 0.2rem;
-  --radius-md: 0.32rem;
-  --radius-lg: 0.45rem;
-  --radius-xl: 0.58rem;
+  --color-surface-50: #f4f8fb;
+  --color-surface-100: #182129;
+  --color-surface-200: #10171d;
+  --color-surface-300: #090e13;
+  --color-surface-400: #04070a;
+  --color-accent: #18a7ff;
+  --color-accent-hover: #43b7ff;
+  --color-accent-dim: #08649f;
+  --color-blue-400: #55bdff;
+  --color-blue-500: #20a8ff;
+  --color-blue-600: #087fd1;
+  --color-blue-700: #075b98;
+  --color-gray-200: #e1e8ed;
+  --color-gray-300: #c7d0d7;
+  --color-gray-400: #93a1ac;
+  --color-gray-500: #697781;
+  --color-gray-600: #48555f;
+  --color-gray-700: #2c3841;
+  --color-gray-800: #1c262e;
+  --color-gray-900: #10171d;
+  --color-red-400: #ff6871;
+  --color-red-500: #ff3847;
+  --color-red-900: #4e0b13;
+  --radius-sm: 0.15rem;
+  --radius-md: 0.25rem;
+  --radius-lg: 0.35rem;
+  --radius-xl: 0.45rem;
+  --pdm-console-border: #293842;
+  --pdm-console-edge: #3a4b57;
+  --pdm-console-panel: #0d1419;
+  --pdm-console-panel-raised: #151e25;
+  --pdm-console-cyan: #24b4ff;
+  --pdm-console-preview: #39d27d;
+  --pdm-console-program: #ff3b49;
+  color: #dce5eb;
+  font-family: 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  letter-spacing: .008em;
   background:
-    radial-gradient(circle at 70% -20%, rgba(22, 125, 255, .08), transparent 36%),
-    #080b0f;
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar {
-  background: linear-gradient(180deg, #11171d 0%, #0b0f13 100%);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, .025), 0 8px 22px rgba(0, 0, 0, .28);
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card {
-  background: #0d1217;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, .2), inset 0 1px 0 rgba(255, 255, 255, .018);
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-header {
-  border-bottom: 1px solid rgba(104, 121, 137, .12);
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live {
-  border-color: #ff3545;
-  box-shadow: 0 0 0 1px rgba(255, 53, 69, .28), 0 9px 24px rgba(0, 0, 0, .28);
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected {
-  border-color: #26bd64;
-  box-shadow: 0 0 0 1px rgba(38, 189, 100, .2), 0 9px 24px rgba(0, 0, 0, .24);
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-header {
-  background: rgba(20, 87, 50, .28);
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-state-dot {
-  background: #31d879;
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-status {
-  color: #63e59a;
+    radial-gradient(circle at 50% -18%, rgba(26, 166, 255, .12), transparent 31%),
+    linear-gradient(135deg, #070b0e 0%, #04070a 100%);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .panel {
-  border-color: rgba(102, 119, 135, .24);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+  border-color: var(--pdm-console-border);
+  border-radius: 5px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .34), inset 0 1px rgba(255, 255, 255, .025);
 }
 
 .pdm-operator-shell.theme-broadcast-pro :is(input, select, textarea) {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  border-color: #32424e;
+  border-radius: 3px;
+  background-color: #0b1116;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .42), 0 1px rgba(255, 255, 255, .025);
 }
 
-/* Broadcast Pro is intentionally a full operator-console skin rather than a
-   small palette swap. Only semantic classes inside the operator shell are
-   touched, so output renderers and all control behavior remain unchanged. */
-.pdm-operator-shell.theme-broadcast-pro {
-  color: #dce4eb;
-  letter-spacing: .005em;
+.pdm-toolbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+  padding: 5px 12px;
+}
+
+.pdm-toolbar-tools {
+  border-top: 1px solid var(--color-gray-800);
+  background: rgba(0, 0, 0, .12);
+}
+
+.pdm-toolbar-item { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; }
+.pdm-toolbar-item[hidden] { display: none; }
+/* Fill each slot with the control itself, not an invisible reserved area.
+   Scope this to inline controls: their floating panels keep their own sizes. */
+.pdm-toolbar-item > button,
+.pdm-toolbar-item > :where(div:not(.fixed):not(.absolute)) > button:first-child {
+  flex: 0 0 var(--pdm-toolbar-button-width, 100px);
+  width: var(--pdm-toolbar-button-width, 100px);
+  min-width: 0;
+}
+.pdm-toolbar-item > :where(div:not(.fixed):not(.absolute)) > button:not(:first-child) {
+  flex: 0 0 28px;
+  width: 28px;
+  padding-inline: 0;
+}
+.pdm-toolbar-row > .pdm-toolbar-item > button,
+.pdm-toolbar-row > .pdm-toolbar-item > div:not(.fixed):not(.absolute) > button {
+  height: 32px;
+  min-height: 32px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.pdm-toolbar-item[data-toolbar-item="pipViews"] > div { height: 32px; }
+.pdm-toolbar-item[data-toolbar-item="pipViews"] > div > button {
+  flex: 0 0 32px;
+  width: 32px;
+  min-width: 32px;
+  height: 30px;
+  min-height: 30px;
+}
+
+/* Compact only the controls, never the surrounding application or popovers.
+   This also leaves room for player play/stop buttons at the 900px minimum. */
+@media (max-width: 1050px) {
+  .pdm-toolbar-row { gap: 4px; padding-inline: 8px; }
+  .pdm-toolbar-row > .pdm-toolbar-item > button,
+  .pdm-toolbar-row > .pdm-toolbar-item > div:not(.fixed):not(.absolute) > button { font-size: 10px; }
+  .pdm-toolbar-row > .pdm-toolbar-item > button,
+  .pdm-toolbar-row > .pdm-toolbar-item > div:not(.fixed):not(.absolute) > button:first-child { padding-inline: 3px; }
+  .pdm-toolbar-item[data-toolbar-item="pipViews"] > div > button { flex-basis: 28px; width: 28px; min-width: 28px; }
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar {
-  height: 50px;
-  padding-inline: 10px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
   gap: 5px;
-  border-bottom-color: #27323c;
+  padding: 7px 0 8px;
+  border-bottom: 1px solid #31414c;
+  background:
+    linear-gradient(90deg, rgba(36, 180, 255, .055), transparent 24%),
+    linear-gradient(180deg, #111a21 0%, #080d11 100%);
+  box-shadow: 0 9px 25px rgba(0, 0, 0, .34), inset 0 -1px rgba(255, 255, 255, .018);
 }
 
-.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar::before {
-  content: '';
-  width: 4px;
-  height: 26px;
-  margin-right: 3px;
-  border-radius: 2px;
-  background: linear-gradient(180deg, #32a2ff, #126be0);
-  box-shadow: 0 0 16px rgba(29, 133, 255, .55);
-  flex: 0 0 auto;
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-row {
+  position: relative;
+  min-height: 44px;
+  padding: 5px 12px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, rgba(25, 36, 44, .96), rgba(12, 18, 23, .98));
+  box-shadow: inset 0 0 0 1px #273640, inset 0 1px rgba(255, 255, 255, .025), 0 2px 7px rgba(0, 0, 0, .22);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-tools {
+  border-top-color: #273640;
+  background: linear-gradient(180deg, rgba(18, 27, 34, .98), rgba(9, 14, 18, .98));
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar button {
-  border-radius: 4px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 1px 2px rgba(0, 0, 0, .28);
+  border-radius: 3px;
+  font-weight: 650;
+  letter-spacing: .015em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045), 0 2px 4px rgba(0, 0, 0, .35);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar button:hover:not(:disabled) {
-  filter: brightness(1.1);
+  filter: brightness(1.14);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar button:active:not(:disabled) {
+  translate: 0 1px;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, .28);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-item[data-toolbar-item="output"] button:not(:disabled) {
+  outline: 1px solid rgba(255, 75, 86, .34);
+  outline-offset: 2px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-item[data-toolbar-item="stream"] button {
+  outline: 1px solid rgba(255, 188, 35, .2);
+  outline-offset: 2px;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-now-playing {
-  height: 34px;
-  padding-inline: 14px;
-  background: linear-gradient(90deg, #161d24 0%, #10161b 60%, #0d1217 100%);
-  border-bottom-color: #242e37;
-  box-shadow: inset 4px 0 0 #f23b48;
+  position: relative;
+  height: 37px;
+  padding: 0 16px;
+  border-bottom-color: #3b2228;
+  background:
+    linear-gradient(90deg, rgba(136, 17, 30, .4), rgba(37, 20, 25, .4) 40%, transparent 78%),
+    #0d1216;
+  box-shadow: inset 0 2px 0 rgba(255, 56, 71, .75), inset 0 -1px rgba(255, 255, 255, .018);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-now-playing > span:first-child {
-  box-shadow: 0 0 0 4px rgba(255, 53, 69, .1), 0 0 12px rgba(255, 53, 69, .7);
+  background: var(--pdm-console-program);
+  box-shadow: 0 0 0 4px rgba(255, 56, 71, .11), 0 0 14px rgba(255, 56, 71, .82);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-main-workspace {
   min-height: 0;
-  gap: 9px;
-  padding: 9px;
+  gap: 10px;
+  padding: 10px;
   background:
-    linear-gradient(rgba(255, 255, 255, .012) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, .012) 1px, transparent 1px),
-    #070a0d;
-  background-size: 28px 28px;
+    linear-gradient(rgba(92, 125, 145, .03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(92, 125, 145, .03) 1px, transparent 1px),
+    radial-gradient(circle at 50% 0%, rgba(24, 167, 255, .055), transparent 40%),
+    #04070a;
+  background-size: 24px 24px, 24px 24px, auto, auto;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library,
 .pdm-operator-shell.theme-broadcast-pro .pdm-stage,
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator {
-  border: 1px solid #27313a;
-  border-radius: 7px;
-  background: #0e1318;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .018);
+  position: relative;
+  border: 1px solid var(--pdm-console-border);
+  border-radius: 5px;
+  background: var(--pdm-console-panel);
+  box-shadow: 0 15px 35px rgba(0, 0, 0, .38), inset 0 1px 0 rgba(255, 255, 255, .025);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library {
-  width: 264px;
+  width: clamp(236px, 20vw, 282px);
   overflow: hidden;
+  box-shadow: inset 0 3px 0 #1388cf, 0 15px 35px rgba(0, 0, 0, .38);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator {
-  width: 180px;
+  width: clamp(166px, 14vw, 205px);
+  box-shadow: inset 0 3px 0 #a87522, 0 15px 35px rgba(0, 0, 0, .38);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-stage {
   min-width: 0;
+  box-shadow: inset 0 3px 0 #415563, 0 15px 35px rgba(0, 0, 0, .42);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library-header,
 .pdm-operator-shell.theme-broadcast-pro .pdm-preview-header,
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator-header {
-  min-height: 38px;
-  border-color: #25303a;
-  background: linear-gradient(180deg, #171e25 0%, #12181e 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025);
+  min-height: 42px;
+  border-color: #293842;
+  background:
+    linear-gradient(90deg, rgba(36, 180, 255, .06), transparent 65%),
+    linear-gradient(180deg, #182229 0%, #10171c 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 4px 9px rgba(0, 0, 0, .16);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library-header > div:first-child > span:first-child,
 .pdm-operator-shell.theme-broadcast-pro .pdm-preview-header > span:first-child,
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator-header {
-  color: #d9e1e8;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .13em;
+  color: #e5edf2;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .16em;
   text-transform: uppercase;
 }
 
-.pdm-operator-shell.theme-broadcast-pro .pdm-library-header > div:first-child > span:first-child::after {
-  content: '  / MEDIA';
-  color: #318eff;
-  font-size: 8px;
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-preview-header > span:first-child::after {
-  content: '  / SWITCHER';
-  color: #318eff;
-  font-size: 8px;
-}
-
-.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator-header::after {
-  content: '  / CUE';
-  color: #318eff;
-  font-size: 8px;
-}
-
 .pdm-operator-shell.theme-broadcast-pro .pdm-library-content {
-  background: linear-gradient(180deg, #0d1217, #0a0f13);
+  background:
+    linear-gradient(180deg, rgba(20, 31, 39, .42), transparent 36%),
+    #080d11;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library-content > div {
-  border-radius: 4px;
+  border-left: 2px solid transparent;
+  border-radius: 2px;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library-content > div:hover {
-  background-color: #18222b;
-  border-color: #34424e;
+  border-left-color: var(--pdm-console-cyan);
+  background-color: #17242d;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library-footer,
 .pdm-operator-shell.theme-broadcast-pro .pdm-pagination,
 .pdm-operator-shell.theme-broadcast-pro .pdm-control-bar {
-  border-color: #25303a;
-  background: linear-gradient(180deg, #12181e 0%, #0d1217 100%);
+  border-color: #293842;
+  background: linear-gradient(180deg, #141d23 0%, #0c1217 100%);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-preview-panel {
-  background: #090d11;
+  background: #05090c;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-grid {
   background:
-    radial-gradient(circle at 50% 0%, rgba(35, 128, 235, .055), transparent 45%),
-    #090d11;
+    linear-gradient(rgba(73, 98, 113, .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(73, 98, 113, .035) 1px, transparent 1px),
+    radial-gradient(circle at 50% -10%, rgba(36, 180, 255, .075), transparent 48%),
+    #05090c;
+  background-size: 18px 18px, 18px 18px, auto, auto;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-card {
   position: relative;
-  border-radius: 5px;
+  isolation: isolate;
+  border-radius: 3px;
   border-width: 1px;
-  border-color: #2a3540;
-  background: linear-gradient(180deg, #10161c 0%, #0b1015 100%);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, .24), inset 0 1px 0 rgba(255, 255, 255, .02);
+  border-color: #344651;
+  background: #020405;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .42), inset 0 0 0 1px rgba(255, 255, 255, .018);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card::before {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 3px;
+  background: #40515d;
+  box-shadow: 0 0 10px rgba(88, 111, 126, .28);
+  content: '';
+  pointer-events: none;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-card:hover {
-  border-color: #40505e;
-  background: linear-gradient(180deg, #131b22 0%, #0d1319 100%);
+  border-color: #5a7180;
+  background: #05090c;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-header {
-  min-height: 31px;
-  border-bottom-color: #26313a;
-  background: linear-gradient(180deg, #171f26 0%, #12191f 100%);
+  order: 50;
+  min-height: 34px;
+  border-top: 1px solid #2b3a44;
+  border-bottom: 0;
+  background: linear-gradient(180deg, #172129 0%, #10171c 100%);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .025);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-preview {
+  background:
+    radial-gradient(circle at 50% 42%, rgba(38, 58, 70, .28), transparent 58%),
+    #030608;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-status {
-  letter-spacing: .075em;
+  letter-spacing: .09em;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live::before {
+  background: var(--pdm-console-program);
+  box-shadow: 0 0 13px rgba(255, 56, 71, .88);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live {
   border-width: 2px;
-  border-color: #ff3c49;
-  box-shadow: 0 0 0 1px rgba(255, 60, 73, .2), 0 0 22px rgba(255, 45, 60, .09), 0 10px 24px rgba(0, 0, 0, .34);
+  border-color: var(--pdm-console-program);
+  box-shadow: 0 0 0 1px rgba(255, 60, 73, .18), 0 0 26px rgba(255, 45, 60, .13), 0 12px 26px rgba(0, 0, 0, .46);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-live .pdm-channel-header {
-  background: linear-gradient(90deg, rgba(113, 19, 29, .72), rgba(54, 18, 24, .52));
+  border-top-color: #8a2530;
+  background: linear-gradient(90deg, rgba(126, 18, 31, .88), rgba(48, 17, 23, .75));
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected::before {
+  background: var(--pdm-console-preview);
+  box-shadow: 0 0 13px rgba(57, 210, 125, .74);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected {
   border-width: 2px;
-  border-color: #2ed16f;
-  box-shadow: 0 0 0 1px rgba(46, 209, 111, .16), 0 0 22px rgba(38, 189, 100, .07), 0 10px 24px rgba(0, 0, 0, .32);
+  border-color: var(--pdm-console-preview);
+  box-shadow: 0 0 0 1px rgba(57, 210, 125, .14), 0 0 24px rgba(38, 189, 100, .11), 0 12px 26px rgba(0, 0, 0, .44);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-header {
-  background: linear-gradient(90deg, rgba(16, 93, 49, .7), rgba(16, 55, 35, .48));
+  border-top-color: #277b4d;
+  background: linear-gradient(90deg, rgba(15, 101, 54, .86), rgba(14, 48, 31, .72));
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-state-dot {
+  background: #5bea98;
+  box-shadow: 0 0 9px rgba(91, 234, 152, .82);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-channel-card.is-selected .pdm-channel-status {
+  color: #94f0b9;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-control-bar {
-  height: 58px;
-  margin: 0 7px 7px;
-  border: 1px solid #27323c;
-  border-radius: 5px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .02);
+  position: relative;
+  height: 61px;
+  margin: 0 8px 8px;
+  padding-inline: 12px;
+  border: 1px solid #30414c;
+  border-radius: 3px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .025), 0 4px 12px rgba(0, 0, 0, .28);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-control-bar .btn-icon {
-  border: 1px solid #2c3741;
-  border-radius: 4px;
-  background: #151c22;
+  border: 1px solid #354854;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #1c2830, #11191f);
+  box-shadow: inset 0 1px rgba(255, 255, 255, .04), 0 2px 4px rgba(0, 0, 0, .3);
 }
 
-.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator > div:nth-child(2) {
-  background: linear-gradient(180deg, #0c1116, #090d11);
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-list {
+  background:
+    linear-gradient(180deg, rgba(139, 97, 31, .055), transparent 28%),
+    #080d11;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb {
-  border-radius: 4px;
-  border-color: #26323c;
-  background: #11171d;
-  box-shadow: 0 5px 12px rgba(0, 0, 0, .22);
+  border-radius: 2px;
+  border-color: #31414b;
+  background: #11191f;
+  box-shadow: 0 7px 15px rgba(0, 0, 0, .34);
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb:hover {
-  border-color: #52616e;
+  border-color: #687c88;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb.border-accent {
-  border-color: #238cff;
-  box-shadow: 0 0 0 1px rgba(35, 140, 255, .18), 0 6px 16px rgba(0, 0, 0, .28);
+  border-color: #f1aa3c;
+  box-shadow: 0 0 0 1px rgba(241, 170, 60, .18), 0 0 16px rgba(241, 170, 60, .08), 0 7px 16px rgba(0, 0, 0, .36);
 }
 
-.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-navigator > div:nth-child(2))::-webkit-scrollbar {
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-thumb.border-accent > div:last-child {
+  color: #ffc66d;
+  background: rgba(138, 84, 9, .32);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-pagination {
+  margin: 0 8px 8px;
+  border: 1px solid #293942;
+  border-radius: 3px;
+}
+
+.pdm-operator-shell.theme-broadcast-pro .fixed > :is(.bg-surface-100, .bg-surface-200, .bg-surface-300) {
+  border-color: #344752;
+  border-radius: 5px;
+  background-color: #0e161b;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .68), inset 0 1px rgba(255, 255, 255, .025);
+}
+
+.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-list)::-webkit-scrollbar {
   width: 7px;
   height: 7px;
 }
 
-.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-navigator > div:nth-child(2))::-webkit-scrollbar-track {
-  background: #090d11;
+.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-list)::-webkit-scrollbar-track {
+  background: #070b0e;
 }
 
-.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-navigator > div:nth-child(2))::-webkit-scrollbar-thumb {
-  border: 2px solid #090d11;
-  border-radius: 8px;
-  background: #33414d;
+.pdm-operator-shell.theme-broadcast-pro :is(.pdm-library-content, .pdm-channel-grid, .pdm-slide-list)::-webkit-scrollbar-thumb {
+  border: 2px solid #070b0e;
+  border-radius: 2px;
+  background: #40525e;
+}
+
+@media (max-width: 1050px) {
+  .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-row {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .pdm-operator-shell.theme-broadcast-pro .pdm-library {
+    width: 225px;
+  }
+
+  .pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator {
+    width: 158px;
+  }
+}
+
+@media (max-width: 950px) {
+  .pdm-toolbar-row,
+  .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-row {
+    gap: 2px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .pdm-toolbar-item > :where(div:not(.fixed):not(.absolute)) > button:not(:first-child),
+  .pdm-toolbar-item[data-toolbar-item="pipViews"] > div > button {
+    flex-basis: 26px;
+    width: 26px;
+    min-width: 26px;
+  }
 }
 
 /*
@@ -409,6 +558,14 @@
 @keyframes fade-out {
   0% { opacity: 1; }
   100% { opacity: 0; }
+}
+
+/* Only the PiP settings preview: clip the actual slide surface, not its
+   letterboxed 16:9 wrapper. Channel previews and program output are unchanged. */
+.pdm-pip-content-preview img,
+.pdm-pip-content-preview canvas,
+.pdm-pip-content-preview video {
+  border-radius: var(--pdm-pip-preview-radius, 0px);
 }
 
 /* Paired names force Chromium to restart the selected scene transition on
@@ -874,4 +1031,11 @@ html.pdm-window-cursor-guard *::after {
 .pdm-operator-cursor-proxy[data-shape='pointer'] .pdm-proxy-pointer,
 .pdm-operator-cursor-proxy[data-shape='text'] .pdm-proxy-text {
   display: block;
+}
+[data-program-scene-modal] [data-broadcast-titles-editor='true'] {
+  width: 125%;
+  height: 125%;
+  flex: none;
+  transform: scale(0.8);
+  transform-origin: top left;
 }

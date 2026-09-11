@@ -34,6 +34,7 @@ export interface QrAutoColorLayout {
     | 'description'
     | 'descriptionFontScale'
     | 'descriptionWidthPercent'
+    | 'descriptionSide'
     | 'sizePercent'
     | 'xPercent'
     | 'yPercent'
@@ -125,7 +126,7 @@ function labelRect(layout: QrAutoColorLayout): OutputRect {
   const blockLeft = centerXPercent / 100 * width - blockWidth / 2
   const centerY = centerYPercent / 100 * height
   return {
-    x: blockLeft + size + gap,
+    x: blockLeft + (config.descriptionSide === 'left' ? 0 : size + gap),
     y: centerY - descriptionHeight / 2,
     width: descriptionWidth,
     height: descriptionHeight

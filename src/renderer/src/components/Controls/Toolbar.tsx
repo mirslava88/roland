@@ -1,4 +1,4 @@
-import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
+import { Component, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { StreamControl } from './StreamControl'
@@ -7,11 +7,9 @@ import { MusicPlayer } from './MusicPlayer'
 import { VideoPlayer } from './VideoPlayer'
 import { SettingsModal } from './SettingsModal'
 import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
-import { BroadcastTitles } from '../BroadcastTitles/BroadcastTitles'
 import { ProgramSceneModal } from '../ProgramScene/ProgramSceneModal'
-import { QrOverlayModal } from '../QrOverlay/QrOverlayModal'
-import { hasQrData } from '../../../../shared/qr-overlay'
 import { acquireOutputTransition } from '../../output-transition-lock'
+import type { ToolbarItemId } from '../../../../shared/toolbar'
 import {
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
   type ProgramSceneViewMode
@@ -86,12 +84,19 @@ function ProgramSceneViewIcon({ mode }: { mode: ProgramSceneViewMode }): JSX.Ele
   )
 }
 
+// Hiding an operator control must not unmount its playback/timer effects.
+function ToolbarItem({ id, visible, children }: { id: ToolbarItemId; visible: boolean; children: ReactNode }): JSX.Element {
+  return <div className="pdm-toolbar-item" data-toolbar-item={id} hidden={!visible}
+    style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>{children}</div>
+}
+
 export function Toolbar(): JSX.Element {
+  const toolbarRef = useRef<HTMLDivElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [auxiliaryDisplaysOpen, setAuxiliaryDisplaysOpen] = useState(false)
   const [outputCloseInFlight, setOutputCloseInFlight] = useState(false)
   const [programSceneOpen, setProgramSceneOpen] = useState(false)
-  const [qrOverlayOpen, setQrOverlayOpen] = useState(false)
+  const [programSceneInitialEditor, setProgramSceneInitialEditor] = useState<'qr' | undefined>()
   const outputCloseInFlightRef = useRef(false)
   const programSceneFocusGenerationRef = useRef(0)
   const {
@@ -114,10 +119,63 @@ export function Toolbar(): JSX.Element {
     setOverlayState
   } = useAppStore()
   const programScene = useAppStore((state) => state.programScene)
-  const captureSources = useAppStore((state) => state.captureSources)
   const setProgramScene = useAppStore((state) => state.setProgramScene)
   const qrOverlay = useAppStore((state) => state.qrOverlay)
-  const setQrOverlay = useAppStore((state) => state.setQrOverlay)
+  const toolbarVisibility = useAppStore((state) => state.toolbarVisibility)
+  const videoQuickControls = useAppStore((state) => state.videoPlaylist.length > 0)
+  const musicQuickControls = useAppStore((state) => state.musicPlaylist.length > 0)
+  const timerQuickControls = useAppStore((state) => state.timerDuration > 0)
+
+  useEffect(() => {
+    const openProgramScene = (event: Event): void => {
+      const detail = (event as CustomEvent<{ editor?: 'qr' }>).detail
+      setProgramSceneInitialEditor(detail?.editor === 'qr' ? 'qr' : undefined)
+      setProgramSceneOpen(true)
+    }
+    window.addEventListener('open-program-scene', openProgramScene)
+    return () => window.removeEventListener('open-program-scene', openProgramScene)
+  }, [])
+
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current
+    if (!toolbar) return
+    // Both rows share one primary-button width. Secondary controls keep their
+    // compact size; only the evenly spaced row gaps absorb the difference.
+    const resizeButtons = (): void => {
+      const widths = Array.from(toolbar.querySelectorAll<HTMLElement>('.pdm-toolbar-row')).flatMap((row) => {
+        const items = Array.from(row.querySelectorAll<HTMLElement>(':scope > .pdm-toolbar-item:not([hidden])'))
+        const rowStyle = getComputedStyle(row)
+        let fixedWidth = Math.max(0, items.length - 1) * parseFloat(rowStyle.columnGap)
+        let mainCount = 0
+        for (const item of items) {
+          const primary = item.dataset.toolbarItem === 'pipViews' ? null : item.querySelector<HTMLElement>(
+            ':scope > button, :scope > div:not(.fixed):not(.absolute) > button:first-child'
+          )
+          fixedWidth += item.getBoundingClientRect().width - (primary?.getBoundingClientRect().width ?? 0)
+          if (primary) mainCount++
+        }
+        const available = row.clientWidth - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight)
+        return mainCount ? [(available - fixedWidth) / mainCount] : []
+      })
+      if (widths.length) {
+        const width = `${Math.max(1, Math.floor(Math.min(...widths) * 4) / 4)}px`
+        if (toolbar.style.getPropertyValue('--pdm-toolbar-button-width') !== width) {
+          toolbar.style.setProperty('--pdm-toolbar-button-width', width)
+        }
+      }
+    }
+    resizeButtons()
+    let previousWidth = toolbar.clientWidth
+    let frame = 0
+    const observer = new ResizeObserver(() => {
+      if (toolbar.clientWidth === previousWidth) return
+      previousWidth = toolbar.clientWidth
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(resizeButtons)
+    })
+    observer.observe(toolbar)
+    return () => { observer.disconnect(); cancelAnimationFrame(frame) }
+  }, [toolbarVisibility, videoQuickControls, musicQuickControls, timerQuickControls])
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 
@@ -127,7 +185,10 @@ export function Toolbar(): JSX.Element {
     return () => window.removeEventListener('open-auxiliary-displays', handleOpenAuxiliaryDisplays)
   }, [])
 
-  const isOutputActive = (isPresentationWindowOpen && activeFile !== null) || activeFile?.type === 'presentation' || (activeFile?.type === 'other' && !activeFile.isImage)
+  const isOutputActive = programScene.enabled ||
+    (isPresentationWindowOpen && activeFile !== null) ||
+    activeFile?.type === 'presentation' ||
+    (activeFile?.type === 'other' && !activeFile.isImage)
   const selectedChannelHasContent = selectedChannel !== null && Boolean(channels[selectedChannel]?.file)
   const selectedChannelFile = selectedChannel !== null ? channels[selectedChannel]?.file : null
   const selectedPptxIsPreparing = selectedChannelFile?.type === 'presentation' &&
@@ -139,31 +200,6 @@ export function Toolbar(): JSX.Element {
     .map((display) => displayAssignments[String(display.id)] || 'off')
   const hasAdditionalScreenOutput = assignedModes.some((mode) => mode !== 'program') ||
     assignedModes.filter((mode) => mode === 'program').length > 1
-  const programSceneReady = Boolean(backdropImage) && captureSources.some(
-    (entry) => entry.capture?.sourceId === programScene.captureSourceId
-  )
-
-  const handleQuickProgramSceneToggle = (): void => {
-    if (programScene.enabled) {
-      setProgramScene({ enabled: false })
-      return
-    }
-    if (!programSceneReady) {
-      setProgramSceneOpen(true)
-      return
-    }
-    const state = useAppStore.getState()
-    const targetDisplay = state.displays.find((display) => (
-      !display.isPrimary && display.id === state.selectedDisplayId
-    )) || state.displays.find((display) => !display.isPrimary)
-    if (targetDisplay) {
-      void window.api.hideTaskbar(targetDisplay.bounds).catch((error: unknown) => {
-        window.api.dbgLog(`program scene taskbar hide failed: ${String(error)}`)
-      })
-    }
-    setProgramScene({ enabled: true, viewMode: 'both' })
-  }
-
   const showPowerPointTransitionHold = (path: string, requestId: string): Promise<boolean> => (
     new Promise((resolve) => {
       let settled = false
@@ -265,7 +301,8 @@ export function Toolbar(): JSX.Element {
       const closingWindowOpen = currentState.isPresentationWindowOpen
       const closingBackdrop = currentState.backdropImage
       const closingDisplayId = currentState.selectedDisplayId
-      const outputStillActive = (closingWindowOpen && closingFile !== null) ||
+      const outputStillActive = currentState.programScene.enabled ||
+        (closingWindowOpen && closingFile !== null) ||
         closingFile?.type === 'presentation' ||
         (closingFile?.type === 'other' && !closingFile.isImage)
       if (!outputStillActive) return
@@ -369,6 +406,7 @@ export function Toolbar(): JSX.Element {
       await window.api.hideOverlay()
       setOverlayState({ kind: 'hidden' })
       await window.api.releaseBrowserFullscreen()
+      currentState.setProgramScene({ enabled: false })
       setActiveFile(null)
       setLiveChannelNull()
       } catch (error) {
@@ -380,6 +418,7 @@ export function Toolbar(): JSX.Element {
           try { await window.api.closePresentationWindow() } catch { /* best effort */ }
           setPresentationWindowOpen(false)
           try { await window.api.releaseBrowserFullscreen() } catch { /* best effort */ }
+          useAppStore.getState().setProgramScene({ enabled: false })
           setActiveFile(null)
           setLiveChannelNull()
         }
@@ -398,6 +437,14 @@ export function Toolbar(): JSX.Element {
       window.dispatchEvent(new CustomEvent('take-channel', { detail: selectedChannel }))
     }
   }
+
+  useEffect(() => {
+    const closeProgramOutput = (): void => {
+      if (isOutputActive) void handleTogglePresentation()
+    }
+    window.addEventListener('close-program-output', closeProgramOutput)
+    return () => window.removeEventListener('close-program-output', closeProgramOutput)
+  })
 
   const handleSelectBackdrop = async (): Promise<void> => {
     if (backdropImage) {
@@ -437,205 +484,166 @@ export function Toolbar(): JSX.Element {
   }
 
   return (
-    <div className="pdm-toolbar relative h-11 bg-surface-300 border-b border-gray-800 flex items-center px-3 gap-1.5 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-      <div className="flex shrink-0 items-center gap-1">
-        <button
-          onClick={() => setSettingsOpen(true)}
-          className="text-[11px] text-gray-400 hover:text-white transition-colors px-1 flex items-center gap-1 whitespace-nowrap"
-          title="Настройки"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          <span className="text-base">⚙</span> Настройки
-        </button>
-
-        <button
-          onClick={() => setAuxiliaryDisplaysOpen(true)}
-          className={`text-[11px] px-1.5 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
-            hasAdditionalScreenOutput
-              ? 'bg-blue-600/80 border-blue-500 text-white hover:bg-blue-600'
-              : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
-          }`}
-          title="Суфлёр и информационный экран"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          🖥 Экраны
-        </button>
-      </div>
-
-      <div className="flex-1" />
-
-      <Timer />
-
-      <EventTimer />
-
-      <MusicPlayer />
-
-      <VideoPlayer />
-
-      {__PDM_STREAM_ENABLED__ && <StreamControl />}
-
-      <BroadcastTitles />
-
-      <button
-        onClick={() => setChannelBoundaryNavigationEnabled(!channelBoundaryNavigationEnabled)}
-        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
-          channelBoundaryNavigationEnabled
-            ? 'bg-emerald-600/80 hover:bg-emerald-600 text-white border-transparent'
-            : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
-        }`}
-        title={`По завершении презентации переключаться на следующий канал — ${channelBoundaryNavigationEnabled ? 'включено' : 'выключено'}`}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        ⇆ Авто: {channelBoundaryNavigationEnabled ? 'Вкл' : 'Выкл'}
-      </button>
-
-      <div
-        className="flex shrink-0 items-stretch"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        <button
-          onClick={handleQuickProgramSceneToggle}
-          className={`whitespace-nowrap rounded-l-lg border px-2 py-1 text-[11px] font-medium transition-colors ${
-            programScene.enabled
-              ? 'border-cyan-500 bg-cyan-600/80 text-white hover:bg-cyan-600'
-              : programSceneReady
-                ? 'border-gray-700 bg-surface-100 text-gray-300 hover:bg-gray-700'
-                : 'border-gray-700 bg-surface-100 text-gray-500 hover:bg-gray-700 hover:text-gray-300'
-          }`}
-          title={programScene.enabled
-            ? 'Выключить режим «Картинка в картинке»'
-            : programSceneReady
-              ? 'Включить режим «Картинка в картинке» с сохранёнными настройками'
-              : 'Сначала настройте фон и внешний источник'}
-        >
-          ▣ PiP: {programScene.enabled ? 'Вкл' : 'Выкл'}
-        </button>
-        <button
-          onClick={() => setProgramSceneOpen(true)}
-          className={`rounded-r-lg border border-l-0 px-1.5 py-1 text-[12px] transition-colors ${
-            programScene.enabled
-              ? 'border-cyan-500 bg-cyan-700/80 text-white hover:bg-cyan-600'
-              : 'border-gray-700 bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'
-          }`}
-          title="Настройки режима «Картинка в картинке»"
-          aria-label="Настройки режима «Картинка в картинке»"
-        >
-          ⚙
-        </button>
-      </div>
-
-      {programScene.enabled && (
-        <div
-          className="flex shrink-0 items-stretch overflow-hidden rounded-lg border border-gray-700 bg-surface-100"
-          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        >
-          {PROGRAM_SCENE_VIEW_BUTTONS.map(({ mode, title }) => {
-            const selected = (programScene.viewMode ?? 'both') === mode
-            return (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => { void handleProgramSceneViewMode(mode) }}
-                title={title}
-                aria-label={title}
-                aria-pressed={selected}
-                className={`flex h-7 w-9 items-center justify-center border-l border-gray-700 first:border-l-0 transition-colors ${selected
-                  ? 'bg-cyan-600 text-white'
-                  : 'text-gray-400 hover:bg-gray-700 hover:text-white'}`}
-              >
-                <ProgramSceneViewIcon mode={mode} />
-              </button>
-            )
-          })}
+    <div ref={toolbarRef} className="pdm-toolbar relative bg-surface-300 border-b border-gray-800 shrink-0 select-none" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+      <div className="pdm-toolbar-row pdm-toolbar-program" role="toolbar" aria-label="Управление эфиром">
+        <div className="pdm-toolbar-item" data-toolbar-item="settings" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="text-[11px] text-gray-300 hover:text-white hover:bg-gray-700 bg-surface-100 border border-gray-700 rounded-lg transition-colors px-2 flex items-center justify-center gap-1 whitespace-nowrap"
+            title="Настройки"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            <span className="text-base">⚙</span> Настройки
+          </button>
         </div>
-      )}
-
-      <div
-        className="flex shrink-0 items-stretch"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        <button
-          type="button"
-          onClick={() => {
-            if (qrOverlay.enabled) {
-              setQrOverlay({ enabled: false })
-            } else if (hasQrData(qrOverlay)) {
-              setQrOverlay({ enabled: true })
-            } else {
-              setQrOverlayOpen(true)
-            }
-          }}
-          className={`whitespace-nowrap rounded-l-lg border px-2 py-1 text-[11px] font-medium transition-colors ${qrOverlay.enabled
-            ? 'border-emerald-500 bg-emerald-600/80 text-white hover:bg-emerald-600'
-            : 'border-gray-700 bg-surface-100 text-gray-300 hover:bg-gray-700'}`}
-          title={qrOverlay.enabled ? 'Убрать QR-код из эфира' : hasQrData(qrOverlay) ? 'Показать QR-код с сохранёнными настройками' : 'Сначала настройте QR-код'}
-        >
-          ▦ QR: {qrOverlay.enabled ? 'Вкл' : 'Выкл'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setQrOverlayOpen(true)}
-          className={`rounded-r-lg border border-l-0 px-1.5 py-1 text-[12px] transition-colors ${qrOverlay.enabled
-            ? 'border-emerald-500 bg-emerald-700/80 text-white hover:bg-emerald-600'
-            : 'border-gray-700 bg-surface-100 text-gray-400 hover:bg-gray-700 hover:text-white'}`}
-          title="Настройки QR-кода"
-          aria-label="Настройки QR-кода"
-        >
-          ⚙
-        </button>
+        <ToolbarItem id="video" visible={toolbarVisibility.video}>
+          <VideoPlayer />
+        </ToolbarItem>
+        <ToolbarItem id="music" visible={toolbarVisibility.music}>
+          <MusicPlayer />
+        </ToolbarItem>
+        <ToolbarItem id="backdrop" visible={toolbarVisibility.backdrop}>
+          <button
+            onClick={handleSelectBackdrop}
+            className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
+              backdropImage
+                ? 'bg-purple-600/80 hover:bg-purple-600 text-white border-transparent'
+                : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
+            }`}
+            title={backdropImage ? 'Отключить подложку' : 'Выбрать подложку'}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            {backdropImage ? '🖼 Фон: Вкл' : '🖼 Фон'}
+          </button>
+        </ToolbarItem>
+        <ToolbarItem id="auto" visible={toolbarVisibility.auto}>
+          <button
+            onClick={() => setChannelBoundaryNavigationEnabled(!channelBoundaryNavigationEnabled)}
+            className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
+              channelBoundaryNavigationEnabled
+                ? 'bg-emerald-600/80 hover:bg-emerald-600 text-white border-transparent'
+                : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
+            }`}
+            title={`По завершении презентации переключаться на следующий канал — ${channelBoundaryNavigationEnabled ? 'включено' : 'выключено'}`}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            ⇆ Авто: {channelBoundaryNavigationEnabled ? 'Вкл' : 'Выкл'}
+          </button>
+        </ToolbarItem>
+        <ToolbarItem id="clicker" visible={toolbarVisibility.clicker}>
+          <button
+            onClick={async () => {
+              const newState = !globalHookEnabled
+              const result = await window.api.toggleGlobalHook(newState)
+              setGlobalHookEnabled(result)
+            }}
+            className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
+              globalHookEnabled
+                ? 'bg-yellow-600/80 hover:bg-yellow-600 text-white border-transparent'
+                : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
+            }`}
+            title={globalHookEnabled ? 'Кликер активен — нажмите для отключения' : 'Кликер выключен — нажмите для включения'}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            🎮 Кликер: {globalHookEnabled ? 'Вкл' : 'Выкл'}
+          </button>
+        </ToolbarItem>
+        <ToolbarItem id="output" visible>
+          <button
+            onClick={handleTogglePresentation}
+            disabled={!canTogglePresentation || outputCloseInFlight}
+            className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
+              isOutputActive
+                ? 'bg-red-600/80 hover:bg-red-600 text-white'
+                : selectedChannelHasContent && !selectedPptxIsPreparing
+                  ? 'bg-red-600 hover:bg-red-500 text-white'
+                  : 'bg-gray-700 text-gray-500 cursor-not-allowed'
+            }`}
+            title={!isOutputActive
+              ? selectedPptxIsPreparing
+                ? 'PowerPoint подготавливает презентацию к эфиру'
+                : !selectedChannelHasContent
+                  ? 'Выберите канал с контентом'
+                  : 'В эфир'
+              : 'Выйти из эфира'}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            {isOutputActive ? '⏹ Выйти из эфира' : '▶ В эфир'}
+          </button>
+        </ToolbarItem>
       </div>
-
-      <button
-        onClick={handleSelectBackdrop}
-        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
-          backdropImage
-            ? 'bg-purple-600/80 hover:bg-purple-600 text-white border-transparent'
-            : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
-        }`}
-        title={backdropImage ? 'Отключить подложку' : 'Выбрать подложку'}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        {backdropImage ? '🖼 Фон: Вкл' : '🖼 Фон'}
-      </button>
-
-      <button
-        onClick={async () => {
-          const newState = !globalHookEnabled
-          const result = await window.api.toggleGlobalHook(newState)
-          setGlobalHookEnabled(result)
-        }}
-        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
-          globalHookEnabled
-            ? 'bg-yellow-600/80 hover:bg-yellow-600 text-white border-transparent'
-            : 'bg-surface-100 text-gray-300 hover:bg-gray-700 border-gray-700'
-        }`}
-        title={globalHookEnabled ? 'Кликер активен — нажмите для отключения' : 'Кликер выключен — нажмите для включения'}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        🎮 Кликер: {globalHookEnabled ? 'Вкл' : 'Выкл'}
-      </button>
-
-      <button
-        onClick={handleTogglePresentation}
-        disabled={!canTogglePresentation || outputCloseInFlight}
-        className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
-          isOutputActive
-            ? 'bg-red-600/80 hover:bg-red-600 text-white'
-            : selectedChannelHasContent && !selectedPptxIsPreparing
-              ? 'bg-red-600 hover:bg-red-500 text-white'
-              : 'bg-gray-700 text-gray-500 cursor-not-allowed'
-        }`}
-        title={!isOutputActive
-          ? selectedPptxIsPreparing
-            ? 'PowerPoint подготавливает презентацию к эфиру'
-            : !selectedChannelHasContent
-              ? 'Выберите канал с контентом'
-              : undefined
-          : undefined}
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        {isOutputActive ? '⏹ Выйти из эфира' : '▶ В эфир'}
-      </button>
+      <div className="pdm-toolbar-row pdm-toolbar-tools" role="toolbar" aria-label="Инструменты">
+        <ToolbarItem id="displays" visible={toolbarVisibility.displays}>
+          <button
+            onClick={() => setAuxiliaryDisplaysOpen(true)}
+            className={`text-[11px] px-1.5 py-1 rounded-lg font-medium transition-colors border whitespace-nowrap ${
+              hasAdditionalScreenOutput
+                ? 'bg-blue-600/80 border-blue-500 text-white hover:bg-blue-600'
+                : 'bg-surface-100 border-gray-700 text-gray-300 hover:bg-gray-700'
+            }`}
+            title="Суфлёр и информационный экран"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            🖥 Экраны
+          </button>
+        </ToolbarItem>
+        <ToolbarItem id="timer" visible={toolbarVisibility.timer}>
+          <Timer />
+        </ToolbarItem>
+        <ToolbarItem id="eventTimer" visible={toolbarVisibility.eventTimer}>
+          <EventTimer />
+        </ToolbarItem>
+        <ToolbarItem id="pip" visible={toolbarVisibility.pip}>
+          <button
+            type="button"
+            onClick={() => {
+              setProgramSceneInitialEditor(undefined)
+              setProgramSceneOpen(true)
+            }}
+            className={`whitespace-nowrap rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors ${
+              programScene.enabled || qrOverlay.enabled
+                ? 'border-cyan-500 bg-cyan-600/80 text-white hover:bg-cyan-600'
+                : 'border-gray-700 bg-surface-100 text-gray-300 hover:bg-gray-700'
+            }`}
+            title="Сцена: картинка, текст, титры и QR-код"
+            aria-label="Открыть Сцену"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            ◫ Сцена
+          </button>
+        </ToolbarItem>
+        <ToolbarItem id="pipViews" visible={toolbarVisibility.pip}>
+          <div
+            className="flex shrink-0 items-stretch overflow-hidden rounded-lg border border-gray-700 bg-surface-100"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            {PROGRAM_SCENE_VIEW_BUTTONS.map(({ mode, title }) => {
+              const selected = (programScene.viewMode ?? 'both') === mode
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => { void handleProgramSceneViewMode(mode) }}
+                  title={programScene.enabled ? title : 'Сначала включите картинку в Сцене'}
+                  disabled={!programScene.enabled}
+                  aria-label={title}
+                  aria-pressed={selected}
+                  className={`disabled:cursor-not-allowed disabled:opacity-35 flex h-7 w-9 items-center justify-center border-l border-gray-700 first:border-l-0 transition-colors ${selected
+                    ? 'bg-cyan-600 text-white'
+                    : 'text-gray-400 hover:bg-gray-700 hover:text-white'}`}
+                >
+                  <ProgramSceneViewIcon mode={mode} />
+                </button>
+              )
+            })}
+          </div>
+        </ToolbarItem>
+        {__PDM_STREAM_ENABLED__ && (
+          <ToolbarItem id="stream" visible={toolbarVisibility.stream}>
+            <StreamControl />
+          </ToolbarItem>
+        )}
+      </div>
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       {auxiliaryDisplaysOpen && (
@@ -643,10 +651,15 @@ export function Toolbar(): JSX.Element {
       )}
       {programSceneOpen && (
         <ProgramSceneModalBoundary onClose={() => setProgramSceneOpen(false)}>
-          <ProgramSceneModal onClose={() => setProgramSceneOpen(false)} />
+          <ProgramSceneModal
+            initialEditor={programSceneInitialEditor}
+            onClose={() => {
+              setProgramSceneOpen(false)
+              setProgramSceneInitialEditor(undefined)
+            }}
+          />
         </ProgramSceneModalBoundary>
       )}
-      {qrOverlayOpen && <QrOverlayModal onClose={() => setQrOverlayOpen(false)} />}
     </div>
   )
 }

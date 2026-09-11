@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import { mediaUrl } from './media'
+import { ProgramSceneAudio } from './components/ProgramScene/ProgramSceneAudio'
 import { PdfViewer } from './components/PresentationView/PdfViewer'
 import { VideoViewer } from './components/PresentationView/VideoViewer'
 import {
@@ -24,16 +25,27 @@ import {
 import { releasePdfiumResources } from './pdfium-renderer'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
+  DEFAULT_PROGRAM_SCENE_CHROMA_KEY,
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
   getProgramSceneRects,
   normalizeProgramSceneParticipantScale,
+  normalizeProgramSceneChromaKey,
+  normalizeProgramSceneMediaLayers,
+  normalizeProgramSceneTextOverlays,
   type ProgramSceneCornerStyle,
+  type ProgramSceneChromaKeyConfig,
   type ProgramSceneParticipantSize,
   type ProgramScenePlacement,
   type ProgramSceneRect,
+  type ProgramSceneMediaLayer,
+  type ProgramSceneTextOverlay,
   type ProgramSceneTransitionEffect,
   type ProgramSceneViewMode
 } from '../../shared/program-scene'
+import { ProgramSceneTextOverlayLayer } from './components/ProgramScene/ProgramSceneTextOverlays'
+import { ProgramSceneMediaLayerSurface } from './components/ProgramScene/ProgramSceneMediaLayers'
+import { ProgramSceneBackgroundLayer } from './components/ProgramScene/ProgramSceneBackgroundLayer'
+import type { ProgramSceneBackgroundPayload } from './program-scene-background'
 import {
   DEFAULT_CONTENT_ZOOM,
   normalizeContentZoom,
@@ -62,6 +74,7 @@ interface ProgramScenePayload {
   active: boolean
   capture: CaptureSourceConfig | null
   backdropPath: string | null
+  background: ProgramSceneBackgroundPayload | null
   placement: ProgramScenePlacement
   participantSize: ProgramSceneParticipantSize
   participantScale: number
@@ -70,6 +83,12 @@ interface ProgramScenePayload {
   transitionEffect: ProgramSceneTransitionEffect
   transitionDurationMs: number
   contentAspectRatio: number | null
+  textOverlays: ProgramSceneTextOverlay[]
+  textOverlaysVisible: boolean
+  mediaLayers: ProgramSceneMediaLayer[]
+  mediaLayersVisible: boolean
+  externalMediaOverlayActive: boolean
+  chromaKey: ProgramSceneChromaKeyConfig
 }
 
 interface ProgramScenePowerPointHold {
@@ -83,6 +102,7 @@ const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
   active: false,
   capture: null,
   backdropPath: null,
+  background: null,
   placement: DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
   participantSize: DEFAULT_PROGRAM_SCENE_LAYOUT.participantSize,
   participantScale: DEFAULT_PROGRAM_SCENE_LAYOUT.participantScale,
@@ -90,7 +110,13 @@ const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
   viewMode: DEFAULT_PROGRAM_SCENE_LAYOUT.viewMode ?? 'both',
   transitionEffect: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth',
   transitionDurationMs: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionDurationMs ?? 360,
-  contentAspectRatio: null
+  contentAspectRatio: null,
+  textOverlays: [],
+  textOverlaysVisible: true,
+  mediaLayers: [],
+  mediaLayersVisible: false,
+  externalMediaOverlayActive: false,
+  chromaKey: { ...DEFAULT_PROGRAM_SCENE_CHROMA_KEY }
 }
 
 type SlotIndex = 0 | 1
@@ -754,9 +780,26 @@ export function PresentationApp(): JSX.Element {
         ? raw.viewMode
         : 'both'
       const nextProgramScene: ProgramScenePayload = {
-        active: raw?.active === true && !!capture,
+        active: raw?.active === true,
         capture,
         backdropPath: typeof raw?.backdropPath === 'string' ? raw.backdropPath : null,
+        background: raw?.background && (
+          raw.background.type === 'image' ||
+          raw.background.type === 'video' ||
+          raw.background.type === 'pdf' ||
+          raw.background.type === 'capture'
+        ) ? raw.background : (
+          typeof raw?.backdropPath === 'string'
+            ? {
+                type: 'image',
+                path: raw.backdropPath,
+                name: 'Фоновое изображение',
+                slide: 1,
+                loop: true,
+                muted: true
+              }
+            : null
+        ),
         placement: typeof raw?.placement === 'string'
           ? raw.placement as ProgramScenePlacement
           : DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
@@ -775,7 +818,13 @@ export function PresentationApp(): JSX.Element {
         transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS,
         contentAspectRatio: typeof raw?.contentAspectRatio === 'number' && Number.isFinite(raw.contentAspectRatio)
           ? raw.contentAspectRatio
-          : null
+          : null,
+        textOverlays: normalizeProgramSceneTextOverlays(raw?.textOverlays),
+        textOverlaysVisible: raw?.textOverlaysVisible !== false,
+        mediaLayers: normalizeProgramSceneMediaLayers(raw?.mediaLayers),
+        mediaLayersVisible: raw?.mediaLayersVisible === true,
+        externalMediaOverlayActive: raw?.externalMediaOverlayActive === true,
+        chromaKey: normalizeProgramSceneChromaKey(raw?.chromaKey)
       }
       const previousProgramScene = programSceneRef.current
       if (
@@ -1014,11 +1063,17 @@ export function PresentationApp(): JSX.Element {
     <div className="relative w-screen h-screen bg-black overflow-hidden">
       {sceneActive && programScene.backdropPath && (
         <img
+          data-program-scene-canvas-background
           src={mediaUrl(programScene.backdropPath)}
-          alt="Program backdrop"
-          className="absolute inset-0 z-0 w-full h-full object-cover select-none"
+          alt="Фон сцены"
+          className="pointer-events-none absolute inset-0 h-full w-full select-none object-cover"
           draggable={false}
         />
+      )}
+      {programScene.mediaLayersVisible && (
+        <div className="pointer-events-none absolute inset-0 z-0">
+          <ProgramSceneMediaLayerSurface layers={programScene.mediaLayers} placement="below" />
+        </div>
       )}
       {slots.map((slot, index) => {
         const isActive = activeLayer.kind === 'slot' && activeLayer.slot === index
@@ -1085,6 +1140,17 @@ export function PresentationApp(): JSX.Element {
           />
         </div>
       )}
+      {sceneActive && programScene.capture && (
+        <ProgramSceneBackgroundLayer
+          source={programScene.background}
+          style={{
+            ...participantStyle,
+            ...(participantVisible ? sceneEffectStyle : {}),
+            borderRadius: sceneBorderRadius
+          }}
+        />
+      )}
+      <ProgramSceneAudio active={sceneActive && !!programScene.capture} />
       <CaptureHub
         activeSourceId={activeCaptureId}
         audioSourceId={captureAudioSourceId}
@@ -1096,25 +1162,39 @@ export function PresentationApp(): JSX.Element {
           transformOrigin: zoomOrigin
         } : undefined}
         sceneSourceId={sceneActive ? programScene.capture?.sourceId ?? null : null}
+        backgroundSourceId={sceneActive && programScene.capture && programScene.background?.type === 'capture'
+          ? programScene.background.capture.sourceId
+          : null}
+        backgroundSceneStyle={{
+          ...participantStyle,
+          ...(participantVisible ? sceneEffectStyle : {}),
+          borderRadius: sceneBorderRadius
+        }}
+        sceneChromaKey={programScene.chromaKey}
         sceneStyle={{ ...participantStyle, ...(participantVisible ? sceneEffectStyle : {}), borderRadius: sceneBorderRadius }}
         onActiveAspectRatio={reportCaptureAspectRatio}
         takeRequest={captureTakeRequest}
         onTakeReady={prepareCaptureTake}
         onTakeError={failCaptureTake}
       />
+      {programScene.mediaLayersVisible && !programScene.externalMediaOverlayActive && (
+        <div className="pointer-events-none absolute inset-0 z-[6]">
+          <ProgramSceneMediaLayerSurface layers={programScene.mediaLayers} placement="above" />
+        </div>
+      )}
       {activeLayer.kind === 'capture' && !sceneActive && (
         <BroadcastTitlesOverlay
           key={broadcastTitles.sourceIdentity || 'no-program-title-source'}
           titles={broadcastTitles}
         />
       )}
-      {sceneActive && (
+      {sceneActive && programScene.capture && (
         <div
           className="absolute overflow-hidden pointer-events-none"
           style={{
             ...participantStyle,
             ...(participantVisible ? sceneEffectStyle : {}),
-            zIndex: 4,
+            zIndex: 7,
             borderRadius: sceneBorderRadius
           }}
         >
@@ -1123,6 +1203,9 @@ export function PresentationApp(): JSX.Element {
             titles={broadcastTitles}
           />
         </div>
+      )}
+      {sceneActive && programScene.textOverlaysVisible && (
+        <ProgramSceneTextOverlayLayer overlays={programScene.textOverlays} />
       )}
       {!hasVisibleContent && !sceneActive && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-700 text-lg select-none">

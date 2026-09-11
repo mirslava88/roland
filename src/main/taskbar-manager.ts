@@ -7,6 +7,13 @@ import { scriptPath } from './paths'
 const execFileAsync = promisify(execFile)
 let taskbarOperationTail: Promise<void> = Promise.resolve()
 let finalRestoreRequested = false
+const hiddenTaskbarDisplays = new Map<number, string>()
+
+export function invalidateTaskbarVisibilityCache(reason: string): void {
+  if (hiddenTaskbarDisplays.size === 0) return
+  hiddenTaskbarDisplays.clear()
+  diagnosticLog('display', `taskbar visibility cache invalidated reason=${reason}`)
+}
 
 function enqueueTaskbarOperation(operation: () => Promise<void>): Promise<void> {
   const next = taskbarOperationTail.then(operation, operation)
@@ -26,6 +33,12 @@ export function hideTaskbarForDisplay(
     try {
       const targetDisplay = screen.getDisplayMatching(displayBounds)
       const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+      const physicalBoundsKey = [
+        physicalBounds.x,
+        physicalBounds.y,
+        physicalBounds.width,
+        physicalBounds.height
+      ].join(',')
       const protectedDisplay = controlWindowBounds
         ? screen.getDisplayMatching(controlWindowBounds)
         : screen.getPrimaryDisplay()
@@ -48,6 +61,11 @@ export function hideTaskbarForDisplay(
           '-Width', String(physicalBounds.width),
           '-Height', String(physicalBounds.height)
         ], { timeout: 5000 })
+        hiddenTaskbarDisplays.delete(targetDisplay.id)
+        return
+      }
+      if (hiddenTaskbarDisplays.get(targetDisplay.id) === physicalBoundsKey) {
+        diagnosticLog('display', `hide taskbar already applied display=${targetDisplay.id}`)
         return
       }
       diagnosticLog(
@@ -69,6 +87,7 @@ export function hideTaskbarForDisplay(
         '-ProtectedWidth', String(protectedPhysicalBounds.width),
         '-ProtectedHeight', String(protectedPhysicalBounds.height)
       ], { timeout: 5000 })
+      hiddenTaskbarDisplays.set(targetDisplay.id, physicalBoundsKey)
     } catch (error) {
       diagnosticLog('display', `hide taskbar failed ${formatDiagnosticError(error)}`)
     }
@@ -86,6 +105,7 @@ export function showAllTaskbars(final = false): Promise<void> {
         '-File', scriptPath('manage-window.ps1'),
         '-Action', 'show-taskbar'
       ], { timeout: 5000 })
+      hiddenTaskbarDisplays.clear()
       diagnosticLog('display', `taskbars restored final=${finalRestoreRequested}`)
     } catch (error) {
       diagnosticLog('display', `show taskbar failed ${formatDiagnosticError(error)}`)

@@ -3,6 +3,7 @@ import { mediaUrl } from './media'
 import { releasePdfiumResources, renderPdfiumPageToCanvas } from './pdfium-renderer'
 import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
+import { InformationTitlesLayer } from './components/AuxiliaryDisplays/InformationTitlesLayer'
 
 const requestedRole = new URLSearchParams(window.location.search).get('role')
 const requestedDisplayId = Number(new URLSearchParams(window.location.search).get('displayId'))
@@ -865,12 +866,7 @@ function InformationDisplay(): JSX.Element {
           <div className="text-xl">Файл не выбран</div>
         </div>
       ) : null}
-      {state.titles && (
-        <BroadcastTitlesOverlay
-          key={state.titleSourceIdentity || 'no-information-title-source'}
-          titles={state.titles}
-        />
-      )}
+      <InformationTitlesLayer />
     </div>
   )
 }

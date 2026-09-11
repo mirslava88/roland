@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
 import { loadAppConfigFromFile, saveCurrentAppConfig } from '../../app-config'
 import { setDisplayAssignmentWithProgramRouting } from '../../program-display-routing'
+import { ToolbarAppearanceSettings } from './ToolbarAppearanceSettings'
 
 interface AudioDevice {
   id: string
@@ -191,7 +192,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+    <div data-pdm-modal="settings" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
       <div
         className="bg-surface-200 border border-gray-700 rounded-xl shadow-2xl w-[680px] max-w-[90vw] max-h-[80vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
@@ -263,7 +264,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
             <div>
               <h3 className="mb-1 text-sm font-semibold text-gray-200">Тема интерфейса</h3>
               <p className="mb-4 text-[10px] leading-4 text-gray-500">
-                Меняется только оформление рабочего окна оператора. Эфир, размеры панелей и расположение элементов остаются без изменений.
+                Меняется только рабочее окно оператора. Broadcast Pro перестраивает визуальную иерархию под эфирную консоль, но не меняет зрительские экраны и логику управления.
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <button
@@ -311,20 +312,26 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                       : 'border-gray-700 hover:border-gray-500'
                   }`}
                 >
-                  <div className="h-28 bg-[#080b0f] p-2.5">
-                    <div className="mb-2 flex gap-1.5">
-                      <span className="h-2 w-12 rounded-[2px] bg-[#167dff]" />
-                      <span className="h-2 w-8 rounded-[2px] bg-[#20262d]" />
-                      <span className="h-2 w-8 rounded-[2px] bg-[#20262d]" />
-                    </div>
-                    <div className="grid h-[76px] grid-cols-[34px_1fr] gap-2">
-                      <span className="rounded-[3px] border border-[#29313a] bg-[#101419]" />
-                      <span className="grid grid-cols-2 gap-1.5 rounded-[3px] border border-[#29313a] bg-[#101419] p-1.5 shadow-lg shadow-black/40">
-                        <i className="rounded-[2px] border-2 border-[#ef3434] bg-[#19212a]" />
-                        <i className="rounded-[2px] border-2 border-[#25b85a] bg-[#19212a]" />
-                        <i className="rounded-[2px] border border-[#303a45] bg-[#171d24]" />
-                        <i className="rounded-[2px] border border-[#303a45] bg-[#171d24]" />
+                  <div className="h-28 bg-[#04070a] p-2">
+                    <div className="mb-1.5 space-y-1">
+                      <span className="flex h-2.5 items-center rounded-[2px] border border-[#2a3b46] bg-[#121c23] px-1">
+                        <i className="mr-1 h-1.5 w-0.5 bg-[#24b4ff]" />
+                        <i className="h-1 w-7 bg-[#31434f]" />
                       </span>
+                      <span className="flex h-2.5 items-center rounded-[2px] border border-[#263640] bg-[#0d151a] px-1">
+                        <i className="mr-1 h-1.5 w-0.5 bg-[#7f909a]" />
+                        <i className="h-1 w-5 bg-[#2b3b45]" />
+                      </span>
+                    </div>
+                    <div className="grid h-[72px] grid-cols-[30px_1fr_24px] gap-1.5">
+                      <span className="rounded-[2px] border border-[#26536b] bg-[#0d151a] shadow-inner shadow-cyan-950/40" />
+                      <span className="grid grid-cols-2 gap-1 rounded-[2px] border border-[#374954] bg-[#070b0e] p-1 shadow-lg shadow-black/60">
+                        <i className="flex flex-col justify-end overflow-hidden rounded-[1px] border-2 border-[#ff3b49] bg-[#111a20]"><b className="h-1.5 bg-[#61151d]" /></i>
+                        <i className="flex flex-col justify-end overflow-hidden rounded-[1px] border-2 border-[#39d27d] bg-[#111a20]"><b className="h-1.5 bg-[#145c36]" /></i>
+                        <i className="flex flex-col justify-end overflow-hidden rounded-[1px] border border-[#3a4d59] bg-[#0d1419]"><b className="h-1.5 bg-[#19252d]" /></i>
+                        <i className="flex flex-col justify-end overflow-hidden rounded-[1px] border border-[#3a4d59] bg-[#0d1419]"><b className="h-1.5 bg-[#19252d]" /></i>
+                      </span>
+                      <span className="rounded-[2px] border border-[#674d22] bg-[#0d151a]" />
                     </div>
                   </div>
                   <div className="flex items-center justify-between bg-surface-100 px-3 py-2">
@@ -339,6 +346,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <div className="mt-4 rounded-lg border border-gray-700 bg-surface-100 px-3 py-2.5 text-[10px] leading-4 text-gray-400">
                 Тема применяется сразу и сохраняется отдельно от каналов и эфира. Классическую тему можно вернуть в любой момент.
               </div>
+              <ToolbarAppearanceSettings />
             </div>
           )}
 
@@ -651,14 +659,19 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>Для запуска нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или дважды щёлкните по каналу</li>
                   <li>PPTX и PDF начинают готовиться сразу после добавления в канал: PPTX скрыто открывается в PowerPoint и получает готовые эфирные слайды, а PDF — страницы под разрешение выбранного дисплея. Пока идёт подготовка, на карточке виден статус <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Кэширование…</code>, а запуск этого PPTX в эфир временно недоступен</li>
                   <li>В карточке видеоканала слева от кнопки «В эфир» находится список «После». Выберите другой непустой канал для автоматического перехода либо «Не переключать»</li>
-                  <li>Раздельная кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">▣ PiP</code> (картинка в картинке) слева от кнопки «Фон» быстро включает и выключает режим с сохранёнными параметрами; соседняя шестерёнка открывает предварительную настройку</li>
-                  <li>В настройках PiP ползунок «Высота камеры» увеличивает участника от 100 до 250%. Пропорции кадра сохраняются; камера заполняет выбранную область без растягивания изображения</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◫ Сцена</code> открывает единый пульт с независимыми разделами «Картинка», «Текст», «QR-код» и «Титры»</li>
+                  <li>Во всех разделах «Сцены» панель состояния и управления эфиром находится сразу под вкладками, предпросмотр — слева, настройки — справа. В «Титрах» кнопки «Выступающий» и «Мероприятие» независимо управляют двумя титрами и сами отжимаются после автоматического скрытия, а кнопка «Показать все» одновременно выводит оба заполненных титра</li>
+                  <li>Окно «Сцена» сохраняет один размер и положение при переключении между всеми четырьмя разделами</li>
+                  <li>В разделах «Картинка», «Текст» и «QR-код» управление «Показать в эфире» выполнено обычной кнопкой без флажка. Перемещение и редактирование в предпросмотре не меняет программный экран в процессе настройки; подготовленный вариант применяется целиком при повторном показе слоя или закрытии Сцены</li>
+                  <li>В разделе «QR-код» настройки применяются сразу: кнопка «Показать в эфире» немедленно включает или выключает QR, а отдельные кнопки сохранения и отмены не требуются</li>
+                  <li>Настройки QR разделены на «Содержимое» и «Оформление». Положение задаётся прямо в предпросмотре; кнопка «Вернуть QR в центр» заменяет отдельную матрицу позиций</li>
+                  <li>В разделе «Картинка» ползунок «Высота камеры» увеличивает участника от 100 до 250%. Пропорции кадра сохраняются; камера заполняет выбранную область без растягивания изображения</li>
                   <li>В панели управления видео доступны воспроизведение, пауза, остановка, переход по таймлайну и зацикливание ролика либо всего видеоплейлиста. Ролик после выхода в эфир запускается только вручную</li>
                   <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью закрывает показанный материал и освобождает его тяжёлые ресурсы: PDF-документ и кэши, видеодекодер либо презентацию PowerPoint, открытую PDM</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>
                   <li>В активном канале PPTX/PDF кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">🔍 Лупа</code> включает увеличение колесом мыши относительно точки курсора; увеличенный документ можно двигать зажатой левой кнопкой мыши, миниатюра и эфир меняются синхронно. Нажатие на проценты возвращает 100%, сохраняя лупу включённой; повторное нажатие при 100% выключает её</li>
                   <li>Поле номера слайда видно даже в неактивном канале — позволяет заранее выставить нужный слайд</li>
-                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⇆ Автопереход</code> находится между кнопками «Видео» и «Подложка (Фон)» и при каждом запуске программы выключен</li>
+                  <li><code className="text-gray-300 bg-surface-400 px-1 rounded-sm">⇆ Авто</code> находится в верхнем ряду панели и при каждом запуске программы выключен</li>
                   <li>При включённом автопереходе нажатие вперёд после последнего слайда PPTX/PDF открывает ближайший следующий канал с контентом, а нажатие назад на первом слайде — предыдущий. Пустые каналы пропускаются</li>
                 </ul>
               </section>
@@ -666,13 +679,14 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h4 className="text-xs font-semibold text-accent mb-1.5">2.1. Титры внешнего источника</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">▰ Титры</code> открывает панель эфирной графики поверх камеры, платы видеозахвата, окна программы или захваченного экрана</li>
+                  <li>Раздел <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Сцена → Титры</code> открывает панель эфирной графики поверх камеры, платы видеозахвата, окна программы или захваченного экрана</li>
                   <li>В блоке «Выступающие» заранее добавьте любое количество спикеров с ФИО и должностями, затем выбирайте нужного из списка и нажимайте «Показать»</li>
+                  <li>Когда выбран выступающий и заполнена информация о мероприятии, кнопка «Показать все» одним нажатием выводит оба титра; независимые переключатели позволяют затем скрывать и возвращать их по отдельности</li>
                   <li>Для каждого титра отдельно выбираются эффекты появления и исчезновения, а также время автоматического скрытия в секундах; значение 0 отключает таймер</li>
                   <li>Для спикера и мероприятия независимо настраиваются форма, цвет текста, градиент фона и два цвета боковой полоски; диагональный стиль доступен с наклоном левой или правой стороны</li>
                   <li>Для информации о мероприятии можно выбрать одну из девяти позиций: слева, по центру или справа в верхней, центральной либо нижней части экрана</li>
                   <li>Заголовок «МЕРОПРИЯТИЕ» можно заменить своим текстом или оставить пустым</li>
-                  <li>Нажмите правой кнопкой мыши на канал с внешним источником, чтобы показать информацию о мероприятии или выбрать спикера; это не переключает канал и не запускает TAKE. Титр появится только там, где уже показывается тот же источник, включая его живые копии и информационные экраны</li>
+                  <li>Нажмите правой кнопкой мыши на канал с внешним источником: после нажатия «Показать всё» выберите нужное ФИО — программа одновременно выведет этого выступающего и мероприятие. Ниже оба титра можно включать по отдельности. Это не переключает канал и не запускает TAKE. Титры появятся только там, где уже показывается тот же источник, включая его живые копии и информационные экраны</li>
                   <li>Редактирование меняет только предварительный просмотр. Если титр уже в эфире, нажмите «Обновить», чтобы зрители увидели новый текст</li>
                   <li>«Скрыть все титры» одновременно убирает оба слоя. В режиме PiP (картинка в картинке) титры выводятся внутри окна участника и не закрывают основной материал; при обычном показе PPTX, PDF и видео они скрыты</li>
                   <li>Тексты сохраняются в конфигурации, но после запуска программы или загрузки конфига титры остаются выключенными</li>
@@ -746,9 +760,12 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 <h4 className="text-xs font-semibold text-accent mb-1.5">7. Настройки — вкладка «Вид»</h4>
                 <ul className="list-disc pl-4 space-y-1 text-gray-400">
                   <li>Тема «Классическая» полностью сохраняет прежнее оформление PDM</li>
-                  <li>Тема «Broadcast Pro» превращает рабочее окно в графитовую эфирную консоль: медиатека, каналы и слайды разделены на модули, а состояния Preview и Program выделены зелёным и красным</li>
+                  <li>Тема «Broadcast Pro» превращает рабочее окно в графитовую эфирную консоль: медиатека, каналы и слайды разделены на модули, выбранный канал выделен зелёным, а активный — красным</li>
                   <li>Тема применяется только к окну оператора и не меняет картинку на эфирных, зеркальных, информационных дисплеях и суфлёрах</li>
                   <li>Выбор сохраняется автоматически между запусками и не влияет на подготовленные материалы или конфигурацию мероприятия</li>
+                  <li>В разделе «Кнопки верхней панели» отметьте нужные кнопки двух рядов. Изменения видны сразу; «Показать все» возвращает полный набор</li>
+                  <li>Кнопки «Настройки» и «В эфир» доступны всегда. Три раскладки показываются и скрываются только вместе со «Сценой»</li>
+                  <li>Скрытие остальных кнопок не останавливает таймер, музыку, видео или стрим; выбор хранится отдельно от конфигурации мероприятия</li>
                 </ul>
               </section>
 

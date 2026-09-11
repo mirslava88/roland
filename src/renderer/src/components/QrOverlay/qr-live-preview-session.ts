@@ -1,9 +1,9 @@
-let livePreviewActive = false
+let qrEditorOwnsOutput = false
 
-export function isQrLivePreviewActive(): boolean {
-  return livePreviewActive
+export function isQrEditorOutputOwned(): boolean {
+  return qrEditorOwnsOutput
 }
 
-export function setQrLivePreviewActive(active: boolean): void {
-  livePreviewActive = active
+export function setQrEditorOutputOwned(owned: boolean): void {
+  qrEditorOwnsOutput = owned
 }

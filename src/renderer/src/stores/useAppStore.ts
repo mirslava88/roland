@@ -1,12 +1,24 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
+import { normalizeToolbarVisibility, readToolbarVisibility, TOOLBAR_STORAGE_KEY, type ToolbarVisibility, type ToolbarItemId } from '../../../shared/toolbar'
+import { DEFAULT_PROGRAM_SCENE_AUDIO, normalizeProgramSceneAudio, type ProgramSceneAudioConfig } from '../../../shared/program-scene-audio'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
+  DEFAULT_PROGRAM_SCENE_BACKGROUND,
+  DEFAULT_PROGRAM_SCENE_CHROMA_KEY,
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
+  normalizeProgramSceneChromaKey,
+  normalizeProgramSceneBackground,
   normalizeProgramSceneParticipantScale,
+  normalizeProgramSceneMediaLayers,
+  normalizeProgramSceneTextOverlays,
   type ProgramSceneCornerStyle,
+  type ProgramSceneBackgroundConfig,
+  type ProgramSceneChromaKeyConfig,
   type ProgramSceneParticipantSize,
   type ProgramScenePlacement,
+  type ProgramSceneMediaLayer,
+  type ProgramSceneTextOverlay,
   type ProgramSceneTransitionEffect,
   type ProgramSceneViewMode
 } from '../../../shared/program-scene'
@@ -168,6 +180,11 @@ function writeStoredAppTheme(theme: AppTheme): void {
   }
 }
 
+function readStoredToolbarVisibility(): ToolbarVisibility {
+  try { return readToolbarVisibility(localStorage) }
+  catch { return normalizeToolbarVisibility() }
+}
+
 export type EventTimerCentralMode = 'current' | 'timer' | 'to-start' | 'to-end'
 export type EventTimerHeadings = Record<EventTimerCentralMode, string>
 
@@ -265,7 +282,10 @@ function normalizedDesktopWindowHwnd(sourceKey?: string): string | null {
  * not the first choice: the channel picker and the information-screen picker
  * create separate PDM source records even when the operator selects the same
  * camera/window. The native device/window keys let titles follow the actual
- * source across every place where it is used.
+ * source across every place where it is used. For cameras, deviceId is the
+ * primary key inside the current Windows session: older saved records may not
+ * contain groupId, and mixing groupId with deviceId would split one camera
+ * into two independent title targets.
  */
 export function captureSourceIdentity(capture?: CaptureSourceConfig | null): string | null {
   if (!capture) return null
@@ -279,6 +299,7 @@ export function captureSourceIdentity(capture?: CaptureSourceConfig | null): str
     if (windowHwnd) return `window:${windowHwnd}`
     return desktopKey ? `desktop:${desktopKey}` : null
   }
+  if (capture.videoDeviceId) return `device:${capture.videoDeviceId}`
   if (capture.videoGroupId) {
     const normalizedLabel = capture.videoLabel.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
     // A physical capture device may expose several distinct video endpoints
@@ -286,7 +307,6 @@ export function captureSourceIdentity(capture?: CaptureSourceConfig | null): str
     // The tuple survives deviceId changes without merging different pictures.
     return `device-group:${JSON.stringify([capture.videoGroupId, normalizedLabel])}`
   }
-  if (capture.videoDeviceId) return `device:${capture.videoDeviceId}`
   return capture.sourceId ? `source:${capture.sourceId}` : null
 }
 
@@ -497,6 +517,9 @@ interface AppState {
   informationMedia: InformationMediaConfig | null
   backdropImage: string | null
   programScene: {
+    audio: ProgramSceneAudioConfig
+    chromaKey: ProgramSceneChromaKeyConfig
+    background: ProgramSceneBackgroundConfig
     enabled: boolean
     captureSourceId: string | null
     placement: ProgramScenePlacement
@@ -506,10 +529,15 @@ interface AppState {
     viewMode: ProgramSceneViewMode
     transitionEffect: ProgramSceneTransitionEffect
     transitionDurationMs: number
+    textOverlays: ProgramSceneTextOverlay[]
+    textOverlaysVisible: boolean
+    mediaLayers: ProgramSceneMediaLayer[]
+    mediaLayersVisible: boolean
   }
   qrOverlay: QrOverlayConfig
   contentZoom: ContentZoomState
   appTheme: AppTheme
+  toolbarVisibility: ToolbarVisibility
   globalHookEnabled: boolean
   channelBoundaryNavigationEnabled: boolean
   eventTimer: EventTimerState
@@ -577,6 +605,8 @@ interface AppState {
   setQrOverlay: (update: Partial<QrOverlayConfig>) => void
   setContentZoom: (update: Partial<ContentZoomState>) => void
   setAppTheme: (theme: AppTheme) => void
+  setToolbarButtonVisible: (id: ToolbarItemId, visible: boolean) => void
+  resetToolbarVisibility: () => void
   setGlobalHookEnabled: (enabled: boolean) => void
   setChannelBoundaryNavigationEnabled: (enabled: boolean) => void
   setEventTimer: (update: Partial<EventTimerState>) => void
@@ -664,14 +694,22 @@ export const useAppStore = create<AppState>()(persist(
   backdropImage: null,
   programScene: {
     ...DEFAULT_PROGRAM_SCENE_LAYOUT,
+    audio: { ...DEFAULT_PROGRAM_SCENE_AUDIO },
+    chromaKey: { ...DEFAULT_PROGRAM_SCENE_CHROMA_KEY },
+    background: { ...DEFAULT_PROGRAM_SCENE_BACKGROUND },
     viewMode: DEFAULT_PROGRAM_SCENE_LAYOUT.viewMode ?? 'both',
     transitionEffect: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth',
     transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS,
-    captureSourceId: null
+    captureSourceId: null,
+    textOverlays: [],
+    textOverlaysVisible: true,
+    mediaLayers: [],
+    mediaLayersVisible: false
   },
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   appTheme: readStoredAppTheme() ?? 'classic',
+  toolbarVisibility: readStoredToolbarVisibility(),
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,
   eventTimer: {
@@ -908,7 +946,7 @@ export const useAppStore = create<AppState>()(persist(
       captureSources: captureSources.filter((item) => item.capture?.sourceId !== sourceId),
       selectedFile: selectedFile?.capture?.sourceId === sourceId ? null : selectedFile,
       programScene: programScene.captureSourceId === sourceId
-        ? { ...programScene, enabled: false, captureSourceId: null }
+        ? { ...programScene, enabled: false, captureSourceId: null, audio: { ...DEFAULT_PROGRAM_SCENE_AUDIO } }
         : programScene
     })
   },
@@ -1074,9 +1112,32 @@ export const useAppStore = create<AppState>()(persist(
     programScene: {
       ...state.programScene,
       ...update,
+      audio: normalizeProgramSceneAudio(update.audio ?? (
+        update.captureSourceId !== undefined && update.captureSourceId !== state.programScene.captureSourceId
+          ? DEFAULT_PROGRAM_SCENE_AUDIO
+          : state.programScene.audio
+      )),
+      chromaKey: normalizeProgramSceneChromaKey(
+        update.chromaKey ?? state.programScene.chromaKey
+      ),
+      background: normalizeProgramSceneBackground(
+        update.background ?? state.programScene.background
+      ),
       participantScale: normalizeProgramSceneParticipantScale(
         update.participantScale ?? state.programScene.participantScale
       ),
+      textOverlays: normalizeProgramSceneTextOverlays(
+        update.textOverlays ?? state.programScene.textOverlays
+      ),
+      textOverlaysVisible: update.textOverlaysVisible !== undefined
+        ? update.textOverlaysVisible === true
+        : state.programScene.textOverlaysVisible,
+      mediaLayers: normalizeProgramSceneMediaLayers(
+        update.mediaLayers ?? state.programScene.mediaLayers
+      ),
+      mediaLayersVisible: update.mediaLayersVisible !== undefined
+        ? update.mediaLayersVisible === true
+        : state.programScene.mediaLayersVisible,
       transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
     }
   })),
@@ -1090,6 +1151,16 @@ export const useAppStore = create<AppState>()(persist(
     const normalizedTheme: AppTheme = theme === 'broadcast-pro' ? 'broadcast-pro' : 'classic'
     writeStoredAppTheme(normalizedTheme)
     set({ appTheme: normalizedTheme })
+  },
+  setToolbarButtonVisible: (id, visible) => {
+    const toolbarVisibility = normalizeToolbarVisibility({ ...get().toolbarVisibility, [id]: visible })
+    try { localStorage.setItem(TOOLBAR_STORAGE_KEY, JSON.stringify(toolbarVisibility)) } catch { /* session-only if storage is unavailable */ }
+    set({ toolbarVisibility })
+  },
+  resetToolbarVisibility: () => {
+    const toolbarVisibility = normalizeToolbarVisibility()
+    try { localStorage.setItem(TOOLBAR_STORAGE_KEY, JSON.stringify(toolbarVisibility)) } catch { /* keep the current session usable */ }
+    set({ toolbarVisibility })
   },
   setGlobalHookEnabled: (enabled) => set({ globalHookEnabled: enabled }),
   setChannelBoundaryNavigationEnabled: (enabled) => set({ channelBoundaryNavigationEnabled: enabled }),
@@ -1280,7 +1351,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 35,
+    version: 42,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1504,6 +1575,13 @@ export const useAppStore = create<AppState>()(persist(
       // v32 -> v33: add description background color and transparency.
       // v33 -> v34: add automatic description background color from the active slide.
       // v34 -> v35: allow automatic text contrast to be disabled independently.
+      // v36 -> v37: add persisted, movable multiline text blocks to PiP.
+      // v37 -> v38: allow the QR description to be placed on either side.
+      // v40 -> v41: add independent image/video layers. Bumping the persisted
+      // version is essential because Zustand shallow-merges the stored
+      // programScene object and would otherwise drop the new default fields.
+      // v41 -> v42: remember per-text visibility and whether QR participates
+      // in the shared Scene canvas/context menu.
       if (version < 24) {
         migrated.qrOverlay = { ...DEFAULT_QR_OVERLAY }
       } else {
@@ -1525,7 +1603,14 @@ export const useAppStore = create<AppState>()(persist(
         : {}
       migrated.programScene = {
         ...rawScene,
-        participantScale: normalizeProgramSceneParticipantScale(rawScene.participantScale)
+        audio: normalizeProgramSceneAudio(rawScene.audio),
+        chromaKey: normalizeProgramSceneChromaKey(rawScene.chromaKey),
+        background: normalizeProgramSceneBackground(rawScene.background),
+        participantScale: normalizeProgramSceneParticipantScale(rawScene.participantScale),
+        textOverlays: normalizeProgramSceneTextOverlays(rawScene.textOverlays),
+        textOverlaysVisible: rawScene.textOverlaysVisible !== false,
+        mediaLayers: normalizeProgramSceneMediaLayers(rawScene.mediaLayers),
+        mediaLayersVisible: rawScene.mediaLayersVisible === true
       }
       return migrated
     },
@@ -1536,7 +1621,12 @@ export const useAppStore = create<AppState>()(persist(
       currentChannelPage: state.currentChannelPage,
       selectedChannel: state.selectedChannel,
       captureSources: state.captureSources,
-      programScene: { ...state.programScene, enabled: false, viewMode: 'both' },
+      programScene: {
+        ...state.programScene,
+        enabled: false,
+        viewMode: 'both',
+        mediaLayersVisible: false
+      },
       qrOverlay: { ...state.qrOverlay, enabled: false },
       slidePositions: state.slidePositions,
       selectedDisplayId: state.selectedDisplayId,

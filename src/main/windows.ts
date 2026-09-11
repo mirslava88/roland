@@ -236,10 +236,47 @@ export function createQrOverlayWindow(display?: Display): BrowserWindow {
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
-    #qr-block{position:fixed;display:none;align-items:center;filter:drop-shadow(0 4px 14px rgba(0,0,0,.34));user-select:none}
-    #qr{display:block;flex:none;user-select:none;-webkit-user-drag:none}
-    #qr-description{display:none;flex:none;align-items:center;overflow:hidden;background:rgba(3,7,18,.88);color:#fff;font-family:Arial,sans-serif;font-weight:700;line-height:1.15;overflow-wrap:anywhere;white-space:pre-wrap}
+    #qr-block{position:fixed;display:none;align-items:center;user-select:none}
+    #qr{display:block;flex:none;filter:drop-shadow(0 4px 14px rgba(0,0,0,.34));user-select:none;-webkit-user-drag:none}
+    #qr-description{display:none;flex:none;align-items:center;overflow:hidden;background:rgba(3,7,18,.88);color:#fff;font-family:Arial,sans-serif;font-weight:700;line-height:1.15;overflow-wrap:anywhere;white-space:pre-wrap;text-rendering:geometricPrecision}
   </style></head><body><div id="qr-block"><img id="qr" alt="" /><div id="qr-description"></div></div></body></html>`
+  void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  return win
+}
+
+export function createProgramSceneMediaOverlayWindow(display?: Display): BrowserWindow {
+  const target = display || screen.getPrimaryDisplay()
+  const { x, y, width, height } = target.bounds
+  const win = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    resizable: false,
+    show: false,
+    hasShadow: false,
+    title: 'PDM Scene Media Overlay',
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  })
+  win.removeMenu()
+  win.setAlwaysOnTop(true, 'screen-saver')
+  win.setIgnoreMouseEvents(true)
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    *{box-sizing:border-box}html,body,#root{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
+    .media-layer{position:absolute;overflow:hidden;transform:translate(-50%,-50%);user-select:none}
+    .media-layer img,.media-layer video{display:block;width:100%;height:100%;object-fit:contain;user-select:none;-webkit-user-drag:none}
+  </style></head><body><div id="root"></div></body></html>`
   void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   return win
 }

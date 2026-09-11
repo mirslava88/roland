@@ -5,6 +5,7 @@ import {
   useAppStore,
   type BroadcastTitlesOutput
 } from '../../stores/useAppStore'
+import { resolveProgramSceneBackground } from '../../program-scene-background'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -16,16 +17,21 @@ function supportsProgramSceneTitles(file: ReturnType<typeof useAppStore.getState
     (file.type === 'other' && (
       file.isImage === true || OFFICE_PROGRAM_EXTENSIONS.has(file.extension.toLowerCase())
     )) ||
-    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
+    (file.type === 'capture' && (
+      file.capture?.captureKind === 'desktop'
+    ))
   )
 }
 
 function sceneTitleSourceIdentity(state: ReturnType<typeof useAppStore.getState>): string | null {
-  const supportedContent = supportsProgramSceneTitles(state.activeFile)
-  if (!state.programScene.enabled || !state.backdropImage || !supportedContent) return null
+  const supportedContent = !state.activeFile || supportsProgramSceneTitles(state.activeFile)
+  const background = resolveProgramSceneBackground(state)
+  if (!state.programScene.enabled || !background || !supportedContent) return null
   const capture = state.captureSources.find(
     (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
   )?.capture
+  if (state.activeFile?.type === 'capture' && state.activeFile.capture?.sourceId === capture?.sourceId) return null
+  if (background.type === 'capture' && background.capture.sourceId === capture?.sourceId) return null
   return captureSourceIdentity(capture)
 }
 
@@ -122,9 +128,12 @@ export function BroadcastTitlesBridge(): JSX.Element | null {
   const captureOutputs = useAppStore((state) => state.captureTitlesOutputs)
   const activeSourceIdentity = useAppStore((state) => state.programCaptureTitlesSourceIdentity)
   const activeFile = useAppStore((state) => state.activeFile)
-  const backdropImage = useAppStore((state) => state.backdropImage)
   const captureSources = useAppStore((state) => state.captureSources)
   const programScene = useAppStore((state) => state.programScene)
+  const backdropImage = useAppStore((state) => state.backdropImage)
+  const channels = useAppStore((state) => state.channels)
+  const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
+  const pptxThumbnailsMap = useAppStore((state) => state.pptxThumbnailsMap)
   const informationMedia = useAppStore((state) => state.informationMedia)
   const informationOutputAssigned = useAppStore((state) => (
     state.displays.some((display) => (
@@ -137,11 +146,11 @@ export function BroadcastTitlesBridge(): JSX.Element | null {
   // This is the source actually painted by PresentationApp, not the next TAKE
   // selected in the control store.  Keep its auto-hide clock running until the
   // output renderer confirms the handoff or a native output is revealed.
-  const sceneSourceIdentity = programScene.enabled && !!backdropImage && supportsProgramSceneTitles(activeFile)
-    ? captureSourceIdentity(captureSources.find(
-      (entry) => entry.capture?.sourceId === programScene.captureSourceId
-    )?.capture)
-    : null
+  void backdropImage
+  void channels
+  void pptxSlidesMap
+  void pptxThumbnailsMap
+  const sceneSourceIdentity = sceneTitleSourceIdentity(useAppStore.getState())
   const programSourceIdentity = sceneSourceIdentity || activeSourceIdentity
   const output = programSourceIdentity
     ? captureOutputs[programSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT

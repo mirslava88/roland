@@ -374,7 +374,7 @@ export function SlideNavigator(): JSX.Element {
         Слайды
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+      <div className="pdm-slide-list flex-1 overflow-y-auto p-2 space-y-2">
         {!activeFile || (activeFile.type !== 'pdf' && activeFile.type !== 'presentation') ? (
           <div className="flex items-center justify-center py-8 text-gray-600 text-xs">
             Нет слайдов

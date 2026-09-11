@@ -2,11 +2,12 @@ import { useEffect } from 'react'
 import { hasQrData } from '../../../../shared/qr-overlay'
 import { getProgramSceneRects } from '../../../../shared/program-scene'
 import { useAppStore } from '../../stores/useAppStore'
+import { resolveProgramSceneBackground } from '../../program-scene-background'
 import {
   contrastingQrDescriptionTextColor,
   detectQrDescriptionBackgroundColor
 } from './auto-background-color'
-import { isQrLivePreviewActive } from './qr-live-preview-session'
+import { isQrEditorOutputOwned } from './qr-live-preview-session'
 import { renderQrImage } from './qr-render'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
@@ -19,7 +20,9 @@ function supportsProgramScene(file: ReturnType<typeof useAppStore.getState>['act
     (file.type === 'other' && (
       file.isImage === true || OFFICE_PROGRAM_EXTENSIONS.has(file.extension.toLowerCase())
     )) ||
-    (file.type === 'capture' && file.capture?.captureKind === 'desktop')
+    (file.type === 'capture' && (
+      file.capture?.captureKind === 'desktop'
+    ))
   )
 }
 
@@ -36,13 +39,12 @@ export function QrOverlayBridge(): null {
   const programScene = useAppStore((state) => state.programScene)
   const captureSources = useAppStore((state) => state.captureSources)
   const backdropImage = useAppStore((state) => state.backdropImage)
+  const channels = useAppStore((state) => state.channels)
+  const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
 
   useEffect(() => {
     let cancelled = false
-    // While the settings window owns the live preview it is the only writer
-    // allowed to move/recolour the overlay. Otherwise a slide change makes this
-    // bridge briefly resend the last saved coordinates over the draft ones.
-    if (isQrLivePreviewActive()) return
+    if (isQrEditorOutputOwned()) return
     const targetExists = displays.some((display) => !display.isPrimary && display.id === selectedDisplayId)
     const outputActive = activeFile !== null || isPresentationWindowOpen
     const visible = config.enabled && hasQrData(config) && targetExists && outputActive
@@ -51,7 +53,7 @@ export function QrOverlayBridge(): null {
       return
     }
     const timer = setTimeout(() => {
-      if (isQrLivePreviewActive()) return
+      if (isQrEditorOutputOwned()) return
       const pptxThumbnails = activeFile?.type === 'presentation'
         ? pptxThumbnailsMap[activeFile.path] || []
         : []
@@ -68,8 +70,12 @@ export function QrOverlayBridge(): null {
       )?.capture ?? null
       const activeSourceIsParticipant = activeFile?.type === 'capture' &&
         activeFile.capture?.sourceId === selectedSceneCapture?.sourceId
-      const sceneActive = programScene.enabled && !!selectedSceneCapture && !!backdropImage &&
-        supportsProgramScene(activeFile) && !activeSourceIsParticipant
+      const sceneBackground = resolveProgramSceneBackground(useAppStore.getState())
+      const backgroundSourceIsParticipant = sceneBackground?.type === 'capture' &&
+        sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId
+      const sceneActive = programScene.enabled && !!sceneBackground &&
+        (!activeFile || supportsProgramScene(activeFile)) && !activeSourceIsParticipant &&
+        !backgroundSourceIsParticipant
       const sceneRects = getProgramSceneRects(outputWidth, outputHeight, {
         placement: programScene.placement,
         participantSize: programScene.participantSize,
@@ -97,7 +103,7 @@ export function QrOverlayBridge(): null {
           })
         : Promise.resolve(null)
       void Promise.all([renderQrImage(config), automaticColor]).then(([imageDataUrl, detectedColor]) => {
-        if (cancelled || isQrLivePreviewActive()) return
+        if (cancelled || isQrEditorOutputOwned()) return
         const backgroundColor = detectedColor ?? config.descriptionBackgroundColor
         window.api.updateQrOverlay({
           visible: true,
@@ -115,7 +121,8 @@ export function QrOverlayBridge(): null {
           descriptionBackgroundColor: backgroundColor,
           descriptionBackgroundTransparent: config.descriptionBackgroundTransparent,
           descriptionFontScale: config.descriptionFontScale,
-          descriptionWidthPercent: config.descriptionWidthPercent
+          descriptionWidthPercent: config.descriptionWidthPercent,
+          descriptionSide: config.descriptionSide
         })
       }).catch((error: unknown) => {
         window.api.dbgLog(`QR overlay generation failed: ${String(error)}`)
@@ -138,7 +145,9 @@ export function QrOverlayBridge(): null {
     pptxAspectRatios,
     programScene,
     captureSources,
-    backdropImage
+    backdropImage,
+    channels,
+    pptxSlidesMap
   ])
 
   useEffect(() => () => window.api.updateQrOverlay({ visible: false }), [])

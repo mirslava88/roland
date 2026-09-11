@@ -194,6 +194,9 @@ const api = {
     ipcRenderer.send('qr-overlay-update', data)
   },
 
+  updateProgramSceneMediaOverlay: (data: unknown): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('program-scene-media-overlay-update', data),
+
   selectInformationMedia: (): Promise<string | null> => ipcRenderer.invoke('select-information-media'),
 
   getAudioDevices: (): Promise<{ id: string; name: string; isDefault: boolean }[]> =>

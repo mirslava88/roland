@@ -1,4 +1,5 @@
 import { releasePdfiumResources, warmPdfiumDocument } from './pdfium-renderer'
+import { normalizeProgramSceneAudio, type ProgramSceneAudioConfig } from '../../shared/program-scene-audio'
 import {
   channelIdFromIndex,
   DEFAULT_BROADCAST_TITLES,
@@ -21,10 +22,18 @@ import {
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
+  normalizeProgramSceneBackground,
+  normalizeProgramSceneChromaKey,
   normalizeProgramSceneParticipantScale,
+  normalizeProgramSceneMediaLayers,
+  normalizeProgramSceneTextOverlays,
+  type ProgramSceneBackgroundConfig,
+  type ProgramSceneChromaKeyConfig,
   type ProgramSceneCornerStyle,
   type ProgramSceneParticipantSize,
   type ProgramScenePlacement,
+  type ProgramSceneMediaLayer,
+  type ProgramSceneTextOverlay,
   type ProgramSceneTransitionEffect,
   type ProgramSceneViewMode
 } from '../../shared/program-scene'
@@ -91,6 +100,9 @@ interface PdmConfigV1 {
   informationMedia: InformationMediaConfig | null
   captureSources: FileEntry[]
   programScene: {
+    audio: ProgramSceneAudioConfig
+    background: ProgramSceneBackgroundConfig
+    chromaKey: ProgramSceneChromaKeyConfig
     enabled: false
     captureSourceId: string | null
     placement: ProgramScenePlacement
@@ -100,6 +112,10 @@ interface PdmConfigV1 {
     viewMode: ProgramSceneViewMode
     transitionEffect: ProgramSceneTransitionEffect
     transitionDurationMs: number
+    textOverlays: ProgramSceneTextOverlay[]
+    textOverlaysVisible: boolean
+    mediaLayers: ProgramSceneMediaLayer[]
+    mediaLayersVisible: boolean
   }
   qrOverlay: QrOverlayConfig
   slidePositions: Record<string, number>
@@ -172,11 +188,12 @@ function safeCapture(value: unknown): CaptureSourceConfig | null {
   if (!isRecord(value)) return null
   const sourceId = safeString(value.sourceId, 256)
   const videoLabel = safeString(value.videoLabel, 512)
-  const videoDeviceId = safeString(value.videoDeviceId, 2048)
-  if (!sourceId || !videoLabel || !videoDeviceId) return null
+  if (!sourceId || !videoLabel) return null
   // Desktop/window source identifiers are tied to a particular running Windows
   // session and must never be replayed from a saved configuration.
   if (value.captureKind === 'desktop') return null
+  const videoDeviceId = safeString(value.videoDeviceId, 2048)
+  if (!videoDeviceId) return null
   return {
     sourceId,
     captureKind: 'device',
@@ -279,6 +296,13 @@ function collectConfigPaths(raw: Record<string, unknown>): string[] {
   const media = isRecord(raw.informationMedia) ? raw.informationMedia : null
   if (media && media.type !== 'capture') addPath(media.path)
   addPath(raw.backdropImage)
+  const programScene = isRecord(raw.programScene) ? raw.programScene : {}
+  const sceneBackground = isRecord(programScene.background) ? programScene.background : {}
+  addPath(sceneBackground.videoPath)
+  const sceneMediaLayers = Array.isArray(programScene.mediaLayers) ? programScene.mediaLayers.slice(0, 100) : []
+  for (const layer of sceneMediaLayers) {
+    if (isRecord(layer)) addPath(layer.path)
+  }
   const qrOverlay = isRecord(raw.qrOverlay) ? raw.qrOverlay : {}
   addPath(qrOverlay.logoPath)
   addPath(qrOverlay.imagePath)
@@ -555,7 +579,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
     backdropImage: state.backdropImage,
     informationMedia: serializableInformationMedia(state.informationMedia),
     captureSources,
-    programScene: { ...state.programScene, enabled: false },
+    programScene: { ...state.programScene, enabled: false, mediaLayersVisible: false },
     qrOverlay: { ...state.qrOverlay, enabled: false },
     slidePositions,
     input: {
@@ -742,6 +766,31 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   const restoredSceneSourceId = sceneCaptureSourceId && restoredCaptureSources.has(sceneCaptureSourceId)
     ? sceneCaptureSourceId
     : null
+  const parsedSceneBackground = normalizeProgramSceneBackground(rawProgramScene.background)
+  const sceneBackgroundVideoPath = parsedSceneBackground.videoPath
+  const restoredSceneBackgroundVideoPath = sceneBackgroundVideoPath && pathExists(sceneBackgroundVideoPath, validation)
+    ? sceneBackgroundVideoPath
+    : null
+  if (sceneBackgroundVideoPath && !restoredSceneBackgroundVideoPath) {
+    warnMissing(warnings, 'Видео нижнего слоя Сцены', sceneBackgroundVideoPath)
+  }
+  const restoredSceneBackgroundChannelId = parsedSceneBackground.channelId &&
+    channels[parsedSceneBackground.channelId]?.file
+    ? parsedSceneBackground.channelId
+    : null
+  if (parsedSceneBackground.channelId && !restoredSceneBackgroundChannelId) {
+    warnings.push(`Канал нижнего слоя Сцены ${parsedSceneBackground.channelId} не восстановлен: канал пуст или недоступен.`)
+  }
+  const restoredSceneBackground: ProgramSceneBackgroundConfig = {
+    ...parsedSceneBackground,
+    videoPath: restoredSceneBackgroundVideoPath,
+    channelId: restoredSceneBackgroundChannelId
+  }
+  const restoredSceneMediaLayers = normalizeProgramSceneMediaLayers(rawProgramScene.mediaLayers).filter((layer) => {
+    if (pathExists(layer.path, validation)) return true
+    warnMissing(warnings, `Медиаслой «${layer.name}»`, layer.path)
+    return false
+  })
 
   const rawQrOverlay = isRecord(raw.qrOverlay) ? raw.qrOverlay : {}
   const parsedQrOverlay = normalizeQrOverlay(rawQrOverlay)
@@ -1039,6 +1088,9 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     backdropImage: restoredBackdrop,
     programScene: {
       enabled: false,
+      audio: normalizeProgramSceneAudio(rawProgramScene.audio),
+      background: restoredSceneBackground,
+      chromaKey: normalizeProgramSceneChromaKey(rawProgramScene.chromaKey),
       captureSourceId: restoredSceneSourceId,
       placement: scenePlacement,
       participantSize: sceneParticipantSize,
@@ -1046,7 +1098,11 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       cornerStyle: sceneCornerStyle,
       viewMode: sceneViewMode,
       transitionEffect: sceneTransitionEffect,
-      transitionDurationMs: sceneTransitionDurationMs
+      transitionDurationMs: sceneTransitionDurationMs,
+      textOverlays: normalizeProgramSceneTextOverlays(rawProgramScene.textOverlays),
+      textOverlaysVisible: rawProgramScene.textOverlaysVisible !== false,
+      mediaLayers: restoredSceneMediaLayers,
+      mediaLayersVisible: false
     },
     qrOverlay: restoredQrOverlay,
     globalHookEnabled: actualGlobalHook,

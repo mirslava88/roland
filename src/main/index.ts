@@ -6,6 +6,7 @@ import {
   createPresentationWindow,
   createOverlayWindow,
   createQrOverlayWindow,
+  createProgramSceneMediaOverlayWindow,
   createMusicPlayerWindow
 } from './windows'
 import type { AuxiliaryWindowRole } from './windows'
@@ -15,7 +16,7 @@ import { readFile, stat } from 'fs/promises'
 import { Readable } from 'stream'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
-import { showAllTaskbars } from './taskbar-manager'
+import { invalidateTaskbarVisibilityCache, showAllTaskbars } from './taskbar-manager'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { scriptPath } from './paths'
@@ -84,6 +85,9 @@ let qrOverlayWindow: BrowserWindow | null = null
 let qrOverlayRevision = 0
 let qrOverlayDisplayId: number | null = null
 let qrOverlayLayoutKey: string | null = null
+let programSceneMediaOverlayWindow: BrowserWindow | null = null
+let programSceneMediaOverlayDisplayId: number | null = null
+let programSceneMediaOverlayRevision = 0
 let wpfTimerProcess: ChildProcess | null = null // WPF timer overlay for PPTX
 let wpfTimerDisplayKey: string | null = null
 let wpfTimerDisplayId: number | null = null
@@ -2841,6 +2845,26 @@ function createWindows(): void {
           `PowerPoint metrics relocate display=${latestPresentationTarget.id} ` +
           `physical=${JSON.stringify(placement.bounds)} ok=${result.ok}`
         )
+        if (
+          !result.ok &&
+          reason === 'display-added-stable' &&
+          latestDisplays.length > 1 &&
+          latestPresentationTarget.id !== latestPrimary.id &&
+          controlWindow &&
+          !controlWindow.isDestroyed()
+        ) {
+          // Windows/PowerPoint may destroy a native slideshow HWND while the
+          // monitor is absent. Relocation cannot resurrect that surface, so
+          // ask the renderer (which owns the active channel and transactional
+          // TAKE choreography) to reopen the same deck on the returned output.
+          diagnosticLog(
+            'display',
+            `PowerPoint output recovery requested display=${latestPresentationTarget.id}`
+          )
+          controlWindow.webContents.send('powerpoint-output-recovery-needed', {
+            displayId: latestPresentationTarget.id
+          })
+        }
       } catch (error) {
         diagnosticLog('display', `PowerPoint metrics relocate failed ${formatDiagnosticError(error)}`)
       }
@@ -2861,6 +2885,9 @@ function createWindows(): void {
       `metrics changed display=${display.id} metrics=${changedMetrics.join(',')} ` +
       `bounds=${JSON.stringify(display.bounds)} workArea=${JSON.stringify(display.workArea)} scale=${display.scaleFactor}`
     )
+    if (changedMetrics.some((metric) => metric !== 'workArea')) {
+      invalidateTaskbarVisibilityCache(`display=${display.id} metrics=${changedMetrics.join(',')}`)
+    }
     scheduleDisplayMetricsSync(`display=${display.id} metrics=${changedMetrics.join(',')}`)
   })
 
@@ -2868,15 +2895,18 @@ function createWindows(): void {
     // Observe the topology selected in Windows without changing it. Running
     // DisplaySwitch automatically can make Windows migrate third-party windows
     // (notably Chromium browsers) to another monitor.
+    invalidateTaskbarVisibilityCache('display-added')
     sendDisplays()
     scheduleDisplayMetricsSync('display-added')
     // Windows may need a moment to publish stable bounds for a new display.
     setTimeout(() => {
       sendDisplays()
       prewarmPresentationWindow()
+      scheduleDisplayMetricsSync('display-added-stable')
     }, 1500)
   })
   screen.on('display-removed', () => {
+    invalidateTaskbarVisibilityCache('display-removed')
     sendDisplays()
     scheduleDisplayMetricsSync('display-removed')
     const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
@@ -2886,6 +2916,14 @@ function createWindows(): void {
       qrOverlayWindow = null
       qrOverlayDisplayId = null
       qrOverlayLayoutKey = null
+    }
+    if (programSceneMediaOverlayDisplayId !== null && !connectedIds.has(programSceneMediaOverlayDisplayId)) {
+      programSceneMediaOverlayRevision += 1
+      if (programSceneMediaOverlayWindow && !programSceneMediaOverlayWindow.isDestroyed()) {
+        programSceneMediaOverlayWindow.destroy()
+      }
+      programSceneMediaOverlayWindow = null
+      programSceneMediaOverlayDisplayId = null
     }
     for (const [displayId, entry] of [...auxiliaryWindows.entries()]) {
       if (!connectedIds.has(displayId)) {
@@ -3203,6 +3241,7 @@ app.whenReady().then(() => {
     const descriptionWidthPercent = typeof payload.descriptionWidthPercent === 'number'
       ? Math.max(40, Math.min(160, payload.descriptionWidthPercent))
       : 65
+    const descriptionSide = payload.descriptionSide === 'left' ? 'left' : 'right'
     const rounded = payload.cornerStyle === 'rounded'
     const revision = ++qrOverlayRevision
 
@@ -3260,7 +3299,8 @@ app.whenReady().then(() => {
       rounded,
       description,
       descriptionFontScale,
-      descriptionWidthPercent
+      descriptionWidthPercent,
+      descriptionSide
     ])
     const preserveLayout = !freshlyCreated && qrOverlayLayoutKey === layoutKey
     const script = `(() => {
@@ -3271,7 +3311,7 @@ app.whenReady().then(() => {
       if (el.getAttribute('src') !== imageDataUrl) el.src = imageDataUrl;
       label.style.color = ${JSON.stringify(descriptionColor)};
       label.style.backgroundColor = ${descriptionBackgroundTransparent ? "'transparent'" : JSON.stringify(descriptionBackgroundColor)};
-      label.style.textShadow = ${descriptionBackgroundTransparent ? "'0 1px 3px rgba(0,0,0,.95), 0 0 8px rgba(0,0,0,.72)'" : "'none'"};
+      label.style.textShadow = 'none';
       if (!${JSON.stringify(preserveLayout)}) {
         const size = Math.round(innerHeight * ${JSON.stringify(sizePercent)} / 100);
         const description = ${JSON.stringify(description)};
@@ -3293,6 +3333,7 @@ app.whenReady().then(() => {
         label.style.borderRadius = ${rounded ? "'clamp(10px, 8%, 42px)'" : "'0'"};
         block.style.gap = gap + 'px';
         block.style.display = 'flex';
+        block.style.flexDirection = ${JSON.stringify(descriptionSide === 'left' ? 'row-reverse' : 'row')};
         const bounds = block.getBoundingClientRect();
         const halfX = bounds.width / innerWidth * 50;
         const halfY = bounds.height / innerHeight * 50;
@@ -3315,6 +3356,126 @@ app.whenReady().then(() => {
       )
     } catch (error) {
       diagnosticLog('qr-overlay', `render failed ${formatDiagnosticError(error)}`)
+    }
+  })
+
+  ipcMain.handle('program-scene-media-overlay-update', async (event, raw: unknown) => {
+    if (
+      !controlWindow || controlWindow.isDestroyed() ||
+      event.sender.id !== controlWindow.webContents.id
+    ) return { success: false, error: 'Недопустимый источник команды.' }
+
+    const payload = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const displayId = typeof payload.displayId === 'number' ? payload.displayId : null
+    const rawLayers = Array.isArray(payload.layers) ? payload.layers.slice(0, 100) : []
+    const layers = rawLayers.flatMap((entry, index) => {
+      const layer = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {}
+      const path = typeof layer.path === 'string' ? layer.path.trim().slice(0, 32_768) : ''
+      if (!path || layer.visible === false || layer.aboveContent === false) return []
+      const numeric = (value: unknown, fallback: number, min: number, max: number): number => {
+        const parsed = typeof value === 'number' ? value : Number(value)
+        return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback
+      }
+      return [{
+        id: typeof layer.id === 'string' ? layer.id.slice(0, 128) : `media-${index + 1}`,
+        kind: layer.kind === 'video' ? 'video' as const : 'image' as const,
+        url: `pdm-media://file/${encodeURIComponent(path)}`,
+        xPercent: numeric(layer.xPercent, 50, 0, 100),
+        yPercent: numeric(layer.yPercent, 50, 0, 100),
+        widthPercent: numeric(layer.widthPercent, 38, 5, 100),
+        aspectRatio: numeric(layer.aspectRatio, 16 / 9, 0.1, 10),
+        loop: layer.loop !== false,
+        muted: layer.muted !== false
+      }]
+    })
+    const visible = payload.visible === true && displayId !== null && layers.length > 0
+    const revision = ++programSceneMediaOverlayRevision
+
+    if (!visible) {
+      if (programSceneMediaOverlayWindow && !programSceneMediaOverlayWindow.isDestroyed()) {
+        programSceneMediaOverlayWindow.destroy()
+        diagnosticLog('scene-media-overlay', 'hidden and renderer released')
+      }
+      programSceneMediaOverlayWindow = null
+      programSceneMediaOverlayDisplayId = null
+      return { success: true }
+    }
+
+    const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
+    if (!display || display.isPrimary) return { success: false, error: 'Эфирный дисплей недоступен.' }
+    let win = programSceneMediaOverlayWindow
+    if (!win || win.isDestroyed()) {
+      win = createProgramSceneMediaOverlayWindow(display)
+      programSceneMediaOverlayWindow = win
+      diagnosticLog('scene-media-overlay', `created display=${display.id}`)
+      await new Promise<void>((resolve) => {
+        if (!win || win.isDestroyed() || !win.webContents.isLoading()) return resolve()
+        win.webContents.once('did-finish-load', () => resolve())
+      })
+    }
+    if (revision !== programSceneMediaOverlayRevision || !win || win.isDestroyed()) {
+      return { success: false, error: 'Команда устарела.' }
+    }
+    const bounds = win.getBounds()
+    if (
+      bounds.x !== display.bounds.x || bounds.y !== display.bounds.y ||
+      bounds.width !== display.bounds.width || bounds.height !== display.bounds.height
+    ) win.setBounds(display.bounds, false)
+    programSceneMediaOverlayDisplayId = display.id
+
+    const script = `(() => {
+      const root = document.getElementById('root');
+      const layers = ${JSON.stringify(layers)};
+      const retained = new Set();
+      for (const layer of layers) {
+        let box = Array.from(root.children).find((entry) => entry.dataset.id === layer.id);
+        const reusable = box && box.dataset.kind === layer.kind && box.dataset.url === layer.url;
+        if (!reusable) {
+          if (box) box.remove();
+          box = document.createElement('div');
+          box.className = 'media-layer';
+          box.dataset.id = layer.id;
+          box.dataset.kind = layer.kind;
+          box.dataset.url = layer.url;
+          const media = document.createElement(layer.kind === 'video' ? 'video' : 'img');
+          media.src = layer.url;
+          box.appendChild(media);
+        }
+        box.style.left = layer.xPercent + '%';
+        box.style.top = layer.yPercent + '%';
+        box.style.width = layer.widthPercent + '%';
+        box.style.aspectRatio = String(layer.aspectRatio);
+        const media = box.firstElementChild;
+        if (layer.kind === 'video') {
+          media.autoplay = true;
+          media.playsInline = true;
+          media.loop = layer.loop;
+          media.muted = layer.muted;
+          media.play().catch(() => {});
+        }
+        root.appendChild(box);
+        retained.add(layer.id);
+      }
+      for (const box of Array.from(root.children)) {
+        if (!retained.has(box.dataset.id)) box.remove();
+      }
+    })()`
+    try {
+      await win.webContents.executeJavaScript(script)
+      if (revision !== programSceneMediaOverlayRevision || win.isDestroyed()) {
+        return { success: false, error: 'Команда устарела.' }
+      }
+      win.setAlwaysOnTop(true, 'screen-saver')
+      win.showInactive()
+      win.moveTop()
+      if (qrOverlayWindow && !qrOverlayWindow.isDestroyed() && qrOverlayWindow.isVisible()) {
+        qrOverlayWindow.moveTop()
+      }
+      diagnosticLog('scene-media-overlay', `shown display=${display.id} layers=${layers.length}`)
+      return { success: true }
+    } catch (error) {
+      diagnosticLog('scene-media-overlay', `render failed ${formatDiagnosticError(error)}`)
+      return { success: false, error: String(error) }
     }
   })
   diagnosticLog('display', JSON.stringify(screen.getAllDisplays().map((d) => ({

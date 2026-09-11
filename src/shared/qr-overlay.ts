@@ -2,9 +2,11 @@ export type QrContentType = 'url' | 'wifi' | 'file'
 export type QrWifiSecurity = 'WPA' | 'WEP' | 'nopass'
 export type QrModuleStyle = 'square' | 'dots' | 'rounded'
 export type QrCornerStyle = 'sharp' | 'rounded'
+export type QrDescriptionSide = 'left' | 'right'
 
 export interface QrOverlayConfig {
   enabled: boolean
+  sceneVisible: boolean
   contentType: QrContentType
   url: string
   wifiSsid: string
@@ -24,6 +26,7 @@ export interface QrOverlayConfig {
   descriptionBackgroundTransparent: boolean
   descriptionFontScale: number
   descriptionWidthPercent: number
+  descriptionSide: QrDescriptionSide
   sizePercent: number
   xPercent: number
   yPercent: number
@@ -37,6 +40,7 @@ export interface QrOverlayOutput {
 
 export const DEFAULT_QR_OVERLAY: QrOverlayConfig = {
   enabled: false,
+  sceneVisible: true,
   contentType: 'url',
   url: 'https://',
   wifiSsid: '',
@@ -56,6 +60,7 @@ export const DEFAULT_QR_OVERLAY: QrOverlayConfig = {
   descriptionBackgroundTransparent: false,
   descriptionFontScale: 1,
   descriptionWidthPercent: 65,
+  descriptionSide: 'right',
   sizePercent: 24,
   xPercent: 84,
   yPercent: 80
@@ -99,6 +104,7 @@ export function normalizeQrOverlay(value: unknown): QrOverlayConfig {
   )
   return {
     enabled: raw.enabled === true,
+    sceneVisible: raw.sceneVisible !== false,
     contentType: raw.contentType === 'wifi' || raw.contentType === 'file' ? raw.contentType : 'url',
     url: typeof raw.url === 'string' ? raw.url.slice(0, 4096) : DEFAULT_QR_OVERLAY.url,
     wifiSsid: typeof raw.wifiSsid === 'string' ? raw.wifiSsid.slice(0, 256) : '',
@@ -139,6 +145,7 @@ export function normalizeQrOverlay(value: unknown): QrOverlayConfig {
       40,
       160
     ),
+    descriptionSide: raw.descriptionSide === 'left' ? 'left' : 'right',
     sizePercent: number(raw.sizePercent, DEFAULT_QR_OVERLAY.sizePercent, 10, 100),
     xPercent: number(raw.xPercent, DEFAULT_QR_OVERLAY.xPercent, 0, 100),
     yPercent: number(raw.yPercent, DEFAULT_QR_OVERLAY.yPercent, 0, 100)

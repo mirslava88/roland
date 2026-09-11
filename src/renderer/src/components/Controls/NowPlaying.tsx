@@ -19,8 +19,10 @@ export function NowPlaying(): JSX.Element | null {
 
   if (!activeFile) return null
 
-  const activeTypeLabel = activeFile.type === 'capture' && activeFile.capture?.captureKind === 'desktop'
-    ? (activeFile.capture.desktopSourceType === 'screen' ? 'Экран' : 'Окно')
+  const activeTypeLabel = activeFile.type === 'capture'
+    ? activeFile.capture?.captureKind === 'desktop'
+      ? (activeFile.capture.desktopSourceType === 'screen' ? 'Экран' : 'Окно')
+      : TYPE_LABELS.capture
     : TYPE_LABELS[activeFile.type] || activeFile.extension
 
   return (
