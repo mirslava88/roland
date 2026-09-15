@@ -1,5 +1,5 @@
 import { Component, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { StreamControl } from './StreamControl'
 import { EventTimer } from '../EventTimer/EventTimer'
@@ -9,6 +9,7 @@ import { SettingsModal } from './SettingsModal'
 import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysModal'
 import { ProgramSceneModal } from '../ProgramScene/ProgramSceneModal'
 import { acquireOutputTransition } from '../../output-transition-lock'
+import { canStartPptx } from '../../pptx-cache-readiness'
 import type { ToolbarItemId } from '../../../../shared/toolbar'
 import {
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
@@ -192,8 +193,9 @@ export function Toolbar(): JSX.Element {
   const selectedChannelHasContent = selectedChannel !== null && Boolean(channels[selectedChannel]?.file)
   const selectedChannelFile = selectedChannel !== null ? channels[selectedChannel]?.file : null
   const selectedPptxIsPreparing = selectedChannelFile?.type === 'presentation' &&
-    pptxCacheStatuses[selectedChannelFile.path] !== 'ready' &&
-    pptxCacheStatuses[selectedChannelFile.path] !== 'error'
+    !canStartPptx(pptxCacheStatuses[selectedChannelFile.path],
+      useAppStore.getState().pptxSlidesMap[selectedChannelFile.path] || [],
+      selectedChannel !== null ? channels[selectedChannel]?.totalSlides || 0 : 0)
   const canTogglePresentation = isOutputActive || (selectedChannelHasContent && !selectedPptxIsPreparing)
   const assignedModes = displays
     .filter((display) => !display.isPrimary)
@@ -238,6 +240,7 @@ export function Toolbar(): JSX.Element {
     )
     if (!needsPowerPointHold) {
       setProgramScene({ viewMode: mode })
+      if (state.programSnapshot) useAppStore.getState().publishProgramSnapshot()
       return
     }
 
@@ -259,9 +262,8 @@ export function Toolbar(): JSX.Element {
         if (generation !== programSceneFocusGenerationRef.current) return
         participantFocusPrepared = mode === 'participant'
         const latest = useAppStore.getState()
-        const targetDisplay = latest.displays.find((display) => (
-          !display.isPrimary && display.id === latest.selectedDisplayId
-        )) || latest.displays.find((display) => !display.isPrimary)
+        const targetDisplayId = connectedProgramDisplayId(latest)
+        const targetDisplay = latest.displays.find((display) => display.id === targetDisplayId)
         if (targetDisplay) {
           void window.api.hideTaskbar(targetDisplay.bounds).catch((error: unknown) => {
             window.api.dbgLog(`participant focus taskbar hide failed: ${String(error)}`)
@@ -281,6 +283,9 @@ export function Toolbar(): JSX.Element {
       viewMode: mode,
       transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
     })
+    if (useAppStore.getState().programSnapshot) {
+      useAppStore.getState().publishProgramSnapshot()
+    }
   }
 
   const handleTogglePresentation = async (): Promise<void> => {
@@ -288,7 +293,10 @@ export function Toolbar(): JSX.Element {
       if (outputCloseInFlightRef.current) return
       const cancelHandledByTake = !window.dispatchEvent(new CustomEvent('cancel-active-take', {
         cancelable: true,
-        detail: { backdropImage, selectedDisplayId }
+        detail: {
+          backdropImage,
+          selectedDisplayId: connectedProgramDisplayId(useAppStore.getState())
+        }
       }))
       if (cancelHandledByTake) return
       outputCloseInFlightRef.current = true
@@ -448,11 +456,9 @@ export function Toolbar(): JSX.Element {
 
   const handleSelectBackdrop = async (): Promise<void> => {
     if (backdropImage) {
-      // The same button is a real toggle. A program scene cannot exist without
-      // its full-screen backdrop, so disable that layout before removing it.
-      useAppStore.getState().setProgramScene({ enabled: false })
+      const sceneIsLive = useAppStore.getState().programSnapshot !== null
       setBackdropImage(null)
-      if (!activeFile) {
+      if (!activeFile && !sceneIsLive) {
         window.api.sendToPresentation('clear-active-content')
         if (isPresentationWindowOpen) {
           await window.api.closePresentationWindow()
@@ -468,10 +474,12 @@ export function Toolbar(): JSX.Element {
     if (path) {
       setBackdropImage(path)
       // Only show backdrop immediately if no active content is playing
-      if (!activeFile) {
+      if (!activeFile && useAppStore.getState().programSnapshot === null) {
         await window.api.switchAudioToExternal()
         if (!isPresentationWindowOpen) {
-          await window.api.openPresentationWindow(selectedDisplayId ?? undefined)
+          const programDisplayId = connectedProgramDisplayId(useAppStore.getState())
+          if (programDisplayId === null) return
+          await window.api.openPresentationWindow(programDisplayId)
           setPresentationWindowOpen(true)
         }
         window.api.sendToPresentation('load-content', {

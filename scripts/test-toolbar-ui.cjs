@@ -9,7 +9,10 @@ app.whenReady().then(async()=>{
   let win
   try {
     win=new BrowserWindow({show:false,frame:false,width:1280,height:800,useContentSize:true,webPreferences:{sandbox:true,nodeIntegration:false,contextIsolation:true,backgroundThrottling:false}})
-    const js=code=>win.webContents.executeJavaScript(code)
+    const js=async code=>{
+      try { return await win.webContents.executeJavaScript(code) }
+      catch(error){ console.error('Failed test expression:',code);console.error(await win.webContents.executeJavaScript('window.testErrors'));throw error }
+    }
     const screenshot=async(name)=>{
       await js('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))')
       win.webContents.invalidate()
@@ -19,6 +22,16 @@ app.whenReady().then(async()=>{
     for(const edition of ['stream','standard']) {
       await win.loadFile(resolve(`tmp/toolbar-ui/${edition}.html`)); await pause(200)
       await js('window.testStore.getState().resetToolbarVisibility()')
+      await js(`window.setTestBusy(false); (() => {
+        const state=window.testStore.getState(),id=state.channelIds[0],file={id:'early-test',path:'early-test.pptx',name:'Cache test',type:'presentation',extension:'.pptx',size:0};
+        window.testStore.setState({selectedChannel:id,channels:{...state.channels,[id]:{...state.channels[id],file,totalSlides:123}},pptxCacheStatuses:{[file.path]:'loading'},pptxSlidesMap:{[file.path]:Array.from({length:30},(_,i)=>'slide_'+i+'.png')}});
+      })()`); await pause(80)
+      assert.equal(await js(`document.querySelector('[data-toolbar-item="output"] button').disabled`),true,'30/123 is still below 25%')
+      await js(`window.testStore.setState({pptxCacheStatuses:{'early-test.pptx':'partial'},pptxSlidesMap:{'early-test.pptx':Array.from({length:31},(_,i)=>'slide_'+i+'.png')}})`); await pause(80)
+      assert.equal(await js(`document.querySelector('[data-toolbar-item="output"] button').disabled`),false,'31/123 enables the real operator TAKE button')
+      await js(`(() => {const state=window.testStore.getState(),id=state.channelIds[0];window.testStore.setState({selectedChannel:null,channels:{...state.channels,[id]:{...state.channels[id],file:null,totalSlides:0}},pptxCacheStatuses:{},pptxSlidesMap:{}});})()`)
+      console.log(`PASS: ${edition} real toolbar enables PPTX TAKE at 31/123, not 30/123`)
+      if(process.env.PDM_PPTX_THRESHOLD_ONLY) continue
       for(const theme of ['classic','broadcast-pro']) {
         await js(`window.testStore.getState().setAppTheme(${JSON.stringify(theme)})`)
         for(const width of [1280,1024,900,880]) {

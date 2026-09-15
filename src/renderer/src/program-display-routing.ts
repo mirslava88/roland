@@ -1,4 +1,5 @@
 import {
+  isSpeakerOnlyDisplayRouting,
   useAppStore,
   type DisplayOutputMode
 } from './stores/useAppStore'
@@ -88,26 +89,27 @@ async function switchPrimaryProgramDisplayUnlocked(
   }
 
   const activeFile = initial.activeFile
+  const outputScene = initial.programSnapshot?.scene ?? initial.programScene
   const outputIsLive = activeFile !== null || initial.isPresentationWindowOpen
   const activeExternalDocument =
     activeFile?.type === 'other' && !activeFile.isImage && !activeFile.isAudio
   const selectedSceneCapture = initial.captureSources.find(
-    (entry) => entry.capture?.sourceId === initial.programScene.captureSourceId
+    (entry) => entry.capture?.sourceId === outputScene.captureSourceId
   )?.capture ?? null
-  const sceneBackground = resolveProgramSceneBackground(initial)
+  const sceneBackground = resolveProgramSceneBackground({ ...initial, programScene: outputScene })
   const activeOfficeSceneLayout = activeExternalDocument && activeFile &&
     OFFICE_PROGRAM_EXTENSIONS.has(activeFile.extension.toLowerCase()) &&
-    initial.programScene.enabled && sceneBackground &&
-    !(sceneBackground.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
+    initial.programSnapshot !== null && outputScene.enabled &&
+    !(sceneBackground?.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
       ? {
           enabled: true,
-          placement: initial.programScene.placement,
-          participantSize: initial.programScene.participantSize,
-          participantScale: initial.programScene.participantScale,
-          cornerStyle: initial.programScene.cornerStyle,
-          viewMode: initial.programScene.viewMode,
-          transitionEffect: initial.programScene.transitionEffect,
-          transitionDurationMs: initial.programScene.transitionDurationMs,
+          placement: outputScene.placement,
+          participantSize: outputScene.participantSize,
+          participantScale: outputScene.participantScale,
+          cornerStyle: outputScene.cornerStyle,
+          viewMode: outputScene.viewMode,
+          transitionEffect: outputScene.transitionEffect,
+          transitionDurationMs: outputScene.transitionDurationMs,
           contentAspectRatio: null
         } as const
       : undefined
@@ -332,6 +334,9 @@ export async function setDisplayAssignmentWithProgramRouting(
   const release = await acquireOutputTransition(`display-role:${displayId}:${mode}`)
   try {
     const before = useAppStore.getState()
+    const wasSpeakerOnlyPresentationRoute =
+      isSpeakerOnlyDisplayRouting(before) &&
+      (before.activeFile?.type === 'presentation' || before.activeFile?.type === 'pdf')
     const previousMode = before.displayAssignments[String(displayId)] || 'off'
     if (previousMode === mode) {
       return {
@@ -355,6 +360,20 @@ export async function setDisplayAssignmentWithProgramRouting(
     const primaryBeforeAssignment = stateBeforeAssignment.selectedDisplayId
     stateBeforeAssignment.setDisplayAssignment(displayId, mode)
 
+    const requestPresentationRouteRefresh = (): void => {
+      const state = useAppStore.getState()
+      const liveChannelId = state.liveChannel
+      const liveFile = liveChannelId ? state.channels[liveChannelId]?.file : null
+      if (!liveChannelId || (liveFile?.type !== 'presentation' && liveFile?.type !== 'pdf')) return
+      window.api.dbgLog(
+        `presentation route refresh requested channel=${liveChannelId} ` +
+        `speakerOnly=${isSpeakerOnlyDisplayRouting(state)} display=${displayId}`
+      )
+      window.dispatchEvent(new CustomEvent('presentation-route-refresh-needed', {
+        detail: { displayId, speakerOnly: isSpeakerOnlyDisplayRouting(state) }
+      }))
+    }
+
     // If there was no program display, assigning the first one makes it primary
     // in Zustand immediately. Force the real output to follow that new id too.
     if (
@@ -363,14 +382,31 @@ export async function setDisplayAssignmentWithProgramRouting(
       useAppStore.getState().selectedDisplayId === displayId &&
       (stateBeforeAssignment.activeFile !== null || stateBeforeAssignment.isPresentationWindowOpen)
     ) {
-      const switched = await switchPrimaryProgramDisplayUnlocked(displayId, {
-        force: true,
-        previousDisplayId: null
-      })
-      if (!switched.success) {
-        useAppStore.getState().setDisplayAssignment(displayId, previousMode)
-        return switched
+      if (wasSpeakerOnlyPresentationRoute) {
+        // Speaker-only TAKE deliberately has no native PowerPoint/PDF output
+        // to relocate. Recreate the current live channel through the normal
+        // TAKE transaction after the assignment lock is released.
+        requestPresentationRouteRefresh()
+      } else {
+        const switched = await switchPrimaryProgramDisplayUnlocked(displayId, {
+          force: true,
+          previousDisplayId: null
+        })
+        if (!switched.success) {
+          useAppStore.getState().setDisplayAssignment(displayId, previousMode)
+          return switched
+        }
       }
+    }
+
+    if (
+      !wasSpeakerOnlyPresentationRoute &&
+      isSpeakerOnlyDisplayRouting(useAppStore.getState()) &&
+      (stateBeforeAssignment.activeFile?.type === 'presentation' || stateBeforeAssignment.activeFile?.type === 'pdf')
+    ) {
+      // The last Program display has just become Speaker. Convert the live
+      // output immediately instead of waiting for a slide-navigation event.
+      requestPresentationRouteRefresh()
     }
 
     return {

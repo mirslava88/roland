@@ -148,4 +148,17 @@ assert.equal(saved.state.programScene.audio.deviceId, config.deviceId)
 state().setProgramScene({ captureSourceId: 'camera-2' })
 assert.equal(state().programScene.audio.enabled, false, 'changing camera cannot keep an unrelated mic live')
 assert.equal(state().programScene.audio.deviceId, '')
+const snapshotRevision = state().publishProgramSnapshot(null, {
+  timer: {
+    duration: 900, remaining: 900, running: false, visible: true,
+    position: { x: 50, y: 50 }, scale: 1,
+    textColor: '#ffffff', warningTextColor: '#facc15', overtimeTextColor: '#ef4444', textOpacity: 1
+  }
+})
+assert.equal(state().programOutputStatus.phase, 'publishing')
+assert.equal(state().programSnapshot.revision, snapshotRevision)
+assert.equal(Object.isFrozen(state().programSnapshot), true)
+assert.equal(Object.isFrozen(state().programSnapshot.scene.mediaLayers), true)
+state().confirmProgramSnapshot(snapshotRevision)
+assert.equal(state().programOutputStatus.phase, 'live')
 console.log('PASS: PiP audio defaults, one audio-only owner, mode changes, stop/cleanup, late results, input switching, unplug/reconnect, permission errors and safe saved settings')

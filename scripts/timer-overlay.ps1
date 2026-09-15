@@ -77,6 +77,7 @@ public class TimerOverlay
     private int savedDisplayHeight = 0;
     private bool hasSavedPixelPosition = false;
     private int lastPositionRevision = -1;
+    private int lastLayoutRevision = -1;
     private int targetDisplayX;
     private int targetDisplayY;
     private int targetDisplayWidth;
@@ -281,6 +282,29 @@ public class TimerOverlay
                 targetDisplayHeight = Math.Max(1, GetJsonInt(line, "displayHeight"));
                 lastPositionRevision = positionRevision;
                 RepositionToTarget();
+            }
+
+            // Scene preview edits use the same normalized travel coordinates
+            // as this native overlay. Apply a layout revision only once: the
+            // 100 ms timer updates must not fight a later direct WPF drag.
+            int layoutRevision = GetJsonInt(line, "layoutRevision");
+            if (line.Contains("\"layoutX\"") &&
+                line.Contains("\"layoutY\"") &&
+                line.Contains("\"layoutScale\"") &&
+                layoutRevision != lastLayoutRevision)
+            {
+                positionX = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(line, "layoutX", positionX)));
+                positionY = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(line, "layoutY", positionY)));
+                scale = Math.Max(0.5, Math.Min(8.0, GetJsonDouble(line, "layoutScale", scale)));
+                hasSavedPosition = true;
+                hasSavedPixelPosition = false;
+                lastLayoutRevision = layoutRevision;
+                ApplyScale();
+                window.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    RepositionToTarget();
+                    SaveState();
+                }), DispatcherPriority.Loaded);
             }
 
             int remaining = GetJsonInt(line, "remaining");

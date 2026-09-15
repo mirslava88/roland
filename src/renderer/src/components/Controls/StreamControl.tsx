@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { DEFAULT_STREAM_SETTINGS, type StreamSettings, type StreamStatus } from '../../../../shared/streaming'
-import { useAppStore } from '../../stores/useAppStore'
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 
 const field = 'w-full rounded border border-gray-600 bg-gray-900 px-2 py-1.5 text-sm text-white disabled:opacity-50'
 const button = 'rounded border border-gray-600 px-3 py-1.5 text-sm hover:bg-gray-700 disabled:opacity-40'
@@ -20,6 +20,8 @@ export function StreamControl(): JSX.Element {
   const [platform, setPlatform] = useState('VK Видео')
   const mounted = useRef(true)
   const selectedDisplayId = useAppStore((s) => s.selectedDisplayId)
+  const displayAssignments = useAppStore((s) => s.displayAssignments)
+  const setInternalProgramOutputActive = useAppStore((s) => s.setInternalProgramOutputActive)
   const displays = useAppStore((s) => s.displays)
   const pipAudioEnabled = useAppStore((s) => s.programScene.enabled && s.programScene.audio?.enabled)
   const active = status?.phase === 'running' || status?.phase === 'starting'
@@ -54,7 +56,13 @@ export function StreamControl(): JSX.Element {
   const duration = status?.startedAt ? Math.floor((Date.now() - status.startedAt) / 1000) : 0
   const elapsed = `${Math.floor(duration / 3600).toString().padStart(2, '0')}:${Math.floor(duration / 60 % 60).toString().padStart(2, '0')}:${(duration % 60).toString().padStart(2, '0')}`
   const live = status?.destinations.some((d) => d.phase === 'live')
-  const display = displays.find((d) => d.id === selectedDisplayId)
+  const programDisplayId = connectedProgramDisplayId({ displays, displayAssignments, selectedDisplayId })
+  const display = displays.find((d) => d.id === programDisplayId)
+
+  useEffect(() => {
+    if (status?.source !== 'internal') return
+    if (status.phase === 'idle' || status.phase === 'error') setInternalProgramOutputActive(false)
+  }, [setInternalProgramOutputActive, status?.phase, status?.source])
 
   return <>
     <button type="button" onClick={() => setOpen(true)}
@@ -69,7 +77,8 @@ export function StreamControl(): JSX.Element {
           <div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">Стрим</h2>
             <button type="button" className={button} onClick={() => setOpen(false)} aria-label="Закрыть настройки стрима">✕</button></div>
           <p className="mb-3 text-xs text-gray-300">В трансляцию попадает всё, что видно на эфирном экране, включая PowerPoint, PiP, титры и QR. Посторонние окна на этом экране тоже будут видны.</p>
-          <div className="mb-3 text-xs text-gray-300">Эфирный экран: {display ? `${display.label || display.id} (${display.bounds.width}×${display.bounds.height})` : 'не выбран — назначьте его в разделе «Экраны»'}</div>
+          <div className="mb-3 text-xs text-gray-300">Источник изображения: {display ? `${display.label || display.id} (${display.bounds.width}×${display.bounds.height})` : 'внутренний программный выход PDM (без дополнительного монитора)'}</div>
+          {!display && <p className="mb-3 text-xs text-blue-200">Внутренний режим не показывает панель управления и работает при 25/30 кадрах в секунду.</p>}
           <fieldset disabled={locked} className="space-y-3 disabled:opacity-75">
             <div className="grid grid-cols-4 gap-2 text-xs">
               <label>Разрешение<select className={field} value={settings.resolution} onChange={(e) => update({ resolution: Number(e.target.value) as 720 | 1080 })}><option value={1080}>1920×1080</option><option value={720}>1280×720</option></select></label>
@@ -112,8 +121,21 @@ export function StreamControl(): JSX.Element {
           <div className="mt-3 flex items-center justify-between gap-2">
             <button type="button" className={button} disabled={locked || !canSave} onClick={() => void run(async () => { await window.api.streaming.save(settings); setMessage('Настройки сохранены. Ключи зашифрованы для текущего пользователя.'); })}>Сохранить настройки</button>
             <div className="flex gap-2"><button type="button" className={button} onClick={() => setOpen(false)}>Закрыть</button>
-              {active ? <button type="button" className="rounded bg-red-600 px-4 py-1.5 text-sm hover:bg-red-500" onClick={() => void run(() => window.api.streaming.stop())}>Остановить стрим</button>
-                : <button type="button" className="rounded bg-red-600 px-4 py-1.5 text-sm hover:bg-red-500 disabled:opacity-40" disabled={busy || !available || selectedDisplayId === null} onClick={() => void run(() => window.api.streaming.start(settings, selectedDisplayId!))}>Начать трансляцию</button>}
+              {active ? <button type="button" className="rounded bg-red-600 px-4 py-1.5 text-sm hover:bg-red-500" onClick={() => void run(async () => {
+                try { await window.api.streaming.stop() }
+                finally { setInternalProgramOutputActive(false) }
+              })}>Остановить стрим</button>
+                : <button type="button" className="rounded bg-red-600 px-4 py-1.5 text-sm hover:bg-red-500 disabled:opacity-40" disabled={busy || !available || (programDisplayId === null && settings.fps > 30)} onClick={() => void run(async () => {
+                  setInternalProgramOutputActive(programDisplayId === null)
+                  try {
+                    if (programDisplayId === null) await window.api.prepareInternalProgramOutput()
+                    else if (!await window.api.placePresentationWindow(programDisplayId)) {
+                      throw new Error('Не удалось подготовить назначенный эфирный экран.')
+                    }
+                    await window.api.streaming.start(settings, programDisplayId)
+                  }
+                  catch (error) { setInternalProgramOutputActive(false); throw error }
+                })}>Начать трансляцию</button>}
             </div>
           </div>
         </section>

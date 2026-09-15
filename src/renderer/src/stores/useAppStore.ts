@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { cachedPptxPrefix } from '../pptx-cache-readiness'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { normalizeToolbarVisibility, readToolbarVisibility, TOOLBAR_STORAGE_KEY, type ToolbarVisibility, type ToolbarItemId } from '../../../shared/toolbar'
 import { DEFAULT_PROGRAM_SCENE_AUDIO, normalizeProgramSceneAudio, type ProgramSceneAudioConfig } from '../../../shared/program-scene-audio'
@@ -107,7 +108,7 @@ function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
 export type ContentType = 'presentation' | 'pdf' | 'video' | 'capture' | 'other' | null
 export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
 export type ChannelId = string
-export type ChannelCacheStatus = 'loading' | 'ready' | 'error'
+export type ChannelCacheStatus = 'loading' | 'partial' | 'ready' | 'error'
 
 export type OverlayState =
   | { kind: 'hidden' }
@@ -159,6 +160,56 @@ export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 
 export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer' | 'event-timer'
 export type AppTheme = 'classic' | 'broadcast-pro'
 export type DisplayAssignments = Record<string, DisplayOutputMode>
+
+type DisplayRoutingSnapshot = {
+  displays: DisplayInfo[]
+  displayAssignments: DisplayAssignments
+  selectedDisplayId: number | null
+  internalProgramOutputActive?: boolean
+}
+
+export function connectedProgramDisplayId(state: DisplayRoutingSnapshot): number | null {
+  const connectedProgramIds = state.displays
+    .filter((display) => (
+      !display.isPrimary && state.displayAssignments[String(display.id)] === 'program'
+    ))
+    .map((display) => display.id)
+  return state.selectedDisplayId !== null && connectedProgramIds.includes(state.selectedDisplayId)
+    ? state.selectedDisplayId
+    : connectedProgramIds[0] ?? null
+}
+
+export function hasConnectedSpeakerDisplay(state: DisplayRoutingSnapshot): boolean {
+  return state.displays.some((display) => (
+    !display.isPrimary && state.displayAssignments[String(display.id)] === 'speaker'
+  ))
+}
+
+export function isSpeakerOnlyDisplayRouting(state: DisplayRoutingSnapshot): boolean {
+  return connectedProgramDisplayId(state) === null && hasConnectedSpeakerDisplay(state)
+}
+
+export function isRendererOnlyPresentationRouting(state: DisplayRoutingSnapshot): boolean {
+  return connectedProgramDisplayId(state) === null && (
+    hasConnectedSpeakerDisplay(state) || state.internalProgramOutputActive === true
+  )
+}
+
+export function navigateSpeakerOnlyPdf(request: 'next' | 'prev' | number): boolean {
+  const state = useAppStore.getState()
+  if (state.activeFile?.type !== 'pdf' || !isRendererOnlyPresentationRouting(state)) return false
+  const current = Math.max(1, state.currentSlide)
+  const total = Math.max(0, state.totalSlides)
+  const requested = typeof request === 'number'
+    ? request
+    : request === 'next'
+      ? current + 1
+      : current - 1
+  const target = Math.max(1, total > 0 ? Math.min(total, requested) : requested)
+    state.setCurrentSlide(target)
+  window.api.dbgLog(`navigatePdf: speaker-only ${String(request)} ${current}→${target}`)
+  return true
+}
 
 const APP_THEME_STORAGE_KEY = 'pdm-operator-theme'
 
@@ -491,6 +542,82 @@ function normalizeBroadcastTitlesOutput(
   }
 }
 
+export interface ProgramSceneConfigState {
+  audio: ProgramSceneAudioConfig
+  chromaKey: ProgramSceneChromaKeyConfig
+  background: ProgramSceneBackgroundConfig
+  enabled: boolean
+  captureSourceId: string | null
+  contentChannelId: string | null
+  placement: ProgramScenePlacement
+  participantSize: ProgramSceneParticipantSize
+  participantScale: number
+  cornerStyle: ProgramSceneCornerStyle
+  viewMode: ProgramSceneViewMode
+  transitionEffect: ProgramSceneTransitionEffect
+  transitionDurationMs: number
+  textOverlays: ProgramSceneTextOverlay[]
+  textOverlaysVisible: boolean
+  mediaLayers: ProgramSceneMediaLayer[]
+  mediaLayersVisible: boolean
+}
+
+// The editable operator state. Only publishProgramSnapshot is allowed to turn it
+// into the state consumed by the real program output.
+export type SceneDraft = ProgramSceneConfigState
+
+export interface ProgramSceneTimerSnapshot {
+  duration: number
+  remaining: number
+  running: boolean
+  visible: boolean
+  position: { x: number; y: number }
+  scale: number
+  textColor: string
+  warningTextColor: string
+  overtimeTextColor: string
+  textOpacity: number
+}
+
+export interface ProgramSnapshot {
+  revision: number
+  publishedAt: number
+  contentChannelId: string | null
+  backdropImage: string | null
+  scene: ProgramSceneConfigState
+  qrOverlay: QrOverlayConfig
+  timer: ProgramSceneTimerSnapshot
+}
+
+function freezeProgramSnapshot(snapshot: ProgramSnapshot): ProgramSnapshot {
+  Object.freeze(snapshot.scene.audio)
+  Object.freeze(snapshot.scene.chromaKey)
+  Object.freeze(snapshot.scene.background)
+  snapshot.scene.textOverlays.forEach(Object.freeze)
+  snapshot.scene.mediaLayers.forEach(Object.freeze)
+  Object.freeze(snapshot.scene.textOverlays)
+  Object.freeze(snapshot.scene.mediaLayers)
+  Object.freeze(snapshot.scene)
+  Object.freeze(snapshot.qrOverlay)
+  Object.freeze(snapshot.timer.position)
+  Object.freeze(snapshot.timer)
+  return Object.freeze(snapshot)
+}
+
+export interface ProgramOutputStatus {
+  desiredRevision: number
+  confirmedRevision: number
+  phase: 'idle' | 'publishing' | 'live' | 'error'
+  error: string | null
+}
+
+export interface ProgramPublicationOverrides {
+  scene?: ProgramSceneConfigState
+  backdropImage?: string | null
+  qrOverlay?: QrOverlayConfig
+  timer?: ProgramSceneTimerSnapshot
+}
+
 interface AppState {
   folderPath: string | null
   rootFolderPath: string | null
@@ -516,24 +643,10 @@ interface AppState {
   selectedDisplayId: number | null
   informationMedia: InformationMediaConfig | null
   backdropImage: string | null
-  programScene: {
-    audio: ProgramSceneAudioConfig
-    chromaKey: ProgramSceneChromaKeyConfig
-    background: ProgramSceneBackgroundConfig
-    enabled: boolean
-    captureSourceId: string | null
-    placement: ProgramScenePlacement
-    participantSize: ProgramSceneParticipantSize
-    participantScale: number
-    cornerStyle: ProgramSceneCornerStyle
-    viewMode: ProgramSceneViewMode
-    transitionEffect: ProgramSceneTransitionEffect
-    transitionDurationMs: number
-    textOverlays: ProgramSceneTextOverlay[]
-    textOverlaysVisible: boolean
-    mediaLayers: ProgramSceneMediaLayer[]
-    mediaLayersVisible: boolean
-  }
+  programScene: ProgramSceneConfigState
+  programSnapshot: ProgramSnapshot | null
+  programOutputStatus: ProgramOutputStatus
+  internalProgramOutputActive: boolean
   qrOverlay: QrOverlayConfig
   contentZoom: ContentZoomState
   appTheme: AppTheme
@@ -602,6 +715,14 @@ interface AppState {
   setInformationMedia: (media: InformationMediaConfig | null) => void
   setBackdropImage: (path: string | null) => void
   setProgramScene: (update: Partial<AppState['programScene']>) => void
+  publishProgramSnapshot: (
+    contentChannelId?: string | null,
+    overrides?: ProgramPublicationOverrides
+  ) => number
+  confirmProgramSnapshot: (revision: number) => void
+  failProgramSnapshot: (revision: number, error: string) => void
+  clearProgramSnapshot: () => void
+  setInternalProgramOutputActive: (active: boolean) => void
   setQrOverlay: (update: Partial<QrOverlayConfig>) => void
   setContentZoom: (update: Partial<ContentZoomState>) => void
   setAppTheme: (theme: AppTheme) => void
@@ -641,6 +762,8 @@ interface AppState {
   timerDuration: number // total seconds set
   timerRemaining: number // seconds remaining (negative = overtime)
   timerRunning: boolean
+  timerOutputVisible: boolean
+  timerOutputOwner: 'toolbar' | 'scene' | null
   timerSoundEnd: string | null
   timerSoundWarning: string | null
   timerOverlayPosition: { x: number; y: number } // percent from top-left
@@ -652,6 +775,7 @@ interface AppState {
   setTimerDuration: (seconds: number) => void
   setTimerRemaining: (seconds: number) => void
   setTimerRunning: (running: boolean) => void
+  setTimerOutputState: (visible: boolean, owner: 'toolbar' | 'scene' | null) => void
   addTimerMinutes: (minutes: number) => void
   resetTimer: () => void
   setTimerSoundEnd: (path: string | null) => void
@@ -701,11 +825,20 @@ export const useAppStore = create<AppState>()(persist(
     transitionEffect: DEFAULT_PROGRAM_SCENE_LAYOUT.transitionEffect ?? 'smooth',
     transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS,
     captureSourceId: null,
+    contentChannelId: null,
     textOverlays: [],
     textOverlaysVisible: true,
     mediaLayers: [],
     mediaLayersVisible: false
   },
+  programSnapshot: null,
+  programOutputStatus: {
+    desiredRevision: 0,
+    confirmedRevision: 0,
+    phase: 'idle',
+    error: null
+  },
+  internalProgramOutputActive: false,
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   appTheme: readStoredAppTheme() ?? 'classic',
@@ -1108,8 +1241,8 @@ export const useAppStore = create<AppState>()(persist(
   },
   setInformationMedia: (media) => set({ informationMedia: media }),
   setBackdropImage: (path) => set({ backdropImage: path }),
-  setProgramScene: (update) => set((state) => ({
-    programScene: {
+  setProgramScene: (update) => set((state) => {
+    const programScene: ProgramSceneConfigState = {
       ...state.programScene,
       ...update,
       audio: normalizeProgramSceneAudio(update.audio ?? (
@@ -1140,7 +1273,129 @@ export const useAppStore = create<AppState>()(persist(
         : state.programScene.mediaLayersVisible,
       transitionDurationMs: PROGRAM_SCENE_TRANSITION_DURATION_MS
     }
+    if (update.enabled === false) {
+      return {
+        programScene,
+        programSnapshot: null,
+        programOutputStatus: {
+          ...state.programOutputStatus,
+          phase: 'idle',
+          error: null
+        }
+      }
+    }
+    return { programScene }
+  }),
+  publishProgramSnapshot: (contentChannelId, overrides) => {
+    const state = get()
+    const revision = Math.max(
+      state.programOutputStatus.desiredRevision,
+      state.programSnapshot?.revision ?? 0
+    ) + 1
+    const publishedAt = Date.now()
+    const sourceScene = overrides?.scene ?? state.programScene
+    const scene: ProgramSceneConfigState = {
+      ...sourceScene,
+      enabled: true,
+      contentChannelId: contentChannelId === undefined
+        ? sourceScene.contentChannelId
+        : contentChannelId,
+      audio: normalizeProgramSceneAudio(sourceScene.audio),
+      chromaKey: normalizeProgramSceneChromaKey(sourceScene.chromaKey),
+      background: normalizeProgramSceneBackground(sourceScene.background),
+      participantScale: normalizeProgramSceneParticipantScale(sourceScene.participantScale),
+      textOverlays: normalizeProgramSceneTextOverlays(sourceScene.textOverlays),
+      mediaLayers: normalizeProgramSceneMediaLayers(sourceScene.mediaLayers).map((layer) => ({
+        ...layer,
+        currentTime: layer.kind === 'video' && layer.playing && layer.playbackStartedAt
+          ? layer.currentTime + Math.max(0, publishedAt - layer.playbackStartedAt) / 1000
+          : layer.currentTime,
+        playbackStartedAt: layer.kind === 'video' && layer.playing ? publishedAt : null
+      }))
+    }
+    const publishedQrOverlay = normalizeQrOverlay(overrides?.qrOverlay ?? state.qrOverlay)
+    const publishedTimer: ProgramSceneTimerSnapshot = overrides?.timer ? {
+      ...overrides.timer,
+      position: { ...overrides.timer.position }
+    } : {
+      duration: state.timerDuration,
+      remaining: state.timerRemaining,
+      running: state.timerRunning,
+      visible: state.timerOutputVisible && state.timerOutputOwner === 'scene',
+      position: { ...state.timerOverlayPosition },
+      scale: state.timerOverlayScale,
+      textColor: state.timerTextColor,
+      warningTextColor: state.timerWarningTextColor,
+      overtimeTextColor: state.timerOvertimeTextColor,
+      textOpacity: state.timerTextOpacity
+    }
+    const snapshot = freezeProgramSnapshot({
+      revision,
+      publishedAt,
+      contentChannelId: scene.contentChannelId,
+      backdropImage: overrides && 'backdropImage' in overrides
+        ? overrides.backdropImage ?? null
+        : state.backdropImage,
+      scene,
+      qrOverlay: publishedQrOverlay,
+      timer: publishedTimer
+    })
+    set({
+      programScene: overrides?.scene ? state.programScene : scene,
+      qrOverlay: publishedQrOverlay,
+      timerDuration: Math.max(0, publishedTimer.duration),
+      timerRemaining: publishedTimer.remaining,
+      timerRunning: publishedTimer.running && publishedTimer.duration > 0,
+      timerOutputVisible: publishedTimer.visible && publishedTimer.duration > 0,
+      timerOutputOwner: publishedTimer.visible && publishedTimer.duration > 0 ? 'scene' : null,
+      timerOverlayPosition: { ...publishedTimer.position },
+      timerOverlayScale: publishedTimer.scale,
+      timerTextColor: publishedTimer.textColor,
+      timerWarningTextColor: publishedTimer.warningTextColor,
+      timerOvertimeTextColor: publishedTimer.overtimeTextColor,
+      timerTextOpacity: publishedTimer.textOpacity,
+      programSnapshot: snapshot,
+      programOutputStatus: {
+        desiredRevision: revision,
+        confirmedRevision: state.programOutputStatus.confirmedRevision,
+        phase: 'publishing',
+        error: null
+      }
+    })
+    return revision
+  },
+  confirmProgramSnapshot: (revision) => set((state) => (
+    revision !== state.programOutputStatus.desiredRevision
+      ? {}
+      : {
+          programOutputStatus: {
+            desiredRevision: revision,
+            confirmedRevision: revision,
+            phase: 'live',
+            error: null
+          }
+        }
+  )),
+  failProgramSnapshot: (revision, error) => set((state) => (
+    revision !== state.programOutputStatus.desiredRevision
+      ? {}
+      : {
+          programOutputStatus: {
+            ...state.programOutputStatus,
+            phase: 'error',
+            error: error.replace(/[\r\n\t]+/g, ' ').slice(0, 300)
+          }
+        }
+  )),
+  clearProgramSnapshot: () => set((state) => ({
+    programSnapshot: null,
+    programOutputStatus: {
+      ...state.programOutputStatus,
+      phase: 'idle',
+      error: null
+    }
   })),
+  setInternalProgramOutputActive: (active) => set({ internalProgramOutputActive: active }),
   setQrOverlay: (update) => set((state) => ({
     qrOverlay: normalizeQrOverlay({ ...state.qrOverlay, ...update })
   })),
@@ -1253,7 +1508,39 @@ export const useAppStore = create<AppState>()(persist(
       `navigatePptx: ENTER command=${command} arg=${arg} ` +
       `typeof-arg=${typeof arg} stopAtBoundary=${stopAtBoundary}`
     )
-    const { overlayState } = get()
+    const state = get()
+    const { overlayState } = state
+    if (
+      state.activeFile?.type === 'presentation' &&
+      isRendererOnlyPresentationRouting(state)
+    ) {
+      const current = Math.max(1, state.currentSlide)
+      const total = Math.max(0, state.totalSlides)
+      const requested = command === 'goto' && typeof arg === 'number'
+        ? arg
+        : command === 'next'
+          ? current + 1
+          : command === 'prev'
+            ? current - 1
+            : current
+      const target = Math.max(1, total > 0 ? Math.min(total, requested) : requested)
+        const cached = cachedPptxPrefix(state.pptxSlidesMap[state.activeFile.path] || [])
+        if (target > cached) {
+          return { success: false, error: 'Этот слайд ещё кэшируется' }
+        }
+        const boundary = stopAtBoundary && (
+        (command === 'next' && total > 0 && current >= total) ||
+        (command === 'prev' && current <= 1)
+      )
+      state.setCurrentSlide(target)
+      window.api.dbgLog(
+        `navigatePptx: speaker-only ${command} ${current}→${target} boundary=${boundary}`
+      )
+      return {
+        success: true,
+        output: JSON.stringify({ Status: 'ok', CurrentSlide: target, Boundary: boundary })
+      }
+    }
     if (overlayState.kind === 'pinned-pptx') {
       window.api.hideOverlay()
       set({ overlayState: { kind: 'hidden' } })
@@ -1302,6 +1589,8 @@ export const useAppStore = create<AppState>()(persist(
   timerDuration: 0,
   timerRemaining: 0,
   timerRunning: false,
+  timerOutputVisible: false,
+  timerOutputOwner: null,
   timerSoundEnd: null,
   timerSoundWarning: null,
   timerOverlayPosition: { x: 90, y: 90 },
@@ -1313,6 +1602,10 @@ export const useAppStore = create<AppState>()(persist(
   setTimerDuration: (seconds) => set({ timerDuration: seconds, timerRemaining: seconds }),
   setTimerRemaining: (seconds) => set({ timerRemaining: seconds }),
   setTimerRunning: (running) => set({ timerRunning: running }),
+  setTimerOutputState: (visible, owner) => set({
+    timerOutputVisible: visible,
+    timerOutputOwner: visible ? owner : null
+  }),
   addTimerMinutes: (minutes) => {
     const { timerDuration, timerRemaining } = get()
     set({
@@ -1351,7 +1644,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 42,
+    version: 44,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -1582,6 +1875,8 @@ export const useAppStore = create<AppState>()(persist(
       // programScene object and would otherwise drop the new default fields.
       // v41 -> v42: remember per-text visibility and whether QR participates
       // in the shared Scene canvas/context menu.
+      // v42 -> v43: keep the chroma-key image fill separate from the global
+      // Scene backdrop. The nested programScene object is shallow-merged.
       if (version < 24) {
         migrated.qrOverlay = { ...DEFAULT_QR_OVERLAY }
       } else {
@@ -1603,6 +1898,9 @@ export const useAppStore = create<AppState>()(persist(
         : {}
       migrated.programScene = {
         ...rawScene,
+        contentChannelId: typeof rawScene.contentChannelId === 'string'
+          ? rawScene.contentChannelId
+          : null,
         audio: normalizeProgramSceneAudio(rawScene.audio),
         chromaKey: normalizeProgramSceneChromaKey(rawScene.chromaKey),
         background: normalizeProgramSceneBackground(rawScene.background),

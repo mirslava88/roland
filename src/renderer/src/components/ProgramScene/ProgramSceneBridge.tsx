@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { waitForNavigationTransitionEnd } from '../../navigation-transition'
 import { PROGRAM_SCENE_TRANSITION_DURATION_MS } from '../../../../shared/program-scene'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
+import { hasQrData } from '../../../../shared/qr-overlay'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -24,24 +25,46 @@ function supportsProgramScene(file: ReturnType<typeof useAppStore.getState>['act
 }
 
 export function ProgramSceneBridge(): null {
-  const programScene = useAppStore((state) => state.programScene)
+  const draftScene = useAppStore((state) => state.programScene)
+  const programSnapshot = useAppStore((state) => state.programSnapshot)
+  const programScene = programSnapshot?.scene ?? draftScene
   const transitionDurationMs = programScene.transitionEffect === 'instant'
     ? 0
     : PROGRAM_SCENE_TRANSITION_DURATION_MS
   const captureSources = useAppStore((state) => state.captureSources)
-  const backdropImage = useAppStore((state) => state.backdropImage)
+  const draftBackdropImage = useAppStore((state) => state.backdropImage)
+  const backdropImage = programSnapshot?.backdropImage ?? draftBackdropImage
   const channels = useAppStore((state) => state.channels)
   const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
   const pptxThumbnailsMap = useAppStore((state) => state.pptxThumbnailsMap)
   const background = useMemo(
-    () => resolveProgramSceneBackground(useAppStore.getState()),
-    [backdropImage, channels, pptxSlidesMap, pptxThumbnailsMap, programScene.background]
+    () => resolveProgramSceneBackground({
+      ...useAppStore.getState(),
+      programScene
+    }),
+    [channels, pptxSlidesMap, pptxThumbnailsMap, programScene]
   )
   const activeFile = useAppStore((state) => state.activeFile)
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
   const displays = useAppStore((state) => state.displays)
+  const displayAssignments = useAppStore((state) => state.displayAssignments)
+  const internalProgramOutputActive = useAppStore((state) => state.internalProgramOutputActive)
+  const timerRemaining = useAppStore((state) => state.timerRemaining)
+  const timerRunning = useAppStore((state) => state.timerRunning)
   const pptxAspectRatios = useAppStore((state) => state.pptxAspectRatios)
   const previousViewModeRef = useRef(programScene.viewMode)
+  const rendererAppliedRevisionRef = useRef(0)
+  const mediaOverlayAppliedRevisionRef = useRef(0)
+
+  const confirmPublishedRevision = useCallback((revision: number): void => {
+    if (
+      revision > 0 &&
+      rendererAppliedRevisionRef.current === revision &&
+      mediaOverlayAppliedRevisionRef.current === revision
+    ) {
+      useAppStore.getState().confirmProgramSnapshot(revision)
+    }
+  }, [])
 
   const selectedCapture = captureSources.find(
     (entry) => entry.capture?.sourceId === programScene.captureSourceId
@@ -50,25 +73,21 @@ export function ProgramSceneBridge(): null {
     activeFile.capture?.sourceId === selectedCapture?.sourceId
   const backgroundSourceIsParticipant = background?.type === 'capture' &&
     background.capture.sourceId === selectedCapture?.sourceId
-  const active = programScene.enabled && !!background &&
+  const active = !!programSnapshot && programScene.enabled &&
     (!activeFile || supportsProgramScene(activeFile)) &&
     !activeSourceIsParticipant && !backgroundSourceIsParticipant
   const contentAspectRatio = activeFile?.type === 'presentation'
     ? pptxAspectRatios[activeFile.path] ?? null
     : null
-  const connectedSelectedDisplay = selectedDisplayId !== null
-    ? displays.find((display) => display.id === selectedDisplayId && !display.isPrimary)
-    : null
-  const targetDisplayId = connectedSelectedDisplay?.id ??
-    displays.find((display) => !display.isPrimary)?.id ??
-    null
-  const nativeContentActive = activeFile?.type === 'presentation' || isOfficeProgramDocument(activeFile)
+  const targetDisplayId = connectedProgramDisplayId({ displays, selectedDisplayId, displayAssignments })
   const upperMediaLayers = useMemo(
     () => programScene.mediaLayers.filter((layer) => layer.visible && layer.aboveContent),
     [programScene.mediaLayers]
   )
-  const externalMediaOverlayActive = programScene.mediaLayersVisible &&
-    nativeContentActive && targetDisplayId !== null && upperMediaLayers.length > 0
+  // One media renderer for both native Office and renderer PDF output: switching
+  // the content type must not remount unchanged image/video layers.
+  const externalMediaOverlayActive = active && programScene.mediaLayersVisible &&
+    targetDisplayId !== null && !internalProgramOutputActive && upperMediaLayers.length > 0
 
   const sendState = useCallback((): void => {
     if (selectedCapture) {
@@ -78,6 +97,7 @@ export function ProgramSceneBridge(): null {
       window.api.sendToPresentation('capture-source-register', background.capture)
     }
     window.api.sendToPresentation('program-scene-update', {
+      revision: programSnapshot?.revision ?? 0,
       active,
       capture: selectedCapture,
       backdropPath: backdropImage,
@@ -95,16 +115,30 @@ export function ProgramSceneBridge(): null {
       mediaLayers: programScene.mediaLayers,
       mediaLayersVisible: programScene.mediaLayersVisible,
       externalMediaOverlayActive,
-      chromaKey: programScene.chromaKey
+      chromaKey: programScene.chromaKey,
+      qrOverlay: internalProgramOutputActive && programSnapshot && programSnapshot.qrOverlay.enabled &&
+        programSnapshot.qrOverlay.sceneVisible !== false && hasQrData(programSnapshot.qrOverlay)
+        ? { ...programSnapshot.qrOverlay, enabled: true }
+        : null,
+      timer: internalProgramOutputActive && programSnapshot?.timer.visible
+        ? { ...programSnapshot.timer, remaining: timerRemaining, running: timerRunning }
+        : null
     })
+    const revision = programSnapshot?.revision ?? 0
     void window.api.updateProgramSceneMediaOverlay({
       visible: externalMediaOverlayActive,
       displayId: targetDisplayId,
       layers: upperMediaLayers
+    }).then((result) => {
+      if (!result.success) throw new Error(result.error || 'Не удалось обновить медиаслои.')
+      mediaOverlayAppliedRevisionRef.current = revision
+      confirmPublishedRevision(revision)
     }).catch((error) => {
-      window.api.dbgLog(`program scene media overlay update failed: ${String(error)}`)
+      const message = String(error)
+      window.api.dbgLog(`program scene media overlay update failed: ${message}`)
+      if (revision > 0) useAppStore.getState().failProgramSnapshot(revision, message)
     })
-  }, [active, backdropImage, background, contentAspectRatio, externalMediaOverlayActive, programScene.chromaKey, programScene.cornerStyle, programScene.mediaLayers, programScene.mediaLayersVisible, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.textOverlays, programScene.textOverlaysVisible, programScene.transitionEffect, programScene.viewMode, selectedCapture, targetDisplayId, transitionDurationMs, upperMediaLayers])
+  }, [active, backdropImage, background, confirmPublishedRevision, contentAspectRatio, externalMediaOverlayActive, internalProgramOutputActive, programScene.chromaKey, programScene.cornerStyle, programScene.mediaLayers, programScene.mediaLayersVisible, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.textOverlays, programScene.textOverlaysVisible, programScene.transitionEffect, programScene.viewMode, programSnapshot, selectedCapture, targetDisplayId, timerRemaining, timerRunning, transitionDurationMs, upperMediaLayers])
 
   // Audio changes must not touch native Office placement, video registration or
   // the held PowerPoint frame used for smooth PiP transitions.
@@ -122,6 +156,29 @@ export function ProgramSceneBridge(): null {
   }, [sendState])
 
   useEffect(() => window.api.on('program-scene-ready', sendState), [sendState])
+
+  useEffect(() => window.api.on('program-scene-applied', (...args: unknown[]) => {
+    const revision = Number((args[0] as { revision?: unknown } | undefined)?.revision)
+    if (Number.isInteger(revision) && revision > 0) {
+      rendererAppliedRevisionRef.current = revision
+      confirmPublishedRevision(revision)
+    }
+  }), [confirmPublishedRevision])
+
+  useEffect(() => {
+    const revision = programSnapshot?.revision
+    if (!revision) return
+    const timeout = setTimeout(() => {
+      const status = useAppStore.getState().programOutputStatus
+      if (status.desiredRevision === revision && status.phase === 'publishing') {
+        useAppStore.getState().failProgramSnapshot(
+          revision,
+          'Окно эфира не подтвердило обновление сцены.'
+        )
+      }
+    }, 6_000)
+    return () => clearTimeout(timeout)
+  }, [programSnapshot?.revision])
 
   useEffect(() => () => {
     void window.api.updateProgramSceneMediaOverlay({ visible: false, displayId: null, layers: [] })
@@ -258,7 +315,10 @@ export function ProgramSceneBridge(): null {
       }
     }
     void updateLiveNativeContent().catch((error) => {
-      window.api.dbgLog(`program scene native content update failed: ${String(error)}`)
+      const message = String(error)
+      window.api.dbgLog(`program scene native content update failed: ${message}`)
+      const revision = useAppStore.getState().programSnapshot?.revision
+      if (revision) useAppStore.getState().failProgramSnapshot(revision, message)
     })
     return () => { cancelled = true }
   }, [active, activeFile?.extension, activeFile?.path, activeFile?.type, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, targetDisplayId, transitionDurationMs])

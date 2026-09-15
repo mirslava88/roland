@@ -376,6 +376,26 @@ export async function warmPdfiumDocument(
   }
 }
 
+export function fitPdfPageInsideRenderBox(
+  originalWidth: number,
+  originalHeight: number,
+  targetWidth: number,
+  targetHeight: number
+): { width: number; height: number } {
+  const safeOriginalWidth = Math.max(1, originalWidth)
+  const safeOriginalHeight = Math.max(1, originalHeight)
+  const safeTargetWidth = Math.max(1, Math.round(targetWidth))
+  const safeTargetHeight = Math.max(1, Math.round(targetHeight))
+  const scale = Math.min(
+    safeTargetWidth / safeOriginalWidth,
+    safeTargetHeight / safeOriginalHeight
+  )
+  return {
+    width: Math.max(1, Math.round(safeOriginalWidth * scale)),
+    height: Math.max(1, Math.round(safeOriginalHeight * scale))
+  }
+}
+
 export async function renderPdfiumPageToCanvas(options: {
   filePath: string
   pageNumber: number
@@ -417,9 +437,22 @@ export async function renderPdfiumPageToCanvas(options: {
         documentEntry.renderCount += 1
         // page.render() closes the native page handle. Always request a fresh one.
         const page = await documentEntry.document.getPage(options.pageNumber - 1)
+        // PDFium treats explicit width and height as independent dimensions.
+        // Passing the rectangular speaker/info panel size therefore stretches
+        // portrait and non-16:9 pages before CSS object-contain can see them.
+        // Fit the page into the requested render box while retaining its own
+        // aspect ratio. Existing live-view callers already request a fitted
+        // box, so their output dimensions remain effectively unchanged.
+        const originalSize = await page.getOriginalSize()
+        const renderSize = fitPdfPageInsideRenderBox(
+          originalSize.originalWidth,
+          originalSize.originalHeight,
+          targetWidth,
+          targetHeight
+        )
         const result = await page.render({
-          width: targetWidth,
-          height: targetHeight,
+          width: renderSize.width,
+          height: renderSize.height,
           renderFormFields: true,
           transparent: false
         })

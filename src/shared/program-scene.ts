@@ -14,6 +14,7 @@ export type ProgramSceneBackgroundKind = 'image' | 'video' | 'channel'
 
 export interface ProgramSceneBackgroundConfig {
   kind: ProgramSceneBackgroundKind
+  imagePath: string | null
   videoPath: string | null
   channelId: string | null
   loop: boolean
@@ -22,6 +23,7 @@ export interface ProgramSceneBackgroundConfig {
 
 export const DEFAULT_PROGRAM_SCENE_BACKGROUND: ProgramSceneBackgroundConfig = {
   kind: 'image',
+  imagePath: null,
   videoPath: null,
   channelId: null,
   loop: true,
@@ -79,6 +81,18 @@ export interface ProgramSceneMediaLayer {
   visible: boolean
   loop: boolean
   muted: boolean
+  opacity: number
+  cropTop: number
+  cropRight: number
+  cropBottom: number
+  cropLeft: number
+  locked: boolean
+  playing: boolean
+  currentTime: number
+  duration: number
+  playbackStartedAt: number | null
+  controlRevision: number
+  restartRevision: number
 }
 
 export const PROGRAM_SCENE_TEXT_FONT_FAMILIES: Record<ProgramSceneTextFontFamily, string> = {
@@ -120,6 +134,9 @@ export function normalizeProgramSceneBackground(value: unknown): ProgramSceneBac
     : 'image'
   return {
     kind,
+    imagePath: typeof raw.imagePath === 'string' && raw.imagePath.trim()
+      ? raw.imagePath
+      : null,
     videoPath: typeof raw.videoPath === 'string' && raw.videoPath.trim()
       ? raw.videoPath
       : null,
@@ -193,7 +210,21 @@ export function normalizeProgramSceneMediaLayers(value: unknown): ProgramSceneMe
       aboveContent: raw.aboveContent !== false,
       visible: raw.visible !== false,
       loop: raw.loop !== false,
-      muted: raw.muted !== false
+      muted: raw.muted !== false,
+      opacity: clampNumber(raw.opacity, 1, 0.05, 1),
+      cropTop: clampNumber(raw.cropTop, 0, 0, 45),
+      cropRight: clampNumber(raw.cropRight, 0, 0, 45),
+      cropBottom: clampNumber(raw.cropBottom, 0, 0, 45),
+      cropLeft: clampNumber(raw.cropLeft, 0, 0, 45),
+      locked: raw.locked === true,
+      playing: raw.playing !== false,
+      currentTime: clampNumber(raw.currentTime, 0, 0, 86_400),
+      duration: clampNumber(raw.duration, 0, 0, 86_400),
+      playbackStartedAt: typeof raw.playbackStartedAt === 'number' && Number.isFinite(raw.playbackStartedAt)
+        ? Math.max(0, Math.round(raw.playbackStartedAt))
+        : null,
+      controlRevision: clampNumber(raw.controlRevision, 0, 0, 1_000_000_000),
+      restartRevision: clampNumber(raw.restartRevision, 0, 0, 1_000_000_000)
     }]
   })
 }

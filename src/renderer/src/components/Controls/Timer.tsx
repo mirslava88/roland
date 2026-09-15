@@ -1,28 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
-import { mediaUrl } from '../../media'
-
-// Play timer sound file. File URL требует URL-encoding для кириллицы/
-// пробелов/других non-ASCII символов в пути — иначе Chromium не загружает
-// (load error, тихо отваливается, sound не слышен). Ошибки логируются
-// через dbgLog чтобы диагностируемо было в main stdout.
-function playTimerSound(rawPath: string, kind: 'warning' | 'end'): void {
-  try {
-    // Served via the pdm-media:// privileged scheme (mediaUrl handles encoding
-    // of Cyrillic/spaces/backslashes) so it loads under webSecurity:true.
-    const url = mediaUrl(rawPath)
-    window.api.dbgLog(`Timer: play ${kind} sound url=${url}`)
-    const a = new Audio(url)
-    a.volume = 1.0
-    a.play().then(() => {
-      window.api.dbgLog(`Timer: ${kind} sound playing OK`)
-    }).catch((e) => {
-      window.api.dbgLog(`Timer: ${kind} sound play() failed: ${String(e)}`)
-    })
-  } catch (e) {
-    window.api.dbgLog(`Timer: ${kind} sound Audio() threw: ${String(e)}`)
-  }
-}
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
+import { playTimerSound, TIMER_COMMAND_EVENT, type TimerCommand } from '../../timer-controls'
 
 function formatTime(totalSeconds: number): string {
   const negative = totalSeconds < 0
@@ -40,18 +18,25 @@ export function Timer(): JSX.Element {
     timerDuration,
     timerRemaining,
     timerRunning,
+    timerOutputVisible,
+    timerOutputOwner,
+    programScene,
     timerSoundEnd,
     timerSoundWarning,
     timerTextColor,
     timerWarningTextColor,
     timerOvertimeTextColor,
     timerTextOpacity,
+    timerOverlayPosition,
+    timerOverlayScale,
     displays,
     displayAssignments,
     selectedDisplayId,
+    internalProgramOutputActive,
     setTimerDuration,
     setTimerRemaining,
     setTimerRunning,
+    setTimerOutputState,
     addTimerMinutes,
     resetTimer,
     setTimerSoundEnd,
@@ -59,7 +44,9 @@ export function Timer(): JSX.Element {
     setTimerTextColor,
     setTimerWarningTextColor,
     setTimerOvertimeTextColor,
-    setTimerTextOpacity
+    setTimerTextOpacity,
+    setTimerOverlayPosition,
+    setTimerOverlayScale
   } = useAppStore()
 
   const [inputH, setInputH] = useState('0')
@@ -67,6 +54,7 @@ export function Timer(): JSX.Element {
   const [addMinInput, setAddMinInput] = useState('')
   const [subMinInput, setSubMinInput] = useState('')
   const [expanded, setExpanded] = useState(false)
+  const [timerLayoutReady, setTimerLayoutReady] = useState(false)
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const warnedRef = useRef(false)
@@ -77,30 +65,60 @@ export function Timer(): JSX.Element {
   const hasDedicatedTimerDisplay = displays.some((display) => (
     !display.isPrimary && displayAssignments[String(display.id)] === 'timer'
   ))
+  const timerUsesProgramOverlay = !internalProgramOutputActive && (
+    !hasDedicatedTimerDisplay || timerOutputOwner === 'scene'
+  )
+
+  useEffect(() => {
+    if (!programScene.enabled && timerOutputOwner === 'scene') {
+      setTimerOutputState(false, null)
+    }
+  }, [programScene.enabled, setTimerOutputState, timerOutputOwner])
+
+  // The native timer can also be dragged directly on the output. Read its
+  // last persisted layout once before renderer updates begin so the Scene
+  // preview and the real overlay start from the exact same place and size.
+  useEffect(() => {
+    let cancelled = false
+    void window.api.getTimerOverlayLayout().then((layout) => {
+      if (cancelled) return
+      setTimerOverlayPosition({ x: layout.x * 100, y: layout.y * 100 })
+      setTimerOverlayScale(layout.scale)
+      setTimerLayoutReady(true)
+    }).catch(() => {
+      if (!cancelled) setTimerLayoutReady(true)
+    })
+    return () => { cancelled = true }
+  }, [setTimerOverlayPosition, setTimerOverlayScale])
 
   // Keep the native overlay data current for the automatic fallback. The
   // update is sent before the overlay is opened so its first frame is never
   // an empty/zero timer.
   useEffect(() => {
-    if (timerDuration <= 0 || hasDedicatedTimerDisplay) return
+    if (!timerLayoutReady || timerDuration <= 0 || !timerOutputVisible || !timerUsesProgramOverlay) return
     window.api.updateTimerOverlay({
       remaining: timerRemaining,
       running: timerRunning,
       duration: timerDuration,
-      posX: 90,
-      posY: 90,
-      scale: 1,
+      posX: timerOverlayPosition.x,
+      posY: timerOverlayPosition.y,
+      scale: timerOverlayScale,
       textColor: timerTextColor,
       warningTextColor: timerWarningTextColor,
       overtimeTextColor: timerOvertimeTextColor,
       textOpacity: timerTextOpacity
     })
   }, [
-    hasDedicatedTimerDisplay,
+    timerUsesProgramOverlay,
+    timerLayoutReady,
     timerDuration,
+    timerOverlayPosition.x,
+    timerOverlayPosition.y,
+    timerOverlayScale,
     timerOvertimeTextColor,
     timerRemaining,
     timerRunning,
+    timerOutputVisible,
     timerTextColor,
     timerTextOpacity,
     timerWarningTextColor
@@ -109,12 +127,13 @@ export function Timer(): JSX.Element {
   // "Screens" is the only explicit output selector. Without a dedicated
   // timer display, fall back to the main program display as an overlay.
   useEffect(() => {
-    if (timerDuration > 0 && !hasDedicatedTimerDisplay) {
-      void window.api.showTimerOverlay(selectedDisplayId ?? undefined)
+    if (timerDuration > 0 && timerOutputVisible && timerUsesProgramOverlay) {
+      const programDisplayId = connectedProgramDisplayId(useAppStore.getState())
+      if (programDisplayId !== null) void window.api.showTimerOverlay(programDisplayId)
     } else {
       void window.api.hideTimerOverlay()
     }
-  }, [hasDedicatedTimerDisplay, selectedDisplayId, timerDuration])
+  }, [selectedDisplayId, timerDuration, timerOutputVisible, timerUsesProgramOverlay])
 
   // Timer tick
   useEffect(() => {
@@ -171,6 +190,7 @@ export function Timer(): JSX.Element {
     window.api.dbgLog(`Timer: handleSetTime inputH="${inputH}" inputM="${inputM}" h=${h} m=${m} total=${total}`)
     if (total > 0) {
       setTimerDuration(total)
+      setTimerOutputState(true, 'toolbar')
       const after = useAppStore.getState()
       window.api.dbgLog(`Timer: after setTimerDuration store={duration=${after.timerDuration}, remaining=${after.timerRemaining}, running=${after.timerRunning}}`)
       warnedRef.current = false
@@ -196,6 +216,8 @@ export function Timer(): JSX.Element {
     endedRef.current = freshRemaining <= 0
     window.api.dbgLog(`Timer: handleStart freshRemaining=${freshRemaining} warnedRef=${warnedRef.current} endedRef=${endedRef.current}`)
     setTimerRunning(true)
+    const owner = useAppStore.getState().timerOutputOwner
+    setTimerOutputState(true, owner ?? 'toolbar')
   }
 
   const handlePause = (): void => {
@@ -206,6 +228,7 @@ export function Timer(): JSX.Element {
     setTimerRunning(false)
     setTimerDuration(0)
     setTimerRemaining(0)
+    setTimerOutputState(false, null)
     warnedRef.current = false
     endedRef.current = false
   }
@@ -218,6 +241,8 @@ export function Timer(): JSX.Element {
 
   const handleAddMin = (min: number): void => {
     addTimerMinutes(min)
+    const state = useAppStore.getState()
+    if (!state.timerOutputVisible) setTimerOutputState(true, 'toolbar')
     const newR = useAppStore.getState().timerRemaining
     if (newR > 0) endedRef.current = false
     if (newR > 60) warnedRef.current = false
@@ -238,6 +263,75 @@ export function Timer(): JSX.Element {
       setSubMinInput('')
     }
   }
+
+  useEffect(() => {
+    const handleSceneCommand = (event: Event): void => {
+      const command = (event as CustomEvent<TimerCommand>).detail
+      if (!command) return
+      const state = useAppStore.getState()
+      if (command.type === 'apply-state') {
+        const duration = Math.max(0, Math.round(command.duration))
+        const remaining = Math.round(command.remaining)
+        if (duration <= 0) {
+          state.setTimerRunning(false)
+          state.setTimerDuration(0)
+          state.setTimerRemaining(0)
+          state.setTimerOutputState(false, null)
+          warnedRef.current = false
+          endedRef.current = false
+          return
+        }
+        state.setTimerDuration(duration)
+        state.setTimerRemaining(remaining)
+        state.setTimerRunning(command.running)
+        state.setTimerOutputState(true, 'scene')
+        warnedRef.current = remaining <= 60
+        endedRef.current = remaining <= 0
+        return
+      }
+      if (command.type === 'set-duration') {
+        const seconds = Math.max(0, Math.round(command.seconds))
+        if (seconds <= 0) return
+        state.setTimerDuration(seconds)
+        warnedRef.current = false
+        endedRef.current = false
+        return
+      }
+      if (command.type === 'start') {
+        const fresh = useAppStore.getState()
+        if (fresh.timerDuration <= 0) return
+        warnedRef.current = fresh.timerRemaining <= 60
+        endedRef.current = fresh.timerRemaining <= 0
+        fresh.setTimerRunning(true)
+        return
+      }
+      if (command.type === 'pause') {
+        state.setTimerRunning(false)
+        return
+      }
+      if (command.type === 'stop') {
+        state.setTimerRunning(false)
+        state.setTimerDuration(0)
+        state.setTimerRemaining(0)
+        state.setTimerOutputState(false, null)
+        warnedRef.current = false
+        endedRef.current = false
+        return
+      }
+      if (command.type === 'reset') {
+        state.resetTimer()
+        warnedRef.current = false
+        endedRef.current = false
+        return
+      }
+      state.addTimerMinutes(command.minutes)
+      const nextRemaining = useAppStore.getState().timerRemaining
+      if (nextRemaining > 0) endedRef.current = false
+      if (nextRemaining > 60) warnedRef.current = false
+    }
+    window.addEventListener(TIMER_COMMAND_EVENT, handleSceneCommand)
+    return () => window.removeEventListener(TIMER_COMMAND_EVENT, handleSceneCommand)
+  }, [])
 
   const isOvertime = timerRemaining < 0
   const isWarning = timerRemaining <= 60 && timerRemaining >= 0 && timerRunning

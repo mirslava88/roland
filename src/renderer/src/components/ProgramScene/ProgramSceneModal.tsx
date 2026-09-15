@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { mediaUrl } from '../../media'
-import { useAppStore } from '../../stores/useAppStore'
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import { normalizeProgramSceneAudio, type ProgramSceneAudioStatus } from '../../../../shared/program-scene-audio'
 import { SlideRenderer } from '../Preview/PreviewPanel'
@@ -42,6 +42,8 @@ import { isQrEditorOutputOwned, setQrEditorOutputOwned } from '../QrOverlay/qr-l
 import { BroadcastTitlesModal } from '../BroadcastTitles/BroadcastTitles'
 import { SceneLayerControlBar, SceneLayerToggleButton } from './SceneLayerControlBar'
 import { SceneQrPreviewLayer } from './SceneQrPreviewLayer'
+import { SceneTimerPreviewLayer } from './SceneTimerPreviewLayer'
+import { SceneTimerSettings } from './SceneTimerSettings'
 import { hasQrData, normalizeQrOverlay } from '../../../../shared/qr-overlay'
 
 interface Props {
@@ -53,6 +55,7 @@ type CanvasSelection =
   | { kind: 'text'; id: string }
   | { kind: 'media'; id: string }
   | { kind: 'qr' }
+  | { kind: 'timer' }
   | { kind: 'chroma' }
   | null
 
@@ -245,6 +248,8 @@ function captureIsUsedOutsideProgramScene(
 export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Element {
   const [activePanel, setActivePanel] = useState<'picture' | 'layers' | 'text' | 'titles' | 'qr'>('picture')
   const storedProgramScene = useAppStore((state) => state.programScene)
+  const programSnapshot = useAppStore((state) => state.programSnapshot)
+  const programOutputStatus = useAppStore((state) => state.programOutputStatus)
   const [textOverlayDraft, setTextOverlayDraft] = useState(() => (
     normalizeProgramSceneTextOverlays(storedProgramScene?.textOverlays)
   ))
@@ -304,6 +309,39 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   const displays = useAppStore((state) => state.displays)
   const qrOverlay = useAppStore((state) => state.qrOverlay)
   const setQrOverlay = useAppStore((state) => state.setQrOverlay)
+  useEffect(() => {
+    if (initialEditor === 'qr') setQrOverlay({ sceneVisible: true })
+  }, [initialEditor, setQrOverlay])
+  const timerDuration = useAppStore((state) => state.timerDuration)
+  const timerRemaining = useAppStore((state) => state.timerRemaining)
+  const timerRunning = useAppStore((state) => state.timerRunning)
+  const timerOverlayPosition = useAppStore((state) => state.timerOverlayPosition)
+  const timerOverlayScale = useAppStore((state) => state.timerOverlayScale)
+  const timerTextColor = useAppStore((state) => state.timerTextColor)
+  const timerWarningTextColor = useAppStore((state) => state.timerWarningTextColor)
+  const timerOvertimeTextColor = useAppStore((state) => state.timerOvertimeTextColor)
+  const timerTextOpacity = useAppStore((state) => state.timerTextOpacity)
+  const [timerOverlayDraft, setTimerOverlayDraft] = useState(() => {
+    const state = useAppStore.getState()
+    return {
+      position: { ...state.timerOverlayPosition },
+      scale: state.timerOverlayScale,
+      textColor: state.timerTextColor,
+      warningTextColor: state.timerWarningTextColor,
+      overtimeTextColor: state.timerOvertimeTextColor,
+      textOpacity: state.timerTextOpacity
+    }
+  })
+  const [timerDraftDirty, setTimerDraftDirty] = useState(false)
+  const [timerTimeDraft, setTimerTimeDraft] = useState(() => {
+    const state = useAppStore.getState()
+    return {
+      duration: state.timerDuration,
+      remaining: state.timerRemaining,
+      running: state.timerRunning
+    }
+  })
+  const [timerTimeDraftDirty, setTimerTimeDraftDirty] = useState(false)
   const [devices, setDevices] = useState<CaptureDeviceDescriptor[]>([])
   const [devicesLoading, setDevicesLoading] = useState(true)
   const [devicesError, setDevicesError] = useState<string | null>(null)
@@ -318,7 +356,9 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     initialEditor === 'qr' ? { kind: 'qr' } : null
   )
   const [sceneContextMenu, setSceneContextMenu] = useState<SceneContextMenuState | null>(null)
-  const [previewChannelId, setPreviewChannelId] = useState<string | null>(null)
+  const [previewChannelId, setPreviewChannelId] = useState<string | null>(
+    () => storedProgramScene.contentChannelId ?? null
+  )
   const previewCanvasRef = useRef<HTMLDivElement>(null)
   const contentPreviewRef = useRef<HTMLDivElement>(null)
   const participantPreviewRef = useRef<HTMLDivElement>(null)
@@ -340,6 +380,49 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   const sceneAudio = normalizeProgramSceneAudio(storedProgramScene.audio)
   const audioDevices = devices.filter((device) => device.kind === 'audioinput')
   const [audioStatus, setAudioStatus] = useState<ProgramSceneAudioStatus>({ phase: 'idle', message: '' })
+
+  const updateTimerOverlayDraft = (update: Partial<typeof timerOverlayDraft>): void => {
+    setTimerDraftDirty(true)
+    setTimerOverlayDraft((draft) => ({ ...draft, ...update }))
+  }
+
+  useEffect(() => {
+    if (timerDraftDirty) return
+    setTimerOverlayDraft({
+      position: { ...timerOverlayPosition },
+      scale: timerOverlayScale,
+      textColor: timerTextColor,
+      warningTextColor: timerWarningTextColor,
+      overtimeTextColor: timerOvertimeTextColor,
+      textOpacity: timerTextOpacity
+    })
+  }, [
+    timerDraftDirty,
+    timerOverlayPosition,
+    timerOverlayScale,
+    timerOvertimeTextColor,
+    timerTextColor,
+    timerTextOpacity,
+    timerWarningTextColor
+  ])
+
+  useEffect(() => {
+    if (timerTimeDraftDirty) return
+    setTimerTimeDraft({ duration: timerDuration, remaining: timerRemaining, running: timerRunning })
+  }, [timerDuration, timerRemaining, timerRunning, timerTimeDraftDirty])
+
+  useEffect(() => {
+    if (!timerTimeDraftDirty || !timerTimeDraft.running) return
+    const interval = setInterval(() => {
+      setTimerTimeDraft((draft) => ({ ...draft, remaining: draft.remaining - 1 }))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [timerTimeDraft.running, timerTimeDraftDirty])
+
+  const updateTimerTimeDraft = (update: (draft: typeof timerTimeDraft) => typeof timerTimeDraft): void => {
+    setTimerTimeDraftDirty(true)
+    setTimerTimeDraft(update)
+  }
 
   const updateChromaKey = (update: Partial<ProgramSceneChromaKeyConfig>): void => {
     setProgramScene({
@@ -431,9 +514,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
       root.removeEventListener('load', readAspectRatio, true)
     }
   }, [previewFile?.path, previewSlide])
-  const outputDisplay = displays.find(
-    (display) => !display.isPrimary && display.id === selectedDisplayId
-  ) ?? displays.find((display) => !display.isPrimary)
+  const outputDisplayId = connectedProgramDisplayId(useAppStore.getState())
+  const outputDisplay = displays.find((display) => display.id === outputDisplayId)
   const outputWidth = Math.max(1, outputDisplay?.bounds?.width ?? 1920)
   const outputHeight = Math.max(1, outputDisplay?.bounds?.height ?? 1080)
   const selectedCaptureMatchesContent = candidatePreviewFile?.type === 'capture' &&
@@ -444,8 +526,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     : null
   const backgroundCaptureMatchesParticipant = backgroundSource?.type === 'capture' &&
     backgroundSource.capture.sourceId === selectedCapture?.sourceId
-  const canEnable = !!backgroundSource &&
-    (!selectedCapture || (!selectedCaptureMatchesContent && !backgroundCaptureMatchesParticipant))
+  const canEnable = !selectedCapture ||
+    (!selectedCaptureMatchesContent && !backgroundCaptureMatchesParticipant)
   const participantOnLeft = programScene.placement.startsWith('left-')
   const vertical = programScene.placement.split('-')[1]
   const participantBaseWidthPercent = programScene.participantSize === 'small'
@@ -488,7 +570,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   }
 
   const updateTextOverlayPosition = (id: string, xPercent: number, yPercent: number): void => {
-    updateTextOverlays(programScene.textOverlays.map((overlay) => (
+    updateTextOverlays(textOverlayDraft.map((overlay) => (
       overlay.id === id ? { ...overlay, xPercent, yPercent } : overlay
     )))
   }
@@ -513,7 +595,14 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   }
 
   const updateMediaLayer = (id: string, update: Partial<(typeof programScene.mediaLayers)[number]>): void => {
-    updateMediaLayers(programScene.mediaLayers.map((layer) => layer.id === id ? { ...layer, ...update } : layer))
+    // Async media metadata must not restore the order from an older render.
+    setMediaLayerDraft((current) => normalizeProgramSceneMediaLayers(
+      current.map((layer) => layer.id === id ? { ...layer, ...update } : layer)
+    ))
+  }
+
+  const reorderMediaLayer = (id: string, direction: 'up' | 'down'): void => {
+    setMediaLayerDraft((current) => moveProgramSceneMediaLayer(current, id, direction))
   }
 
   const closeModal = (): void => {
@@ -529,7 +618,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     // until the operator explicitly shows it or closes the Scene window.
     setQrEditorOutputOwned(true)
     return () => {
-      const config = useAppStore.getState().qrOverlay
+      const state = useAppStore.getState()
+      const config = state.programSnapshot?.qrOverlay ?? state.qrOverlay
       setQrEditorOutputOwned(false)
       void publishQrOverlay(config, () => !isQrEditorOutputOwned())
     }
@@ -626,42 +716,64 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
         ? 'text'
         : canvasSelection.kind === 'qr'
           ? 'qr'
-          : 'chroma'
+          : canvasSelection.kind === 'timer'
+            ? 'timer'
+            : 'chroma'
     : activePanel
-  const layerControlPanel = effectiveEditorPanel === 'layers' || effectiveEditorPanel === 'text'
-    ? effectiveEditorPanel
-    : 'picture'
-  const sceneDraftDirty = JSON.stringify(textOverlayDraft) !== JSON.stringify(
+  const structuralDraftDirty = programSnapshot !== null && JSON.stringify({
+    backdropImage,
+    captureSourceId: programScene.captureSourceId,
+    placement: programScene.placement,
+    participantSize: programScene.participantSize,
+    participantScale: programScene.participantScale,
+    cornerStyle: programScene.cornerStyle,
+    viewMode: programScene.viewMode,
+    transitionEffect: programScene.transitionEffect,
+    audio: programScene.audio,
+    chromaKey: programScene.chromaKey,
+    background: programScene.background
+  }) !== JSON.stringify({
+    backdropImage: programSnapshot.backdropImage,
+    captureSourceId: programSnapshot.scene.captureSourceId,
+    placement: programSnapshot.scene.placement,
+    participantSize: programSnapshot.scene.participantSize,
+    participantScale: programSnapshot.scene.participantScale,
+    cornerStyle: programSnapshot.scene.cornerStyle,
+    viewMode: programSnapshot.scene.viewMode,
+    transitionEffect: programSnapshot.scene.transitionEffect,
+    audio: programSnapshot.scene.audio,
+    chromaKey: programSnapshot.scene.chromaKey,
+    background: programSnapshot.scene.background
+  })
+  const sceneDraftDirty = structuralDraftDirty || (
+    programSnapshot !== null && previewChannelId !== programSnapshot.contentChannelId
+  ) || JSON.stringify(textOverlayDraft) !== JSON.stringify(
     normalizeProgramSceneTextOverlays(storedProgramScene.textOverlays)
-  ) || JSON.stringify(mediaLayerDraft) !== JSON.stringify(
-    normalizeProgramSceneMediaLayers(storedProgramScene.mediaLayers)
-  ) || JSON.stringify(qrOverlay) !== lastPublishedQrRef.current
+  ) || JSON.stringify(mediaLayerDraft.map(({ currentTime: _currentTime, duration: _duration, playbackStartedAt: _playbackStartedAt, ...layer }) => layer)) !== JSON.stringify(
+    normalizeProgramSceneMediaLayers(storedProgramScene.mediaLayers).map(({ currentTime: _currentTime, duration: _duration, playbackStartedAt: _playbackStartedAt, ...layer }) => layer)
+  ) || JSON.stringify(qrOverlay) !== lastPublishedQrRef.current || timerDraftDirty || timerTimeDraftDirty
+  const programIsLive = programSnapshot !== null && programOutputStatus.phase !== 'idle'
 
   const selectBackdrop = async (): Promise<void> => {
     const path = await window.api.selectBackdropImage()
     if (!path) return
     const state = useAppStore.getState()
     state.setBackdropImage(path)
+    // The Scene editor owns only its draft. The actual program output receives
+    // this backdrop together with every other layer on Show/Refresh.
+  }
+
+  const selectChromaFillImage = async (): Promise<void> => {
+    const path = await window.api.selectBackdropImage()
+    if (!path) return
+    const state = useAppStore.getState()
     state.setProgramScene({
       background: normalizeProgramSceneBackground({
         ...state.programScene.background,
-        kind: 'image'
+        kind: 'image',
+        imagePath: path
       })
     })
-    // Match the toolbar behaviour: if nothing is on air, the chosen backdrop
-    // becomes the idle program picture immediately while this modal stays open.
-    if (!state.activeFile) {
-      await window.api.switchAudioToExternal()
-      if (!state.isPresentationWindowOpen) {
-        await window.api.openPresentationWindow(state.selectedDisplayId ?? undefined)
-        state.setPresentationWindowOpen(true)
-      }
-      window.api.sendToPresentation('load-content', {
-        type: 'backdrop',
-        path,
-        name: 'Backdrop'
-      })
-    }
   }
 
   const selectBackgroundVideo = async (): Promise<void> => {
@@ -681,7 +793,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   const addTextAt = (xPercent = 10, yPercent = 10): void => {
     const id = `text-${crypto.randomUUID()}`
     const widthPercent = 34
-    updateTextOverlays([...programScene.textOverlays, {
+    updateTextOverlays([...textOverlayDraft, {
       id,
       text: 'Новый текст',
       visible: true,
@@ -697,49 +809,45 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     setActivePanel('picture')
   }
 
-  const addImageLayer = async (position?: { xPercent: number; yPercent: number }): Promise<void> => {
-    const path = await window.api.selectBackdropImage()
-    if (!path) return
-    const id = `media-${crypto.randomUUID()}`
-    updateMediaLayers([...programScene.mediaLayers, {
-      id,
-      kind: 'image',
-      path,
-      name: shortFileName(path) || 'Картинка',
-      xPercent: position?.xPercent ?? 50,
-      yPercent: position?.yPercent ?? 50,
-      widthPercent: 38,
-      aspectRatio: 16 / 9,
-      aboveContent: true,
-      visible: true,
-      loop: true,
-      muted: true
-    }])
+  const addMediaLayers = async (position?: { xPercent: number; yPercent: number }): Promise<void> => {
+    const paths = await window.api.selectSceneLayerFiles()
+    if (!paths?.length) return
+    const added = paths.flatMap((path) => {
+      const image = /\.(png|jpe?g|bmp|gif|webp|svg)$/i.test(path)
+      const video = /\.(mp4|mov|avi|webm|mkv|m4v)$/i.test(path)
+      if (!image && !video) return []
+      return [{
+        id: `media-${crypto.randomUUID()}`,
+        kind: video ? 'video' as const : 'image' as const,
+        path,
+        name: shortFileName(path) || 'Слой',
+        xPercent: position?.xPercent ?? 50,
+        yPercent: position?.yPercent ?? 50,
+        widthPercent: video ? 42 : 38,
+        aspectRatio: 16 / 9,
+        aboveContent: true,
+        visible: true,
+        loop: true,
+        muted: true,
+        opacity: 1,
+        cropTop: 0,
+        cropRight: 0,
+        cropBottom: 0,
+        cropLeft: 0,
+        locked: false,
+        playing: video,
+        currentTime: 0,
+        duration: 0,
+        playbackStartedAt: null,
+        controlRevision: 0,
+        restartRevision: 0
+      }]
+    })
+    if (!added.length) return
+    setMediaLayerDraft((current) => normalizeProgramSceneMediaLayers([...current, ...added]))
+    const id = added.at(-1)!.id
     setSelectedMediaLayerId(id)
     setCanvasSelection({ kind: 'media', id })
-  }
-
-  const addVideoLayers = async (position?: { xPercent: number; yPercent: number }): Promise<void> => {
-    const paths = await window.api.selectVideoFiles()
-    if (!paths?.length) return
-    const added = paths.map((path) => ({
-      id: `media-${crypto.randomUUID()}`,
-      kind: 'video' as const,
-      path,
-      name: shortFileName(path) || 'Видео',
-      xPercent: position?.xPercent ?? 50,
-      yPercent: position?.yPercent ?? 50,
-      widthPercent: 42,
-      aspectRatio: 16 / 9,
-      aboveContent: true,
-      visible: true,
-      loop: true,
-      muted: true
-    }))
-    updateMediaLayers([...programScene.mediaLayers, ...added])
-    const selectedId = added.at(-1)?.id ?? null
-    setSelectedMediaLayerId(selectedId)
-    if (selectedId) setCanvasSelection({ kind: 'media', id: selectedId })
   }
 
   const selectBackgroundKind = (kind: ProgramSceneBackgroundKind): void => {
@@ -752,32 +860,90 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   }
 
   const publishSceneDraft = async (enableScene = false): Promise<void> => {
+    const previousSnapshot = useAppStore.getState().programSnapshot
     setProgramScene({
       ...(enableScene ? { enabled: true, viewMode: 'both' as const } : {}),
+      contentChannelId: previewChannelId,
       textOverlays: textOverlayDraft,
       mediaLayers: mediaLayerDraft,
-      ...(enableScene && textOverlayDraft.length > 0 ? { textOverlaysVisible: true } : {}),
-      ...(enableScene && mediaLayerDraft.some((layer) => layer.visible) ? { mediaLayersVisible: true } : {})
+      // The master publication owns every draft layer, including newly added
+      // objects on refresh. There are no separate output switches to enable.
+      textOverlaysVisible: textOverlayDraft.some((overlay) => overlay.visible !== false),
+      mediaLayersVisible: mediaLayerDraft.some((layer) => layer.visible)
     })
     const currentQr = useAppStore.getState().qrOverlay
     const nextQr = currentQr.sceneVisible !== false && hasQrData(currentQr)
       ? normalizeQrOverlay({ ...currentQr, enabled: true })
       : currentQr
-    if (nextQr !== currentQr) setQrOverlay({ enabled: true })
     const state = useAppStore.getState()
-    const channelToTake = enableScene
-      ? previewChannelId || (!state.activeFile ? state.selectedChannel : null)
-      : null
+    const channelToTake = previewChannelId || (
+      enableScene && !state.activeFile ? state.selectedChannel : null
+    )
     const channelFile = channelToTake ? state.channels[channelToTake]?.file : null
-    if (channelToTake && channelFile && state.activeFile?.path !== channelFile.path) {
+    if (channelToTake && channelFile && (
+      state.liveChannel !== channelToTake ||
+      state.activeFile?.path !== channelFile.path ||
+      state.currentSlide !== state.channels[channelToTake]?.slide
+    )) {
+      const takeCompleted = new Promise<void>((resolve) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const listener = (event: Event): void => {
+          const detail = (event as CustomEvent<{ channelId?: string }>).detail
+          if (detail?.channelId !== channelToTake) return
+          window.removeEventListener('take-channel-completed', listener)
+          if (timeout) clearTimeout(timeout)
+          resolve()
+        }
+        window.addEventListener('take-channel-completed', listener)
+        timeout = setTimeout(() => {
+          window.removeEventListener('take-channel-completed', listener)
+          resolve()
+        }, 30_000)
+      })
       window.dispatchEvent(new CustomEvent('take-channel', { detail: channelToTake }))
+      await takeCompleted
+      const committed = useAppStore.getState()
+      if (committed.liveChannel !== channelToTake || committed.activeFile?.path !== channelFile.path) {
+        if (!previousSnapshot) committed.setProgramScene({ enabled: false })
+        committed.failProgramSnapshot(
+          committed.programOutputStatus.desiredRevision,
+          'Выбранный канал не был подтверждён реальным выходом.'
+        )
+        window.alert('Канал не удалось вывести. Сцена не опубликована.')
+        return
+      }
     } else if (enableScene && !state.activeFile && !state.isPresentationWindowOpen) {
-      await window.api.openPresentationWindow(state.selectedDisplayId ?? undefined)
-      state.setPresentationWindowOpen(true)
-      window.api.setActiveContentType('backdrop')
+      const programDisplayId = connectedProgramDisplayId(state)
+      if (programDisplayId !== null) {
+        await window.api.openPresentationWindow(programDisplayId)
+        state.setPresentationWindowOpen(true)
+        window.api.setActiveContentType('backdrop')
+      } else if (state.internalProgramOutputActive) {
+        await window.api.prepareInternalProgramOutput()
+        state.setPresentationWindowOpen(true)
+        window.api.setActiveContentType('backdrop')
+      }
     }
     lastPublishedQrRef.current = JSON.stringify(nextQr)
+    const revision = useAppStore.getState().publishProgramSnapshot(channelToTake, {
+      qrOverlay: nextQr,
+      timer: {
+        duration: Math.max(0, timerTimeDraft.duration),
+        remaining: timerTimeDraft.remaining,
+        running: timerTimeDraft.running && timerTimeDraft.duration > 0,
+        visible: timerTimeDraft.duration > 0,
+        position: { ...timerOverlayDraft.position },
+        scale: timerOverlayDraft.scale,
+        textColor: timerOverlayDraft.textColor,
+        warningTextColor: timerOverlayDraft.warningTextColor,
+        overtimeTextColor: timerOverlayDraft.overtimeTextColor,
+        textOpacity: timerOverlayDraft.textOpacity
+      }
+    })
+    setTimerDraftDirty(false)
+    setTimerTimeDraftDirty(false)
     await publishQrOverlay(nextQr, () => isQrEditorOutputOwned())
+    window.api.dbgLog(`program snapshot published revision=${revision} channel=${channelToTake ?? 'none'}`)
   }
 
   const setPictureVisible = async (pressed: boolean): Promise<void> => {
@@ -898,60 +1064,46 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
           ))}
         </div>
 
-        {activePanel !== 'titles' && effectiveEditorPanel !== 'qr' && (
+        {activePanel !== 'titles' && (
           <SceneLayerControlBar
-            active={layerControlPanel === 'picture'
-              ? programScene.enabled
-              : layerControlPanel === 'layers'
-                ? programScene.mediaLayersVisible
-                : programScene.textOverlaysVisible}
-            status={layerControlPanel === 'picture'
-              ? programScene.enabled ? 'Сцена в эфире' : 'Сцена скрыта'
-              : layerControlPanel === 'layers'
-                ? programScene.mediaLayersVisible ? 'Слои в эфире' : 'Слои скрыты'
-              : programScene.textOverlaysVisible ? 'Текст в эфире' : 'Текст скрыт'}
-            detail={layerControlPanel === 'picture'
-              ? programScene.enabled && sceneDraftDirty
-                ? 'Есть изменения — нажмите ↻'
-                : !backgroundSource
-                ? 'Выберите фоновое изображение'
-                : !selectedCapture
+            active={programIsLive}
+            status={programOutputStatus.phase === 'publishing'
+                ? 'Обновление эфира…'
+                : programOutputStatus.phase === 'error'
+                  ? 'Ошибка вывода'
+                  : programIsLive ? 'Сцена в эфире' : 'Сцена скрыта'}
+            detail={programOutputStatus.error
+                ? programOutputStatus.error
+                : programIsLive && sceneDraftDirty
+                  ? 'Есть изменения — нажмите ↻'
+                  : !selectedCapture
                   ? 'Сцена готова без внешнего источника'
                   : selectedCaptureMatchesContent
                     ? 'Выберите источник, отличный от основного'
                     : backgroundCaptureMatchesParticipant
                       ? 'Камера участника и нижний слой должны отличаться'
-                    : 'Слой подготовлен'
-              : layerControlPanel === 'layers'
-                ? programScene.mediaLayers.length > 0
-                  ? `${programScene.mediaLayers.length} медиаслоёв`
-                  : 'Добавьте картинку или видео'
-              : programScene.textOverlays.length > 0
-                ? `${programScene.textOverlays.length} текстовых блоков`
-                : 'Добавьте текстовый блок'}
+                    : 'Слой подготовлен'}
           >
-            {layerControlPanel === 'picture' ? (
-              <>
               <SceneLayerToggleButton
                 buttonProps={{ 'data-program-scene-picture-visible': true }}
                 tone="air"
-                pressed={programScene.enabled}
-                disabled={!canEnable && !programScene.enabled}
-                title={canEnable || programScene.enabled ? 'Показывать или скрывать Сцену для эфира' : 'Выберите фоновое изображение'}
+                pressed={programIsLive}
+                disabled={!canEnable && !programIsLive}
+                title={canEnable || programIsLive ? 'Показывать или скрывать Сцену для эфира' : 'Устраните конфликт источников'}
                 onPressedChange={(pressed) => void setPictureVisible(pressed)}
               >
-                {programScene.enabled ? 'Выйти из эфира' : 'Показать в эфире'}
+                {programIsLive ? 'Выйти из эфира' : 'Показать в эфире'}
               </SceneLayerToggleButton>
               <button
                 type="button"
                 data-program-scene-refresh
                 aria-label="Обновить сцену в эфире"
-                title={programScene.enabled
+                title={programIsLive
                   ? 'Передать в эфир изменения из предпросмотра'
                   : 'Сначала покажите сцену в эфире'}
-                disabled={!programScene.enabled}
+                disabled={!programIsLive}
                 onClick={() => void publishSceneDraft(false)}
-                className={`flex h-7 w-7 items-center justify-center rounded-full border text-base font-bold leading-none transition-colors ${!programScene.enabled
+                className={`flex h-7 w-7 items-center justify-center rounded-full border text-base font-bold leading-none transition-colors ${!programIsLive
                   ? 'cursor-not-allowed border-gray-800 bg-surface-100 text-gray-600'
                   : sceneDraftDirty
                     ? 'border-blue-300 bg-blue-600 text-white shadow-[0_0_10px_rgba(37,99,235,.45)] hover:bg-blue-500'
@@ -959,55 +1111,6 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
               >
                 ↻
               </button>
-              </>
-            ) : layerControlPanel === 'layers' ? (
-              <>
-                <SceneLayerToggleButton
-                  buttonProps={{ 'data-program-scene-media-visible': true }}
-                  tone="air"
-                  pressed={programScene.mediaLayersVisible}
-                  disabled={programScene.mediaLayers.length === 0 && !programScene.mediaLayersVisible}
-                  title="Показывать или скрывать все медиаслои в эфире"
-                  onPressedChange={(pressed) => setProgramScene(pressed
-                    ? { mediaLayersVisible: true, mediaLayers: mediaLayerDraft }
-                    : { mediaLayersVisible: false })}
-                >
-                  {programScene.mediaLayersVisible ? 'Выйти из эфира' : 'Показать в эфире'}
-                </SceneLayerToggleButton>
-                <button
-                  type="button"
-                  data-program-scene-refresh
-                  aria-label="Обновить сцену в эфире"
-                  title={programScene.enabled ? 'Передать в эфир изменения из предпросмотра' : 'Сначала покажите сцену в эфире'}
-                  disabled={!programScene.enabled}
-                  onClick={() => void publishSceneDraft(false)}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-gray-600 bg-surface-100 text-base font-bold leading-none text-gray-300 transition-colors hover:border-blue-400 hover:bg-blue-700 hover:text-white disabled:cursor-not-allowed disabled:border-gray-800 disabled:text-gray-600"
-                >↻</button>
-              </>
-            ) : (
-              <>
-                <SceneLayerToggleButton
-                  buttonProps={{ 'data-program-scene-text-visible': true }}
-                  tone="air"
-                  pressed={programScene.textOverlaysVisible}
-                  title="Показывать или скрывать все текстовые блоки в эфире"
-                  onPressedChange={(pressed) => setProgramScene(pressed
-                    ? { textOverlaysVisible: true, textOverlays: textOverlayDraft }
-                    : { textOverlaysVisible: false })}
-                >
-                  {programScene.textOverlaysVisible ? 'Выйти из эфира' : 'Показать в эфире'}
-                </SceneLayerToggleButton>
-                <button
-                  type="button"
-                  data-program-scene-refresh
-                  aria-label="Обновить сцену в эфире"
-                  title={programScene.enabled ? 'Передать в эфир изменения из предпросмотра' : 'Сначала покажите сцену в эфире'}
-                  disabled={!programScene.enabled}
-                  onClick={() => void publishSceneDraft(false)}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-gray-600 bg-surface-100 text-base font-bold leading-none text-gray-300 transition-colors hover:border-blue-400 hover:bg-blue-700 hover:text-white disabled:cursor-not-allowed disabled:border-gray-800 disabled:text-gray-600"
-                >↻</button>
-              </>
-            )}
           </SceneLayerControlBar>
         )}
 
@@ -1017,8 +1120,19 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
           className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)] gap-3"
         >
           <section className="min-h-0">
-        <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
           <span className="text-xs text-gray-300">Предпросмотр</span>
+          <span
+            data-scene-context-hint
+            className="inline-flex items-center gap-1.5 rounded-md border border-blue-400/30 bg-blue-500/10 px-2 py-1 text-[11px] leading-none text-blue-200"
+          >
+            <svg className="h-4 w-4 shrink-0" viewBox="0 0 20 24" fill="none" aria-hidden="true">
+              <path d="M10 2a8 8 0 0 1 8 8v2h-8V2Z" fill="currentColor" fillOpacity=".65" />
+              <rect x="2" y="2" width="16" height="20" rx="8" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M10 2v10M2 12h16" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+            Правая кнопка мыши — добавить в сцену
+          </span>
         </div>
         <div
           ref={previewCanvasRef}
@@ -1026,7 +1140,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
           className="relative mb-2 aspect-video overflow-hidden rounded-lg border border-gray-700 bg-gray-950"
           style={{
             width: `min(100%, calc(max(64px, 100dvh - ${devicesError ? 430 : 390}px) * 16 / 9))`,
-            marginInline: 'auto'
+            marginInline: 'auto',
+            containerType: 'inline-size'
           }}
           onPointerDown={(event) => {
             if (event.target === event.currentTarget) setCanvasSelection(null)
@@ -1090,8 +1205,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             />
           )}
           <ProgramSceneMediaLayerSurface
-            layers={programScene.mediaLayers}
-            placement="below"
+            layers={mediaLayerDraft}
+            placement="all"
             interactive={activePanel === 'picture' || activePanel === 'layers'}
             selectedId={selectedMediaLayerId}
             onSelect={(id) => {
@@ -1101,6 +1216,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             onMove={(id, xPercent, yPercent) => updateMediaLayer(id, { xPercent, yPercent })}
             onScale={(id, widthPercent) => updateMediaLayer(id, { widthPercent })}
             onAspectRatio={(id, aspectRatio) => updateMediaLayer(id, { aspectRatio })}
+            onPlaybackTime={(id, currentTime, duration) => updateMediaLayer(id, { currentTime, duration })}
           />
           <div
             ref={contentPreviewRef}
@@ -1112,6 +1228,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
               top: '50%',
               transform: 'translateY(-50%)',
               zIndex: 2,
+              isolation: 'isolate',
               borderRadius: previewRadius,
               '--pdm-pip-preview-radius': typeof previewRadius === 'number' ? `${previewRadius}px` : previewRadius
             } as React.CSSProperties}
@@ -1176,7 +1293,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             }}
           >
             <div data-program-scene-key-fill-preview className="absolute inset-0 flex items-center justify-center overflow-hidden bg-black">
-              {backgroundSource?.type === 'image' && (
+              {selectedCapture && backgroundSource?.type === 'image' && (
                 <img
                   src={mediaUrl(backgroundSource.path)}
                   alt="Заполнение хромакея"
@@ -1184,7 +1301,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                   draggable={false}
                 />
               )}
-              {backgroundSource?.type === 'video' && (
+              {selectedCapture && backgroundSource?.type === 'video' && (
                 <video
                   key={backgroundSource.path}
                   src={mediaUrl(backgroundSource.path)}
@@ -1195,7 +1312,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                   className="absolute inset-0 h-full w-full object-cover"
                 />
               )}
-              {backgroundSource?.type === 'pdf' && backgroundChannel?.file && (
+              {selectedCapture && backgroundSource?.type === 'pdf' && backgroundChannel?.file && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black">
                   <SlideRenderer
                     file={backgroundChannel.file}
@@ -1205,7 +1322,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                   />
                 </div>
               )}
-              {backgroundSource?.type === 'capture' && (
+              {selectedCapture && backgroundSource?.type === 'capture' && (
                 <CaptureThumbnail
                   config={backgroundSource.capture}
                   className="absolute inset-0 h-full w-full"
@@ -1240,21 +1357,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
               )}
             </div>
           </div>
-          <ProgramSceneMediaLayerSurface
-            layers={programScene.mediaLayers}
-            placement="above"
-            interactive={activePanel === 'picture' || activePanel === 'layers'}
-            selectedId={selectedMediaLayerId}
-            onSelect={(id) => {
-              setSelectedMediaLayerId(id)
-              setCanvasSelection({ kind: 'media', id })
-            }}
-            onMove={(id, xPercent, yPercent) => updateMediaLayer(id, { xPercent, yPercent })}
-            onScale={(id, widthPercent) => updateMediaLayer(id, { widthPercent })}
-            onAspectRatio={(id, aspectRatio) => updateMediaLayer(id, { aspectRatio })}
-          />
           <ProgramSceneTextOverlayLayer
-            overlays={programScene.textOverlays}
+            overlays={textOverlayDraft}
             interactive={activePanel === 'picture' || activePanel === 'text'}
             selectedId={selectedTextOverlayId}
             onSelect={(id) => {
@@ -1263,17 +1367,17 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             }}
             onMove={updateTextOverlayPosition}
             onScale={(id, fontSizePercent) => updateTextOverlays(
-              programScene.textOverlays.map((overlay) => (
+              textOverlayDraft.map((overlay) => (
                 overlay.id === id ? { ...overlay, fontSizePercent } : overlay
               ))
             )}
             onWidthChange={(id, widthPercent) => updateTextOverlays(
-              programScene.textOverlays.map((overlay) => (
+              textOverlayDraft.map((overlay) => (
                 overlay.id === id ? { ...overlay, widthPercent } : overlay
               ))
             )}
             onTextChange={(id, text) => updateTextOverlays(
-              programScene.textOverlays.map((overlay) => (
+              textOverlayDraft.map((overlay) => (
                 overlay.id === id ? { ...overlay, text } : overlay
               ))
             )}
@@ -1282,61 +1386,147 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             config={qrOverlay}
             outputWidth={outputWidth}
             outputHeight={outputHeight}
-            shown={activePanel === 'qr' || qrOverlay.sceneVisible !== false}
+            shown={qrOverlay.sceneVisible !== false || qrOverlay.enabled}
             interactive={activePanel === 'picture' || activePanel === 'qr'}
             selected={canvasSelection?.kind === 'qr' || activePanel === 'qr'}
             onSelect={() => setCanvasSelection({ kind: 'qr' })}
             onChange={setQrOverlay}
           />
-          {activePanel === 'picture' && !backgroundSource && (
-            <button
-              type="button"
-              onClick={() => programScene.background.kind === 'video'
-                ? void selectBackgroundVideo()
-                : programScene.background.kind === 'image'
-                  ? void selectBackdrop()
-                  : undefined}
-              className="absolute inset-x-0 bottom-2 z-10 mx-auto w-fit rounded-md border border-amber-400/50 bg-gray-950/90 px-3 py-1 text-center text-[10px] font-medium text-amber-300 shadow-lg hover:border-amber-300 hover:bg-gray-900 hover:text-amber-200"
-              title="Выбрать нижний слой сцены"
-            >
-              Выберите фоновое изображение
-            </button>
-          )}
+          <SceneTimerPreviewLayer
+            remaining={timerTimeDraft.remaining}
+            running={timerTimeDraft.running}
+            duration={timerTimeDraft.duration}
+            position={timerOverlayDraft.position}
+            scale={timerOverlayDraft.scale}
+            textColor={timerOverlayDraft.textColor}
+            warningTextColor={timerOverlayDraft.warningTextColor}
+            overtimeTextColor={timerOverlayDraft.overtimeTextColor}
+            textOpacity={timerOverlayDraft.textOpacity}
+            outputWidth={outputWidth}
+            outputHeight={outputHeight}
+            interactive={activePanel === 'picture'}
+            selected={canvasSelection?.kind === 'timer'}
+            onSelect={() => setCanvasSelection({ kind: 'timer' })}
+            onPositionChange={(position) => updateTimerOverlayDraft({ position })}
+            onScaleChange={(scale) => updateTimerOverlayDraft({ scale })}
+          />
         </div>
 
           </section>
           <section className="flex min-h-0 flex-col">
 
         {effectiveEditorPanel === 'chroma' ? (
-          <ChromaKeyPanel
-            config={programScene.chromaKey}
-            available={chromaAvailable}
-            pickerActive={chromaColorPickerActive}
-            onChange={updateChromaKey}
-            onPickerToggle={() => {
-              updateChromaKey({ enabled: true })
-              setChromaColorPickerActive((active) => !active)
-            }}
-            onReset={() => {
-              setChromaColorPickerActive(false)
-              setProgramScene({ chromaKey: { ...DEFAULT_PROGRAM_SCENE_CHROMA_KEY } })
-            }}
-          />
+          <div className="grid min-h-0 gap-2">
+            <div data-program-scene-background className="rounded-lg border border-blue-500/50 bg-surface-100 p-2 shadow-sm shadow-blue-950/30">
+              <div className="mb-1.5">
+                <div className="text-sm font-semibold text-white">Заполнение хромакея</div>
+                <div className="text-[10px] text-gray-400">Картинка, видео или канал будут видны только вместо удалённого цветного фона.</div>
+              </div>
+              <div className="grid grid-cols-3 gap-1">
+                {BACKGROUND_KINDS.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    data-scene-background-kind={item.value}
+                    onClick={() => selectBackgroundKind(item.value)}
+                    className={`h-8 min-w-0 rounded-md border px-2 text-xs font-semibold transition-colors ${programScene.background.kind === item.value
+                      ? 'border-blue-400 bg-blue-600 text-white shadow-sm shadow-blue-950/40'
+                      : 'border-gray-600 bg-gray-900 text-gray-200 hover:border-gray-400 hover:bg-gray-800'}`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              {programScene.background.kind === 'image' && (
+                <button type="button" data-program-scene-chroma-fill-image onClick={() => void selectChromaFillImage()}
+                  className="mt-1.5 flex h-7 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-gray-600 bg-gray-900 px-2 text-[10px] text-gray-200 hover:border-gray-400">
+                  <span className="truncate">{shortFileName(programScene.background.imagePath) || 'Изображение не выбрано'}</span>
+                  <span className="shrink-0 text-blue-300">Выбрать</span>
+                </button>
+              )}
+              {programScene.background.kind === 'video' && (
+                <div className="mt-1.5 flex h-7 min-w-0 items-center gap-2">
+                  <button type="button" onClick={() => void selectBackgroundVideo()}
+                    className="flex h-7 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-gray-600 bg-gray-900 px-2 text-[10px] text-gray-200 hover:border-gray-400">
+                    <span className="truncate">{shortFileName(programScene.background.videoPath) || 'Видео не выбрано'}</span>
+                    <span className="shrink-0 text-blue-300">Выбрать</span>
+                  </button>
+                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
+                    <input type="checkbox" checked={programScene.background.loop}
+                      onChange={(event) => setProgramScene({ background: { ...programScene.background, loop: event.target.checked } })} />
+                    Повтор
+                  </label>
+                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
+                    <input type="checkbox" checked={!programScene.background.muted}
+                      onChange={(event) => setProgramScene({ background: { ...programScene.background, muted: !event.target.checked } })} />
+                    Звук
+                  </label>
+                </div>
+              )}
+              {programScene.background.kind === 'channel' && (
+                <div className="mt-1.5 flex h-7 min-w-0 items-center gap-2">
+                  <select
+                    aria-label="Канал заполнения хромакея"
+                    value={programScene.background.channelId ?? ''}
+                    onChange={(event) => setProgramScene({
+                      background: { ...programScene.background, channelId: event.target.value || null }
+                    })}
+                    className="h-7 min-w-0 flex-1 rounded-md border border-gray-600 bg-gray-900 px-2 text-[10px] text-white"
+                  >
+                    <option value="">Выберите канал</option>
+                    {channelIds.map((channelId) => {
+                      const file = channels[channelId]?.file
+                      if (!isProgramSceneBackgroundChannelSupported(file)) return null
+                      return <option key={channelId} value={channelId}>Канал {channelId} — {file?.name}</option>
+                    })}
+                  </select>
+                  {backgroundSource?.type === 'video' && (
+                    <>
+                      <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
+                        <input type="checkbox" checked={programScene.background.loop}
+                          onChange={(event) => setProgramScene({ background: { ...programScene.background, loop: event.target.checked } })} />
+                        Повтор
+                      </label>
+                      <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
+                        <input type="checkbox" checked={!programScene.background.muted}
+                          onChange={(event) => setProgramScene({ background: { ...programScene.background, muted: !event.target.checked } })} />
+                        Звук
+                      </label>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            <ChromaKeyPanel
+              config={programScene.chromaKey}
+              available={chromaAvailable}
+              pickerActive={chromaColorPickerActive}
+              onChange={updateChromaKey}
+              onPickerToggle={() => {
+                updateChromaKey({ enabled: true })
+                setChromaColorPickerActive((active) => !active)
+              }}
+              onReset={() => {
+                setChromaColorPickerActive(false)
+                setProgramScene({ chromaKey: { ...DEFAULT_PROGRAM_SCENE_CHROMA_KEY } })
+              }}
+            />
+          </div>
         ) : effectiveEditorPanel === 'layers' ? (
           <ProgramSceneMediaLayerEditor
-            layers={programScene.mediaLayers}
+            layers={mediaLayerDraft}
             selectedId={selectedMediaLayerId}
             onSelect={(id) => {
               setSelectedMediaLayerId(id)
               setCanvasSelection(id ? { kind: 'media', id } : null)
             }}
             onChange={updateMediaLayers}
-            onAddImage={() => void addImageLayer()}
-            onAddVideo={() => void addVideoLayers()}
+            onReorder={reorderMediaLayer}
+            onAddLayer={() => void addMediaLayers()}
           />
         ) : effectiveEditorPanel === 'text' ? (
           <ProgramSceneTextOverlayEditor
-            overlays={programScene.textOverlays}
+            overlays={textOverlayDraft}
             selectedId={selectedTextOverlayId}
             onSelectedIdChange={(id) => {
               setSelectedTextOverlayId(id)
@@ -1351,91 +1541,42 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             manageOutputOwnership={false}
             onClose={() => setCanvasSelection(null)}
           />
+        ) : effectiveEditorPanel === 'timer' ? (
+          <SceneTimerSettings
+            duration={timerTimeDraft.duration}
+            remaining={timerTimeDraft.remaining}
+            running={timerTimeDraft.running}
+            position={timerOverlayDraft.position}
+            scale={timerOverlayDraft.scale}
+            textColor={timerOverlayDraft.textColor}
+            warningTextColor={timerOverlayDraft.warningTextColor}
+            overtimeTextColor={timerOverlayDraft.overtimeTextColor}
+            textOpacity={timerOverlayDraft.textOpacity}
+            onPositionChange={(position) => updateTimerOverlayDraft({ position })}
+            onScaleChange={(scale) => updateTimerOverlayDraft({ scale })}
+            onTextColorChange={(textColor) => updateTimerOverlayDraft({ textColor })}
+            onWarningTextColorChange={(warningTextColor) => updateTimerOverlayDraft({ warningTextColor })}
+            onOvertimeTextColorChange={(overtimeTextColor) => updateTimerOverlayDraft({ overtimeTextColor })}
+            onTextOpacityChange={(textOpacity) => updateTimerOverlayDraft({ textOpacity })}
+            onSetDuration={(duration) => updateTimerTimeDraft(() => ({ duration, remaining: duration, running: false }))}
+            onStart={() => updateTimerTimeDraft((draft) => ({ ...draft, running: draft.duration > 0 }))}
+            onPause={() => updateTimerTimeDraft((draft) => ({ ...draft, running: false }))}
+            onStop={() => updateTimerTimeDraft(() => ({ duration: 0, remaining: 0, running: false }))}
+            onReset={() => updateTimerTimeDraft((draft) => ({ ...draft, remaining: draft.duration, running: false }))}
+            onAddMinutes={(minutes) => updateTimerTimeDraft((draft) => {
+              if (draft.duration <= 0 && minutes > 0) {
+                const duration = minutes * 60
+                return { duration, remaining: duration, running: false }
+              }
+              return { ...draft, remaining: draft.remaining + minutes * 60 }
+            })}
+          />
         ) : <>
 
-        <div data-program-scene-background className="mb-1.5 rounded-lg border border-blue-500/50 bg-surface-100 p-1.5 shadow-sm shadow-blue-950/30">
-          <div className="flex items-center gap-2">
-            <span className="w-[118px] shrink-0 text-[11px] font-semibold leading-tight text-white">Фон под хромакеем</span>
-            <div className="grid min-w-0 flex-1 grid-cols-3 gap-1">
-              {BACKGROUND_KINDS.map((item) => (
-                <button
-                  key={item.value}
-                  type="button"
-                  data-scene-background-kind={item.value}
-                  onClick={() => selectBackgroundKind(item.value)}
-                  className={`h-8 min-w-0 rounded-md border px-2 text-xs font-semibold transition-colors ${programScene.background.kind === item.value
-                    ? 'border-blue-400 bg-blue-600 text-white shadow-sm shadow-blue-950/40'
-                    : 'border-gray-600 bg-gray-900 text-gray-200 hover:border-gray-400 hover:bg-gray-800'}`}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          {programScene.background.kind === 'image' && (
-            <button type="button" onClick={() => void selectBackdrop()}
-              className="mt-1 flex h-7 w-full min-w-0 items-center justify-between gap-2 rounded-md border border-gray-600 bg-gray-900 px-2 text-[10px] text-gray-200 hover:border-gray-400">
-              <span className="truncate">{shortFileName(backdropImage) || 'Изображение не выбрано'}</span>
-              <span className="shrink-0 text-blue-300">Выбрать</span>
-            </button>
-          )}
-          {programScene.background.kind === 'video' && (
-            <div className="mt-1 flex h-7 min-w-0 items-center gap-2">
-              <button type="button" onClick={() => void selectBackgroundVideo()}
-                className="flex h-7 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-gray-600 bg-gray-900 px-2 text-[10px] text-gray-200 hover:border-gray-400">
-                <span className="truncate">{shortFileName(programScene.background.videoPath) || 'Видео не выбрано'}</span>
-                <span className="shrink-0 text-blue-300">Выбрать</span>
-              </button>
-              <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
-                <input type="checkbox" checked={programScene.background.loop}
-                  onChange={(event) => setProgramScene({ background: { ...programScene.background, loop: event.target.checked } })} />
-                Повтор
-              </label>
-              <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
-                <input type="checkbox" checked={!programScene.background.muted}
-                  onChange={(event) => setProgramScene({ background: { ...programScene.background, muted: !event.target.checked } })} />
-                Звук
-              </label>
-            </div>
-          )}
-          {programScene.background.kind === 'channel' && (
-            <div className="mt-1 flex h-7 min-w-0 items-center gap-2">
-              <select
-                aria-label="Канал нижнего слоя"
-                value={programScene.background.channelId ?? ''}
-                onChange={(event) => setProgramScene({
-                  background: { ...programScene.background, channelId: event.target.value || null }
-                })}
-                className="h-7 min-w-0 flex-1 rounded-md border border-gray-600 bg-gray-900 px-2 text-[10px] text-white"
-              >
-                <option value="">Выберите канал</option>
-                {channelIds.map((channelId) => {
-                  const file = channels[channelId]?.file
-                  if (!isProgramSceneBackgroundChannelSupported(file)) return null
-                  return <option key={channelId} value={channelId}>Канал {channelId} — {file?.name}</option>
-                })}
-              </select>
-              {backgroundSource?.type === 'video' && (
-                <>
-                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
-                    <input type="checkbox" checked={programScene.background.loop}
-                      onChange={(event) => setProgramScene({ background: { ...programScene.background, loop: event.target.checked } })} />
-                    Повтор
-                  </label>
-                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-gray-300">
-                    <input type="checkbox" checked={!programScene.background.muted}
-                      onChange={(event) => setProgramScene({ background: { ...programScene.background, muted: !event.target.checked } })} />
-                    Звук
-                  </label>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-
         <div className="mb-1 flex items-center gap-2">
-          <label className="w-[118px] shrink-0 text-[11px] font-medium text-gray-300">Камера поверх</label>
+          <label className="w-[138px] shrink-0 text-[11px] font-medium text-gray-300">Внешний источник (камера)</label>
           <select
+            data-program-scene-participant-source
             value={selectedOption}
             onChange={(event) => selectExternalSource(event.target.value)}
             className="h-8 min-w-0 flex-1 rounded-lg border border-gray-700 bg-surface-100 px-2 text-xs text-white outline-none focus:border-blue-500"
@@ -1691,27 +1832,27 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
               </button>
               <button
                 type="button"
-                data-scene-add="image"
+                data-scene-add="timer"
                 onClick={() => {
-                  const position = { xPercent: sceneContextMenu.xPercent, yPercent: sceneContextMenu.yPercent }
+                  setCanvasSelection({ kind: 'timer' })
+                  setActivePanel('picture')
                   setSceneContextMenu(null)
-                  void addImageLayer(position)
                 }}
                 className="block w-full rounded px-2 py-1.5 text-left hover:bg-blue-600"
               >
-                Слой — картинка
+                Таймер
               </button>
               <button
                 type="button"
-                data-scene-add="video"
+                data-scene-add="layer"
                 onClick={() => {
                   const position = { xPercent: sceneContextMenu.xPercent, yPercent: sceneContextMenu.yPercent }
                   setSceneContextMenu(null)
-                  void addVideoLayers(position)
+                  void addMediaLayers(position)
                 }}
                 className="block w-full rounded px-2 py-1.5 text-left hover:bg-blue-600"
               >
-                Слой — видео
+                Добавить слой
               </button>
               <div className="my-1 border-t border-gray-700" />
             </>}
@@ -1720,13 +1861,13 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                 <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Слой</div>
                 <button type="button" data-scene-object-action="up"
                   onClick={() => {
-                    updateMediaLayers(moveProgramSceneMediaLayer(programScene.mediaLayers, sceneContextMenu.target.kind === 'media' ? sceneContextMenu.target.id : '', 'up'))
+                    if (sceneContextMenu.target.kind === 'media') reorderMediaLayer(sceneContextMenu.target.id, 'up')
                     setSceneContextMenu(null)
                   }}
                   className="block w-full rounded px-2 py-1.5 text-left hover:bg-blue-600">Выше</button>
                 <button type="button" data-scene-object-action="down"
                   onClick={() => {
-                    updateMediaLayers(moveProgramSceneMediaLayer(programScene.mediaLayers, sceneContextMenu.target.kind === 'media' ? sceneContextMenu.target.id : '', 'down'))
+                    if (sceneContextMenu.target.kind === 'media') reorderMediaLayer(sceneContextMenu.target.id, 'down')
                     setSceneContextMenu(null)
                   }}
                   className="block w-full rounded px-2 py-1.5 text-left hover:bg-blue-600">Ниже</button>
@@ -1758,7 +1899,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                 <button type="button" data-scene-object-action="hide"
                   onClick={() => {
                     if (sceneContextMenu.target.kind === 'text') {
-                      updateTextOverlays(programScene.textOverlays.map((overlay) => (
+                      updateTextOverlays(textOverlayDraft.map((overlay) => (
                         overlay.id === sceneContextMenu.target.id ? { ...overlay, visible: false } : overlay
                       )))
                     }
@@ -1881,17 +2022,17 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
               </>
             )}
             {!sceneContextMenu.chooserOnly && <>
-            {(programScene.mediaLayers.length > 0 || programScene.textOverlays.length > 0 || hasQrData(qrOverlay)) && (
+            {(mediaLayerDraft.length > 0 || textOverlayDraft.length > 0 || hasQrData(qrOverlay)) && (
               <>
                 <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Настроить</div>
-                {programScene.mediaLayers.length > 0 && (
+                {mediaLayerDraft.length > 0 && (
                   <button
                     type="button"
                     data-scene-manage="layers"
                     onClick={() => {
-                      const selectedId = programScene.mediaLayers.some((layer) => layer.id === selectedMediaLayerId)
+                      const selectedId = mediaLayerDraft.some((layer) => layer.id === selectedMediaLayerId)
                         ? selectedMediaLayerId
-                        : programScene.mediaLayers.at(-1)?.id ?? null
+                        : mediaLayerDraft.at(-1)?.id ?? null
                       setSelectedMediaLayerId(selectedId)
                       setCanvasSelection(selectedId ? { kind: 'media', id: selectedId } : null)
                       setActivePanel('picture')
@@ -1899,17 +2040,17 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                     }}
                     className="block w-full rounded px-2 py-1.5 text-left hover:bg-blue-600"
                   >
-                    Слои сцены ({programScene.mediaLayers.length})
+                    Слои сцены ({mediaLayerDraft.length})
                   </button>
                 )}
-                {programScene.textOverlays.length > 0 && (
+                {textOverlayDraft.length > 0 && (
                   <button
                     type="button"
                     data-scene-manage="text"
                     onClick={() => {
-                      const selectedId = programScene.textOverlays.some((overlay) => overlay.id === selectedTextOverlayId)
+                      const selectedId = textOverlayDraft.some((overlay) => overlay.id === selectedTextOverlayId)
                         ? selectedTextOverlayId
-                        : programScene.textOverlays.at(-1)?.id ?? null
+                        : textOverlayDraft.at(-1)?.id ?? null
                       setSelectedTextOverlayId(selectedId)
                       setCanvasSelection(selectedId ? { kind: 'text', id: selectedId } : null)
                       setActivePanel('picture')
@@ -1917,7 +2058,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                     }}
                     className="block w-full rounded px-2 py-1.5 text-left hover:bg-blue-600"
                   >
-                    Текстовые блоки ({programScene.textOverlays.length})
+                    Текстовые блоки ({textOverlayDraft.length})
                   </button>
                 )}
                 {hasQrData(qrOverlay) && (
@@ -1925,6 +2066,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                     type="button"
                     data-scene-manage="qr"
                     onClick={() => {
+                      setQrOverlay({ sceneVisible: true })
                       setCanvasSelection({ kind: 'qr' })
                       setActivePanel('picture')
                       setSceneContextMenu(null)

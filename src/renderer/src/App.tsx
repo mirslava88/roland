@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useAppStore } from './stores/useAppStore'
+import { navigateSpeakerOnlyPdf, useAppStore } from './stores/useAppStore'
 import { FileLibrary } from './components/Library/FileLibrary'
 import { PreviewPanel } from './components/Preview/PreviewPanel'
 import { ControlBar } from './components/Controls/ControlBar'
@@ -14,6 +14,7 @@ import { AuxiliaryDisplayBridge } from './components/AuxiliaryDisplays/Auxiliary
 import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTitlesBridge'
 import { ProgramSceneBridge } from './components/ProgramScene/ProgramSceneBridge'
 import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
+import { InternalProgramOutputBridge } from './components/ProgramScene/InternalProgramOutputBridge'
 
 export default function App(): JSX.Element {
   const {
@@ -246,7 +247,9 @@ export default function App(): JSX.Element {
         )
         window.dispatchEvent(new Event('pdf-navigation-priority'))
         useAppStore.getState().releasePinnedPdfOverlay()
-        window.api.sendToPresentation('navigate-pdf', direction)
+        if (!navigateSpeakerOnlyPdf(direction)) {
+          window.api.sendToPresentation('navigate-pdf', direction)
+        }
       }
     }
 
@@ -282,7 +285,9 @@ export default function App(): JSX.Element {
             await useAppStore.getState().navigatePptx('goto', request.slide)
           } else if (activeFile?.type === 'pdf') {
             useAppStore.getState().releasePinnedPdfOverlay()
-            window.api.sendToPresentation('navigate-slide', request.slide)
+            if (!navigateSpeakerOnlyPdf(request.slide)) {
+              window.api.sendToPresentation('navigate-slide', request.slide)
+            }
           }
         }
       })()
@@ -311,6 +316,7 @@ export default function App(): JSX.Element {
       <AuxiliaryDisplayBridge />
       <BroadcastTitlesBridge />
       <ProgramSceneBridge />
+      <InternalProgramOutputBridge />
       <QrOverlayBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="pdm-main-workspace flex flex-1 overflow-hidden">

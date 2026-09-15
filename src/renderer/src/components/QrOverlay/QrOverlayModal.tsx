@@ -7,7 +7,7 @@ import {
 } from '../../../../shared/qr-overlay'
 import { getProgramSceneRects } from '../../../../shared/program-scene'
 import { mediaUrl } from '../../media'
-import { useAppStore } from '../../stores/useAppStore'
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import { SlideRenderer } from '../Preview/PreviewPanel'
 import { SceneLayerControlBar, SceneLayerToggleButton } from '../ProgramScene/SceneLayerControlBar'
@@ -74,9 +74,8 @@ export async function publishQrOverlay(
   shouldPublish: () => boolean = () => true
 ): Promise<void> {
   const state = useAppStore.getState()
-  const targetExists = state.displays.some(
-    (display) => !display.isPrimary && display.id === state.selectedDisplayId
-  )
+  const outputDisplayId = connectedProgramDisplayId(state)
+  const targetExists = outputDisplayId !== null
   if (!config.enabled || !hasQrData(config) ||
     (!state.activeFile && !state.isPresentationWindowOpen) || !targetExists) {
     if (shouldPublish()) window.api.updateQrOverlay({ visible: false })
@@ -90,9 +89,7 @@ export async function publishQrOverlay(
     const docPreviewPath = state.activeFile?.type === 'other'
       ? state.docPreviewsMap[state.activeFile.path] ?? null
       : null
-    const outputDisplay = state.displays.find(
-      (display) => !display.isPrimary && display.id === state.selectedDisplayId
-    ) ?? state.displays.find((display) => !display.isPrimary)
+    const outputDisplay = state.displays.find((display) => display.id === outputDisplayId)
     const outputWidth = Math.max(1, outputDisplay?.bounds.width ?? 1920)
     const outputHeight = Math.max(1, outputDisplay?.bounds.height ?? 1080)
     const selectedCapture = state.captureSources.find(
@@ -103,7 +100,7 @@ export async function publishQrOverlay(
     const sceneBackground = resolveProgramSceneBackground(state)
     const backgroundIsParticipant = sceneBackground?.type === 'capture' &&
       sceneBackground.capture.sourceId === selectedCapture?.sourceId
-    const sceneActive = state.programScene.enabled && !!sceneBackground &&
+    const sceneActive = state.programScene.enabled &&
       (!state.activeFile || supportsProgramScene(state.activeFile)) && !activeIsParticipant &&
       !backgroundIsParticipant
     const contentAspectRatio = state.activeFile?.type === 'presentation'
@@ -138,7 +135,7 @@ export async function publishQrOverlay(
     const backgroundColor = detectedColor ?? config.descriptionBackgroundColor
     window.api.updateQrOverlay({
       visible: true,
-      displayId: state.selectedDisplayId,
+      displayId: outputDisplayId,
       imageDataUrl,
       sizePercent: config.sizePercent,
       xPercent: config.xPercent,
@@ -227,9 +224,8 @@ export function QrOverlayModal({
   const activeDocPreviewPath = activeFile?.type === 'other'
     ? docPreviewsMap[activeFile.path] ?? null
     : null
-  const outputDisplay = displays.find(
-    (display) => !display.isPrimary && display.id === selectedDisplayId
-  ) ?? displays.find((display) => !display.isPrimary)
+  const outputDisplayId = connectedProgramDisplayId(useAppStore.getState())
+  const outputDisplay = displays.find((display) => display.id === outputDisplayId)
   const outputWidth = Math.max(1, outputDisplay?.bounds.width ?? 1920)
   const outputHeight = Math.max(1, outputDisplay?.bounds.height ?? 1080)
   const outputAspectRatio = outputWidth / outputHeight
@@ -244,7 +240,7 @@ export function QrOverlayModal({
   )
   const backgroundSourceIsParticipant = sceneBackground?.type === 'capture' &&
     sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId
-  const sceneActive = programScene.enabled && !!sceneBackground &&
+  const sceneActive = programScene.enabled &&
     (!activeFile || supportsProgramScene(activeFile)) && !activeSourceIsParticipant &&
     !backgroundSourceIsParticipant
   const sceneContentAspectRatio = activeFile?.type === 'presentation'
@@ -484,7 +480,7 @@ export function QrOverlayModal({
           <button type="button" onClick={onClose} className="px-2 text-xl text-gray-400 hover:text-white">×</button>
         </div>}
 
-        <SceneLayerControlBar
+        {!embedded && <SceneLayerControlBar
           active={draft.enabled}
           status={draft.enabled ? 'QR-код в эфире' : 'QR-код скрыт'}
           detail={valid ? 'Слой подготовлен' : 'Заполните данные QR-кода'}
@@ -495,8 +491,8 @@ export function QrOverlayModal({
             pressed={draft.enabled}
             title="Показывать или скрывать QR-код в эфире"
             onPressedChange={(pressed) => {
-              const nextConfig = normalizeQrOverlay({ ...draft, enabled: pressed })
-              update({ enabled: pressed })
+              const nextConfig = normalizeQrOverlay({ ...draft, enabled: pressed, ...(pressed ? { sceneVisible: true } : {}) })
+              update({ enabled: pressed, ...(pressed ? { sceneVisible: true } : {}) })
               if (!pressed) {
                 window.api.updateQrOverlay({ visible: false })
               } else {
@@ -506,7 +502,7 @@ export function QrOverlayModal({
           >
             {draft.enabled ? 'Выйти из эфира' : 'Показать в эфире'}
           </SceneLayerToggleButton>
-        </SceneLayerControlBar>
+        </SceneLayerControlBar>}
 
         <div className={embedded
           ? settingsOnly
@@ -764,15 +760,21 @@ export function QrOverlayModal({
                 update({ sizePercent: draft.sizePercent + direction * 2 })
               }}
             >
-              {sceneActive && sceneBackground ? (
+              {sceneActive ? (
                 <div className="pointer-events-none absolute inset-0 overflow-hidden">
-                  {sceneBackground.type === 'capture' ? (
+                  {backdropImage && <img
+                    src={mediaUrl(backdropImage)}
+                    alt=""
+                    draggable={false}
+                    className="absolute inset-0 h-full w-full select-none object-cover"
+                  />}
+                  {sceneBackground?.type === 'capture' ? (
                     <CaptureThumbnail
                       config={sceneBackground.capture}
                       className="absolute inset-0 h-full w-full"
                       fit="cover"
                     />
-                  ) : sceneBackground.type === 'video' ? (
+                  ) : sceneBackground?.type === 'video' ? (
                     <video
                       src={mediaUrl(sceneBackground.path)}
                       autoPlay
@@ -781,7 +783,7 @@ export function QrOverlayModal({
                       muted
                       className="absolute inset-0 h-full w-full object-cover"
                     />
-                  ) : sceneBackground.type === 'pdf' && programScene.background.channelId &&
+                  ) : sceneBackground?.type === 'pdf' && programScene.background.channelId &&
                     channels[programScene.background.channelId]?.file ? (
                       <div className="absolute inset-0 flex items-center justify-center bg-black">
                         <SlideRenderer
@@ -791,14 +793,14 @@ export function QrOverlayModal({
                           onTotalSlides={() => undefined}
                         />
                       </div>
-                  ) : (
+                  ) : sceneBackground ? (
                     <img
                       src={mediaUrl(sceneBackground.path)}
                       alt=""
                       draggable={false}
                       className="absolute inset-0 h-full w-full select-none object-cover"
                     />
-                  )}
+                  ) : null}
                   <div
                     className="absolute z-[1] overflow-hidden bg-transparent"
                     style={{

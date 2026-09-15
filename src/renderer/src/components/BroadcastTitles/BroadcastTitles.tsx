@@ -86,7 +86,7 @@ export function BroadcastTitles(): JSX.Element {
       : undefined
     const activeCapture = state.activeFile?.type === 'capture' ? state.activeFile.capture : undefined
     const sceneBackground = resolveProgramSceneBackground(state)
-    const sceneSupportsTitles = state.programScene.enabled && !!sceneBackground &&
+    const sceneSupportsTitles = state.programScene.enabled &&
       (!state.activeFile || supportsProgramSceneTitles(state.activeFile))
     const sceneCapture = sceneSupportsTitles
       ? state.captureSources.find(
@@ -162,7 +162,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
   const selectedCapture = selectedFile?.type === 'capture' ? selectedFile.capture : undefined
   const activeCapture = activeFile?.type === 'capture' ? activeFile.capture : undefined
   const sceneBackground = resolveProgramSceneBackground(useAppStore.getState())
-  const sceneSupportsTitles = programScene.enabled && !!sceneBackground &&
+  const sceneSupportsTitles = programScene.enabled &&
     (!activeFile || supportsProgramSceneTitles(activeFile))
   const sceneCapture = sceneSupportsTitles
     ? captureSources.find((entry) => entry.capture?.sourceId === programScene.captureSourceId)?.capture

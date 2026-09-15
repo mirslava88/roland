@@ -1,5 +1,6 @@
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'child_process'
 import { performance } from 'perf_hooks'
+import type { Writable } from 'stream'
 import type { StreamSettings, StreamStatus } from '../shared/streaming'
 import { StreamPublisher } from './stream-publisher'
 import { FlvParser, type FlvPacket } from './stream-flv'
@@ -24,6 +25,11 @@ export function publisherErrorMessage(text: string): string | undefined {
 export function desktopInputArguments(bounds: { x: number; y: number; width: number; height: number }, fps: number): string[] {
   return ['-thread_queue_size', '2', '-probesize', '32', '-analyzeduration', '0', '-fpsprobesize', '0', '-f', 'gdigrab', '-framerate', String(fps), '-draw_mouse', '0',
     '-offset_x', String(bounds.x), '-offset_y', String(bounds.y), '-video_size', `${bounds.width}x${bounds.height}`, '-i', 'desktop']
+}
+
+export function rawVideoInputArguments(width: number, height: number, fps: number): string[] {
+  return ['-thread_queue_size', '2', '-f', 'rawvideo', '-pixel_format', 'bgra', '-video_size', `${width}x${height}`,
+    '-framerate', String(fps), '-use_wallclock_as_timestamps', '1', '-i', 'pipe:3']
 }
 
 export const encoderArguments = (s: StreamSettings, encoder: string, videoInput: string[]): string[] => [
@@ -78,6 +84,8 @@ export class StreamingEngine {
   private stopped = false
   private lastFrameAt = performance.now()
   private writePending = false
+  private videoInput: Writable | null = null
+  private videoWritePending = false
   private fps = 0
   private droppedFrames = 0
   private bitrateKbps = 0
@@ -97,9 +105,13 @@ export class StreamingEngine {
   constructor(private path: string, private settings: StreamSettings,
     private onError: (message: string) => void) {}
 
-  start(encoder: string, videoInput: string[]): void {
-    const process = spawn(this.path, encoderArguments(this.settings, encoder, videoInput), { windowsHide: true, stdio: 'pipe' })
+  start(encoder: string, videoInput: string[], rawVideo = false): void {
+    const process = spawn(this.path, encoderArguments(this.settings, encoder, videoInput), {
+      windowsHide: true,
+      stdio: rawVideo ? ['pipe', 'pipe', 'pipe', 'pipe'] : 'pipe'
+    }) as ChildProcessWithoutNullStreams
     this.encoder = process
+    this.videoInput = rawVideo ? process.stdio[3] as Writable : null
     this.publishers = this.settings.destinations.filter((d) => d.enabled).map(d => new StreamPublisher(this.path, { ...d }))
     process.stdin.on('error', () => this.fail('Кодер прекратил приём кадров.'))
     process.on('error', () => this.fail('Не удалось запустить кодер.'))
@@ -173,6 +185,20 @@ export class StreamingEngine {
     })
   }
 
+  writeVideo(bytes: Buffer): Promise<boolean> {
+    const input = this.videoInput
+    if (this.stopped || !input || input.destroyed || this.videoWritePending || bytes.length === 0) {
+      return Promise.resolve(false)
+    }
+    this.videoWritePending = true
+    return new Promise((resolve) => {
+      input.write(bytes, (error) => {
+        this.videoWritePending = false
+        resolve(!error && !this.stopped)
+      })
+    })
+  }
+
   snapshot(): Pick<StreamStatus, 'destinations' | 'fps' | 'bitrateKbps' | 'droppedFrames' | 'encoderLagMs'> {
     return { fps: this.fps, bitrateKbps: this.bitrateKbps, droppedFrames: this.droppedFrames, encoderLagMs: this.encoderLagMs,
       destinations: this.publishers.map(p => p.snapshot()) }
@@ -190,6 +216,8 @@ export class StreamingEngine {
     for (const p of this.publishers) p.stop()
     this.headers.clear()
     this.encoder?.stdin.destroy()
+    this.videoInput?.destroy()
+    this.videoInput = null
     this.encoder?.kill()
     this.encoder = null
     this.publishers = []

@@ -46,6 +46,10 @@ import { ProgramSceneTextOverlayLayer } from './components/ProgramScene/ProgramS
 import { ProgramSceneMediaLayerSurface } from './components/ProgramScene/ProgramSceneMediaLayers'
 import { ProgramSceneBackgroundLayer } from './components/ProgramScene/ProgramSceneBackgroundLayer'
 import type { ProgramSceneBackgroundPayload } from './program-scene-background'
+import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
+import { SceneTimerPreviewLayer } from './components/ProgramScene/SceneTimerPreviewLayer'
+import type { QrOverlayConfig } from '../../shared/qr-overlay'
+import type { ProgramSceneTimerSnapshot } from './stores/useAppStore'
 import {
   DEFAULT_CONTENT_ZOOM,
   normalizeContentZoom,
@@ -71,6 +75,7 @@ interface ContentSlot {
 }
 
 interface ProgramScenePayload {
+  revision: number
   active: boolean
   capture: CaptureSourceConfig | null
   backdropPath: string | null
@@ -89,6 +94,8 @@ interface ProgramScenePayload {
   mediaLayersVisible: boolean
   externalMediaOverlayActive: boolean
   chromaKey: ProgramSceneChromaKeyConfig
+  qrOverlay: QrOverlayConfig | null
+  timer: ProgramSceneTimerSnapshot | null
 }
 
 interface ProgramScenePowerPointHold {
@@ -99,6 +106,7 @@ interface ProgramScenePowerPointHold {
 }
 
 const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
+  revision: 0,
   active: false,
   capture: null,
   backdropPath: null,
@@ -116,7 +124,9 @@ const EMPTY_PROGRAM_SCENE: ProgramScenePayload = {
   mediaLayers: [],
   mediaLayersVisible: false,
   externalMediaOverlayActive: false,
-  chromaKey: { ...DEFAULT_PROGRAM_SCENE_CHROMA_KEY }
+  chromaKey: { ...DEFAULT_PROGRAM_SCENE_CHROMA_KEY },
+  qrOverlay: null,
+  timer: null
 }
 
 type SlotIndex = 0 | 1
@@ -780,6 +790,9 @@ export function PresentationApp(): JSX.Element {
         ? raw.viewMode
         : 'both'
       const nextProgramScene: ProgramScenePayload = {
+        revision: Number.isInteger(raw?.revision) && Number(raw?.revision) > 0
+          ? Number(raw?.revision)
+          : 0,
         active: raw?.active === true,
         capture,
         backdropPath: typeof raw?.backdropPath === 'string' ? raw.backdropPath : null,
@@ -788,18 +801,7 @@ export function PresentationApp(): JSX.Element {
           raw.background.type === 'video' ||
           raw.background.type === 'pdf' ||
           raw.background.type === 'capture'
-        ) ? raw.background : (
-          typeof raw?.backdropPath === 'string'
-            ? {
-                type: 'image',
-                path: raw.backdropPath,
-                name: 'Фоновое изображение',
-                slide: 1,
-                loop: true,
-                muted: true
-              }
-            : null
-        ),
+        ) ? raw.background : null,
         placement: typeof raw?.placement === 'string'
           ? raw.placement as ProgramScenePlacement
           : DEFAULT_PROGRAM_SCENE_LAYOUT.placement,
@@ -824,7 +826,9 @@ export function PresentationApp(): JSX.Element {
         mediaLayers: normalizeProgramSceneMediaLayers(raw?.mediaLayers),
         mediaLayersVisible: raw?.mediaLayersVisible === true,
         externalMediaOverlayActive: raw?.externalMediaOverlayActive === true,
-        chromaKey: normalizeProgramSceneChromaKey(raw?.chromaKey)
+        chromaKey: normalizeProgramSceneChromaKey(raw?.chromaKey),
+        qrOverlay: raw?.qrOverlay ?? null,
+        timer: raw?.timer ?? null
       }
       const previousProgramScene = programSceneRef.current
       if (
@@ -836,6 +840,15 @@ export function PresentationApp(): JSX.Element {
       }
       programSceneRef.current = nextProgramScene
       setProgramScene(nextProgramScene)
+      if (nextProgramScene.revision > 0) {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (programSceneRef.current.revision === nextProgramScene.revision) {
+            window.api.sendToControl('program-scene-applied', {
+              revision: nextProgramScene.revision
+            })
+          }
+        }))
+      }
       if (raw?.active !== true) {
         setPowerPointHold(null)
       } else if (nextViewMode !== 'participant') {
@@ -1206,6 +1219,28 @@ export function PresentationApp(): JSX.Element {
       )}
       {sceneActive && programScene.textOverlaysVisible && (
         <ProgramSceneTextOverlayLayer overlays={programScene.textOverlays} />
+      )}
+      {sceneActive && programScene.qrOverlay?.enabled && (
+        <SceneQrPreviewLayer
+          config={programScene.qrOverlay}
+          outputWidth={viewport.width}
+          outputHeight={viewport.height}
+        />
+      )}
+      {sceneActive && programScene.timer?.visible && (
+        <SceneTimerPreviewLayer
+          remaining={programScene.timer.remaining}
+          running={programScene.timer.running}
+          duration={programScene.timer.duration}
+          position={programScene.timer.position}
+          scale={programScene.timer.scale}
+          textColor={programScene.timer.textColor}
+          warningTextColor={programScene.timer.warningTextColor}
+          overtimeTextColor={programScene.timer.overtimeTextColor}
+          textOpacity={programScene.timer.textOpacity}
+          outputWidth={viewport.width}
+          outputHeight={viewport.height}
+        />
       )}
       {!hasVisibleContent && !sceneActive && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-700 text-lg select-none">

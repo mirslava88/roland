@@ -8,6 +8,10 @@ import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { scriptPath as resolveScript } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
+import { createPptxCache, readPptxCacheImages, type PptxCacheProgress } from './pptx-cache'
+import { resizePptxThumbnail } from './pptx-thumbnail'
+import { exportPptxIncrementally } from './pptx-incremental-export'
+import { createPptxDiskCache } from './pptx-cache-disk'
 import {
   diagnosticLog,
   formatDiagnosticError,
@@ -111,20 +115,29 @@ function pptxExportDirectory(
   return join(tmpdir(), `pdm-${kind}-${hash}`)
 }
 
-async function readPptxExportCache(directory: string): Promise<string[] | null> {
-  try {
-    const count = Number((await readFile(join(directory, 'complete.txt'), 'utf8')).trim())
-    if (!Number.isInteger(count) || count < 1) return null
-    const images: string[] = []
-    for (let i = 1; i <= count; i++) {
-      const imagePath = join(directory, `slide_${i}.png`)
-      if (!existsSync(imagePath)) return null
-      images.push(imagePath)
-    }
-    return images
-  } catch {
-    return null
-  }
+const readPptxExportCache = readPptxCacheImages
+const pptxDiskCache = createPptxDiskCache()
+
+const preparePptxCache = createPptxCache({
+  directory: (path, size, mtime, width, height) => pptxDiskCache.claim(pptxExportDirectory('slides', path, size, mtime, width, height)),
+  readCache: readPptxExportCache,
+  export: (path, outputDir, width, height, onEvent, signal) => exportPptxIncrementally(
+    pptDaemon.send.bind(pptDaemon), { path, outputDir, width, height }, onEvent, signal
+  ),
+  prepare: (path) => pptDaemon.send('prepare', { path }, 120_000),
+  resize: resizePptxThumbnail,
+  enqueue: enqueuePptxExport,
+  release: (path) => syncPreparedPowerPointsInternal([], `single-pass-cache:${path}`),
+  log: (message) => diagnosticLog('pptx-cache', message)
+})
+
+export async function stopPptxCacheJobs(): Promise<void> {
+  await preparePptxCache.stop()
+}
+
+export async function clearPptxDiskCaches(): Promise<void> {
+  const result = await pptxDiskCache.clear()
+  diagnosticLog('pptx-cache', `shutdown purge removed=${result.removed} shared=${result.shared}`)
 }
 
 let originalAudioDeviceId: string | null = null
@@ -1012,8 +1025,6 @@ export function registerIpcHandlers(
         try {
           const args: Record<string, unknown> = { path: filePath }
           const displays = screen.getAllDisplays()
-          const primaryDisplay = screen.getPrimaryDisplay()
-          const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
           const explicitlyRequestedDisplay = typeof displayId === 'number'
             ? displays.find((d) => d.id === displayId)
             : undefined
@@ -1023,7 +1034,13 @@ export function registerIpcHandlers(
               error: `Requested PowerPoint display ${displayId} is disconnected`
             }
           }
-          const targetDisplay = explicitlyRequestedDisplay || externalDisplay || primaryDisplay
+          if (!explicitlyRequestedDisplay) {
+            return {
+              success: false,
+              error: 'Для PowerPoint не назначен подключённый эфирный дисплей.'
+            }
+          }
+          const targetDisplay = explicitlyRequestedDisplay
 
           // Electron bounds are DIP while SetWindowPos expects physical pixels.
           const placement = getPowerPointNativePlacement(targetDisplay, sceneLayout, {
@@ -1249,9 +1266,9 @@ export function registerIpcHandlers(
     try {
       const renderWidth = Math.max(64, Math.min(16384, Math.round(width)))
       const st = await stat(filePath)
-      // v2 invalidates pre-fix cache entries: Windows.Data.Pdf used to cache
-      // visually uniform white frames as successful renders.
-      const key = createHash('md5').update(`native-pdf-v2|${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${renderWidth}`).digest('hex')
+      // v3 invalidates both visually uniform frames and PNGs whose physical
+      // dimensions were incorrectly enlarged by Windows display scaling.
+      const key = createHash('md5').update(`native-pdf-v3|${filePath}|${st.mtimeMs}|${st.size}|${pageIndex}|${renderWidth}`).digest('hex')
       const outPath = join(tmpdir(), `pdm-pdfpage-${key}.png`)
       const rejectedPath = `${outPath}.rejected`
 
@@ -1384,49 +1401,27 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string, keepPrepared = false) => {
-    if (process.platform === 'win32') {
-      diagnosticLog('pptx-preview', `thumbnail request file=${filePath}`)
-      return enqueuePptxExport(`thumbnails:${filePath.toLowerCase()}`, async () => {
-        const started = Date.now()
-        try {
-          const fileStats = await stat(filePath)
-          const thumbDir = pptxExportDirectory('thumbs', filePath, fileStats.size, fileStats.mtimeMs, 320, 240)
-          diagnosticLog('pptx-preview', `thumbnail start exporter=daemon size=${fileStats.size} mtime=${fileStats.mtime.toISOString()} dir=${thumbDir}`)
-          const cached = await readPptxExportCache(thumbDir)
-          if (cached) {
-            diagnosticLog('pptx-preview', `thumbnail cache hit count=${cached.length} dir=${thumbDir}`)
-            return { success: true, thumbnails: cached, slideCount: cached.length }
-          }
-          const result = await pptDaemon.send('export', {
-            path: filePath,
-            outputDir: thumbDir,
-            width: 320,
-            height: 240
-          }, 180000)
-          if (!result.ok) throw new Error(result.error || 'PowerPoint daemon export failed')
-          const thumbFiles = await readPptxExportCache(thumbDir)
-          if (!thumbFiles) throw new Error(`PowerPoint daemon returned an incomplete thumbnail export: ${thumbDir}`)
-          diagnosticLog('pptx-preview', `thumbnail success exporter=daemon count=${thumbFiles.length} dir=${thumbDir} dur=${Date.now() - started}ms`)
-          return { success: true, thumbnails: thumbFiles, slideCount: thumbFiles.length }
-        } catch (error: unknown) {
-          console.error('[IPC] generate-pptx-thumbnails failed:', error)
-          diagnosticLog('pptx-preview', `thumbnail failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`)
-          return { success: false, error: String(error) }
-        } finally {
-          if (!keepPrepared) {
-            const released = await syncPreparedPowerPointsInternal([], `thumbnail-export:${filePath}`)
-            if (!released.success) {
-              return {
-                success: false,
-                error: released.error || 'PowerPoint thumbnail resources were not released'
-              }
-            }
-          }
-        }
+  ipcMain.handle('prepare-pptx-cache', async (event, filePath: string) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    try {
+      const result = await preparePptxCache(filePath, 1920, 1080, (progress: PptxCacheProgress) => {
+        if (!event.sender.isDestroyed()) event.sender.send('pptx-cache-progress', progress)
       })
+      return { success: true, ...result }
+    } catch (error) {
+      diagnosticLog('pptx-cache', `failed ${formatDiagnosticError(error)}`)
+      return { success: false, error: String(error) }
     }
-    return { success: false, error: 'Unsupported platform' }
+  })
+
+  ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string) => {
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    try {
+      const result = await preparePptxCache(filePath)
+      return { success: true, thumbnails: result.thumbnails, slideCount: result.slideCount }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
   })
 
   ipcMain.handle('relocate-powerpoint', async (
@@ -1507,48 +1502,29 @@ export function registerIpcHandlers(
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const w = width && width > 0 ? width : 1920
     const h = height && height > 0 ? height : 1080
-    diagnosticLog('pptx-preview', `full-slide request file=${filePath} size=${w}x${h}`)
-    return enqueuePptxExport(`slides:${filePath.toLowerCase()}:${w}x${h}`, async () => {
-      const started = Date.now()
-      try {
-        const fileStats = await stat(filePath)
-        const slidesDir = pptxExportDirectory('slides', filePath, fileStats.size, fileStats.mtimeMs, w, h)
-        diagnosticLog('pptx-preview', `full-slide start exporter=daemon fileSize=${fileStats.size} mtime=${fileStats.mtime.toISOString()} output=${w}x${h} dir=${slidesDir}`)
-        const cached = await readPptxExportCache(slidesDir)
-        if (cached) {
-          diagnosticLog('pptx-preview', `full-slide cache hit count=${cached.length} dir=${slidesDir}`)
-          return { success: true, slides: cached, slideCount: cached.length }
-        }
-        const result = await pptDaemon.send('export', {
-          path: filePath,
-          outputDir: slidesDir,
-          width: w,
-          height: h
-        }, 240000)
-        if (!result.ok) throw new Error(result.error || 'PowerPoint daemon export failed')
-        const slides = await readPptxExportCache(slidesDir)
-        if (!slides) throw new Error(`PowerPoint daemon returned an incomplete full-slide export: ${slidesDir}`)
-        diagnosticLog('pptx-preview', `full-slide success exporter=daemon count=${slides.length} dir=${slidesDir} dur=${Date.now() - started}ms`)
-        return { success: true, slides, slideCount: slides.length }
-      } catch (error: unknown) {
-        console.error('[IPC] generate-pptx-slides failed:', error)
-        diagnosticLog('pptx-preview', `full-slide failed file=${filePath} dur=${Date.now() - started}ms ${formatDiagnosticError(error)}`)
-        return { success: false, error: String(error) }
-      } finally {
-        const released = await syncPreparedPowerPointsInternal([], `full-slide-export:${filePath}`)
-        if (!released.success) {
-          return {
-            success: false,
-            error: released.error || 'PowerPoint slide resources were not released'
-          }
-        }
-      }
-    })
+    try {
+      const result = await preparePptxCache(filePath, w, h)
+      return { success: true, slides: result.slides, slideCount: result.slideCount }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
   })
 
   ipcMain.handle('read-file', async (_event, filePath: string) => {
     const buffer = await readFile(filePath)
-    return buffer.buffer
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+  })
+
+  ipcMain.handle('select-scene-layer-files', async () => {
+    const result = await dialog.showOpenDialog(controlWindow, {
+      properties: ['openFile', 'multiSelections'],
+      title: 'Добавить слой',
+      filters: [{ name: 'Картинки и видео', extensions: [
+        'png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp', 'svg',
+        'mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v'
+      ] }]
+    })
+    return result.canceled ? null : result.filePaths
   })
 
   ipcMain.handle('select-backdrop-image', async () => {

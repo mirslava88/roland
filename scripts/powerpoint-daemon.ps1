@@ -3631,6 +3631,14 @@ while ($true) {
                 $outputDir = [string]$req.outputDir
                 $exportWidth = [int]$req.width
                 $exportHeight = [int]$req.height
+                $incrementalExport = $req.incremental -eq $true
+                $exportFirst = 1
+                if ($incrementalExport) {
+                    $exportFirst = [int]$req.startSlide
+                    if ($exportFirst -lt 1 -or [int]$req.batchSize -lt 1 -or [int]$req.batchSize -gt 8) {
+                        throw 'Invalid incremental PPTX export range'
+                    }
+                }
                 if ([string]::IsNullOrWhiteSpace($exportPath) -or -not (Test-Path -LiteralPath $exportPath -PathType Leaf)) {
                     throw "PPTX export source does not exist: $exportPath"
                 }
@@ -3639,13 +3647,13 @@ while ($true) {
 
                 $exportStarted = [DateTime]::UtcNow
                 Log "export: BEGIN file='$exportPath' size=${exportWidth}x${exportHeight} dir='$outputDir'"
-                if (Test-Path -LiteralPath $outputDir) {
+                if ($exportFirst -eq 1 -and (Test-Path -LiteralPath $outputDir)) {
                     Remove-Item -LiteralPath $outputDir -Recurse -Force -ErrorAction Stop
                 }
                 New-Item -ItemType Directory -Path $outputDir -Force -ErrorAction Stop | Out-Null
 
                 $ppt = Get-OrCreatePPT
-                if ($script:pptOwnedByRoland) {
+                if ($script:pptOwnedByRoland -and -not (Test-PowerPointHasAnySlideShow $ppt)) {
                     try { $ppt.WindowState = 2 } catch {}
                     $ppt.Visible = -1
                     Hide-PPEditor $ppt
@@ -3654,6 +3662,7 @@ while ($true) {
                 $exportPres = $null
                 $openedForExport = $false
                 $exportCleanupError = ''
+                $exportPending = $false
                 try {
                     # Reuse a presentation already owned by the live slideshow.
                     # This avoids trying to open the same file twice in one
@@ -3685,22 +3694,36 @@ while ($true) {
 
                     $exportCount = [int]$exportPres.Slides.Count
                     if ($exportCount -lt 1) { throw 'Presentation contains no slides' }
+                    if ($exportFirst -gt $exportCount) { throw 'Incremental export starts beyond the presentation' }
+                    $exportLast = $exportCount
+                    if ($incrementalExport) { $exportLast = [Math]::Min($exportCount, $exportFirst + [int]$req.batchSize - 1) }
+                    $exportSlideWidth = [double]$exportPres.PageSetup.SlideWidth
+                    $exportSlideHeight = [double]$exportPres.PageSetup.SlideHeight
+                    $bulkExportUsed = $false
                     $individualError = ''
                     try {
-                        for ($i = 1; $i -le $exportCount; $i++) {
+                        for ($i = $exportFirst; $i -le $exportLast; $i++) {
                             $imagePath = Join-Path $outputDir "slide_$i.png"
                             $exportPres.Slides.Item($i).Export($imagePath, 'PNG', $exportWidth, $exportHeight)
                             if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) {
                                 throw "PowerPoint did not export slide $i"
+                            }
+                            if ($req.progress) {
+                                Reply @{ id = $id; event = 'slide-exported'; slide = $i; slideCount = $exportCount;
+                                    slideWidth = $exportSlideWidth; slideHeight = $exportSlideHeight; path = $imagePath }
                             }
                         }
                         Log "export: Slide.Export succeeded count=$exportCount"
                     } catch {
                         $individualError = $_.Exception.Message
                         Log "export: Slide.Export failed, trying Presentation.Export: $individualError"
+                        $bulkExportUsed = $true
                         for ($i = 1; $i -le $exportCount; $i++) {
                             $partial = Join-Path $outputDir "slide_$i.png"
-                            if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+                            # Never delete already-published frames during a
+                            # background fallback. Replace them only after the
+                            # complete bulk export has successfully finished.
+                            if (-not $incrementalExport -and (Test-Path -LiteralPath $partial)) { Remove-Item -LiteralPath $partial -Force }
                         }
                         $bulkDir = Join-Path $outputDir 'bulk-export'
                         New-Item -ItemType Directory -Path $bulkDir -Force -ErrorAction Stop | Out-Null
@@ -3722,9 +3745,19 @@ while ($true) {
                             if (Test-Path -LiteralPath $bulkDir) { Remove-Item -LiteralPath $bulkDir -Recurse -Force }
                         }
                     }
-                    [System.IO.File]::WriteAllText((Join-Path $outputDir 'complete.txt'), [string]$exportCount)
+                    $exportPending = $incrementalExport -and -not $bulkExportUsed -and $exportLast -lt $exportCount
+                    if ($exportPending) {
+                        if (Test-PdmOwnedPresentation $exportPres) { Mark-PreparedPresentation $exportPres }
+                    } else {
+                        for ($i = 1; $i -le $exportCount; $i++) {
+                            if (-not (Test-Path -LiteralPath (Join-Path $outputDir "slide_$i.png") -PathType Leaf)) {
+                                throw "Incomplete incremental export: missing slide $i"
+                            }
+                        }
+                        [System.IO.File]::WriteAllText((Join-Path $outputDir 'complete.txt'), [string]$exportCount)
+                    }
                 } finally {
-                    if ($exportPres -and $openedForExport -and (Test-PdmOwnedPresentation $exportPres)) {
+                    if (-not $exportPending -and $exportPres -and $openedForExport -and (Test-PdmOwnedPresentation $exportPres)) {
                         $script:lastManagedPresentationCloseOk = $false
                         Close-ManagedPresentation $exportPres
                         if (-not $script:lastManagedPresentationCloseOk) {
@@ -3739,8 +3772,8 @@ while ($true) {
                             $ppt.Visible = 0
                         }
                     } catch {}
-                    Release-IdleOwnedPowerPointHost 'export'
-                    if (-not $script:lastIdleOwnedPowerPointHostReleaseOk -and
+                    if (-not $exportPending) { Release-IdleOwnedPowerPointHost 'export' }
+                    if (-not $exportPending -and -not $script:lastIdleOwnedPowerPointHostReleaseOk -and
                         [string]::IsNullOrEmpty($exportCleanupError)) {
                         $exportCleanupError = "PowerPoint exported slides but its idle host was not released: $exportPath"
                     }
@@ -3750,7 +3783,9 @@ while ($true) {
                 }
                 $exportMs = [int]([DateTime]::UtcNow - $exportStarted).TotalMilliseconds
                 Log "export: END count=$exportCount dur=${exportMs}ms"
-                Reply @{ id = $id; ok = $true; slideCount = $exportCount; path = $outputDir }
+                Reply @{ id = $id; ok = $true; slideCount = $exportCount; path = $outputDir;
+                    slideWidth = $exportSlideWidth; slideHeight = $exportSlideHeight; bulkExport = $bulkExportUsed;
+                    exportPending = $exportPending; nextSlide = ($exportLast + 1) }
             }
             'snapshot' {
                 # Захватить пиксели активного screenClass-окна PP напрямую

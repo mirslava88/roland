@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
+import { navigateSpeakerOnlyPdf, useAppStore } from '../../stores/useAppStore'
 import {
   queueAbsoluteNavigationDuringTransition,
   queueNavigationDuringTransition
@@ -96,7 +96,9 @@ export function ControlBar(): JSX.Element {
       handlePptxNav('prev')
     } else if (activeFile.type === 'pdf') {
       useAppStore.getState().releasePinnedPdfOverlay()
-      window.api.sendToPresentation('navigate-pdf', 'prev')
+      if (!navigateSpeakerOnlyPdf('prev')) {
+        window.api.sendToPresentation('navigate-pdf', 'prev')
+      }
     }
   }
 
@@ -126,7 +128,9 @@ export function ControlBar(): JSX.Element {
       handlePptxNav('next')
     } else if (activeFile.type === 'pdf') {
       useAppStore.getState().releasePinnedPdfOverlay()
-      window.api.sendToPresentation('navigate-pdf', 'next')
+      if (!navigateSpeakerOnlyPdf('next')) {
+        window.api.sendToPresentation('navigate-pdf', 'next')
+      }
     }
   }
 
@@ -156,7 +160,9 @@ export function ControlBar(): JSX.Element {
     } else if (activeFile.type === 'pdf') {
       setCurrentSlide(num)
       useAppStore.getState().releasePinnedPdfOverlay()
-      window.api.sendToPresentation('navigate-slide', num)
+      if (!navigateSpeakerOnlyPdf(num)) {
+        window.api.sendToPresentation('navigate-slide', num)
+      }
     }
     setGoToSlide('')
   }
@@ -261,7 +267,9 @@ export function ControlBar(): JSX.Element {
               } else if (activeFile.type === 'pdf') {
                 setCurrentSlide(1)
                 useAppStore.getState().releasePinnedPdfOverlay()
-                window.api.sendToPresentation('navigate-slide', 1)
+                if (!navigateSpeakerOnlyPdf(1)) {
+                  window.api.sendToPresentation('navigate-slide', 1)
+                }
               }
             }}
             disabled={currentSlide <= 1}

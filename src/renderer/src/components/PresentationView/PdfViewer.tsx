@@ -486,9 +486,29 @@ export function PdfViewer({
         try {
           const nativePath = await window.api.renderPdfPage(filePath, pageNum - 1, targetBufW)
           if (!nativePath || token !== renderTokenRef.current) return null
-          return await new Promise<HTMLImageElement>((resolve, reject) => {
+          return await new Promise<HTMLImageElement | null>((resolve, reject) => {
             const im = new Image()
-            im.onload = () => resolve(im)
+            im.onload = () => {
+              // Windows.Data.Pdf can occasionally apply the primary display
+              // DPI to the PNG container without scaling the painted page to
+              // match it. Drawing that oversized bitmap into the requested
+              // canvas makes the document look smaller and leaves transparent
+              // pixels where the previous page can show through. Never use a
+              // native frame whose intrinsic dimensions disagree with the
+              // exact buffer requested by this viewer; PDFium is already warm
+              // and provides a correctly sized fallback.
+              const dimensionsMatch =
+                Math.abs(im.naturalWidth - targetBufW) <= 2 &&
+                Math.abs(im.naturalHeight - targetBufH) <= 2
+              if (!dimensionsMatch) {
+                window.api.dbgLog(
+                  `PdfViewer: native frame rejected page=${pageNum} src=${im.naturalWidth}x${im.naturalHeight} expected=${targetBufW}x${targetBufH}`
+                )
+                resolve(null)
+                return
+              }
+              resolve(im)
+            }
             im.onerror = () => reject(new Error('image load failed'))
             im.src = `${mediaUrl(nativePath)}?t=${Date.now()}`
           })
@@ -559,6 +579,14 @@ export function PdfViewer({
       canvas.style.height = `${cssHeight}px`
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
+
+      // A ready PDF frame may contain transparent pixels (mixed page sizes,
+      // cropped media boxes, native PNG output). drawImage uses source-over,
+      // so without this atomic clear those pixels reveal the previous page
+      // that is still stored in the same-sized canvas backing buffer. The
+      // clear and draw run in one JS task after the replacement is complete,
+      // therefore Chromium cannot paint an intermediate black frame.
+      ctx.clearRect(0, 0, targetBufW, targetBufH)
 
       if (frame.kind === 'native') {
         // Lossless native render — draw directly (native image can be larger

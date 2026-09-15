@@ -51,6 +51,52 @@ function currentInformationTitlesState(): Pick<InformationDisplayState, 'titleSo
   }
 }
 
+function currentSpeakerDisplayState(
+  state: ReturnType<typeof useAppStore.getState>
+): SpeakerDisplayState {
+  const {
+    activeFile,
+    backdropImage,
+    currentSlide,
+    totalSlides,
+    pptxSlidesMap,
+    pptxThumbnailsMap
+  } = state
+  const supported = activeFile?.type === 'presentation' || activeFile?.type === 'pdf'
+  if (!activeFile || !supported) {
+    return {
+      active: false,
+      fileType: null,
+      filePath: null,
+      fileName: '',
+      currentSlide: 1,
+      totalSlides: 0,
+      notes: '',
+      backdropImage
+    }
+  }
+
+  const slideImages = activeFile.type === 'presentation'
+    ? pptxSlidesMap[activeFile.path] || pptxThumbnailsMap[activeFile.path] || []
+    : []
+  const knownTotal = Math.max(totalSlides, slideImages.length)
+  const safeCurrent = Math.max(1, knownTotal > 0 ? Math.min(currentSlide, knownTotal) : currentSlide)
+  return {
+    active: true,
+    fileType: activeFile.type === 'presentation' ? 'presentation' : 'pdf',
+    filePath: activeFile.path,
+    fileName: activeFile.name,
+    currentSlide: safeCurrent,
+    totalSlides: knownTotal,
+    currentImagePath: slideImages[safeCurrent - 1] || null,
+    nextImagePath: safeCurrent < knownTotal ? slideImages[safeCurrent] || null : null,
+    notes: activeFile.type === 'presentation'
+      ? notesCache.get(`${activeFile.path}|${safeCurrent}`) || ''
+      : '',
+    backdropImage
+  }
+}
+
 function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>): void {
   const {
     activeFile,
@@ -60,11 +106,13 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     isPlaying,
     isPresentationWindowOpen,
     pptxAspectRatios,
-    programScene,
+    programScene: draftProgramScene,
+    programSnapshot,
     selectedDisplayId,
     videoLoopTrack,
     videoPlayback
   } = state
+  const programScene = programSnapshot?.scene ?? draftProgramScene
   const sourceDisplay = displays.find((display) => display.id === selectedDisplayId)
   const presentationAspectRatio = activeFile?.type === 'presentation'
     ? pptxAspectRatios[activeFile.path] ?? null
@@ -72,7 +120,7 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
   const playback = activeFile?.type === 'video'
     ? videoPlayback[activeFile.path]
     : undefined
-  const sceneBackground = resolveProgramSceneBackground(state)
+  const sceneBackground = resolveProgramSceneBackground({ ...state, programScene })
   const selectedSceneCapture = state.captureSources.find(
     (entry) => entry.capture?.sourceId === programScene.captureSourceId
   )?.capture
@@ -83,10 +131,10 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     (activeFile.type === 'other' && activeFile.isImage === true) ||
     (activeFile.type === 'capture' && activeFile.capture?.captureKind === 'desktop')
   )
-  const sceneActive = programScene.enabled && !!sceneBackground &&
+  const sceneActive = programSnapshot !== null && programScene.enabled &&
     sceneContentSupported &&
     !(activeFile?.type === 'capture' && activeFile.capture?.sourceId === selectedSceneCapture?.sourceId) &&
-    !(sceneBackground.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
+    !(sceneBackground?.type === 'capture' && sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId)
   const sceneCapture = sceneActive ? selectedSceneCapture : undefined
   const titleSourceIdentity = sceneCapture
     ? captureSourceIdentity(sceneCapture)
@@ -225,6 +273,7 @@ export function AuxiliaryDisplayBridge(): null {
     timerRemaining,
     timerRunning,
     timerDuration,
+    timerOutputVisible,
     timerTextColor,
     timerWarningTextColor,
     timerOvertimeTextColor,
@@ -284,7 +333,7 @@ export function AuxiliaryDisplayBridge(): null {
   const informationTitles = informationSourceIdentity
     ? captureTitlesOutputs[informationSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
-  const hasTimerOutput = timerDuration > 0 && roleIds.timer.length > 0
+  const hasTimerOutput = timerOutputVisible && timerDuration > 0 && roleIds.timer.length > 0
   const hasEventTimerOutput = eventTimerOutput?.live === true && roleIds.eventTimer.length > 0
   const taskbarSuppressionActive =
     externalDisplays.length > 0 && (
@@ -332,7 +381,7 @@ export function AuxiliaryDisplayBridge(): null {
             latest.activeFile !== null ||
             latest.isPresentationWindowOpen ||
             latest.informationMedia !== null ||
-            latest.timerDuration > 0 ||
+            (latest.timerOutputVisible && latest.timerDuration > 0) ||
             latest.eventTimerOutput?.live === true
           if (stillNeedsSuppression) {
             for (const display of latestExternalDisplays) {
@@ -378,6 +427,18 @@ export function AuxiliaryDisplayBridge(): null {
     window.api.dbgLog(`information display state listener ready display=${data?.displayId ?? 'unknown'}`)
     window.api.sendToAuxiliary('info', 'information-state', currentInformationDisplayState())
     window.api.sendToAuxiliary('info', 'information-titles-update', currentInformationTitlesState())
+  }), [])
+
+  useEffect(() => window.api.on('speaker-state-ready', (...args: unknown[]) => {
+    const data = args[0] as { displayId?: number | null } | undefined
+    window.api.dbgLog(`speaker display state listener ready display=${data?.displayId ?? 'unknown'}`)
+    // did-finish-load can happen before SpeakerDisplay installs its React IPC
+    // listener. Re-send the complete current slide after that listener is ready.
+    window.api.sendToAuxiliary(
+      'speaker',
+      'speaker-state',
+      currentSpeakerDisplayState(useAppStore.getState())
+    )
   }), [])
 
   useEffect(() => window.api.on('information-video-ended', (...args: unknown[]) => {
@@ -438,37 +499,10 @@ export function AuxiliaryDisplayBridge(): null {
       // opening/closing a temporary Office session can otherwise delay the
       // actual slideshow by several seconds.
       if (roleIds.speaker.length === 0) return
-      const supported = activeFile?.type === 'presentation' || activeFile?.type === 'pdf'
-      if (!activeFile || !supported) {
-        window.api.sendToAuxiliary('speaker', 'speaker-state', {
-          active: false,
-          fileType: null,
-          filePath: null,
-          fileName: '',
-          currentSlide: 1,
-          totalSlides: 0,
-          notes: '',
-          backdropImage
-        } satisfies SpeakerDisplayState)
+      const baseState = currentSpeakerDisplayState(useAppStore.getState())
+      if (!baseState.active || !activeFile) {
+        window.api.sendToAuxiliary('speaker', 'speaker-state', baseState)
         return
-      }
-
-      const slideImages = activeFile.type === 'presentation'
-        ? pptxSlidesMap[activeFile.path] || pptxThumbnailsMap[activeFile.path] || []
-        : []
-      const knownTotal = Math.max(totalSlides, slideImages.length)
-      const safeCurrent = Math.max(1, knownTotal > 0 ? Math.min(currentSlide, knownTotal) : currentSlide)
-      const baseState: SpeakerDisplayState = {
-        active: true,
-        fileType: activeFile.type === 'presentation' ? 'presentation' : 'pdf',
-        filePath: activeFile.path,
-        fileName: activeFile.name,
-        currentSlide: safeCurrent,
-        totalSlides: knownTotal,
-        currentImagePath: slideImages[safeCurrent - 1] || null,
-        nextImagePath: safeCurrent < knownTotal ? slideImages[safeCurrent] || null : null,
-        notes: '',
-        backdropImage
       }
 
       if (activeFile.type !== 'presentation') {
@@ -476,12 +510,10 @@ export function AuxiliaryDisplayBridge(): null {
         return
       }
 
+      const safeCurrent = baseState.currentSlide
       const cacheKey = `${activeFile.path}|${safeCurrent}`
       const cachedNotes = notesCache.get(cacheKey)
-      window.api.sendToAuxiliary('speaker', 'speaker-state', {
-        ...baseState,
-        notes: cachedNotes || ''
-      })
+      window.api.sendToAuxiliary('speaker', 'speaker-state', baseState)
       if (cachedNotes !== undefined) return
 
       await waitForNavigationTransitionEnd()
@@ -517,11 +549,11 @@ export function AuxiliaryDisplayBridge(): null {
     window.api.sendToAuxiliary('info', 'information-state', currentInformationDisplayState())
     window.api.sendToAuxiliary('timer', 'information-state', {
       media: null,
-      displayTimer: timerDuration > 0,
+      displayTimer: timerOutputVisible && timerDuration > 0,
       backdropImage,
       titleSourceIdentity: null
     } satisfies InformationDisplayState)
-  }, [backdropImage, informationMedia, informationTitles, timerDuration])
+  }, [backdropImage, informationMedia, informationTitles, timerDuration, timerOutputVisible])
 
   useEffect(() => {
     const titlesState = currentInformationTitlesState()

@@ -269,9 +269,13 @@ function SpeakerDisplay(): JSX.Element {
     backdropImage: null
   })
 
-  useEffect(() => window.api.on('speaker-state', (...args: unknown[]) => {
-    setState(args[0] as SpeakerDisplayState)
-  }), [])
+  useEffect(() => {
+    const unsubscribe = window.api.on('speaker-state', (...args: unknown[]) => {
+      setState(args[0] as SpeakerDisplayState)
+    })
+    window.api.sendToControl('speaker-state-ready', { displayId: auxiliaryDisplayId })
+    return unsubscribe
+  }, [])
 
   if (!state.active || !state.filePath || !state.fileType) {
     if (state.backdropImage) {

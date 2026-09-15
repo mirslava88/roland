@@ -7,7 +7,7 @@ import { connect as tcpConnect } from 'net'
 import { connect as tlsConnect } from 'tls'
 import { DEFAULT_STREAM_SETTINGS, validateStreamSettings } from '../shared/streaming'
 import type { StreamSettings, StreamStatus } from '../shared/streaming'
-import { desktopInputArguments, probeEncoder, StreamingEngine } from './streaming-engine'
+import { desktopInputArguments, probeEncoder, rawVideoInputArguments, StreamingEngine } from './streaming-engine'
 import { diagnosticLog } from './diagnostic-log'
 
 const freshStatus = (): StreamStatus => ({ phase: 'idle', startedAt: null, encoder: '', fps: 0, bitrateKbps: 0, droppedFrames: 0, encoderLagMs: 0, destinations: [] })
@@ -21,6 +21,11 @@ export class StreamingManager {
   private engine: StreamingEngine | null = null
   private status: StreamStatus = freshStatus()
   private displayId: number | null = null
+  private audioCaptureDisplayId: number | null = null
+  private internalProgram = false
+  private frameTimer?: NodeJS.Timeout
+  private frameCaptureBusy = false
+  private internalFrameSize: { width: number; height: number } | null = null
   private settings: StreamSettings | null = null
   private routingTimer?: NodeJS.Timeout
   private encoderCache = new Map<string, boolean>()
@@ -29,7 +34,11 @@ export class StreamingManager {
     ? join(process.resourcesPath, 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
     : join(app.getAppPath(), 'node_modules', 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
 
-  constructor(private control: () => BrowserWindow | null, private programDisplay: () => number | null) {
+  constructor(
+    private control: () => BrowserWindow | null,
+    private programDisplay: () => number | null,
+    private programWindow: () => BrowserWindow | null
+  ) {
     const handle = (channel: string, fn: (...args: any[]) => unknown): void => {
       ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
         if (event.sender !== this.control()?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error('Недоступно.')
@@ -39,7 +48,7 @@ export class StreamingManager {
     handle('stream-load', () => this.load())
     handle('stream-save', (value: StreamSettings) => this.save(value))
     handle('stream-status', () => ({ ...this.status, ...(this.engine?.snapshot() || {}) }))
-    handle('stream-start', (value: StreamSettings, displayId: number) => this.start(value, displayId))
+    handle('stream-start', (value: StreamSettings, displayId: number | null) => this.start(value, displayId))
     handle('stream-stop', () => this.stop())
     handle('stream-devices', () => this.devices())
     handle('stream-check', (value: StreamSettings) => this.check(value))
@@ -60,13 +69,17 @@ export class StreamingManager {
       if (event.sender === this.worker?.webContents && event.senderFrame === event.sender.mainFrame) this.fail(String(message).slice(0, 300))
     })
     screen.on('display-removed', (_event, display) => {
-      if (display.id === this.displayId) this.fail('Эфирный экран отключён. После подключения запустите стрим повторно.')
+      if (!this.internalProgram && display.id === this.displayId) this.fail('Эфирный экран отключён. После подключения запустите стрим повторно.')
     })
     screen.on('display-metrics-changed', (_event, display, metrics) => {
-      if (display.id === this.displayId && metrics.some((m) => ['bounds', 'rotation', 'scaleFactor'].includes(m))) {
+      if (!this.internalProgram && display.id === this.displayId && metrics.some((m) => ['bounds', 'rotation', 'scaleFactor'].includes(m))) {
         this.fail('Изменились параметры эфирного экрана. Запустите стрим повторно.')
       }
     })
+  }
+
+  isInternalProgramOutputActive(): boolean {
+    return this.internalProgram
   }
 
   private async load(): Promise<{ settings: StreamSettings; canSave: boolean; available: boolean; warning?: string }> {
@@ -119,11 +132,11 @@ export class StreamingManager {
     captureSession.setPermissionRequestHandler((contents, permission, callback) => callback(isWorker(contents) && permission === 'media'))
     captureSession.setDisplayMediaRequestHandler(async (request, callback) => {
       try {
-        if (!this.worker || request.frame !== this.worker.webContents.mainFrame || this.displayId === null) { callback({}); return }
-        const pinned = this.displayId
+        if (!this.worker || request.frame !== this.worker.webContents.mainFrame || this.audioCaptureDisplayId === null) { callback({}); return }
+        const pinned = this.audioCaptureDisplayId
         const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } })
         const source = sources.find((s) => s.display_id === String(pinned))
-        if (!source || this.displayId !== pinned) { callback({}); return }
+        if (!source || this.audioCaptureDisplayId !== pinned) { callback({}); return }
         const systemAudio = this.settings?.audio === 'system' || this.settings?.audio === 'both'
         callback({ video: source, ...(systemAudio ? { audio: 'loopback' as const } : {}) })
       } catch { callback({}) }
@@ -158,17 +171,30 @@ export class StreamingManager {
     finally { this.busy = false; if (!this.engine) this.closeWorker() }
   }
 
-  private async start(value: StreamSettings, displayId: number): Promise<void> {
+  private async start(value: StreamSettings, displayId: number | null): Promise<void> {
     if (this.busy || this.engine || this.status.phase === 'starting') throw new Error('Стрим уже запущен или запускается.')
     const settings = validateStreamSettings(value)
     if (process.platform !== 'win32' || !existsSync(this.ffmpegPath)) throw new Error('Модуль стриминга доступен в Windows-сборке с FFmpeg.')
-    const display = screen.getAllDisplays().find((d) => d.id === displayId)
-    if (!display || displayId !== this.programDisplay()) throw new Error('Сначала направьте эфир PDM на выбранный дополнительный экран.')
-    if (this.control() && screen.getDisplayMatching(this.control()!.getBounds()).id === displayId) throw new Error('Для стрима нужен отдельный эфирный экран, без панели управления PDM.')
+    const internalProgram = displayId === null
+    const display = displayId === null ? null : screen.getAllDisplays().find((d) => d.id === displayId)
+    if (!internalProgram && !display) throw new Error('Назначенный эфирный экран отключён.')
+    if (!internalProgram && this.control() && screen.getDisplayMatching(this.control()!.getBounds()).id === displayId) throw new Error('Для стрима нужен отдельный эфирный экран, без панели управления PDM.')
+    if (internalProgram && settings.fps > 30) throw new Error('Без дополнительного монитора выберите 25 или 30 кадров/с.')
+    const internalWindow = internalProgram ? this.programWindow() : null
+    if (internalProgram && (!internalWindow || internalWindow.isDestroyed())) {
+      throw new Error('Внутренний программный выход ещё не готов. Повторите запуск стрима.')
+    }
+    if (internalWindow) {
+      internalWindow.setIgnoreMouseEvents(true)
+      internalWindow.setOpacity(0)
+      if (!internalWindow.isVisible()) internalWindow.showInactive()
+    }
     this.busy = true
     const token = ++this.epoch
     this.status = { ...freshStatus(), phase: 'starting' }
     this.displayId = displayId
+    this.audioCaptureDisplayId = internalProgram ? screen.getPrimaryDisplay().id : displayId
+    this.internalProgram = internalProgram
     this.settings = settings
     try {
       let encoder = 'libx264'
@@ -187,21 +213,57 @@ export class StreamingManager {
         audio: settings.audio, microphoneId: settings.microphoneId })
       if (token !== this.epoch) throw new Error(this.status.error || 'Запуск отменён.')
       this.engine = new StreamingEngine(this.ffmpegPath, settings, (message) => this.fail(message))
-      const physical = screen.dipToScreenRect(null, display.bounds)
-      this.engine.start(encoder, desktopInputArguments(physical, settings.fps))
-      diagnosticLog('stream', `start capture=native encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} display=${displayId} bounds=${JSON.stringify(physical)} destinations=${settings.destinations.filter(d => d.enabled).length}`)
+      if (internalProgram && internalWindow) {
+        const firstFrame = await internalWindow.webContents.capturePage()
+        const size = firstFrame.getSize()
+        if (size.width < 16 || size.height < 16) throw new Error('Внутренний программный выход не отрисовал кадр.')
+        this.internalFrameSize = size
+        this.engine.start(encoder, rawVideoInputArguments(size.width, size.height, settings.fps), true)
+        // FFmpeg opens the raw-video and PCM inputs together. Do not await the
+        // first video pipe before resuming PCM, otherwise both inputs can wait
+        // on each other during startup.
+        void this.engine.writeVideo(firstFrame.getBitmap())
+        const captureFrame = async (): Promise<void> => {
+          if (this.frameCaptureBusy || !this.engine || !this.internalProgram) return
+          const win = this.programWindow()
+          if (!win || win.isDestroyed()) {
+            this.fail('Внутренний программный выход закрылся.')
+            return
+          }
+          this.frameCaptureBusy = true
+          try {
+            const frame = await win.webContents.capturePage()
+            const currentSize = frame.getSize()
+            if (currentSize.width !== size.width || currentSize.height !== size.height) {
+              this.fail('Изменился размер внутреннего программного выхода. Запустите стрим повторно.')
+              return
+            }
+            await this.engine?.writeVideo(frame.getBitmap())
+          } catch {
+            this.fail('Не удалось получить кадр внутреннего программного выхода.')
+          } finally {
+            this.frameCaptureBusy = false
+          }
+        }
+        this.frameTimer = setInterval(() => { void captureFrame() }, Math.max(1, Math.round(1000 / settings.fps)))
+        diagnosticLog('stream', `start capture=internal encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} frame=${size.width}x${size.height} destinations=${settings.destinations.filter(d => d.enabled).length}`)
+      } else if (display) {
+        const physical = screen.dipToScreenRect(null, display.bounds)
+        this.engine.start(encoder, desktopInputArguments(physical, settings.fps))
+        diagnosticLog('stream', `start capture=native encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} display=${displayId} bounds=${JSON.stringify(physical)} destinations=${settings.destinations.filter(d => d.enabled).length}`)
+      }
       await this.command('resume')
       if (token !== this.epoch) throw new Error(this.status.error || 'Запуск отменён.')
-      this.status = { ...freshStatus(), phase: 'running', encoder, startedAt: Date.now() }
+      this.status = { ...freshStatus(), phase: 'running', encoder, startedAt: Date.now(), source: internalProgram ? 'internal' : 'display' }
       let diagnosticTicks = 0
       this.routingTimer = setInterval(() => {
         if (++diagnosticTicks % 20 === 0 && this.engine) {
           const s = this.engine.snapshot()
           diagnosticLog('stream', `fps=${s.fps} encodedKbps=${s.bitrateKbps} encoderLagMs=${s.encoderLagMs} destinations=${JSON.stringify(s.destinations.map((d, i) => ({ index: i, phase: d.phase, retries: d.retries, bufferedMs: d.bufferedMs, kbps: d.bitrateKbps, droppedFrames: d.droppedFrames, error: d.error })))}`)
         }
-        if (this.programDisplay() !== this.displayId) this.fail('Эфир перенесён на другой экран. Запустите стрим повторно.')
+        if (!this.internalProgram && this.programDisplay() !== this.displayId) this.fail('Эфир перенесён на другой экран. Запустите стрим повторно.')
         else if (!this.control() || this.control()!.isDestroyed()) this.fail('Окно управления закрыто. Стрим остановлен.')
-        else if (screen.getDisplayMatching(this.control()!.getBounds()).id === this.displayId) {
+        else if (!this.internalProgram && screen.getDisplayMatching(this.control()!.getBounds()).id === this.displayId) {
           this.fail('Панель управления перемещена на эфирный экран. Верните её на основной экран и запустите стрим повторно.')
         }
       }, 500)
@@ -224,10 +286,15 @@ export class StreamingManager {
     if (this.engine) diagnosticLog('stream', 'stop')
     this.epoch++
     clearInterval(this.routingTimer)
+    clearInterval(this.frameTimer)
+    this.frameTimer = undefined
     this.engine?.stop()
     this.engine = null
     this.closeWorker() // destroying its renderer releases every media track, canvas and audio context
     this.displayId = null
+    this.audioCaptureDisplayId = null
+    this.internalProgram = false
+    this.internalFrameSize = null
     this.settings = null
     this.status = freshStatus()
   }

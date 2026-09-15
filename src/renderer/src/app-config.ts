@@ -298,6 +298,7 @@ function collectConfigPaths(raw: Record<string, unknown>): string[] {
   addPath(raw.backdropImage)
   const programScene = isRecord(raw.programScene) ? raw.programScene : {}
   const sceneBackground = isRecord(programScene.background) ? programScene.background : {}
+  addPath(sceneBackground.imagePath)
   addPath(sceneBackground.videoPath)
   const sceneMediaLayers = Array.isArray(programScene.mediaLayers) ? programScene.mediaLayers.slice(0, 100) : []
   for (const layer of sceneMediaLayers) {
@@ -767,6 +768,13 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     ? sceneCaptureSourceId
     : null
   const parsedSceneBackground = normalizeProgramSceneBackground(rawProgramScene.background)
+  const sceneBackgroundImagePath = parsedSceneBackground.imagePath
+  const restoredSceneBackgroundImagePath = sceneBackgroundImagePath && pathExists(sceneBackgroundImagePath, validation)
+    ? sceneBackgroundImagePath
+    : null
+  if (sceneBackgroundImagePath && !restoredSceneBackgroundImagePath) {
+    warnMissing(warnings, 'Картинка заполнения хромакея', sceneBackgroundImagePath)
+  }
   const sceneBackgroundVideoPath = parsedSceneBackground.videoPath
   const restoredSceneBackgroundVideoPath = sceneBackgroundVideoPath && pathExists(sceneBackgroundVideoPath, validation)
     ? sceneBackgroundVideoPath
@@ -783,6 +791,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   }
   const restoredSceneBackground: ProgramSceneBackgroundConfig = {
     ...parsedSceneBackground,
+    imagePath: restoredSceneBackgroundImagePath,
     videoPath: restoredSceneBackgroundVideoPath,
     channelId: restoredSceneBackgroundChannelId
   }

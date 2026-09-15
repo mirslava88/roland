@@ -25,6 +25,7 @@ export interface StreamStatus {
   bitrateKbps: number
   droppedFrames: number
   encoderLagMs: number
+  source?: 'display' | 'internal'
   destinations: Array<{ id: string; name: string; phase: 'connecting' | 'live' | 'reconnecting'; retries: number; error?: string;
     bitrateKbps: number; bufferedMs: number; droppedFrames: number }>
 }
@@ -40,7 +41,7 @@ export interface StreamingApi {
   save(settings: StreamSettings): Promise<void>
   devices(): Promise<Array<{ id: string; label: string }>>
   check(settings: StreamSettings): Promise<Array<{ name: string; reachable: boolean }>>
-  start(settings: StreamSettings, displayId: number): Promise<void>
+  start(settings: StreamSettings, displayId: number | null): Promise<void>
   stop(): Promise<void>
   status(): Promise<StreamStatus>
 }

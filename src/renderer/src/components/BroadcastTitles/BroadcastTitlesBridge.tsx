@@ -24,14 +24,17 @@ function supportsProgramSceneTitles(file: ReturnType<typeof useAppStore.getState
 }
 
 function sceneTitleSourceIdentity(state: ReturnType<typeof useAppStore.getState>): string | null {
+  const snapshot = state.programSnapshot
+  if (!snapshot) return null
+  const programScene = snapshot.scene
   const supportedContent = !state.activeFile || supportsProgramSceneTitles(state.activeFile)
-  const background = resolveProgramSceneBackground(state)
-  if (!state.programScene.enabled || !background || !supportedContent) return null
+  const background = resolveProgramSceneBackground({ ...state, programScene })
+  if (!programScene.enabled || !supportedContent) return null
   const capture = state.captureSources.find(
-    (entry) => entry.capture?.sourceId === state.programScene.captureSourceId
+    (entry) => entry.capture?.sourceId === programScene.captureSourceId
   )?.capture
   if (state.activeFile?.type === 'capture' && state.activeFile.capture?.sourceId === capture?.sourceId) return null
-  if (background.type === 'capture' && background.capture.sourceId === capture?.sourceId) return null
+  if (background?.type === 'capture' && background.capture.sourceId === capture?.sourceId) return null
   return captureSourceIdentity(capture)
 }
 

@@ -179,7 +179,7 @@ export function SceneQrPreviewLayer({
     <div
       ref={layerRef}
       className="pointer-events-none absolute inset-0 z-[10] overflow-hidden"
-      style={{ containerType: 'size' }}
+      style={{ containerType: 'size', zIndex: 10, isolation: 'isolate' }}
       data-scene-qr-layer
       onPointerMove={move}
       onPointerUp={(event) => {

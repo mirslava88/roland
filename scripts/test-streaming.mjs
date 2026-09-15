@@ -12,7 +12,7 @@ async function moduleFrom(path) {
   const result = await build({ entryPoints: [path], bundle: true, platform: 'node', format: 'esm', write: false })
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`)
 }
-const { StreamingEngine, progressReader, publisherErrorMessage } = await moduleFrom('src/main/streaming-engine.ts')
+const { StreamingEngine, progressReader, publisherErrorMessage, rawVideoInputArguments } = await moduleFrom('src/main/streaming-engine.ts')
 const { DEFAULT_STREAM_SETTINGS, validateStreamSettings } = await moduleFrom('src/shared/streaming.ts')
 for (const server of ['file:///tmp/test', 'https://example.com', '-report', 'rtmp://localhost/\nsecret']) {
   assert.throws(() => validateStreamSettings({ ...DEFAULT_STREAM_SETTINGS, destinations: [{ id: 'test', name: 'test', enabled: true, server, key: '' }] }))
@@ -26,6 +26,41 @@ const parser = progressReader((p) => { progress = p })
 parser(Buffer.from('untrusted secret text\nfra'))
 parser(Buffer.from('me=42\nfps=30.0\nprogress=continue\n'))
 assert.deepEqual(progress, { frame: 42, fps: 30 })
+assert.deepEqual(rawVideoInputArguments(1920, 1080, 30), [
+  '-thread_queue_size', '2', '-f', 'rawvideo', '-pixel_format', 'bgra',
+  '-video_size', '1920x1080', '-framerate', '30', '-use_wallclock_as_timestamps', '1', '-i', 'pipe:3'
+])
+
+{
+  const rawErrors = []
+  const rawSettings = {
+    ...structuredClone(DEFAULT_STREAM_SETTINGS),
+    resolution: 720,
+    bitrateKbps: 1200,
+    destinations: []
+  }
+  const rawEngine = new StreamingEngine(ffmpeg, rawSettings, (error) => rawErrors.push(error))
+  rawEngine.start('libx264', rawVideoInputArguments(128, 72, 30), true)
+  let rawLog = ''
+  rawEngine.encoder.stderr.on('data', (data) => { rawLog = (rawLog + data.toString()).slice(-8000) })
+  const frame = Buffer.alloc(128 * 72 * 4)
+  for (let index = 0; index < 36; index++) {
+    frame.fill(index % 255)
+    const [videoAccepted, audioAccepted] = await Promise.all([
+      rawEngine.writeVideo(frame),
+      rawEngine.write(new Float32Array(1600 * 2).buffer, Date.now())
+    ])
+    if (!videoAccepted || !audioAccepted) {
+      await delay(100)
+      assert.fail(`${rawErrors.join('; ') || 'raw FFmpeg pipe rejected a frame'}\n${rawLog}`)
+    }
+    await delay(33)
+  }
+  await delay(600)
+  assert.equal(rawErrors.length, 0, rawErrors.join('; '))
+  rawEngine.stop()
+  console.log('PASS: internal BGRA program frames and PCM audio encode through independent FFmpeg pipes')
+}
 
 async function port() {
   const server = createServer()

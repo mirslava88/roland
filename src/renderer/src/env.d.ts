@@ -210,6 +210,7 @@ interface Api {
   }>>
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
+  prepareInternalProgramOutput(): Promise<void>
   placePresentationWindow(displayId?: number): Promise<boolean>
   raisePresentationWindow(): Promise<boolean>
   openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>
@@ -223,6 +224,14 @@ interface Api {
   checkPowerPoint(): Promise<boolean>
   preparePowerPoint(filePath: string): Promise<{
     success: boolean
+    slideCount?: number
+    aspectRatio?: number
+    error?: string
+  }>
+  preparePptxCache(filePath: string): Promise<{
+    success: boolean
+    slides?: string[]
+    thumbnails?: string[]
     slideCount?: number
     aspectRatio?: number
     error?: string
@@ -302,6 +311,7 @@ interface Api {
   prepareDesktopCaptureSource(sourceId: string): Promise<DesktopCapturePrepareResult>
   releaseBrowserFullscreen(keepSourceKey?: string): Promise<{ released: number; remaining: number }>
   selectBackdropImage(): Promise<string | null>
+  selectSceneLayerFiles(): Promise<string[] | null>
   selectQrLogo(): Promise<string | null>
   selectQrImage(): Promise<string | null>
   updateQrOverlay(data: unknown): void
@@ -325,6 +335,7 @@ interface Api {
   moveItem(srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }>
   showTimerOverlay(displayId?: number): Promise<void>
   hideTimerOverlay(): Promise<void>
+  getTimerOverlayLayout(): Promise<{ x: number; y: number; scale: number }>
   updateTimerOverlay(data: {
     remaining: number
     running: boolean

@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { hasQrData } from '../../../../shared/qr-overlay'
 import { getProgramSceneRects } from '../../../../shared/program-scene'
-import { useAppStore } from '../../stores/useAppStore'
+import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
 import {
   contrastingQrDescriptionTextColor,
@@ -27,8 +27,11 @@ function supportsProgramScene(file: ReturnType<typeof useAppStore.getState>['act
 }
 
 export function QrOverlayBridge(): null {
-  const config = useAppStore((state) => state.qrOverlay)
+  const draftConfig = useAppStore((state) => state.qrOverlay)
+  const programSnapshot = useAppStore((state) => state.programSnapshot)
+  const config = programSnapshot?.qrOverlay ?? draftConfig
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
+  const displayAssignments = useAppStore((state) => state.displayAssignments)
   const displays = useAppStore((state) => state.displays)
   const activeFile = useAppStore((state) => state.activeFile)
   const isPresentationWindowOpen = useAppStore((state) => state.isPresentationWindowOpen)
@@ -36,16 +39,18 @@ export function QrOverlayBridge(): null {
   const pptxThumbnailsMap = useAppStore((state) => state.pptxThumbnailsMap)
   const docPreviewsMap = useAppStore((state) => state.docPreviewsMap)
   const pptxAspectRatios = useAppStore((state) => state.pptxAspectRatios)
-  const programScene = useAppStore((state) => state.programScene)
+  const draftProgramScene = useAppStore((state) => state.programScene)
   const captureSources = useAppStore((state) => state.captureSources)
   const backdropImage = useAppStore((state) => state.backdropImage)
   const channels = useAppStore((state) => state.channels)
   const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
+  const programScene = programSnapshot?.scene ?? draftProgramScene
 
   useEffect(() => {
     let cancelled = false
     if (isQrEditorOutputOwned()) return
-    const targetExists = displays.some((display) => !display.isPrimary && display.id === selectedDisplayId)
+    const outputDisplayId = connectedProgramDisplayId({ displays, displayAssignments, selectedDisplayId })
+    const targetExists = outputDisplayId !== null
     const outputActive = activeFile !== null || isPresentationWindowOpen
     const visible = config.enabled && hasQrData(config) && targetExists && outputActive
     if (!visible) {
@@ -60,9 +65,7 @@ export function QrOverlayBridge(): null {
       const docPreviewPath = activeFile?.type === 'other'
         ? docPreviewsMap[activeFile.path] ?? null
         : null
-      const outputDisplay = displays.find(
-        (display) => !display.isPrimary && display.id === selectedDisplayId
-      ) ?? displays.find((display) => !display.isPrimary)
+      const outputDisplay = displays.find((display) => display.id === outputDisplayId)
       const outputWidth = Math.max(1, outputDisplay?.bounds.width ?? 1920)
       const outputHeight = Math.max(1, outputDisplay?.bounds.height ?? 1080)
       const selectedSceneCapture = captureSources.find(
@@ -70,10 +73,13 @@ export function QrOverlayBridge(): null {
       )?.capture ?? null
       const activeSourceIsParticipant = activeFile?.type === 'capture' &&
         activeFile.capture?.sourceId === selectedSceneCapture?.sourceId
-      const sceneBackground = resolveProgramSceneBackground(useAppStore.getState())
+      const sceneState = programSnapshot
+        ? { ...useAppStore.getState(), programScene: programSnapshot.scene }
+        : useAppStore.getState()
+      const sceneBackground = resolveProgramSceneBackground(sceneState)
       const backgroundSourceIsParticipant = sceneBackground?.type === 'capture' &&
         sceneBackground.capture.sourceId === selectedSceneCapture?.sourceId
-      const sceneActive = programScene.enabled && !!sceneBackground &&
+      const sceneActive = programSnapshot !== null && programScene.enabled &&
         (!activeFile || supportsProgramScene(activeFile)) && !activeSourceIsParticipant &&
         !backgroundSourceIsParticipant
       const sceneRects = getProgramSceneRects(outputWidth, outputHeight, {
@@ -107,7 +113,7 @@ export function QrOverlayBridge(): null {
         const backgroundColor = detectedColor ?? config.descriptionBackgroundColor
         window.api.updateQrOverlay({
           visible: true,
-          displayId: selectedDisplayId,
+          displayId: outputDisplayId,
           imageDataUrl,
           sizePercent: config.sizePercent,
           xPercent: config.xPercent,
@@ -136,6 +142,7 @@ export function QrOverlayBridge(): null {
   }, [
     config,
     selectedDisplayId,
+    displayAssignments,
     displays,
     activeFile,
     isPresentationWindowOpen,

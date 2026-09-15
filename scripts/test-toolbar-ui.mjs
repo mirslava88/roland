@@ -51,6 +51,7 @@ window.testListenerCount = event => listeners.get(event)?.size || 0;
 const call = (name, result) => (...args) => { window.testCalls.push(name); return Promise.resolve(result); };
 window.api = {
   dbgLog() {}, on(event,fn) {if (!listeners.has(event)) listeners.set(event,new Set()); listeners.get(event).add(fn); return () => listeners.get(event).delete(fn);},
+  getTimerOverlayLayout:call('timer-layout',{x:.9,y:.9,scale:1}),
   updateTimerOverlay:call('timer-update'), showTimerOverlay:call('timer-show'), hideTimerOverlay:call('timer-hide'),
   sendToPresentation:call('presentation-message'),
   musicGetState:call('music-status',{playing:true,currentIndex:0,currentTime:10,duration:100,volume:1,trackName:'Test music',loopTrack:false}),

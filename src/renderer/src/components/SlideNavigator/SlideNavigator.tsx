@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useAppStore } from '../../stores/useAppStore'
+import { isRendererOnlyPresentationRouting, navigateSpeakerOnlyPdf, useAppStore } from '../../stores/useAppStore'
+import { cachedPptxPrefix } from '../../pptx-cache-readiness'
 import { queueAbsoluteNavigationDuringTransition } from '../../navigation-transition'
 import { mediaUrl } from '../../media'
 import * as pdfjsLib from 'pdfjs-dist'
@@ -51,6 +52,8 @@ function touchPdfThumbnailCache(filePath: string, entry: CachedPdfThumbnails): v
 
 export function SlideNavigator(): JSX.Element {
   const { activeFile, currentSlide, setCurrentSlide, setTotalSlides, setPptxThumbnails } = useAppStore()
+  const pptxProgressThumbnails = useAppStore((state) => activeFile?.type === 'presentation'
+    ? state.pptxThumbnailsMap[activeFile.path] : undefined)
   const [thumbnails, setThumbnails] = useState<SlideThumb[]>([])
   const [loading, setLoading] = useState(false)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -284,18 +287,8 @@ export function SlideNavigator(): JSX.Element {
     } catch (err) {
       if (isCurrent()) console.error('Failed to generate PPTX thumbnails:', err)
     } finally {
-      // Export commands can no longer be cancelled after Office accepted
-      // them. Ensure any hidden managed deck/idle PDM-owned host is released
-      // even when the active file changed while export was finishing.
-      const released = await window.api.syncPreparedPowerPoints([]).catch((error: unknown) => ({
-        success: false,
-        error: String(error)
-      }))
-      if (!released.success) {
-        window.api.dbgLog(
-          `PPTX navigator: native document release failed file=${filePath} error=${released.error || '-'}`
-        )
-      }
+      // The shared main-process cache owns native cleanup; a disk hit
+      // must not start PowerPoint merely to send a redundant release.
       if (isCurrent()) setLoading(false)
     }
   }, [setTotalSlides])
@@ -335,7 +328,8 @@ export function SlideNavigator(): JSX.Element {
         }))
         setThumbnails(thumbs)
         setPptxThumbnails(existing)
-        if (existing.length > 0) setTotalSlides(existing.length)
+        const status = useAppStore.getState().pptxCacheStatuses[activeFile.path]
+        if (existing.length > 0 && status !== 'loading' && status !== 'partial') setTotalSlides(existing.length)
       } else {
         loadPptxThumbnails(activeFile.path)
       }
@@ -356,7 +350,17 @@ export function SlideNavigator(): JSX.Element {
     pptxThumbnailGenerationRef.current += 1
   }, [])
 
+  useEffect(() => {
+    if (activeFile?.type !== 'presentation' || !pptxProgressThumbnails?.length) return
+    const paths = pptxProgressThumbnails.slice(0, cachedPptxPrefix(pptxProgressThumbnails))
+    setThumbnails(paths.map((path, i) => ({ index: i + 1, dataUrl: mediaUrl(path) })))
+    useAppStore.setState({ pptxThumbnails: paths })
+  }, [activeFile?.path, activeFile?.type, pptxProgressThumbnails])
+
   const handleClick = (index: number): void => {
+    const state = useAppStore.getState()
+    if (activeFile?.type === 'presentation' && isRendererOnlyPresentationRouting(state) &&
+      index > cachedPptxPrefix(state.pptxSlidesMap[activeFile.path] || [])) return
     if (queueAbsoluteNavigationDuringTransition(index)) return
     setCurrentSlide(index)
     if (activeFile?.type === 'presentation') {
@@ -364,7 +368,9 @@ export function SlideNavigator(): JSX.Element {
     } else if (activeFile?.type === 'pdf') {
       window.dispatchEvent(new Event('pdf-navigation-priority'))
       useAppStore.getState().releasePinnedPdfOverlay()
-      window.api.sendToPresentation('navigate-slide', index)
+      if (!navigateSpeakerOnlyPdf(index)) {
+        window.api.sendToPresentation('navigate-slide', index)
+      }
     }
   }
 

@@ -61,6 +61,7 @@ const api = {
 
   openPresentationWindow: (displayId?: number, behindPowerPoint?: boolean) =>
     ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
+  prepareInternalProgramOutput: () => ipcRenderer.invoke('prepare-internal-program-output'),
 
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
     ipcRenderer.invoke('place-presentation-window', displayId),
@@ -98,6 +99,9 @@ const api = {
 
   preparePowerPoint: (filePath: string) =>
     ipcRenderer.invoke('prepare-powerpoint', filePath),
+
+  preparePptxCache: (filePath: string) =>
+    ipcRenderer.invoke('prepare-pptx-cache', filePath),
 
   syncPreparedPowerPoints: (filePaths: string[]) =>
     ipcRenderer.invoke('sync-prepared-powerpoints', filePaths),
@@ -185,6 +189,7 @@ const api = {
     ipcRenderer.invoke('release-browser-fullscreen', keepSourceKey),
 
   selectBackdropImage: (): Promise<string | null> => ipcRenderer.invoke('select-backdrop-image'),
+  selectSceneLayerFiles: (): Promise<string[] | null> => ipcRenderer.invoke('select-scene-layer-files'),
 
   selectQrLogo: (): Promise<string | null> => ipcRenderer.invoke('select-qr-logo'),
 
@@ -248,6 +253,9 @@ const api = {
   showTimerOverlay: (displayId?: number) => ipcRenderer.invoke('show-timer-overlay', displayId),
 
   hideTimerOverlay: () => ipcRenderer.invoke('hide-timer-overlay'),
+
+  getTimerOverlayLayout: (): Promise<{ x: number; y: number; scale: number }> =>
+    ipcRenderer.invoke('get-timer-overlay-layout'),
 
   updateTimerOverlay: (data: {
     remaining: number

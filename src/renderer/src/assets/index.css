@@ -140,6 +140,8 @@
 .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar {
   z-index: 20;
   display: flex;
+  width: 100%;
+  min-width: 0;
   flex-direction: column;
   gap: 5px;
   padding: 7px 0 8px;

@@ -66,11 +66,21 @@ try {
     # blank/solid PDF page is harmlessly rendered again by pdf.js, while a
     # broken native frame must never be announced as ready to the audience.
     $uniform = $false
+    $dimensionMismatch = $false
     $spread = -1
+    $actualDimensions = 'unknown'
+    $expectedHeight = [Math]::Max(
+        1,
+        [Math]::Round($Width * [double]$page.Size.Height / [double]$page.Size.Width)
+    )
     try {
         Add-Type -AssemblyName System.Drawing
         $bitmap = [System.Drawing.Bitmap]::FromFile($OutPath)
         try {
+            $actualDimensions = "$($bitmap.Width)x$($bitmap.Height)"
+            $dimensionMismatch =
+                [Math]::Abs($bitmap.Width - $Width) -gt 2 -or
+                [Math]::Abs($bitmap.Height - $expectedHeight) -gt 2
             $minR = 255; $minG = 255; $minB = 255; $minA = 255
             $maxR = 0;   $maxG = 0;   $maxB = 0;   $maxA = 0
             $sampleColumns = [Math]::Min(64, $bitmap.Width)
@@ -107,13 +117,22 @@ try {
         Write-Output "VALIDATION_UNAVAILABLE $($_.Exception.Message)"
     }
 
-    if ($uniform) {
+    if ($uniform -or $dimensionMismatch) {
         Remove-Item -LiteralPath $OutPath -Force -ErrorAction SilentlyContinue
+        $reason = if ($dimensionMismatch) {
+            "dimensions-v1 actual=$actualDimensions expected=${Width}x$expectedHeight"
+        } else {
+            "uniform-v1 bytes=$($bytes.Length) spread=$spread"
+        }
         [System.IO.File]::WriteAllText(
             $RejectedPath,
-            "uniform-v1 bytes=$($bytes.Length) spread=$spread"
+            $reason
         )
-        Write-Output "FALLBACK_UNIFORM $($bytes.Length) spread=$spread $($page.Size.Width)x$($page.Size.Height)"
+        if ($dimensionMismatch) {
+            Write-Output "FALLBACK_DIMENSIONS actual=$actualDimensions expected=${Width}x$expectedHeight"
+        } else {
+            Write-Output "FALLBACK_UNIFORM $($bytes.Length) spread=$spread $($page.Size.Width)x$($page.Size.Height)"
+        }
         exit 0
     }
 

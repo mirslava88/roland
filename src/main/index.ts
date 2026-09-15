@@ -15,7 +15,7 @@ import { writeFileSync, unlinkSync, existsSync, createReadStream, readFileSync }
 import { readFile, stat } from 'fs/promises'
 import { Readable } from 'stream'
 import { tmpdir } from 'os'
-import { registerIpcHandlers, closeAllExternalFiles } from './ipc-handlers'
+import { registerIpcHandlers, closeAllExternalFiles, stopPptxCacheJobs, clearPptxDiskCaches } from './ipc-handlers'
 import { invalidateTaskbarVisibilityCache, showAllTaskbars } from './taskbar-manager'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
@@ -93,6 +93,8 @@ let wpfTimerDisplayKey: string | null = null
 let wpfTimerDisplayId: number | null = null
 let lastWpfTimerData: Record<string, unknown> = {}
 let wpfTimerPositionRevision = 0
+let wpfTimerLayoutRevision = 0
+let lastWpfTimerLayoutKey = ''
 let wpfTimerMirrorSyncTimer: NodeJS.Timeout | null = null
 let lastWpfTimerMirrorSignature = ''
 const wpfTimerDataFile = join(tmpdir(), 'roland-timer-data.json')
@@ -1433,6 +1435,21 @@ function createWindows(): void {
     diagnosticLog('renderer', msg)
   })
 
+  ipcMain.handle('prepare-internal-program-output', async (event) => {
+    if (!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) {
+      throw new Error('Недопустимый источник команды.')
+    }
+    prewarmPresentationWindow()
+    await waitForPresentationWindowReady()
+    if (!presentationWindow || presentationWindow.isDestroyed()) {
+      throw new Error('Внутренний программный выход не готов.')
+    }
+    presentationWindow.setIgnoreMouseEvents(true)
+    presentationWindow.setOpacity(0)
+    if (!presentationWindow.isVisible()) presentationWindow.showInactive()
+    diagnosticLog('window', 'internal program output prepared (transparent, capture-only)')
+  })
+
   ipcMain.handle('open-presentation-window', async (
     _event,
     displayId?: number,
@@ -1441,14 +1458,23 @@ function createWindows(): void {
     presentationWindowRequestedVisible = true
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
-    const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
     const explicitlyRequestedDisplay = displayId === undefined
       ? undefined
       : displays.find((d) => d.id === displayId)
     if (displayId !== undefined && !explicitlyRequestedDisplay) {
       throw new Error(`Requested presentation display ${displayId} is disconnected`)
     }
-    const targetDisplay = explicitlyRequestedDisplay || externalDisplay || primaryDisplay
+    const internalProgramOutput = streamingManager?.isInternalProgramOutputActive() === true
+    const targetDisplay = explicitlyRequestedDisplay || (
+      internalProgramOutput
+        ? presentationWindow && !presentationWindow.isDestroyed()
+          ? screen.getDisplayMatching(presentationWindow.getBounds())
+          : primaryDisplay
+        : undefined
+    )
+    if (!targetDisplay) {
+      throw new Error('Эфирный дисплей не выбран. Для работы без него запустите внутренний стрим.')
+    }
     presentationDisplayId = targetDisplay.id
 
     const raiseOverlay = (reason: string): void => {
@@ -1465,12 +1491,12 @@ function createWindows(): void {
     }
 
     if (!presentationWindow || presentationWindow.isDestroyed()) {
-      console.log(`[MAIN ${Date.now()}] open-presentation-window: create BEGIN display=${targetDisplay!.id}`)
-      presentationWindow = createManagedPresentationWindow(targetDisplay!)
+      console.log(`[MAIN ${Date.now()}] open-presentation-window: create BEGIN display=${targetDisplay.id}`)
+      presentationWindow = createManagedPresentationWindow(targetDisplay)
     } else {
       console.log(`[MAIN ${Date.now()}] open-presentation-window: reusing warm window`)
       const currentBounds = presentationWindow.getBounds()
-      const nextBounds = targetDisplay!.bounds
+      const nextBounds = targetDisplay.bounds
       if (
         currentBounds.x !== nextBounds.x || currentBounds.y !== nextBounds.y ||
         currentBounds.width !== nextBounds.width || currentBounds.height !== nextBounds.height
@@ -1489,6 +1515,14 @@ function createWindows(): void {
       presentationWindow !== targetWindow
     ) {
       throw new Error('Presentation output changed or closed while it was becoming ready')
+    }
+
+    if (streamingManager?.isInternalProgramOutputActive()) {
+      targetWindow.setIgnoreMouseEvents(true)
+      targetWindow.setOpacity(0)
+      if (!targetWindow.isVisible()) targetWindow.showInactive()
+      diagnosticLog('window', 'presentation output kept transparent for internal stream')
+      return
     }
 
     // Critical sequence: raise overlay FIRST, THEN show presentation window.
@@ -1525,8 +1559,6 @@ function createWindows(): void {
     const win = presentationWindow
 
     const displays = screen.getAllDisplays()
-    const primaryDisplay = screen.getPrimaryDisplay()
-    const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
     const explicitlyRequestedDisplay = displayId === undefined
       ? undefined
       : displays.find((display) => display.id === displayId)
@@ -1534,7 +1566,15 @@ function createWindows(): void {
       diagnosticLog('window', `presentation output relocate refused: display=${displayId} is disconnected`)
       return false
     }
-    const targetDisplay = explicitlyRequestedDisplay || externalDisplay || primaryDisplay
+    const targetDisplay = explicitlyRequestedDisplay || (
+      streamingManager?.isInternalProgramOutputActive()
+        ? displays.find((display) => display.bounds.x === win.getBounds().x && display.bounds.y === win.getBounds().y) || screen.getPrimaryDisplay()
+        : undefined
+    )
+    if (!targetDisplay) {
+      diagnosticLog('window', 'presentation output relocate refused: no assigned program display')
+      return false
+    }
     const originalBounds = win.getBounds()
     const originalFullScreen = win.isFullScreen()
     const nextBounds = targetDisplay.bounds
@@ -1704,6 +1744,13 @@ function createWindows(): void {
     placement: 'cover' | 'underlay' = 'cover',
     safetyLock = false
   ) => {
+    if (displayId === undefined && streamingManager?.isInternalProgramOutputActive()) {
+      // The internal program renderer is captured directly. A native overlay
+      // here would cover the operator's primary monitor and leak into neither
+      // the hidden program surface nor its stream.
+      diagnosticLog('window', 'show-overlay acknowledged by internal program surface')
+      return true
+    }
     if (overlaySafetyLocked) {
       if (!safetyLock) {
         diagnosticLog('window', 'show-overlay ignored: PowerPoint safety cover is locked')
@@ -1722,11 +1769,13 @@ function createWindows(): void {
     overlayPlacement = placement
     console.log(`[MAIN ${Date.now()}] show-overlay: ENTER placement=${placement} hasDataUrl=${!!freezeImageDataUrl} hasPath=${!!imagePath}`)
     const displays = screen.getAllDisplays()
-    const primaryDisplay = screen.getPrimaryDisplay()
-    const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
-    const targetDisplay = displayId
-      ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
-      : externalDisplay || primaryDisplay
+    const targetDisplay = typeof displayId === 'number'
+      ? displays.find((d) => d.id === displayId)
+      : undefined
+    if (!targetDisplay) {
+      diagnosticLog('window', `show-overlay refused: program display=${displayId ?? 'none'} unavailable`)
+      return false
+    }
     overlayDisplayId = targetDisplay.id
 
     // Hybrid mode: caller can pass a file path instead of a data URL. Read
@@ -1871,12 +1920,18 @@ function createWindows(): void {
   // as a "freeze-frame" inside the overlay during a channel switch.
   ipcMain.handle('capture-display', async (_event, displayId?: number): Promise<string | null> => {
     try {
+      if (displayId === undefined && streamingManager?.isInternalProgramOutputActive()) {
+        if (!presentationWindow || presentationWindow.isDestroyed()) return null
+        const frame = await presentationWindow.webContents.capturePage()
+        return frame.isEmpty() ? null : frame.toDataURL()
+      }
       const displays = screen.getAllDisplays()
-      const primaryDisplay = screen.getPrimaryDisplay()
-      const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
-      const targetDisplay = displayId
-        ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
-        : externalDisplay || primaryDisplay
+      const targetDisplay = typeof displayId === 'number'
+        ? displays.find((d) => d.id === displayId)
+        : streamingManager?.isInternalProgramOutputActive()
+          ? screen.getPrimaryDisplay()
+          : undefined
+      if (!targetDisplay) return null
       const { width, height } = targetDisplay.size
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
@@ -2529,18 +2584,32 @@ function createWindows(): void {
     overtimeTextColor: string
     textOpacity: number
   }) => {
-    sendToWpfTimer(data)
+    const layoutX = Math.max(0, Math.min(1, Number(data.posX) / 100))
+    const layoutY = Math.max(0, Math.min(1, Number(data.posY) / 100))
+    const layoutScale = Math.max(0.5, Math.min(8, Number(data.scale)))
+    const layoutKey = `${layoutX.toFixed(6)},${layoutY.toFixed(6)},${layoutScale.toFixed(3)}`
+    if (layoutKey !== lastWpfTimerLayoutKey) {
+      lastWpfTimerLayoutKey = layoutKey
+      wpfTimerLayoutRevision += 1
+    }
+    sendToWpfTimer({
+      ...data,
+      layoutX,
+      layoutY,
+      layoutScale,
+      layoutRevision: wpfTimerLayoutRevision
+    })
     broadcastWpfTimerToMirrors()
   })
+
+  ipcMain.handle('get-timer-overlay-layout', () => readWpfTimerLayout())
 
   ipcMain.handle('show-timer-overlay', async (_event, displayId?: number) => {
     timerActive = true
     const displays = screen.getAllDisplays()
-    const primaryDisplay = screen.getPrimaryDisplay()
-    const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
-    const targetDisplay = displayId
-      ? displays.find((d) => d.id === displayId) || externalDisplay || primaryDisplay
-      : externalDisplay || primaryDisplay
+    const targetDisplay = typeof displayId === 'number'
+      ? displays.find((d) => !d.isPrimary && d.id === displayId)
+      : undefined
     if (targetDisplay) {
       wpfTimerDisplayId = targetDisplay.id
       // WPF/SetWindowPos consume physical pixels. Electron display bounds are
@@ -2800,14 +2869,29 @@ function createWindows(): void {
       }
     }
 
-    const fallbackOutput = displays.find((display) => display.id !== primary.id) || primary
-    const presentationTarget = byId.get(presentationDisplayId ?? -1) || fallbackOutput
-    presentationDisplayId = presentationTarget.id
-    placeWindow(presentationWindow, presentationTarget, 'presentation output')
+    let presentationTarget = byId.get(presentationDisplayId ?? -1)
+    if (!presentationTarget && streamingManager?.isInternalProgramOutputActive()) {
+      presentationTarget = presentationWindow && !presentationWindow.isDestroyed()
+        ? screen.getDisplayMatching(presentationWindow.getBounds())
+        : primary
+    }
+    if (presentationTarget) {
+      presentationDisplayId = presentationTarget.id
+      placeWindow(presentationWindow, presentationTarget, 'presentation output')
+    } else if (presentationWindowRequestedVisible && presentationWindow && !presentationWindow.isDestroyed()) {
+      // Windows may move an orphaned fullscreen HWND onto the operator or a
+      // Speaker/Info display. Make it invisible until the renderer confirms a
+      // real Program target instead of guessing another external monitor.
+      presentationWindow.setIgnoreMouseEvents(true)
+      presentationWindow.setOpacity(0)
+      diagnosticLog('display', 'presentation output target disconnected; physical surface hidden')
+    }
 
     const overlayTarget = byId.get(overlayDisplayId ?? -1) || presentationTarget
-    overlayDisplayId = overlayTarget.id
-    placeWindow(overlayWindow, overlayTarget, 'transition overlay')
+    if (overlayTarget) {
+      overlayDisplayId = overlayTarget.id
+      placeWindow(overlayWindow, overlayTarget, 'transition overlay')
+    }
 
     for (const [displayId, entry] of auxiliaryWindows) {
       placeWindow(entry.window, byId.get(displayId), `auxiliary role=${entry.role}`)
@@ -2815,6 +2899,10 @@ function createWindows(): void {
 
     if (timerActive) {
       const timerTarget = byId.get(wpfTimerDisplayId ?? -1) || presentationTarget
+      if (!timerTarget) {
+        hideWpfTimer()
+        return
+      }
       wpfTimerDisplayId = timerTarget.id
       const physicalBounds = screen.dipToScreenRect(null, timerTarget.bounds)
       showWpfTimer(physicalBounds)
@@ -2826,10 +2914,12 @@ function createWindows(): void {
       // native relocate so a stale topology snapshot cannot move PowerPoint
       // back onto the former main display after a successful handoff.
       const latestDisplays = screen.getAllDisplays()
-      const latestPrimary = screen.getPrimaryDisplay()
       const latestById = new Map(latestDisplays.map((display) => [display.id, display]))
-      const latestFallback = latestDisplays.find((display) => display.id !== latestPrimary.id) || latestPrimary
-      const latestPresentationTarget = latestById.get(presentationDisplayId ?? -1) || latestFallback
+      const latestPresentationTarget = latestById.get(presentationDisplayId ?? -1)
+      if (!latestPresentationTarget) {
+        diagnosticLog('display', 'PowerPoint metrics relocation skipped: Program target unavailable')
+        return
+      }
       if (latestPresentationTarget.id !== presentationTarget.id) {
         diagnosticLog(
           'display',
@@ -3385,7 +3475,19 @@ app.whenReady().then(() => {
         widthPercent: numeric(layer.widthPercent, 38, 5, 100),
         aspectRatio: numeric(layer.aspectRatio, 16 / 9, 0.1, 10),
         loop: layer.loop !== false,
-        muted: layer.muted !== false
+        muted: layer.muted !== false,
+        opacity: numeric(layer.opacity, 1, 0.05, 1),
+        cropTop: numeric(layer.cropTop, 0, 0, 45),
+        cropRight: numeric(layer.cropRight, 0, 0, 45),
+        cropBottom: numeric(layer.cropBottom, 0, 0, 45),
+        cropLeft: numeric(layer.cropLeft, 0, 0, 45),
+        playing: layer.playing !== false,
+        currentTime: numeric(layer.currentTime, 0, 0, 86400),
+        playbackStartedAt: typeof layer.playbackStartedAt === 'number' && Number.isFinite(layer.playbackStartedAt)
+          ? Math.max(0, Math.round(layer.playbackStartedAt))
+          : null,
+        controlRevision: numeric(layer.controlRevision, 0, 0, 1000000000),
+        restartRevision: numeric(layer.restartRevision, 0, 0, 1000000000)
       }]
     })
     const visible = payload.visible === true && displayId !== null && layers.length > 0
@@ -3445,15 +3547,29 @@ app.whenReady().then(() => {
         box.style.top = layer.yPercent + '%';
         box.style.width = layer.widthPercent + '%';
         box.style.aspectRatio = String(layer.aspectRatio);
+        box.style.opacity = String(layer.opacity);
+        box.style.clipPath = 'inset(' + layer.cropTop + '% ' + layer.cropRight + '% ' + layer.cropBottom + '% ' + layer.cropLeft + '%)';
         const media = box.firstElementChild;
         if (layer.kind === 'video') {
-          media.autoplay = true;
+          const targetTime = layer.currentTime + (layer.playing && layer.playbackStartedAt ? Math.max(0, Date.now() - layer.playbackStartedAt) / 1000 : 0);
+          const restartChanged = box.dataset.restartRevision !== String(layer.restartRevision);
+          const controlChanged = box.dataset.controlRevision !== String(layer.controlRevision);
+          const seek = () => {
+            const bounded = media.duration > 0 ? Math.min(targetTime, media.duration) : targetTime;
+            if (restartChanged || controlChanged || Math.abs(media.currentTime - bounded) > 1) media.currentTime = bounded;
+          };
+          if (media.readyState >= 1) seek(); else media.addEventListener('loadedmetadata', seek, { once: true });
+          box.dataset.controlRevision = String(layer.controlRevision);
+          box.dataset.restartRevision = String(layer.restartRevision);
+          media.autoplay = layer.playing;
           media.playsInline = true;
           media.loop = layer.loop;
           media.muted = layer.muted;
-          media.play().catch(() => {});
+          if (layer.playing) media.play().catch(() => {}); else media.pause();
         }
-        root.appendChild(box);
+        // Preserve unchanged media nodes when the content channel changes.
+        const nextBox = root.children[retained.size];
+        if (nextBox !== box) root.insertBefore(box, nextBox || null);
         retained.add(layer.id);
       }
       for (const box of Array.from(root.children)) {
@@ -3652,7 +3768,11 @@ app.whenReady().then(() => {
   })
 
   if (__PDM_STREAM_ENABLED__) {
-    streamingManager = new StreamingManager(() => controlWindow, () => presentationDisplayId)
+    streamingManager = new StreamingManager(
+      () => controlWindow,
+      () => presentationDisplayId,
+      () => presentationWindow
+    )
   }
   createWindows()
   prewarmPresentationWindow()
@@ -3693,7 +3813,13 @@ app.on('before-quit', (event) => {
   streamingManager?.stop()
   diagnosticLog('shutdown', 'waiting for PowerPoint, browser fullscreen and window-enumerator cleanup')
   void Promise.allSettled([
-    pptDaemon.shutdown(),
+    (async () => {
+      // Cache cleanup may still issue sync-prepared. Drain it before shutting
+      // down the COM daemon, then purge only after all writers have stopped.
+      await stopPptxCacheJobs()
+      await pptDaemon.shutdown()
+      await clearPptxDiskCaches()
+    })(),
     (async () => {
       await releaseBrowserFullscreenWindows(undefined, false)
       await nativeWindowDaemon.shutdown()

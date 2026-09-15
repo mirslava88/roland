@@ -3,13 +3,93 @@ const { resolve } = require('node:path')
 const { writeFileSync } = require('node:fs')
 const assert = require('node:assert/strict')
 app.setPath('userData', resolve('tmp/pip-video-ui/profile'))
-const deadline = setTimeout(() => app.exit(1), 55000)
+const deadline = setTimeout(() => app.exit(1), 120000)
 app.whenReady().then(async () => {
   let win
   let stage = 'startup'
   try {
     win = new BrowserWindow({ show: false, width: 1280, height: 800, useContentSize: true,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+    if (process.env.PDM_SCENE_HINT_ONLY) {
+      stage = 'Scene right-click discoverability hint'
+      await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
+      await new Promise(done => setTimeout(done, 350))
+      for (const width of [1280, 880]) {
+        win.setContentSize(width, 800)
+        await new Promise(done => setTimeout(done, 100))
+        const layout = await win.webContents.executeJavaScript(`(() => {
+          const hint=document.querySelector('[data-scene-context-hint]');
+          const preview=document.querySelector('[data-program-scene-preview]');
+          const rect=hint.getBoundingClientRect(), canvas=preview.getBoundingClientRect();
+          const section=hint.closest('section').getBoundingClientRect();
+          return {text:hint.textContent.trim(),outsideCanvas:!preview.contains(hint),
+            above:rect.bottom<=canvas.top, fits:rect.left>=section.left-1&&rect.right<=section.right+1,
+            bounds:{left:rect.left,right:rect.right,sectionLeft:section.left,sectionRight:section.right},
+            visible:rect.width>0&&rect.height>0, noOverflow:hint.scrollWidth<=hint.clientWidth};
+        })()`)
+        assert.equal(layout.text, 'Правая кнопка мыши — добавить в сцену')
+        assert.ok(layout.outsideCanvas && layout.above && layout.fits && layout.visible && layout.noOverflow,
+          `Hint must fit above the preview without hiding scene objects at ${width}px: ${JSON.stringify(layout)}`)
+      }
+      win.setContentSize(1280, 800)
+      await new Promise(done => setTimeout(done, 100))
+      writeFileSync(resolve('tmp/pip-video-ui/scene-context-hint.png'), (await win.webContents.capturePage()).toPNG())
+      await win.webContents.executeJavaScript(`(() => {
+        const preview=document.querySelector('[data-program-scene-preview]');const rect=preview.getBoundingClientRect();
+        preview.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:rect.left+8,clientY:rect.top+8}));
+      })()`)
+      await new Promise(done => setTimeout(done, 60))
+      assert.deepEqual(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-scene-context-menu] [data-scene-add]')).map(button=>button.textContent.trim())`),
+        ['Фон','Текст','QR-код','Таймер','Добавить слой'])
+      await win.webContents.executeJavaScript(`window.unmountTest();`)
+      console.log('PASS: visible right-click hint at 1280/880px, outside preview/output, existing Add to Scene menu unchanged')
+      clearTimeout(deadline)
+      win.destroy()
+      app.quit()
+      return
+    }
+    if (!process.env.PDM_LAYER_ORDER_ONLY) {
+    stage = 'reject a DPI-enlarged native PDF bitmap before it can shrink the page'
+    await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'pdf-native-dpi' })
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (await win.webContents.executeJavaScript('window.pdfReadyCount >= 1')) break
+      await new Promise(done => setTimeout(done, 40))
+    }
+    const dpiFallbackPixel = await win.webContents.executeJavaScript(`(() => {
+      const canvas=document.querySelector('canvas'); const data=canvas.getContext('2d').getImageData(canvas.width-2,canvas.height-2,1,1).data;
+      return Array.from(data);
+    })()`)
+    assert.ok(
+      dpiFallbackPixel[1] > 140 && dpiFallbackPixel[3] === 255,
+      'An oversized native bitmap must fall back to the correctly sized PDF frame'
+    )
+    console.log('PASS: DPI-enlarged native PDF frames cannot shrink the visible page')
+    stage = 'replace a transparent PDF page without retaining the previous page'
+    await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'pdf-replace' })
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (await win.webContents.executeJavaScript('window.pdfReadyCount >= 1')) break
+      await new Promise(done => setTimeout(done, 40))
+    }
+    const firstPdfPixel = await win.webContents.executeJavaScript(`(() => {
+      const canvas=document.querySelector('canvas'); const data=canvas.getContext('2d').getImageData(2,2,1,1).data;
+      return Array.from(data);
+    })()`)
+    assert.ok(firstPdfPixel[0] > 180 && firstPdfPixel[3] === 255, 'First PDF page must paint the complete canvas')
+    await win.webContents.executeJavaScript(`window.testEmit('navigate-slide', 2)`)
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (await win.webContents.executeJavaScript('window.pdfReadyCount >= 2')) break
+      await new Promise(done => setTimeout(done, 40))
+    }
+    const replacedPdfPixels = await win.webContents.executeJavaScript(`(() => {
+      const canvas=document.querySelector('canvas'); const ctx=canvas.getContext('2d');
+      return {
+        corner:Array.from(ctx.getImageData(2,2,1,1).data),
+        center:Array.from(ctx.getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data)
+      };
+    })()`)
+    assert.equal(replacedPdfPixels.corner[3], 0, 'Transparent pixels of a new PDF page must not retain the previous page')
+    assert.ok(replacedPdfPixels.center[2] > 180 && replacedPdfPixels.center[3] === 255, 'The new PDF page must be fully committed')
+    console.log('PASS: transparent PDF page replacement clears the previous page atomically')
     await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
     await new Promise(done => setTimeout(done, 350))
     const startupRendered = await win.webContents.executeJavaScript(`document.body.innerText.includes('Сцена')`)
@@ -17,9 +97,198 @@ app.whenReady().then(async () => {
     assert.equal(startupRendered, true)
     assert.deepEqual(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-scene-panel]')).map(button => button.textContent.trim())`),
       ['Сцена для эфира', 'Титры'])
+    stage = 'global Scene backdrop needs no chroma fill prompt'
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      backdropVisible:!!document.querySelector('[data-program-scene-canvas-background]'),
+      fillPrompt:Array.from(document.querySelectorAll('button')).some(button=>button.textContent.trim()==='Выберите фоновое изображение'),
+      chromaFillInGeneralSettings:!!document.querySelector('[data-program-scene-background]')
+    })`), {backdropVisible:true,fillPrompt:false,chromaFillInGeneralSettings:false},
+      'A selected global backdrop must appear without asking for a separate chroma fill')
+    console.log('PASS: selected global Scene backdrop has no chroma-fill prompt')
+    stage = 'open participant context menu for chroma isolation'
+    await win.webContents.executeJavaScript(`(() => {
+      const preview=document.querySelector('[data-program-scene-preview]');
+      const participant=document.querySelector('[data-program-scene-participant-preview]').getBoundingClientRect();
+      preview.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:participant.left+participant.width/2,clientY:participant.top+participant.height/2}));
+    })()`)
+    await new Promise(done => setTimeout(done, 30))
+    stage = 'open chroma settings for isolation'
+    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-object-action="chroma"]').click()`)
+    await new Promise(done => setTimeout(done, 30))
+    stage = 'prepare independent chroma and backdrop paths'
+    await win.webContents.executeJavaScript(`(() => {
+      window.testScene.backdropImage='global-backdrop-must-stay';
+      window.testScene.setProgramScene({background:{...window.testScene.programScene.background,kind:'image',imagePath:null}});
+    })()`)
+    await new Promise(done => setTimeout(done, 30))
+    stage = 'pick independent chroma image fill'
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-chroma-fill-image]').click()`)
+    await new Promise(done => setTimeout(done, 50))
+    stage = 'verify independent chroma image fill'
+    assert.equal(await win.webContents.executeJavaScript(`String(window.testScene.backdropImage)`), 'global-backdrop-must-stay',
+      'Choosing a chroma-key image must not replace the global Scene backdrop')
+    assert.equal(await win.webContents.executeJavaScript(`String(window.testScene.programScene.background.imagePath).includes('e11d48')`), true,
+      'Choosing a chroma-key image must store a dedicated fill path')
+    console.log('PASS: chroma-key image fill stays independent from the global Scene backdrop')
+    stage = 'hide chroma fill until an external source is selected'
+    await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&no-participant' })
+    await new Promise(done => setTimeout(done, 350))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      prompt:!!document.querySelector('[data-program-scene-select-external-source]'),
+      fillMedia:!!document.querySelector('[data-program-scene-key-fill-preview] img, [data-program-scene-key-fill-preview] video')
+    })`), {prompt:true,fillMedia:false},
+      'A chroma fill must not occupy the participant frame before an external source is selected')
+    console.log('PASS: chroma fill stays hidden without an external source')
+    stage = 'default empty Scene timer to fifteen minutes'
+    await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device&timer-empty' })
+    await new Promise(done => setTimeout(done, 350))
+    await win.webContents.executeJavaScript(`(() => {
+      const preview=document.querySelector('[data-program-scene-preview]'); const rect=preview.getBoundingClientRect();
+      preview.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:rect.left+8,clientY:rect.top+8}));
+    })()`)
+    await new Promise(done => setTimeout(done, 20))
+    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="timer"]').click()`)
+    await new Promise(done => setTimeout(done, 20))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      hours:document.querySelector('[aria-label="Часы таймера"]').value,
+      minutes:document.querySelector('[aria-label="Минуты таймера"]').value
+    })`), {hours:'0',minutes:'15'}, 'An unset Scene timer must default to fifteen minutes')
+    await win.webContents.executeJavaScript(`(() => {
+      const input=document.querySelector('[aria-label="Минуты таймера"]');
+      const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+      setter.call(input,'5'); input.dispatchEvent(new Event('input',{bubbles:true}));
+    })()`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-timer-set]').click()`)
+    await new Promise(done => setTimeout(done, 50))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      preview:document.querySelector('[data-program-scene-timer-preview]')?.textContent.trim(),
+      outputVisible:window.testScene.timerOutputVisible,
+      outputShows:window.timerOverlayShows
+    })`), {preview:'05:00',outputVisible:false,outputShows:0},
+      'Set in the Scene timer must update only the preview and keep the output hidden')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-timer-adjust="-10"]').click()`)
+    await new Promise(done => setTimeout(done, 40))
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-timer-preview]')?.textContent.trim()`), '-05:00',
+      'Subtracting past zero must keep the Scene timer visible in overtime')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
+    await new Promise(done => setTimeout(done, 80))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      scene:window.testScene.programScene.enabled,
+      outputVisible:window.testScene.timerOutputVisible,
+      outputOwner:window.testScene.timerOutputOwner,
+      outputShows:window.timerOverlayShows
+    })`), {scene:true,outputVisible:true,outputOwner:'scene',outputShows:0},
+      'Show on air must publish the prepared Scene timer without choosing an unrelated monitor')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
+    await new Promise(done => setTimeout(done, 80))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      scene:window.testScene.programScene.enabled,
+      outputVisible:window.testScene.timerOutputVisible,
+      outputOwner:window.testScene.timerOutputOwner
+    })`), {scene:false,outputVisible:false,outputOwner:null},
+      'Leaving the Scene output must hide a timer published by the Scene')
+    await win.webContents.executeJavaScript(`window.testScene.setTimerOutputState(true,'toolbar')`)
+    await new Promise(done => setTimeout(done, 40))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      outputVisible:window.testScene.timerOutputVisible,
+      outputOwner:window.testScene.timerOutputOwner
+    })`), {outputVisible:true,outputOwner:'toolbar'},
+      'A standalone toolbar timer must not be hidden merely because the Scene is off')
+    console.log('PASS: empty Scene timer defaults to 15 minutes')
+    await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
+    await new Promise(done => setTimeout(done, 350))
     const sceneFrameScript = `(() => { const rect=document.querySelector('[data-program-scene-modal]').getBoundingClientRect(); return {x:Math.round(rect.x),y:Math.round(rect.y),width:Math.round(rect.width),height:Math.round(rect.height)}; })()`
     const sceneModalFrame = await win.webContents.executeJavaScript(sceneFrameScript)
     const picturePreviewSize = await win.webContents.executeJavaScript(`(() => { const rect=document.querySelector('[data-program-scene-preview]').getBoundingClientRect(); return {width:Math.round(rect.width),height:Math.round(rect.height)}; })()`)
+    stage = 'move and scale running timer in Scene preview'
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-timer-preview]').textContent.trim()`), '07:00',
+      'A configured talk timer must be visible in the unified Scene preview')
+    await win.webContents.executeJavaScript(`(() => {
+      const preview=document.querySelector('[data-program-scene-preview]'); const rect=preview.getBoundingClientRect();
+      preview.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:rect.left+8,clientY:rect.top+8}));
+    })()`)
+    await new Promise(done => setTimeout(done, 20))
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="timer"]').textContent.trim()`), 'Таймер',
+      'Scene context menu must offer Add to Scene — Timer')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="timer"]').click()`)
+    await new Promise(done => setTimeout(done, 20))
+    assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-timer-settings]')`), true,
+      'Add to Scene — Timer must open the full timer settings')
+    const timerWheelCancelled = await win.webContents.executeJavaScript(`(() => {
+      const timer=document.querySelector('[data-program-scene-timer-preview]');
+      const wheel=new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:-120});
+      timer.dispatchEvent(wheel);
+      return wheel.defaultPrevented;
+    })()`)
+    await new Promise(done => setTimeout(done, 40))
+    assert.equal(timerWheelCancelled, true, 'Timer wheel scaling must not scroll the Scene window')
+    assert.equal(await win.webContents.executeJavaScript(`window.testScene.timerOverlayScale`), 1,
+      'Wheel scaling in Scene preview must remain a draft before refresh')
+    assert.equal(await win.webContents.executeJavaScript(`Number(document.querySelector('[data-program-scene-timer-preview]').dataset.timerScale)`), 1.1,
+      'Wheel up over the timer must increase its Scene preview scale')
+    assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-timer-settings]')`), true,
+      'Selecting the timer must open its contextual settings to the right of the preview')
+    assert.deepEqual(await win.webContents.executeJavaScript(`(() => ({
+      time:!!document.querySelector('[data-program-scene-timer-time]'),
+      tabs:Array.from(document.querySelectorAll('[data-program-scene-timer-tab]')).map(button=>button.textContent.trim())
+    }))()`), {time:true,tabs:['Время','Положение и вид','Звуки']},
+      'Scene timer settings must expose clearly named sections and open on time controls')
+    const liveRemainingBeforeDraft = await win.webContents.executeJavaScript(`window.testScene.timerRemaining`)
+    const liveOutputShowsBeforeDraft = await win.webContents.executeJavaScript(`window.timerOverlayShows`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-timer-adjust="5"]').click()`)
+    await new Promise(done => setTimeout(done, 40))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      preview:document.querySelector('[data-program-scene-timer-preview]').textContent.trim(),
+      liveRemaining:window.testScene.timerRemaining,
+      outputVisible:window.testScene.timerOutputVisible,
+      outputShows:window.timerOverlayShows
+    })`), {
+      preview:'12:00',
+      liveRemaining:liveRemainingBeforeDraft,
+      outputVisible:true,
+      outputShows:liveOutputShowsBeforeDraft
+    }, 'Adding five minutes in the Scene must change only the preview and keep the current timer on air')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-timer-tab="sound"]').click()`)
+    await new Promise(done => setTimeout(done, 20))
+    assert.deepEqual(await win.webContents.executeJavaScript(`(() => {
+      const panel=document.querySelector('[data-program-scene-timer-settings]');
+      const sounds=Array.from(panel.querySelectorAll('[data-program-scene-timer-sound]'));
+      const panelRect=panel.getBoundingClientRect(); const lastRect=sounds.at(-1).getBoundingClientRect();
+      return {sounds:sounds.map(item=>item.dataset.programSceneTimerSound),fullyVisible:lastRect.bottom<=panelRect.bottom+1};
+    })()`), {sounds:['warning','end'],fullyVisible:true},
+      'Both Scene timer sound selectors must be fully visible in the Sound section')
+    const timerPositionBeforeDrag = await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`)
+    const timerPreviewPositionBeforeDrag = await win.webContents.executeJavaScript(`(() => { const timer=document.querySelector('[data-program-scene-timer-preview]'); return {left:timer.style.left,top:timer.style.top}; })()`)
+    await win.webContents.executeJavaScript(`(() => {
+      const timer=document.querySelector('[data-program-scene-timer-preview]');
+      const layer=document.querySelector('[data-program-scene-timer-layer]');
+      const preview=document.querySelector('[data-program-scene-preview]').getBoundingClientRect();
+      const rect=timer.getBoundingClientRect();
+      const pointerId=17;
+      timer.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,pointerId,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2}));
+      layer.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId,clientX:preview.left+preview.width*.35,clientY:preview.top+preview.height*.3}));
+      layer.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId,clientX:preview.left+preview.width*.35,clientY:preview.top+preview.height*.3}));
+    })()`)
+    await new Promise(done => setTimeout(done, 40))
+    const timerPositionAfterDrag = await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`)
+    const timerPreviewPositionAfterDrag = await win.webContents.executeJavaScript(`(() => { const timer=document.querySelector('[data-program-scene-timer-preview]'); return {left:timer.style.left,top:timer.style.top}; })()`)
+    assert.deepEqual(timerPositionAfterDrag, timerPositionBeforeDrag,
+      'Dragging the timer in Scene preview must not update its on-air position before refresh')
+    assert.notDeepEqual(timerPreviewPositionAfterDrag, timerPreviewPositionBeforeDrag,
+      'Dragging the timer must update its local Scene preview position')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').click()`)
+    await new Promise(done => setTimeout(done, 40))
+    const publishedTimer = await win.webContents.executeJavaScript(`({position:{...window.testScene.timerOverlayPosition},scale:window.testScene.timerOverlayScale})`)
+    assert.equal(publishedTimer.scale, 1.1, 'Scene refresh must publish the drafted timer scale')
+    assert.ok(publishedTimer.position.x >= 0 && publishedTimer.position.x <= 100 && publishedTimer.position.y >= 0 && publishedTimer.position.y <= 100,
+      'Published timer position must stay inside the Scene')
+    assert.notDeepEqual(publishedTimer.position, timerPositionBeforeDrag,
+      'Scene refresh must publish the drafted timer position')
+    assert.ok(await win.webContents.executeJavaScript(`window.testScene.timerRemaining`) >= liveRemainingBeforeDraft + 299,
+      'Scene refresh must publish the drafted +5 minutes to the on-air timer')
+    console.log('PASS: Scene timer edits stay local, open contextual settings, and publish on refresh')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-preview]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,pointerId:19}))`)
+    await new Promise(done => setTimeout(done, 20))
     const keyFillGeometry = await win.webContents.executeJavaScript(`(() => {
       const preview=document.querySelector('[data-program-scene-preview]').getBoundingClientRect();
       const participant=document.querySelector('[data-program-scene-participant-preview]').getBoundingClientRect();
@@ -95,9 +364,10 @@ app.whenReady().then(async () => {
       chroma:!!document.querySelector('[data-program-scene-chroma]'),
       participantPosition:document.body.innerText.includes('Положение участника'),
       participantSize:document.body.innerText.includes('Размер участника'),
-      backgroundSettings:!!document.querySelector('[data-program-scene-background]')
-    })`), {chroma:true,participantPosition:false,participantSize:false,backgroundSettings:false},
-      'Contextual Chroma editor must contain only chroma-key settings')
+      backgroundSettings:!!document.querySelector('[data-program-scene-background]'),
+      backgroundKinds:Array.from(document.querySelectorAll('[data-scene-background-kind]')).map(button=>button.dataset.sceneBackgroundKind)
+    })`), {chroma:true,participantPosition:false,participantSize:false,backgroundSettings:true,backgroundKinds:['image','video','channel']},
+      'Contextual Chroma editor must contain chroma-key controls and its picture/video/channel fill')
     await win.webContents.executeJavaScript(`(() => {
       const preview=document.querySelector('[data-program-scene-preview]');
       const participant=document.querySelector('[data-program-scene-participant-preview]').getBoundingClientRect();
@@ -160,7 +430,7 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 40))
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').textContent.trim()`), 'Показать в эфире')
     await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
-    await new Promise(done => setTimeout(done, 60))
+    await new Promise(done => setTimeout(done, 300))
     assert.deepEqual(await win.webContents.executeJavaScript(`window.sceneTakeChannels`), ['A'],
       'Showing the Scene on air must take its explicitly chosen channel through the regular channel path')
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').textContent.trim()`), 'Выйти из эфира',
@@ -173,7 +443,7 @@ app.whenReady().then(async () => {
     })()`)
     await new Promise(done => setTimeout(done, 30))
     assert.deepEqual(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-scene-context-menu] [data-scene-add]')).map(button=>button.textContent.trim())`),
-      ['Фон','Текст','QR-код','Слой — картинка','Слой — видео'], 'Scene context menu must put every add action at the top and keep source selection out of right click')
+      ['Фон','Текст','QR-код','Таймер','Добавить слой'], 'Scene context menu must put every add action at the top and keep source selection out of right click')
     await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="text"]').click()`)
     await new Promise(done => setTimeout(done, 40))
     assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-text-id]') && !!document.querySelector('[data-program-scene-text-input]')`), true,
@@ -185,10 +455,12 @@ app.whenReady().then(async () => {
       await new Promise(done => setTimeout(done, 4))
     }
     await new Promise(done => setTimeout(done, 80))
+    stage = 'verify text Scene draft after inline typing'
     assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays.length`), 0,
       'Direct typing in preview must remain a draft before refresh')
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-inline-text]').innerText`), 'Мероприятие 2026',
       'Sequential typing must keep the caret at the end instead of reversing text')
+    stage = 'resize text directly on Scene canvas'
     const textWidthBefore = await win.webContents.executeJavaScript(`(() => {
       const text=document.querySelector('[data-program-scene-text-id]'); const before=parseFloat(text.style.width);
       const handle=document.querySelector('[data-program-scene-text-resize]'); const rect=handle.getBoundingClientRect();
@@ -202,6 +474,7 @@ app.whenReady().then(async () => {
       'Text width must resize directly on the Scene preview')
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-drag]')`), null,
       'Text must not have a separate move icon covering its first letters')
+    stage = 'drag text directly on Scene canvas'
     await win.webContents.executeJavaScript(`(() => {
       const preview=document.querySelector('[data-program-scene-preview]').getBoundingClientRect();
       const text=document.querySelector('[data-program-scene-text-id]'); const rect=text.getBoundingClientRect();
@@ -212,6 +485,7 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 40))
     assert.ok(await win.webContents.executeJavaScript(`parseFloat(document.querySelector('[data-program-scene-text-id]').style.left)`) < 1,
       'Dragging the text itself must move it into the preview corner without a handle')
+    stage = 'open text object context menu'
     await win.webContents.executeJavaScript(`(() => { const text=document.querySelector('[data-program-scene-text-id]'); const rect=text.getBoundingClientRect(); text.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:rect.left+5,clientY:rect.top+5})); })()`)
     await new Promise(done => setTimeout(done, 30))
     assert.deepEqual(await win.webContents.executeJavaScript(`Array.from(document.querySelector('[data-scene-context-menu]').children).map(element=>element.textContent.trim()).filter(text=>text==='Добавить в сцену'||text==='Настроить')`),
@@ -221,21 +495,26 @@ app.whenReady().then(async () => {
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-scene-object-action="hide"]').className.includes('bg-red')`), true)
     await win.webContents.executeJavaScript(`document.querySelector('[data-scene-context-menu]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true})); document.body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`)
     await new Promise(done => setTimeout(done, 30))
+    stage = 'refresh direct text Scene edits'
     await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').click()`)
     await new Promise(done => setTimeout(done, 80))
-    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays[0].text`), 'Мероприятие 2026',
+    const refreshedText = await win.webContents.executeJavaScript(`({draft:window.testScene.programScene.textOverlays,snapshot:window.testScene.programSnapshot?.scene?.textOverlays,status:window.testScene.programOutputStatus,disabled:document.querySelector('[data-program-scene-refresh]')?.disabled})`)
+    assert.equal(refreshedText.draft[0]?.text, 'Мероприятие 2026',
       'Scene refresh must publish direct preview edits')
-    assert.ok(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays[0].widthPercent`) > 34,
+    assert.ok(refreshedText.draft[0]?.widthPercent > 34,
       'Scene refresh must publish text width changed directly in preview')
-    await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent.trim()==='Удалить').click()`)
+    stage = 'remove refreshed Scene text object'
+    await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button=>button.textContent.trim()==='Удалить')?.click()`)
     await new Promise(done => setTimeout(done, 30))
-    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').click()`)
+    stage = 'refresh after removing Scene text object'
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]')?.click()`)
     await new Promise(done => setTimeout(done, 50))
-    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays.length`), 0,
+    stage = 'verify removed Scene text object'
+    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays?.length ?? -1`), 0,
       'Refreshing after removing a text object must remove it from program output')
     await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-preview]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`)
     await new Promise(done => setTimeout(done, 30))
-    assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-background]')`), true,
+    assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-participant-source]')`), true,
       'Clicking an empty canvas area must return to Scene settings')
     await win.webContents.executeJavaScript(`(() => { window.testScene.backdropImage='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#7c3aed"/></svg>'); window.testScene.setProgramScene({}); })()`)
     await new Promise(done => setTimeout(done, 30))
@@ -245,19 +524,10 @@ app.whenReady().then(async () => {
       'Add to Scene must be the first section of the context menu')
     await win.webContents.executeJavaScript(`window.testScene.backdropImage=null; document.querySelector('[data-scene-add="background"]').click()`)
     await new Promise(done => setTimeout(done, 50))
-    assert.deepEqual(await win.webContents.executeJavaScript(`({opens:window.backdropPickerOpens,selected:window.testScene.backdropImage?.includes('#e11d48')||window.testScene.backdropImage?.includes('%23e11d48'),kind:window.testScene.programScene.background.kind})`),
-      {opens:1,selected:true,kind:'image'}, 'Background in Add to Scene must immediately open the file picker and select the image')
+    assert.deepEqual(await win.webContents.executeJavaScript(`({opens:window.backdropPickerOpens,selected:window.testScene.backdropImage?.includes('#e11d48')||window.testScene.backdropImage?.includes('%23e11d48'),fill:window.testScene.programScene.background.imagePath??null})`),
+      {opens:1,selected:true,fill:null}, 'Background in Add to Scene must select only the global backdrop')
     await win.webContents.executeJavaScript(`window.testScene.backdropImage=null; window.testScene.setProgramScene({})`)
     await new Promise(done => setTimeout(done, 30))
-    const backgroundKinds = await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-scene-background-kind]')).map(button => ({kind:button.dataset.sceneBackgroundKind,text:button.textContent.trim(),top:Math.round(button.getBoundingClientRect().top),fits:button.scrollWidth<=button.clientWidth}))`)
-    assert.deepEqual(backgroundKinds.map(item => item.kind), ['image','video','channel'], 'Scene must expose image, video and channel lower-layer types')
-    assert.equal(new Set(backgroundKinds.map(item => item.top)).size, 1, 'Lower-layer type buttons must stay on one compact row')
-    assert.ok(backgroundKinds.every(item => item.fits), 'Every lower-layer type label must fit completely')
-    for (const kind of ['video','channel','image']) {
-      await win.webContents.executeJavaScript(`document.querySelector('[data-scene-background-kind="${kind}"]').click()`)
-      await new Promise(done => setTimeout(done, 30))
-      assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.background.kind`), kind)
-    }
     stage = 'check chroma key controls'
     await win.webContents.executeJavaScript(`(() => {
       const preview=document.querySelector('[data-program-scene-preview]');
@@ -267,6 +537,28 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 30))
     await win.webContents.executeJavaScript(`document.querySelector('[data-scene-object-action="chroma"]').click()`)
     await new Promise(done => setTimeout(done, 30))
+    const backgroundKinds = await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-scene-background-kind]')).map(button => ({kind:button.dataset.sceneBackgroundKind,text:button.textContent.trim(),top:Math.round(button.getBoundingClientRect().top),fits:button.scrollWidth<=button.clientWidth}))`)
+    assert.deepEqual(backgroundKinds.map(item => item.kind), ['image','video','channel'], 'Chroma settings must expose image, video and channel fill types')
+    assert.equal(new Set(backgroundKinds.map(item => item.top)).size, 1, 'Chroma fill type buttons must stay on one compact row')
+    assert.ok(backgroundKinds.every(item => item.fits), 'Every chroma fill type label must fit completely')
+    for (const kind of ['video','channel','image']) {
+      await win.webContents.executeJavaScript(`document.querySelector('[data-scene-background-kind="${kind}"]').click()`)
+      await new Promise(done => setTimeout(done, 30))
+      assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.background.kind`), kind)
+    }
+    await win.webContents.executeJavaScript(`(() => {
+      window.testScene.backdropImage='global-backdrop-must-stay';
+      window.testScene.setProgramScene({background:{...window.testScene.programScene.background,kind:'image',imagePath:null}});
+    })()`)
+    await new Promise(done => setTimeout(done, 30))
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-chroma-fill-image]').click()`)
+    await new Promise(done => setTimeout(done, 50))
+    assert.deepEqual(await win.webContents.executeJavaScript(`({
+      opens:window.backdropPickerOpens,
+      backdrop:window.testScene.backdropImage,
+      fillSelected:Boolean(window.testScene.programScene.background.imagePath?.includes('#e11d48')||window.testScene.programScene.background.imagePath?.includes('%23e11d48'))
+    })`), {opens:2,backdrop:'global-backdrop-must-stay',fillSelected:true},
+      'Choosing a chroma-key image must not replace the global Scene backdrop')
     assert.deepEqual(await win.webContents.executeJavaScript(`(() => {
       const panel=document.querySelector('[data-program-scene-chroma]');
       return {
@@ -317,7 +609,7 @@ app.whenReady().then(async () => {
       preview.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:rect.left+2,clientY:rect.top+2}));
     })()`)
     await new Promise(done => setTimeout(done, 30))
-    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="image"]').click()`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="layer"]').click()`)
     await new Promise(done => setTimeout(done, 40))
     assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-media-editor]')`), true,
       'Adding a layer from the Scene context menu must open its editor')
@@ -338,13 +630,11 @@ app.whenReady().then(async () => {
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-media-editor]').innerText.includes('Под презентацией')`), true,
       'Down must move a layer through the fixed Presentation level')
     assert.deepEqual(await win.webContents.executeJavaScript(`(() => {
-      const below=document.querySelector('[data-program-scene-media-surface="below"]');
-      const above=document.querySelector('[data-program-scene-media-surface="above"]');
+      const layer=document.querySelector('[data-program-scene-media-id]');
       const content=document.querySelector('.pdm-pip-content-preview');
-      const participant=document.querySelector('[data-program-scene-participant-preview]');
-      return {belowZ:getComputedStyle(below).zIndex,contentZ:getComputedStyle(content).zIndex,participantZ:getComputedStyle(participant).zIndex,aboveZ:getComputedStyle(above).zIndex,belowHasLayer:!!below.querySelector('[data-program-scene-media-id]'),aboveHasLayer:!!above.querySelector('[data-program-scene-media-id]')};
-    })()`), {belowZ:'1',contentZ:'2',participantZ:'4',aboveZ:'6',belowHasLayer:true,aboveHasLayer:false},
-      'Preview stacking must match program output when a media layer is below presentation')
+      return {layerZ:getComputedStyle(layer).zIndex,contentZ:getComputedStyle(content).zIndex,surface:layer.parentElement.dataset.programSceneMediaSurface};
+    })()`), {layerZ:'1',contentZ:'2',surface:'all'},
+      'Preview layer must stack below the presentation before any publication')
     await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-program-scene-media-editor] button')).find(button => button.textContent.trim()==='Выше').click()`)
     await new Promise(done => setTimeout(done, 30))
     const scaleBefore = await win.webContents.executeJavaScript(`Number(document.querySelector('[data-program-scene-media-editor] input[type="range"]').value)`)
@@ -354,7 +644,9 @@ app.whenReady().then(async () => {
     assert.ok(scaleAfter > scaleBefore, 'Mouse wheel up must enlarge the selected media layer')
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-modal]').scrollHeight<=document.querySelector('[data-program-scene-modal]').clientHeight`), true,
       'Layers editor must fit without modal scrolling')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-media-visible]').click()`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
+    await new Promise(done => setTimeout(done, 80))
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 40))
     assert.deepEqual(await win.webContents.executeJavaScript(`({visible:window.testScene.programScene.mediaLayersVisible,count:window.testScene.programScene.mediaLayers.length})`), {visible:true,count:1},
       'Show on air must commit prepared media layers as one operation')
@@ -380,6 +672,8 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 30))
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-media-editor]').innerText.includes('(скрыт)')`), true,
       'Scene layers manager must identify the hidden layer')
+    assert.equal(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-program-scene-media-editor] button')).find(button=>button.textContent.trim()==='Слой скрыт').className.includes('bg-amber-500')`), true,
+      'Hidden layer must have an amber visibility button')
     await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-program-scene-media-editor] button')).find(button=>button.textContent.trim()==='Слой скрыт').click()`)
     await new Promise(done => setTimeout(done, 30))
     assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-program-scene-media-id]')`), true,
@@ -439,6 +733,7 @@ app.whenReady().then(async () => {
     writeFileSync(resolve('tmp/pip-video-ui/scene-titles-layout.png'), (await win.webContents.capturePage()).toPNG())
     stage = 'select information title source ahead of off-air selected channel'
     await win.webContents.executeJavaScript(`(() => {
+      window.testScene.setProgramScene({enabled:false});
       window.testScene.activeFile = null;
       window.testScene.programCaptureTitlesSourceIdentity = null;
       window.testScene.selectedChannel = 'A';
@@ -552,7 +847,7 @@ app.whenReady().then(async () => {
         columnsTopAligned: Math.abs(previewRect.top - settingsRect.top) <= 40,
         previewSize: {width:Math.round(previewRect.width),height:Math.round(previewRect.height)},
         hasDuplicatePreview: !!editor.querySelector('[data-qr-overlay-preview]'),
-        barTop: Math.round(editor.querySelector('[data-scene-air-bar]').getBoundingClientRect().top - modalRect.top)
+        barTop: Math.round(modal.querySelector('[data-scene-air-bar]').getBoundingClientRect().top - modalRect.top)
       };
     })()`)
     assert.equal(qrSceneLayout.modalFits, true, 'QR Scene panel must fit without modal scrolling or clipping')
@@ -614,8 +909,8 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 60))
     await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 300))
-    assert.deepEqual(await win.webContents.executeJavaScript(`({scene:window.testScene.programScene.enabled,qr:window.testScene.qrOverlay.enabled,output:window.lastQrOverlay?.visible})`),
-      {scene:true,qr:true,output:true}, 'Showing Scene must publish its prepared QR without pressing the QR tab button')
+    assert.deepEqual(await win.webContents.executeJavaScript(`({scene:window.testScene.programScene.enabled,qr:window.testScene.qrOverlay.enabled,snapshot:window.testScene.programSnapshot?.qrOverlay?.enabled,nativeOutput:window.lastQrOverlay?.visible??false})`),
+      {scene:true,qr:true,snapshot:true,nativeOutput:false}, 'Showing Scene must publish its prepared QR through the internal Program snapshot without a physical output display')
     await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 40))
     await win.webContents.executeJavaScript(`(() => {
@@ -624,7 +919,7 @@ app.whenReady().then(async () => {
       object.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:31,clientX:rect.left+5,clientY:rect.top+5}));
     })()`)
     await new Promise(done => setTimeout(done, 60))
-    await win.webContents.executeJavaScript(`document.querySelector('[data-qr-overlay-visible]').click()`)
+    await win.webContents.executeJavaScript(`window.testScene.setQrOverlay({enabled:false})`)
     await new Promise(done => setTimeout(done, 80))
     stage = 'move and scale QR on shared Scene canvas'
     const qrDragResult = await win.webContents.executeJavaScript(`(() => {
@@ -685,53 +980,22 @@ app.whenReady().then(async () => {
       };
     })()`)
     assert.equal(qrInitialControls.livePresent, false, 'QR editor must not expose a second live-editing checkbox')
-    assert.equal(qrInitialControls.visibilityControls, 1, 'QR editor must keep only Show on air')
-    assert.equal(qrInitialControls.visibilityTag, 'BUTTON', 'QR Show on air must be a button, not a checkbox')
-    assert.equal(qrInitialControls.visibilityInputs, 0, 'QR Show on air must not contain a checkbox')
-    assert.equal(qrInitialControls.visibilityRed, true, 'QR Show on air button must be red')
+    assert.equal(qrInitialControls.visibilityControls, 0, 'Embedded QR settings must not duplicate the master Scene output button')
     assert.equal(qrInitialControls.hasSave, false, 'QR editor must not have a Save button')
     assert.equal(qrInitialControls.hasCancel, false, 'QR editor must not have a Cancel button')
-    await win.webContents.executeJavaScript(`(() => {
-      const editor = document.querySelector('[data-qr-overlay-editor]');
-      const url = editor.querySelector('input[placeholder="https://example.ru"]');
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(url, 'https://example.test/live');
-      url.dispatchEvent(new Event('input', {bubbles:true}));
-    })()`)
-    await new Promise(done => setTimeout(done, 150))
-    await win.webContents.executeJavaScript(`document.querySelector('[data-qr-overlay-visible]').click()`)
-    await new Promise(done => setTimeout(done, 300))
-    const qrImmediateResult = await win.webContents.executeJavaScript(`(() => {
-      return {url:window.testScene.qrOverlay.url,enabled:window.testScene.qrOverlay.enabled,
-        outputVisible:window.lastQrOverlay?.visible,sizePercent:window.lastQrOverlay?.sizePercent};
-    })()`)
-    assert.equal(qrImmediateResult.url, 'https://example.test/live', 'QR settings must be applied without Save')
-    assert.equal(qrImmediateResult.enabled, true, 'Show on air must enable QR immediately')
-    assert.equal(qrImmediateResult.outputVisible, true, 'Show on air must publish the QR immediately')
-    await win.webContents.executeJavaScript(`(() => {
-      const size = Array.from(document.querySelector('[data-qr-overlay-editor]').querySelectorAll('input[type="range"]')).at(-1);
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(size, '30');
-      size.dispatchEvent(new Event('input', {bubbles:true}));
-    })()`)
-    await new Promise(done => setTimeout(done, 300))
-    assert.equal(await win.webContents.executeJavaScript(`window.lastQrOverlay?.sizePercent`), qrImmediateResult.sizePercent,
-      'QR changes in preview must stay out of program output')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-qr-overlay-visible]').click()`)
-    await new Promise(done => setTimeout(done, 100))
-    const qrHiddenResult = await win.webContents.executeJavaScript(`({enabled:window.testScene.qrOverlay.enabled,outputVisible:window.lastQrOverlay?.visible})`)
-    assert.equal(qrHiddenResult.enabled, false)
-    assert.equal(qrHiddenResult.outputVisible, false, 'Unchecking Show on air must hide QR immediately')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-qr-overlay-visible]').click()`)
-    await new Promise(done => setTimeout(done, 300))
-    assert.equal(await win.webContents.executeJavaScript(`window.lastQrOverlay?.sizePercent`), 30,
-      'Showing QR again must publish the prepared preview state')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-qr-overlay-visible]').click()`)
-    await new Promise(done => setTimeout(done, 100))
+    stage = 'live QR must remain visible in shared preview';
+    await win.webContents.executeJavaScript(`window.testScene.setQrOverlay({enabled:true,sceneVisible:false}); document.querySelector('[data-scene-panel="picture"]').click()`);
+    await new Promise(done => setTimeout(done, 150));
+    assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-scene-qr-object]')`), true,
+      'A QR visible on air must also be visible in Scene preview even for a legacy hidden draft');
+    await win.webContents.executeJavaScript(`window.testScene.setQrOverlay({enabled:false,sceneVisible:true})`);
     await win.webContents.executeJavaScript(`new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))`)
     win.webContents.invalidate()
     await new Promise(done => setTimeout(done, 150))
     writeFileSync(resolve('tmp/pip-video-ui/scene-qr-layout.png'), (await win.webContents.capturePage()).toPNG())
     await win.webContents.executeJavaScript(`(() => {
       window.testScene.setProgramScene({enabled:true});
+      window.testScene.publishProgramSnapshot(null);
       document.querySelector('[data-scene-panel="picture"]').click();
     })()`)
     await new Promise(done => setTimeout(done, 50))
@@ -775,8 +1039,8 @@ app.whenReady().then(async () => {
       'Text edits in preview must stay out of program output')
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-live-preview]') === null`), true,
       'Text editor must not expose a second live-editing checkbox')
-    assert.deepEqual(await win.webContents.executeJavaScript(`(() => { const control=document.querySelector('[data-program-scene-text-visible]'); return {tag:control?.tagName,inputCount:control?.querySelectorAll('input').length,red:control?.className.includes('bg-red')}; })()`),
-      {tag:'BUTTON',inputCount:0,red:true}, 'Text Show on air must be a red button, not a checkbox')
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-visible]') === null && document.querySelectorAll('[data-program-scene-picture-visible]').length === 1`), true,
+      'Text editor must keep only the master Scene output button')
     assert.equal(await win.webContents.executeJavaScript(`document.body.innerText.includes('Предпросмотр')`), true)
     assert.equal(await win.webContents.executeJavaScript(`document.body.innerText.includes('Презентация и камера рядом, на общем фоне.')`), false)
     await win.webContents.executeJavaScript(`(() => {
@@ -798,13 +1062,13 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 100))
     assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays.length`), 0,
       'Scaling text in preview must stay out of program output')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-visible]').click()`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 100))
-    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlaysVisible`), false,
-      'Show on air button must hide all text without deleting it')
-    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays.length`), 0,
-      'Hiding text must not publish the prepared preview state')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-visible]').click()`)
+    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.enabled`), false,
+      'Master output button must exit the Scene')
+    assert.equal(await win.webContents.executeJavaScript(`window.testScene.programSnapshot === null`), true,
+      'Exiting Scene must clear the published snapshot')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 100))
     const editedTexts = await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays`)
     assert.equal(editedTexts.length, 2, 'Showing text must publish all prepared text blocks')
@@ -857,9 +1121,9 @@ app.whenReady().then(async () => {
       'Mouse wheel must not reduce the preview text scale below 10%')
     assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays[1].fontSizePercent`), 10,
       'Further preview changes must not alter the visible program text')
-    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-visible]').click()`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 100))
-    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-text-visible]').click()`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`)
     await new Promise(done => setTimeout(done, 100))
     const republishedTexts = await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays`)
     assert.equal(republishedTexts.length, 2,
@@ -961,6 +1225,93 @@ app.whenReady().then(async () => {
         console.log(`PASS: ${kind} ${aspect}: real SlideRenderer, four rounded/sharp corners, unchanged geometry, next slide and CSS isolation`)
       }
     }
+    }
+    for (const kind of ['pptx', 'pdf']) {
+      stage = `verify painted ${kind} layer order`;
+      await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: `corners&${kind}&wide` });
+      await new Promise(done => setTimeout(done, 350));
+      await win.webContents.executeJavaScript(`(() => {
+        const preview=document.querySelector('[data-program-scene-preview]'); const r=preview.getBoundingClientRect();
+        preview.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+2,clientY:r.top+2}));
+      })()`);
+      await new Promise(done => setTimeout(done, 30));
+      await win.webContents.executeJavaScript(`document.querySelector('[data-scene-add="layer"]').click()`);
+      await new Promise(done => setTimeout(done, 100));
+      await win.webContents.executeJavaScript(`(() => {
+        Array.from(document.querySelectorAll('[data-program-scene-media-editor] button')).find(b=>b.textContent.trim()==='По центру').click();
+      })()`);
+      await new Promise(done => setTimeout(done, 30));
+      await win.webContents.executeJavaScript(`(() => {
+        const size=document.querySelector('[data-program-scene-media-editor] input[type="range"]');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(size,'100');
+        size.dispatchEvent(new Event('input',{bubbles:true}));
+      })()`);
+      for (const above of [true, false, true]) {
+        await win.webContents.executeJavaScript(`window.retainedMediaElement ||= document.querySelector('[data-program-scene-media-id] img')`);
+        if (!above || above === true && await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-media-editor]').innerText.includes('Под презентацией')`)) {
+          await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-program-scene-media-editor] button')).find(b=>b.textContent.trim()===${JSON.stringify(above ? 'Выше' : 'Ниже')}).click()`);
+        }
+        await new Promise(done => setTimeout(done, 150));
+        assert.equal(await win.webContents.executeJavaScript(`window.retainedMediaElement===document.querySelector('[data-program-scene-media-id] img')`), true,
+          'Reordering must retain the same loaded image element before Refresh');
+        await win.webContents.executeJavaScript(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+        win.webContents.invalidate();
+        await new Promise(done => setTimeout(done, 120));
+        const p=await win.webContents.executeJavaScript(`(() => {const r=document.querySelector('[data-program-scene-preview]').getBoundingClientRect();return {x:r.left+r.width*.4,y:r.top+r.height*.5,w:innerWidth,h:innerHeight};})()`);
+        const image=(await win.webContents.capturePage()).resize({width:p.w,height:p.h});
+        const offset=(Math.round(p.y)*p.w+Math.round(p.x))*4; const bytes=image.toBitmap();
+        const green=bytes[offset+1]>140 && bytes[offset+2]<100;
+        const pink=bytes[offset+2]>160 && bytes[offset+1]<100;
+        if (!(above ? pink : green)) {
+          writeFileSync(resolve('tmp/pip-video-ui/layer-order-failure.png'), image.toPNG());
+          console.error(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-program-scene-media-id]')).map(e=>({style:e.style.cssText,surface:e.parentElement.dataset.programSceneMediaSurface,image:e.querySelector('img')?.getAttribute('src'),rect:JSON.stringify(e.getBoundingClientRect().toJSON())}))`));
+        }
+        assert.ok(above ? pink : green, `${kind}: a layer ${above ? 'above' : 'below'} must paint ${above ? 'over' : 'under'} the presentation, got BGRA ${Array.from(bytes.subarray(offset,offset+4))}`);
+      }
+      assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll('[data-program-scene-picture-visible]').length===1 && !document.querySelector('[data-program-scene-media-visible]')`), true,
+        'Layer settings must not duplicate the master Scene output button');
+      await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').click()`);
+      await new Promise(done=>setTimeout(done,80));
+      assert.equal(await win.webContents.executeJavaScript(`window.testScene.programSnapshot.scene.mediaLayersVisible && window.testScene.programSnapshot.scene.mediaLayers.length===1`), true,
+        'Refresh must enable a newly added layer without a separate media output button');
+      console.log(`PASS: ${kind} painted preview matches above/below layer order`);
+    }
+    stage = 'unified media picker detects image and video';
+    await win.webContents.executeJavaScript(`window.nextSceneLayerFiles=['synthetic-image.PNG','synthetic-video.MP4','unsupported.txt'];document.querySelector('[data-add-program-scene-layer]').click()`);
+    await new Promise(done=>setTimeout(done,100));
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').click()`);
+    await new Promise(done=>setTimeout(done,100));
+    assert.deepEqual(await win.webContents.executeJavaScript(`window.testScene.programSnapshot.scene.mediaLayers.map(l=>l.kind)`), ['image','image','video'],
+      'Unified picker must detect mixed image/video files case-insensitively and reject unsupported files');
+    assert.equal(await win.webContents.executeJavaScript(`!document.querySelector('[data-add-program-scene-image-layer], [data-add-program-scene-video-layer]')`), true,
+      'Separate image/video picker buttons must be removed');
+    stage = 'QR preview with logo and hidden contextual editor';
+    await win.loadFile(resolve('tmp/pip-video-ui/index.html'), {search:'preview&device'});
+    await win.webContents.executeJavaScript(`window.testScene.setQrOverlay({url:'https://example.test/qr',sceneVisible:false,enabled:false,logoPath:'synthetic-logo.png'})`);
+    await win.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-program-scene-preview]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+2,clientY:r.top+2}));})()`);
+    await new Promise(done=>setTimeout(done,30));
+    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-manage="qr"]').click()`);
+    await new Promise(done=>setTimeout(done,250));
+    assert.deepEqual(await win.webContents.executeJavaScript(`(()=>{const img=document.querySelector('[data-scene-qr-object] img');return {shown:!!img,width:img?.naturalWidth,enabled:window.testScene.qrOverlay.enabled,sceneVisible:window.testScene.qrOverlay.sceneVisible};})()`),
+      {shown:true,width:1024,enabled:false,sceneVisible:true}, 'Opening QR settings must restore scene membership without publishing it');
+    await win.webContents.executeJavaScript(`document.querySelector('[data-scene-panel="picture"]').click()`);
+    await new Promise(done=>setTimeout(done,80));
+    assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('[data-scene-qr-object] img')`), true,
+      'QR must remain in the preview when another panel is selected');
+    await win.webContents.executeJavaScript(`window.testScene.displays=[{id:2,isPrimary:false,bounds:{width:1920,height:1080}}];window.testScene.displayAssignments={'2':'program'};window.testScene.setProgramScene({enabled:false});`);
+    await new Promise(done=>setTimeout(done,30));
+    await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-picture-visible]').click()`);
+    await new Promise(done=>setTimeout(done,350));
+    assert.deepEqual(await win.webContents.executeJavaScript(`({snapshot:window.testScene.programSnapshot?.qrOverlay.enabled,native:window.lastQrOverlay?.visible})`),
+      {snapshot:true,native:true}, 'The restored QR must reach the published snapshot and native output without a separate QR button');
+    await win.webContents.executeJavaScript(`window.testScene.setQrOverlay({contentType:'file',imagePath:'synthetic-qr.png',logoPath:null})`);
+    await new Promise(done=>setTimeout(done,250));
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-scene-qr-object] img')?.naturalWidth`), 640,
+      'A QR loaded from a file must decode in the contextual preview');
+    console.log('PASS: retained preview layers, unified mixed media picker, hidden QR editor, logo and QR file');
+    if (process.env.PDM_LAYER_ORDER_ONLY) {
+      win.destroy(); clearTimeout(deadline); app.exit(0); return;
+    }
     const cases = ['legacy', 'device', 'desktop'].flatMap(variant =>
       ['wide', 'four-three'].flatMap(aspect => ['preview', 'output'].map(mode => ({ variant, aspect, mode }))))
     for (const { variant, aspect, mode } of cases) {
@@ -1025,6 +1376,8 @@ app.whenReady().then(async () => {
             return {opacity:getComputedStyle(canvas).opacity,rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}};
           })()`)
           assert.equal(chromaMetrics.opacity, '1', 'Program output must switch to the GPU chroma surface')
+          win.webContents.invalidate()
+          await new Promise(done => setTimeout(done, 150))
           const screenshot = await win.webContents.capturePage()
           const picture = screenshot.resize({width:1280,height:800})
           const bytes = picture.toBitmap()

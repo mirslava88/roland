@@ -20,12 +20,12 @@ const {
 } = await moduleFrom('src/renderer/src/program-scene-background.ts')
 
 assert.deepEqual(normalizeProgramSceneBackground(undefined), {
-  kind: 'image', videoPath: null, channelId: null, loop: true, muted: true
+  kind: 'image', imagePath: null, videoPath: null, channelId: null, loop: true, muted: true
 })
 assert.deepEqual(normalizeProgramSceneBackground({
   kind: 'video', videoPath: ' C:/clip.mp4 ', loop: false, muted: false
 }), {
-  kind: 'video', videoPath: ' C:/clip.mp4 ', channelId: null, loop: false, muted: false
+  kind: 'video', imagePath: null, videoPath: ' C:/clip.mp4 ', channelId: null, loop: false, muted: false
 })
 assert.equal(normalizeProgramSceneBackground({ kind: 'unknown' }).kind, 'image')
 assert.deepEqual(normalizeProgramSceneMediaLayers(undefined), [])
@@ -64,7 +64,9 @@ const state = (background, file = null, slide = 1) => ({
   pptxThumbnailsMap: {}
 })
 
-assert.equal(resolveProgramSceneBackground(state({ kind: 'image' })).path, 'C:/backdrop.png')
+assert.equal(resolveProgramSceneBackground(state({ kind: 'image', imagePath: 'C:/key-fill.png' })).path, 'C:/key-fill.png')
+assert.equal(resolveProgramSceneBackground(state({ kind: 'image' })), null,
+  'the global Scene backdrop must never become the chroma-key image fill')
 assert.deepEqual(resolveProgramSceneBackground(state({ kind: 'video', videoPath: 'C:/lower.mp4', loop: false, muted: false })), {
   type: 'video', path: 'C:/lower.mp4', name: 'Фоновое видео', slide: 1, loop: false, muted: false
 })
@@ -107,7 +109,10 @@ assert.match(appConfig, /background: restoredSceneBackground/)
 assert.match(appConfig, /chromaKey: normalizeProgramSceneChromaKey\(rawProgramScene\.chromaKey\)/)
 assert.match(appConfig, /mediaLayers: restoredSceneMediaLayers/)
 const storeSource = readFileSync('src/renderer/src/stores/useAppStore.ts', 'utf8')
-assert.match(storeSource, /version:\s*42/)
+assert.match(storeSource, /version:\s*44/)
+assert.match(storeSource, /export type SceneDraft = ProgramSceneConfigState/)
+assert.match(storeSource, /freezeProgramSnapshot/)
+assert.match(storeSource, /publishProgramSnapshot: \(contentChannelId, overrides\)/)
 assert.match(storeSource, /mediaLayers:\s*normalizeProgramSceneMediaLayers\(rawScene\.mediaLayers\)/)
 assert.match(storeSource, /mediaLayersVisible:\s*rawScene\.mediaLayersVisible === true/)
 const main = readFileSync('src/main/index.ts', 'utf8')
@@ -124,10 +129,21 @@ assert.match(sceneModal, /data-scene-context-menu/)
 assert.match(sceneModal, /data-scene-add="background"/)
 assert.match(sceneModal, /data-scene-add="text"/)
 assert.match(sceneModal, /data-scene-add="qr"/)
+assert.match(sceneModal, /data-scene-add="timer"/)
 assert.doesNotMatch(sceneModal, /data-scene-add="external"/)
-assert.match(sceneModal, /data-scene-add="image"/)
-assert.match(sceneModal, /data-scene-add="video"/)
+assert.match(sceneModal, /data-scene-add="layer"/)
+assert.doesNotMatch(sceneModal, /data-scene-add="(?:image|video)"/)
+assert.match(sceneModal, /selectSceneLayerFiles\(\)/)
+assert.match(sceneModal, /shown=\{qrOverlay\.sceneVisible !== false \|\| qrOverlay\.enabled\}/)
+assert.match(sceneModal, /data-scene-manage="qr"[\s\S]*?setQrOverlay\(\{ sceneVisible: true \}\)/)
 assert.match(sceneModal, /<SceneQrPreviewLayer/)
+assert.match(sceneModal, /<SceneTimerPreviewLayer/)
+assert.match(sceneModal, /<SceneTimerSettings/)
+assert.match(sceneModal, /canvasSelection\?\.kind === 'timer'/)
+assert.match(sceneModal, /position=\{timerOverlayDraft\.position\}/)
+assert.match(sceneModal, /scale=\{timerOverlayDraft\.scale\}/)
+assert.match(sceneModal, /publishProgramSnapshot\(channelToTake, \{/)
+assert.match(sceneModal, /position: \{ \.\.\.timerOverlayDraft\.position \}/)
 assert.match(sceneModal, /data-program-scene-refresh/)
 assert.match(sceneModal, /data-program-scene-select-external-source/)
 assert.match(sceneModal, /data-scene-external-source-picker/)
@@ -137,6 +153,7 @@ assert.match(sceneModal, /addEventListener\('wheel', changeCameraHeight, \{ pass
 assert.match(sceneModal, /data-scene-object-action="chroma"/)
 assert.match(sceneModal, /function ChromaKeyPanel/)
 assert.match(sceneModal, /effectiveEditorPanel === 'chroma'/)
+assert.doesNotMatch(sceneModal, /Фон под хромакеем/)
 assert.match(sceneModal, /data-scene-manage="layers"/)
 assert.match(sceneModal, /data-scene-manage="text"/)
 assert.match(sceneModal, /data-scene-manage="qr"/)
@@ -147,17 +164,26 @@ assert.ok(sceneModal.indexOf('data-scene-manage="layers"') > sceneModal.indexOf(
   'Configure must be below object actions')
 assert.match(sceneModal, /data-program-scene-select-content/)
 assert.match(sceneModal, /chooserOnly:\s*true/)
-assert.match(sceneModal, /Выберите фоновое изображение/)
+assert.doesNotMatch(sceneModal, /Сначала выберите фоновое изображение/)
 assert.match(sceneModal, /data-scene-content-channel=/)
 assert.match(sceneModal, /channel\.caption\.trim\(\) \|\| shortFileName\(file\.path\)/)
 assert.match(sceneModal, /new CustomEvent\('take-channel', \{ detail: channelToTake \}\)/)
 assert.match(sceneModal, /new CustomEvent\('close-program-output'\)/)
-assert.match(sceneModal, /programScene\.enabled \? 'Выйти из эфира' : 'Показать в эфире'/)
+assert.match(sceneModal, /programIsLive \? 'Выйти из эфира' : 'Показать в эфире'/)
 assert.match(sceneModal, /pptxSlidesMap\[previewFile\.path\]\s*\|\|\s*pptxThumbnailsMap/)
 assert.match(sceneModal, /measuredContentFrame\?\.aspectRatio \?\? storedContentAspectRatio \?\? 16 \/ 9/)
 assert.match(sceneModal, /contentHeightPercent/)
 const mediaLayers = readFileSync('src/renderer/src/components/ProgramScene/ProgramSceneMediaLayers.tsx', 'utf8')
-assert.match(mediaLayers, /style=\{\{ zIndex: placement === 'below' \? 1 : 6 \}\}/)
+assert.match(mediaLayers, /zIndex: placement === 'below' \? 1 : 6, isolation: 'isolate'/)
+assert.match(sceneModal, /placement="all"/)
+assert.equal((sceneModal.match(/<ProgramSceneMediaLayerSurface/g) || []).length, 1)
+assert.match(mediaLayers, /zIndex: placement === 'all' \? \(layer.aboveContent \? 6 : 1\)/)
+assert.match(mediaLayers, /onReorder\(selected.id, 'down'\)/)
+assert.doesNotMatch(mediaLayers, /onAddImage|onAddVideo/)
+const ipcSource = readFileSync('src/main/ipc-handlers.ts', 'utf8')
+assert.match(ipcSource, /buffer\.buffer\.slice\(buffer\.byteOffset, buffer\.byteOffset \+ buffer\.byteLength\)/)
+assert.match(ipcSource, /select-scene-layer-files/)
+assert.match(mediaLayers, /controlRevision/)
 const textOverlays = readFileSync('src/renderer/src/components/ProgramScene/ProgramSceneTextOverlays.tsx', 'utf8')
 assert.match(textOverlays, /data-program-scene-inline-text/)
 assert.match(textOverlays, /contentEditable=\{interactive \? 'plaintext-only' : false\}/)
@@ -176,9 +202,36 @@ assert.match(qrOverlay, /sceneVisible:\s*raw\.sceneVisible !== false/)
 const sceneQrPreview = readFileSync('src/renderer/src/components/ProgramScene/SceneQrPreviewLayer.tsx', 'utf8')
 assert.match(sceneQrPreview, /data-qr-description-inline-editor/)
 assert.match(sceneQrPreview, /onTextChange\(event\.currentTarget\.innerText/)
+const sceneTimerPreview = readFileSync('src/renderer/src/components/ProgramScene/SceneTimerPreviewLayer.tsx', 'utf8')
+assert.match(sceneTimerPreview, /onSelect\?\.\(\)/)
+const sceneTimerSettings = readFileSync('src/renderer/src/components/ProgramScene/SceneTimerSettings.tsx', 'utf8')
+assert.match(sceneTimerSettings, /data-program-scene-timer-settings/)
+assert.match(sceneTimerSettings, /timerDuration > 0 \? timerDuration : 15 \* 60/)
+assert.match(sceneTimerSettings, /onSetDuration\(seconds\)/)
+assert.match(sceneTimerSettings, /data-program-scene-timer-adjust=\{minutes \* direction\}/)
+assert.match(sceneTimerSettings, /Положение и оформление попадут в эфир после ↻/)
+assert.match(sceneTimerSettings, /data-program-scene-timer-time/)
+assert.match(sceneTimerSettings, /data-program-scene-timer-sound=\{sound\.kind\}/)
+assert.match(sceneTimerSettings, /selectSoundFile\(\)/)
+const timerControls = readFileSync('src/renderer/src/timer-controls.ts', 'utf8')
+assert.match(timerControls, /TIMER_COMMAND_EVENT = 'pdm-timer-command'/)
+assert.match(timerControls, /type: 'apply-state'/)
+const timerControl = readFileSync('src/renderer/src/components/Controls/Timer.tsx', 'utf8')
+assert.match(timerControl, /addEventListener\(TIMER_COMMAND_EVENT, handleSceneCommand\)/)
+assert.match(timerControl, /timerOutputVisible/)
+assert.match(timerControl, /timerOutputOwner === 'scene'/)
+assert.match(timerControl, /setTimerOutputState\(false, null\)/)
+assert.match(sceneModal, /publishProgramSnapshot\(channelToTake, \{/)
+assert.match(sceneModal, /timerTimeDraftDirty/)
+assert.match(sceneModal, /draft\.duration <= 0 && minutes > 0/)
+assert.match(sceneModal, /selectedCapture && backgroundSource\?\.type === 'image'/)
+assert.match(sceneModal, />Внешний источник \(камера\)<\/label>/)
 const sceneBridge = readFileSync('src/renderer/src/components/ProgramScene/ProgramSceneBridge.tsx', 'utf8')
+assert.match(sceneBridge, /externalMediaOverlayActive = active && programScene.mediaLayersVisible/)
+assert.doesNotMatch(sceneBridge, /nativeContentActive && targetDisplayId/)
 assert.doesNotMatch(sceneBridge, /programScene\.enabled && !!selectedCapture/)
-assert.match(sceneBridge, /programScene\.enabled && !!background/)
+assert.match(sceneBridge, /!!programSnapshot && programScene\.enabled/)
+assert.doesNotMatch(sceneBridge, /programScene\.enabled && !!background/)
 assert.doesNotMatch(presentation, /active:\s*raw\?\.active === true && !!capture/)
 for (const path of [
   'src/renderer/src/components/AuxiliaryDisplays/AuxiliaryDisplayBridge.tsx',
@@ -194,15 +247,15 @@ for (const path of [
 const sceneCanvas = sceneModal.slice(sceneModal.indexOf('data-program-scene-preview'))
 const contentSurfaceIndex = sceneCanvas.indexOf('className={`pdm-pip-content-preview')
 assert.ok(
-  sceneCanvas.indexOf('placement="below"') < contentSurfaceIndex,
+  sceneCanvas.indexOf('placement="all"') < contentSurfaceIndex,
   'the unified scene preview must draw lower layers below presentation content'
 )
 assert.ok(
-  contentSurfaceIndex < sceneCanvas.indexOf('placement="above"'),
+  sceneCanvas.includes('zIndex: 2'),
   'the unified scene preview must draw upper layers above presentation content'
 )
 assert.ok(
-  sceneCanvas.indexOf('placement="above"') < sceneCanvas.indexOf('<ProgramSceneTextOverlayLayer'),
+  sceneCanvas.indexOf('placement="all"') < sceneCanvas.indexOf('<ProgramSceneTextOverlayLayer'),
   'the unified scene preview must draw text above media layers'
 )
 assert.ok(

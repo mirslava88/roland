@@ -23,7 +23,6 @@ interface ProgramSceneBackgroundState {
   programScene: {
     background: unknown
   }
-  backdropImage: string | null
   channels: Record<string, { file: FileEntry | null; slide: number }>
   pptxSlidesMap: Record<string, string[]>
   pptxThumbnailsMap: Record<string, string[]>
@@ -42,11 +41,11 @@ export function isProgramSceneBackgroundChannelSupported(file?: FileEntry | null
 export function resolveProgramSceneBackground(state: ProgramSceneBackgroundState): ProgramSceneBackgroundPayload | null {
   const config = normalizeProgramSceneBackground(state.programScene.background)
   if (config.kind === 'image') {
-    return state.backdropImage
+    return config.imagePath
       ? {
           type: 'image',
-          path: state.backdropImage,
-          name: 'Фоновое изображение',
+          path: config.imagePath,
+          name: 'Заполнение хромакея',
           slide: 1,
           loop: config.loop,
           muted: config.muted
