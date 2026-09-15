@@ -841,7 +841,7 @@ export const useAppStore = create<AppState>()(persist(
   internalProgramOutputActive: false,
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
-  appTheme: readStoredAppTheme() ?? 'classic',
+  appTheme: readStoredAppTheme() ?? 'broadcast-pro',
   toolbarVisibility: readStoredToolbarVisibility(),
   globalHookEnabled: true,
   channelBoundaryNavigationEnabled: false,

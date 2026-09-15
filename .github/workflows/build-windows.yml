@@ -61,6 +61,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Electron download failed' }
           }
 
+      - name: PowerPoint output recovery regression tests
+        run: npm run test:powerpoint-output-recovery
+
       - name: Local streaming regression tests
         if: env.PDM_EDITION == 'stream'
         run: npm run test:streaming

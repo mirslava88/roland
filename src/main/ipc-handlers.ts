@@ -7,7 +7,7 @@ import { existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import { scriptPath as resolveScript } from './paths'
-import { pptDaemon } from './powerpoint-daemon'
+import { pptDaemon, PowerPointPreOpenRecoveryError } from './powerpoint-daemon'
 import { createPptxCache, readPptxCacheImages, type PptxCacheProgress } from './pptx-cache'
 import { resizePptxThumbnail } from './pptx-thumbnail'
 import { exportPptxIncrementally } from './pptx-incremental-export'
@@ -748,7 +748,8 @@ export interface FileEntry {
 
 export function registerIpcHandlers(
   controlWindow: BrowserWindow,
-  getPresentationWindow: () => BrowserWindow | null
+  getPresentationWindow: () => BrowserWindow | null,
+  onPowerPointOutputCommitted: () => void = () => undefined
 ): void {
   ipcMain.handle('get-app-version', (event): string => {
     if (event.sender.id !== controlWindow.webContents.id) return ''
@@ -1187,8 +1188,17 @@ export function registerIpcHandlers(
                 CurrentSlide: res.slide ?? 1
               })
               setActivePowerPointSceneLayout(sceneLayout?.enabled ? sceneLayout : null)
+              // This is a main-process proof: OPEN + COMMIT checked the exact
+              // live HWND under the daemon lock. A renderer cannot unlock an
+              // uncertain output by merely asking to hide a safety cover.
+              onPowerPointOutputCommitted()
               return { success: true, output }
             } catch (error: unknown) {
+              if (error instanceof PowerPointPreOpenRecoveryError && res.id === 0) {
+                // No OPEN entered the native host. Keep the existing PDF/video
+                // visible; an ABORT here is both unnecessary and gate-blocked.
+                return { success: false, error: String(error), safeToUncover: true }
+              }
               let cleanupError = ''
               try {
                 // A timeout cannot cancel a COM command already being

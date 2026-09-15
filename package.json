@@ -16,6 +16,7 @@
     "test:program-scene-background": "node scripts/test-program-scene-background.mjs",
     "test:toolbar:ui": "node scripts/test-toolbar-ui.mjs",
     "test:powerpoint-display-recovery": "node scripts/test-powerpoint-display-recovery.mjs",
+    "test:powerpoint-output-recovery": "node scripts/test-powerpoint-output-recovery.mjs",
     "test:streaming": "node scripts/test-streaming.mjs && node scripts/test-streaming-handshake.mjs && node scripts/test-streaming-keyframes.mjs",
     "test:streaming:capture": "node scripts/run-streaming-capture-test.mjs",
     "test:streaming:latency": "node scripts/run-streaming-latency-test.mjs",

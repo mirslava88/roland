@@ -113,7 +113,8 @@ let overlayPlacement: 'cover' | 'underlay' = 'cover'
 let overlayOperationGeneration = 0
 let overlayPinned = false
 // A commit-failure cover is a safety boundary, not a normal transition frame.
-// No renderer/UI path may uncover or replace it until the main process restarts.
+// Only a verified main-process OPEN + COMMIT may unlock a recovered output.
+// A fatal/unknown daemon ownership state still requires a restart.
 let overlaySafetyLocked = false
 let overlaySafetyReady = false
 let displayMetricsSyncTimer: NodeJS.Timeout | null = null
@@ -1038,7 +1039,13 @@ function createWindows(): void {
   const thisControlWindow = controlWindow
   let allowControlWindowClose = false
   let closeConfirmationOpen = false
-  registerIpcHandlers(controlWindow, () => presentationWindow)
+  registerIpcHandlers(controlWindow, () => presentationWindow, () => {
+    if (!overlaySafetyLocked) return
+    overlaySafetyLocked = false
+    overlaySafetyReady = false
+    beginOverlayOperation()
+    diagnosticLog('window', 'PowerPoint safety cover unlocked after verified output commit; awaiting normal reveal')
+  })
 
   const discardPreparedWorkspaceRecovery = async (): Promise<void> => {
     if (thisControlWindow.isDestroyed()) return
@@ -1908,7 +1915,7 @@ function createWindows(): void {
       stopOverlayZOrderGuard()
       targetOverlay.setAlwaysOnTop(true, 'screen-saver')
       targetOverlay.moveTop()
-      diagnosticLog('window', 'PowerPoint failure safety cover locked until PDM restart')
+      diagnosticLog('window', 'PowerPoint failure safety cover locked until verified output recovery or PDM restart')
     }
     return true
     // NB: No raise-timer. Poller data (2026-04-25 session) proved PP

@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Continue'
 [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding           = [System.Text.Encoding]::UTF8
+. (Join-Path $PSScriptRoot 'powerpoint-linked-pictures.ps1')
 
 # Win32 primitives:
 #  - SetWindowPos — drop WS_EX_TOPMOST from PP's slideshow window via
@@ -24,6 +25,24 @@ public static extern int DwmFlush();
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern System.IntPtr BeginDeferWindowPos(int count);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern System.IntPtr DeferWindowPos(System.IntPtr batch, System.IntPtr hwnd, System.IntPtr after, int x, int y, int width, int height, uint flags);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern bool EndDeferWindowPos(System.IntPtr batch);
+public static bool PromoteWarmedOutput(System.IntPtr next, System.IntPtr previous) {
+    if (next == System.IntPtr.Zero || previous == System.IntPtr.Zero || next == previous ||
+        !IsWindow(next) || !IsWindow(previous)) return false;
+    System.IntPtr batch = BeginDeferWindowPos(2);
+    if (batch == System.IntPtr.Zero) return false;
+    // NOACTIVATE | NOMOVE | NOSIZE: change only prepared windows' Z-order,
+    // together in one screen-refreshing cycle.
+    batch = DeferWindowPos(batch, next, System.IntPtr.Zero, 0, 0, 0, 0, 0x13);
+    if (batch == System.IntPtr.Zero) return false;
+    batch = DeferWindowPos(batch, previous, new System.IntPtr(1), 0, 0, 0, 0, 0x13);
+    return batch != System.IntPtr.Zero && EndDeferWindowPos(batch);
+}
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern int SetWindowRgn(System.IntPtr hWnd, System.IntPtr hRgn, bool bRedraw);
 [System.Runtime.InteropServices.DllImport("gdi32.dll", SetLastError = true)]
 public static extern System.IntPtr CreateRectRgn(int left, int top, int right, int bottom);
@@ -43,6 +62,63 @@ public static extern bool IsWindowVisible(System.IntPtr hWnd);
 public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
 public static extern int GetWindowLong(System.IntPtr hWnd, int nIndex);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern int SetWindowLong(System.IntPtr hWnd, int nIndex, int value);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern bool SetLayeredWindowAttributes(System.IntPtr hwnd, uint key, byte alpha, uint flags);
+private static readonly object _transparentEditorLock = new object();
+private static long _transparentEditorHwnd;
+private static long _transparentEditorPid;
+private static int _transparentEditorStyle;
+private static long _linkedPicturesScope;
+private static long _linkedPicturesScopePid;
+public static long BeginLinkedPicturesEditorScope(long processId) {
+    lock (_transparentEditorLock) { _linkedPicturesScopePid = processId; return ++_linkedPicturesScope; }
+}
+public static bool ExposeEditorForLinkedPictures(long hwnd, long processId, long scope) {
+    lock (_transparentEditorLock) {
+        if (scope <= 0 || scope != _linkedPicturesScope || processId != _linkedPicturesScopePid) return false;
+        var window = (System.IntPtr)hwnd;
+        if (hwnd == 0 || processId <= 0 || !IsWindow(window) || GetWindowProcessId(hwnd) != processId) return false;
+        var name = new System.Text.StringBuilder(64);
+        GetClassName(window, name, name.Capacity);
+        if (name.ToString() != "PPTFrameClass") return false;
+        if (_transparentEditorHwnd == hwnd) return true;
+        if (_transparentEditorHwnd != 0) return false;
+        int style = GetWindowLong(window, -20);
+        // Do not overwrite pre-existing transparency from Office/add-ins.
+        if ((style & 0x80000) != 0) return false;
+        ShowWindow(window, 0);
+        SetWindowLong(window, -20, style | 0x80000);
+        if (!SetLayeredWindowAttributes(window, 0, 0, 2)) {
+            SetWindowLong(window, -20, style);
+            return false;
+        }
+        _transparentEditorPid = processId;
+        _transparentEditorStyle = style;
+        System.Threading.Interlocked.Exchange(ref _transparentEditorHwnd, hwnd);
+        // Visible to accessibility, alpha=0 to the operator/audience; bottom
+        // Z-order, no activation, no geometry changes, no slideshow HWNDs.
+        if (SetWindowPos(window, new System.IntPtr(1), 0, 0, 0, 0, 0x53)) return true;
+        RestoreLinkedPicturesEditor();
+        return false;
+    }
+}
+public static void RestoreLinkedPicturesEditor() {
+    lock (_transparentEditorLock) {
+        _linkedPicturesScope++;
+        _linkedPicturesScopePid = 0;
+        long hwnd = System.Threading.Interlocked.Read(ref _transparentEditorHwnd);
+        if (hwnd == 0) return;
+        var window = (System.IntPtr)hwnd;
+        if (IsWindow(window) && GetWindowProcessId(hwnd) == _transparentEditorPid) {
+            ShowWindow(window, 0); // hide BEFORE removing alpha=0
+            SetWindowLong(window, -20, _transparentEditorStyle);
+        }
+        System.Threading.Interlocked.Exchange(ref _transparentEditorHwnd, 0);
+        _transparentEditorPid = 0;
+    }
+}
 public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
@@ -149,6 +225,7 @@ public static void StartPowerPointEditorGuard(long processId, long[] existingHwn
                     } else if (protectedWindows.Contains(hwnd)) {
                         continue;
                     }
+                    if (hwnd == System.Threading.Interlocked.Read(ref _transparentEditorHwnd)) continue;
                     EditorGuardFoundHwnd = hwnd;
                     if (IsWindowVisible((System.IntPtr)hwnd)) {
                         ShowWindow((System.IntPtr)hwnd, 0);
@@ -587,7 +664,7 @@ function Restore-MediaForeground {
 }
 
 function Reset-SlideVideoClickState {
-    $script:startedSlideVideos.Clear()
+    $script:startedSlideVideos = @{}
     Restore-MediaForeground
 }
 
@@ -1640,7 +1717,17 @@ function Restore-PowerPointSession {
                             try { Stop-Process -Id $ownedProcessId -Force -ErrorAction Stop } catch {
                                 Log "PowerPoint cleanup: force termination failed: $($_.Exception.Message)"
                             }
-                            Start-Sleep -Milliseconds 150
+                            # Process termination is asynchronous. Verify the
+                            # same PID/start-time until exit instead of treating
+                            # a 150 ms delay as proof that cleanup has failed.
+                            $forceDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
+                            do {
+                                $ownedProcessState = Get-OwnedPowerPointProcessState `
+                                    $ownedProcessId $ownedProcessStartTimeUtcTicks
+                                if (-not [bool]$ownedProcessState.verified -or
+                                    -not [bool]$ownedProcessState.alive) { break }
+                                Start-Sleep -Milliseconds 50
+                            } while ([DateTime]::UtcNow -lt $forceDeadline)
                         } else {
                             Log ("PowerPoint force termination disabled by final ownership check verified={0} unmanaged={1} error='{2}'" -f `
                                 $preForceOwnership.verified, $preForceOwnership.hasUnmanaged, $preForceOwnership.error)
@@ -1782,8 +1869,9 @@ function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
     if ($cached) {
         try {
             $cachedPath = [string]$cached.Presentation.FullName
-            $null = [int]$cached.View.Slide.SlideIndex
-            if ([string]::IsNullOrEmpty($expectedPath) -or $cachedPath -ieq $expectedPath) {
+            $cachedView = $cached.View
+            if ($cachedView -and [int]$cachedView.Slide.SlideIndex -gt 0 -and
+                ([string]::IsNullOrEmpty($expectedPath) -or $cachedPath -ieq $expectedPath)) {
                 return $cached
             }
         } catch {
@@ -1796,7 +1884,9 @@ function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
             for ($i = 1; $i -le $ppt.SlideShowWindows.Count; $i++) {
                 $candidate = $ppt.SlideShowWindows.Item($i)
                 $candidatePath = [string]$candidate.Presentation.FullName
-                if ([string]::IsNullOrEmpty($expectedPath) -or $candidatePath -ieq $expectedPath) {
+                $candidateView = $candidate.View
+                if ($candidateView -and [int]$candidateView.Slide.SlideIndex -gt 0 -and
+                    ([string]::IsNullOrEmpty($expectedPath) -or $candidatePath -ieq $expectedPath)) {
                     $script:activeSlideShowWindow = $candidate
                     $script:activePresentation = $candidate.Presentation
                     $script:activePresentationPath = $candidatePath
@@ -1815,8 +1905,12 @@ function Resolve-PdmSlideShowWindow($ppt) {
     $cached = $script:activeSlideShowWindow
     if ($cached) {
         try {
-            $null = [int]$cached.View.Slide.SlideIndex
-            return $cached
+            $cachedView = $cached.View
+            if ($cachedView -and [int]$cachedView.Slide.SlideIndex -gt 0) {
+                return $cached
+            }
+            $script:activeSlideShowWindow = $null
+            $script:activeSlideShowHwnd = 0
         } catch {
             $script:activeSlideShowWindow = $null
             $script:activeSlideShowHwnd = 0
@@ -2116,10 +2210,21 @@ while ($true) {
     if ($line.Trim().Length -eq 0) { continue }
 
     $id = 0
+    $script:commandLinkedPicturesGuard = $null
     try {
         $req  = $line | ConvertFrom-Json
         if ($null -ne $req.id) { $id = [int]$req.id }
         $cmd  = [string]$req.cmd
+
+        # Start before any COM validation: the current editor warning can itself
+        # be the reason Presentations.Count/Open/Run is blocked.
+        if ($cmd -in @('prepare','open','notes','export') -and $req.path) {
+            $guardProcessId = [long]$script:pptOwnedProcessId
+            if ($guardProcessId -eq 0 -and $script:pptOriginalEditorHwnd -ne 0) {
+                $guardProcessId = [long][PptDaemon.Native]::GetWindowProcessId([long]$script:pptOriginalEditorHwnd)
+            }
+            $script:commandLinkedPicturesGuard = Start-PdmLinkedPicturesGuard $guardProcessId ([string]$req.path) ([long]$script:pptOwnedProcessStartTimeUtcTicks)
+        }
 
         switch ($cmd) {
             'prepare' {
@@ -2159,13 +2264,13 @@ while ($true) {
                     if (-not $pres) {
                         try {
                             # ReadOnly=true, Untitled=false, WithWindow=false.
-                            $pres = $ppt.Presentations.Open($preparePath, -1, 0, 0)
+                            $pres = Open-PdmPowerPointPresentation $ppt $preparePath -1 0
                         } catch {
                             if (-not $script:pptOwnedByRoland) {
                                 throw "Hidden PowerPoint preparation failed without changing the user's editor: $($_.Exception.Message)"
                             }
                             Log "prepare: hidden open failed, retrying in hidden PDM instance: $($_.Exception.Message)"
-                            $pres = $ppt.Presentations.Open($preparePath)
+                            $pres = Open-PdmPowerPointPresentation $ppt $preparePath 0 -1
                             Hide-PPEditor $ppt
                         }
                         $openedByPdm = $true
@@ -2559,9 +2664,9 @@ while ($true) {
                     # window so the PowerPoint editor never flashes on screen.
                     # Args: FileName, ReadOnly=0, Untitled=0, WithWindow=0.
                     try {
-                        $pres = $ppt.Presentations.Open($req.path, 0, 0, 0)
+                        $pres = Open-PdmPowerPointPresentation $ppt ([string]$req.path) 0 0
                     } catch {
-                        $pres = $ppt.Presentations.Open($req.path)
+                        $pres = Open-PdmPowerPointPresentation $ppt ([string]$req.path) 0 -1
                     }
                     # Publish the exact RCW to rollback before ownership
                     # registration. Mark-ManagedPresentation deliberately
@@ -2895,11 +3000,18 @@ while ($true) {
                     if ($deferPromotion) {
                         Log "staged warmed slideshow behind persistent output HWND=$underlayHwnd"
                     } else {
-                        if ($underlayHwnd -ne 0 -and $underlayHwnd -ne $newHwnd) {
-                            Lower-Window $underlayHwnd
-                            Log "lowered persistent output HWND=$underlayHwnd before slideshow promotion"
+                        $atomicPromotion = [PptDaemon.Native]::PromoteWarmedOutput(
+                            [System.IntPtr]$newHwnd, [System.IntPtr]$underlayHwnd)
+                        if (-not $atomicPromotion) {
+                            # On an unavailable batch, expose the prepared
+                            # replacement FIRST; never drop the old cover first.
+                            Raise-SlideShow $newHwnd $targetRect
+                            try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
+                            if ($underlayHwnd -ne 0 -and $underlayHwnd -ne $newHwnd) {
+                                Lower-Window $underlayHwnd
+                            }
                         }
-                        Raise-SlideShow $newHwnd $targetRect
+                        Log "warmed output promotion atomic=$atomicPromotion"
                         try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
                         Log "promoted warmed slideshow HWND=$newHwnd"
                     }
@@ -3562,7 +3674,7 @@ while ($true) {
                         try { $ppt.WindowState = 2 } catch {}
                         try { $ppt.Visible = -1 } catch {}
                         Hide-PPEditor $ppt
-                        $notesPres = $ppt.Presentations.Open($notesPath, -1, 0, 0)
+                        $notesPres = Open-PdmPowerPointPresentation $ppt $notesPath -1 0
                         $openedForNotes = $true
                         Mark-ManagedPresentation $notesPres
                     }
@@ -3679,13 +3791,13 @@ while ($true) {
                     if (-not $exportPres) {
                         try {
                             # ReadOnly=true, Untitled=false, WithWindow=false.
-                            $exportPres = $ppt.Presentations.Open($exportPath, -1, 0, 0)
+                            $exportPres = Open-PdmPowerPointPresentation $ppt $exportPath -1 0
                         } catch {
                             if (-not $script:pptOwnedByRoland) {
                                 throw "Hidden export failed without changing the user's PowerPoint window: $($_.Exception.Message)"
                             }
                             Log "export: hidden open failed, retrying windowed: $($_.Exception.Message)"
-                            $exportPres = $ppt.Presentations.Open($exportPath)
+                            $exportPres = Open-PdmPowerPointPresentation $ppt $exportPath 0 -1
                             Hide-PPEditor $ppt
                         }
                         $openedForExport = $true
@@ -3865,7 +3977,7 @@ while ($true) {
     } catch {
         $commandError = $_
         $commandErrorMessage = [string]$commandError.Exception.Message
-        Log "cmd '$cmd' failed: $commandErrorMessage"
+        Log "cmd '$cmd' failed: $commandErrorMessage; location=$($commandError.InvocationInfo.ScriptLineNumber); stack=$($commandError.ScriptStackTrace)"
         if ($cmd -eq 'open' -and $script:openTransaction) {
             Abort-PowerPointOpenTransaction
             if (-not $script:lastOpenTransactionOk) {
@@ -3890,6 +4002,15 @@ while ($true) {
             Log 'fatal uncertain session: leaving normal command loop for EOF cleanup retry'
             break
         }
+    } finally {
+        $linkedGuard = $script:commandLinkedPicturesGuard
+        $script:commandLinkedPicturesGuard = $null
+        if ($linkedGuard) {
+            $linkedGuard.Dispose()
+            if ($linkedGuard.Clicks -gt 0) { Log "linked-picture warning auto-enabled count=$($linkedGuard.Clicks)" }
+            elseif ($linkedGuard.LastError) { Log "linked-picture automation error=$($linkedGuard.LastError)" }
+        }
+        [PptDaemon.Native]::RestoreLinkedPicturesEditor()
     }
 }
 

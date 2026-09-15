@@ -15,6 +15,9 @@ type PendingRequest = {
 type CleanupRecoveryCommand = 'commit-open' | 'close'
 type TimedOutStatefulRequest = { cmd: string; args: Record<string, unknown> }
 
+// OPEN was never written: there is no new slideshow to abort or conceal.
+export class PowerPointPreOpenRecoveryError extends Error {}
+
 export interface DaemonResponse {
   id: number
   ok: boolean
@@ -528,6 +531,41 @@ class PowerPointDaemon {
       .catch((err) => diagnosticLog('ppt-daemon', `warmup failed: ${formatDiagnosticError(err)}`))
   }
 
+  private async waitForCleanup(cmd: string): Promise<void> {
+    const barrier = this.cleanupBarrier
+    if (!barrier) return
+    let timer: NodeJS.Timeout | null = null
+    try {
+      await Promise.race([
+        barrier,
+        new Promise<void>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`PowerPoint cleanup is still busy before '${cmd}'`)), 60_000)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  private async recoverCloseBeforeOpen(): Promise<void> {
+    // Already inside the operation lock: a timer queued behind this OPEN
+    // cannot recover CLOSE for us. Retry the retained, ownership-aware CLOSE
+    // here, and wait for its terminal cleanup (not merely the early ACK).
+    for (let attempt = 1; this.cleanupRecoveryRequired === 'close' && attempt <= 3; attempt++) {
+      diagnosticLog('ppt-daemon', `close recovery before open BEGIN attempt=${attempt}`)
+      const result = await this.sendRaw('close', {}, 0)
+      await this.waitForCleanup('open')
+      if (result.ok && !this.cleanupRecoveryRequired) return
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 250))
+    }
+    if (this.cleanupRecoveryRequired === 'close' && !this.sessionUncertain) {
+      throw new PowerPointPreOpenRecoveryError(
+        `PowerPoint is still finishing the previous presentation cleanup. Try again. ${this.cleanupRecoveryError ?? ''}`
+      )
+    }
+    this.assertRecoveryCommandAllowed('open')
+  }
+
   private async sendRaw(
     cmd: string,
     args: Record<string, unknown> = {},
@@ -537,7 +575,6 @@ class PowerPointDaemon {
     if (this.sessionUncertain) {
       throw new Error(`PowerPoint state is uncertain; '${cmd}' is blocked until PDM restarts`)
     }
-    this.assertRecoveryCommandAllowed(cmd)
     this.assertTimedOutStatefulCommandAllowed(cmd)
     if (cmd === 'close') {
       this.clearCloseCleanupRetryTimer()
@@ -547,22 +584,8 @@ class PowerPointDaemon {
     if (!this.acceptingRawSends) {
       throw new Error(`PowerPoint daemon rejected '${cmd}' during shutdown`)
     }
-    const barrier = this.cleanupBarrier
-    if (barrier) {
-      let barrierTimer: NodeJS.Timeout | null = null
-      try {
-        await Promise.race([
-          barrier,
-          new Promise<void>((_resolve, reject) => {
-            barrierTimer = setTimeout(() => {
-              reject(new Error(`PowerPoint cleanup is still busy before '${cmd}'`))
-            }, 60_000)
-          })
-        ])
-      } finally {
-        if (barrierTimer) clearTimeout(barrierTimer)
-      }
-    }
+    await this.waitForCleanup(cmd)
+    if (cmd === 'open') await this.recoverCloseBeforeOpen()
     if (!this.acceptingRawSends) {
       throw new Error(`PowerPoint daemon rejected '${cmd}' during shutdown`)
     }
