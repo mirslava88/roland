@@ -23,6 +23,19 @@ Object.assign(state,{informationMedia:null,displayAssignments:{},programCaptureT
 Object.assign(state,{programSnapshot:null,programOutputStatus:{desiredRevision:0,confirmedRevision:0,phase:'idle',error:null},internalProgramOutputActive:false,publishProgramSnapshot(channelId,overrides={}){const next=state.programOutputStatus.desiredRevision+1;state.programSnapshot={revision:next,publishedAt:Date.now(),contentChannelId:channelId??null,backdropImage:overrides.backdropImage??state.backdropImage,scene:overrides.scene??state.programScene,qrOverlay:overrides.qrOverlay??state.qrOverlay,timer:overrides.timer??{duration:state.timerDuration,remaining:state.timerRemaining,running:state.timerRunning,visible:state.timerOutputVisible,position:state.timerOverlayPosition,scale:state.timerOverlayScale,textColor:state.timerTextColor,warningTextColor:state.timerWarningTextColor,overtimeTextColor:state.timerOvertimeTextColor,textOpacity:state.timerTextOpacity}};if(overrides.qrOverlay)state.qrOverlay=overrides.qrOverlay;if(overrides.timer){state.timerDuration=overrides.timer.duration;state.timerRemaining=overrides.timer.remaining;state.timerRunning=overrides.timer.running;state.timerOutputVisible=overrides.timer.visible;state.timerOutputOwner=overrides.timer.visible?'scene':null;state.timerOverlayPosition=overrides.timer.position;state.timerOverlayScale=overrides.timer.scale;state.timerTextColor=overrides.timer.textColor;state.timerWarningTextColor=overrides.timer.warningTextColor;state.timerOvertimeTextColor=overrides.timer.overtimeTextColor;state.timerTextOpacity=overrides.timer.textOpacity;}state.programOutputStatus={desiredRevision:next,confirmedRevision:next,phase:'live',error:null};revision++;listeners.forEach(fn=>fn());return next;},confirmProgramSnapshot(){},failProgramSnapshot(){},clearProgramSnapshot(){state.programSnapshot=null;state.programOutputStatus.phase='idle';},setInternalProgramOutputActive(active){state.internalProgramOutputActive=active;}});
 if (location.search.includes('timer-empty')) Object.assign(state,{timerDuration:0,timerRemaining:0,timerRunning:false,timerOutputVisible:false,timerOutputOwner:null,programScene:{...state.programScene,enabled:false}});
 if (location.search.includes('no-participant')) Object.assign(state,{programScene:{...state.programScene,captureSourceId:null,background:{kind:'image',imagePath:state.backdropImage,videoPath:null,channelId:null,loop:true,muted:true}}});
+if (location.search.includes('content-follow')) {
+  const file=(path,type)=>({path,name:path,type,extension:'.'+path.split('.').pop(),size:1});
+  const frame='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#22c55e"/></svg>');
+  state.channels={A:{file:file('synthetic-video.mp4','video'),slide:1,totalSlides:1,caption:'Видео'},
+    B:{file:file('synthetic-live.pdf','pdf'),slide:2,totalSlides:2,caption:'PDF'},
+    C:{file:file('synthetic-live.pptx','presentation'),slide:1,totalSlides:2,caption:'PPTX'},
+    D:{file:file('synthetic-draft.pdf','pdf'),slide:1,totalSlides:2,caption:'Черновик'}};
+  state.channelIds=['A','B','C','D'];state.liveChannel='B';state.activeFile=state.channels.B.file;
+  state.currentSlide=2;state.selectedChannel='A';state.selectedFile=state.channels.A.file;
+  state.programScene={...state.programScene,contentChannelId:'A'};
+  state.pptxSlidesMap={'synthetic-live.pptx':[frame,frame]};
+  state.pptxAspectRatios={'synthetic-live.pptx':16/9};
+}
 if (!location.search.includes('timer-empty')) state.publishProgramSnapshot(null);
 window.testSlideSize = location.search.includes('portrait') ? [600, 900] : location.search.includes('four-three') ? [800, 600] : [960, 540];
 if (location.search.includes('corners')) {

@@ -296,6 +296,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   const addCaptureSource = useAppStore((state) => state.addCaptureSource)
   const backdropImage = useAppStore((state) => state.backdropImage)
   const activeFile = useAppStore((state) => state.activeFile)
+  const liveChannel = useAppStore((state) => state.liveChannel)
   const currentSlide = useAppStore((state) => state.currentSlide)
   const selectedChannel = useAppStore((state) => state.selectedChannel)
   const setSelectedChannel = useAppStore((state) => state.setSelectedChannel)
@@ -357,8 +358,20 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   )
   const [sceneContextMenu, setSceneContextMenu] = useState<SceneContextMenuState | null>(null)
   const [previewChannelId, setPreviewChannelId] = useState<string | null>(
-    () => storedProgramScene.contentChannelId ?? null
+    () => {
+      const state = useAppStore.getState()
+      return state.activeFile ? state.liveChannel ?? null : storedProgramScene.contentChannelId ?? null
+    }
   )
+  const previousLiveContentRef = useRef({ channelId: liveChannel, path: activeFile?.path })
+  useEffect(() => {
+    const previous = previousLiveContentRef.current
+    if (previous.channelId === liveChannel && previous.path === activeFile?.path) return
+    previousLiveContentRef.current = { channelId: liveChannel, path: activeFile?.path }
+    // A real channel change replaces an old preview pin. Merely dropping or
+    // selecting another file must not steal the preview or a manual draft.
+    setPreviewChannelId(activeFile ? liveChannel ?? null : null)
+  }, [liveChannel, activeFile?.path])
   const previewCanvasRef = useRef<HTMLDivElement>(null)
   const contentPreviewRef = useRef<HTMLDivElement>(null)
   const participantPreviewRef = useRef<HTMLDivElement>(null)
@@ -1220,6 +1233,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
           />
           <div
             ref={contentPreviewRef}
+            data-scene-preview-content-path={previewFile?.path}
             className={`pdm-pip-content-preview absolute flex items-center justify-center text-[11px] font-semibold text-gray-800 shadow-xl overflow-hidden ${activePanel === 'picture' || activePanel === 'layers' ? 'pointer-events-none' : ''} ${previewFile ? 'bg-transparent' : 'bg-white/90'}`}
             style={{
               width: `${contentWidthPercent}%`,

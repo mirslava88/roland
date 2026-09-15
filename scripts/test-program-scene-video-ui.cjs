@@ -10,6 +10,51 @@ app.whenReady().then(async () => {
   try {
     win = new BrowserWindow({ show: false, width: 1280, height: 800, useContentSize: true,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+    if (process.env.PDM_SCENE_CONTENT_FOLLOW_ONLY) {
+      stage = 'Scene content follows committed channels, not a stale video'
+      await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&content-follow' })
+      await new Promise(done => setTimeout(done, 350))
+      assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('.pdm-pip-content-preview video')`), false,
+        'Opening Scene with a live PDF must not show the previously saved video channel')
+      const previewPath=()=>win.webContents.executeJavaScript(`document.querySelector('.pdm-pip-content-preview').dataset.scenePreviewContentPath`)
+      const take=async id=>{
+        await win.webContents.executeJavaScript(`(() => {const state=window.testScene;state.liveChannel=${JSON.stringify(id)};
+          state.activeFile=state.channels[state.liveChannel].file;state.currentSlide=state.channels[state.liveChannel].slide;state.setProgramScene({});})()`)
+        await new Promise(done => setTimeout(done, 100))
+      }
+      assert.equal(await previewPath(), 'synthetic-live.pdf')
+      await take('A')
+      assert.equal(await previewPath(), 'synthetic-video.mp4')
+      await take('B')
+      assert.equal(await previewPath(), 'synthetic-live.pdf')
+      assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('.pdm-pip-content-preview video')`), false)
+      await take('C')
+      assert.equal(await previewPath(), 'synthetic-live.pptx')
+      assert.equal(await win.webContents.executeJavaScript(`!!document.querySelector('.pdm-pip-content-preview img')`), true)
+      await win.webContents.executeJavaScript(`(() => {const state=window.testScene;
+        state.selectedChannel='A';state.selectedFile=state.channels.A.file;
+        state.channels={...state.channels,A:{...state.channels.A,file:{...state.channels.A.file,path:'synthetic-replaced.mp4'}}};state.setProgramScene({});})()`)
+      await new Promise(done => setTimeout(done, 60))
+      assert.equal(await previewPath(), 'synthetic-live.pptx', 'Selecting/dropping another video must not steal the preview')
+      await win.webContents.executeJavaScript(`(() => {const content=document.querySelector('.pdm-pip-content-preview');const rect=content.getBoundingClientRect();
+        content.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2}));})()`)
+      await new Promise(done => setTimeout(done, 40))
+      await win.webContents.executeJavaScript(`document.querySelector('[data-scene-content-channel="D"]').click()`)
+      await new Promise(done => setTimeout(done, 60))
+      assert.equal(await previewPath(), 'synthetic-draft.pdf', 'Explicit draft selection must still work without TAKE')
+      assert.equal(await win.webContents.executeJavaScript(`window.testScene.activeFile.path`), 'synthetic-live.pptx')
+      assert.deepEqual(await win.webContents.executeJavaScript(`window.sceneTakeChannels`), [])
+      await win.webContents.executeJavaScript(`window.testScene.setProgramScene({participantScale:1.2})`)
+      await new Promise(done => setTimeout(done, 60))
+      assert.equal(await previewPath(), 'synthetic-draft.pdf', 'Unrelated scene edits must keep the manual draft')
+      await take('B')
+      assert.equal(await previewPath(), 'synthetic-live.pdf', 'The next committed TAKE must replace the previous preview source')
+      writeFileSync(resolve('tmp/pip-video-ui/scene-content-follow.png'), (await win.webContents.capturePage()).toPNG())
+      await win.webContents.executeJavaScript(`window.unmountTest()`)
+      clearTimeout(deadline);win.destroy();app.quit()
+      console.log('PASS: stale video on opening, video→PDF→PPTX TAKE, unrelated drop/selection, manual draft and next TAKE synchronization')
+      return
+    }
     if (process.env.PDM_SCENE_HINT_ONLY) {
       stage = 'Scene right-click discoverability hint'
       await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
