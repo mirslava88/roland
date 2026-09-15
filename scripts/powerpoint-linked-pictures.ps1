@@ -135,7 +135,8 @@ function Start-PdmLinkedPicturesGuard([long]$ProcessId, [string]$Path, [long]$Ex
         $process = Get-Process -Id $ProcessId -ErrorAction Stop
         if ($process.ProcessName -ine 'POWERPNT') { return $null }
         if ($ExpectedStartTicks -ne 0 -and $process.StartTime.ToUniversalTime().Ticks -ne $ExpectedStartTicks) { return $null }
-        $transparentEditor = $ExpectedStartTicks -gt 0 -and (Test-PdmLinkedPictures $Path)
+        if (-not (Test-PdmLinkedPictures $Path)) { return $null }
+        $transparentEditor = $ExpectedStartTicks -gt 0
         $scope = 0L
         if ($transparentEditor) { $scope = [PptDaemon.Native]::BeginLinkedPicturesEditorScope($ProcessId) }
         return New-Object PdmOffice.LinkedPicturesGuard([int]$ProcessId, $process.StartTime.ToUniversalTime().Ticks, [IO.Path]::GetFileName($Path), $transparentEditor, $scope)
@@ -144,11 +145,16 @@ function Start-PdmLinkedPicturesGuard([long]$ProcessId, [string]$Path, [long]$Ex
 
 function Test-PdmLinkedPictures([string]$Path) {
     # Inspect relationships only. Do not fetch targets or modify the PPTX.
-    if ([IO.Path]::GetExtension($Path) -notin @('.pptx','.ppsx','.potx','.pptm','.ppsm','.potm')) { return $false }
+    # Enable Content can approve multiple content types. Never auto-click it in
+    # macro-capable/legacy files, even when their visible bar mentions pictures.
+    if ([IO.Path]::GetExtension($Path) -notin @('.pptx','.ppsx','.potx')) { return $false }
     $archive = $null
     try {
         Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
         $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName -match '(?i)(^|/)vbaProject\.bin$') { return $false }
+        }
         $total = 0L
         foreach ($entry in $archive.Entries) {
             if (-not $entry.FullName.StartsWith('ppt/') -or -not $entry.FullName.EndsWith('.rels')) { continue }

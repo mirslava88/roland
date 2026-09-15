@@ -83,11 +83,13 @@ try {
  foreach ($taskCase in @(
   @{Name='linked';Mode='External';Type='image';Expected=$true},
   @{Name='embedded';Mode='Internal';Type='image';Expected=$false},
-  @{Name='hyperlink';Mode='External';Type='hyperlink';Expected=$false}
+  @{Name='hyperlink';Mode='External';Type='hyperlink';Expected=$false},
+  @{Name='disguised-macro';Mode='External';Type='image';Expected=$false;Vba=$true}
  )) {
   $taskPath = Join-Path $taskDirectory ($taskCase.Name + '.pptx')
   $taskZip = [IO.Compression.ZipFile]::Open($taskPath,[IO.Compression.ZipArchiveMode]::Create)
   try {
+   if ($taskCase.Vba) { $null = $taskZip.CreateEntry('ppt/vbaProject.bin') }
    $taskEntry = $taskZip.CreateEntry('ppt/slides/_rels/slide1.xml.rels')
    $taskWriter = New-Object IO.StreamWriter($taskEntry.Open())
    try { $taskWriter.Write('<Relationships><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/' + $taskCase.Type + '" TargetMode="' + $taskCase.Mode + '" Target="https://example.invalid/image.png"/></Relationships>') }
@@ -95,6 +97,9 @@ try {
   } finally { $taskZip.Dispose() }
   if ((Test-PdmLinkedPictures $taskPath) -ne $taskCase.Expected) { throw 'Relationship preflight mismatch' }
  }
+ $taskMacroPath = Join-Path $taskDirectory 'linked.pptm'
+ Copy-Item -LiteralPath (Join-Path $taskDirectory 'linked.pptx') -Destination $taskMacroPath
+ if (Test-PdmLinkedPictures $taskMacroPath) { throw 'Macro-capable extension authorized' }
  # A missing UIA helper must preserve ordinary hidden opening and ReadOnly.
  function Start-PdmLinkedPicturesGuard { return $null }
  function Hide-PPEditor {}
