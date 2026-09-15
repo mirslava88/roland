@@ -64,6 +64,9 @@ try {
  [uint32]$taskKey=0; [byte]$taskAlpha=255; [uint32]$taskFlags=0
  if(-not [SyntheticPptEditor]::GetLayeredWindowAttributes($taskEditor,[ref]$taskKey,[ref]$taskAlpha,[ref]$taskFlags) -or $taskAlpha -ne 0){throw 'Editor was not completely transparent'}
  if(-not [PptDaemon.Native]::IsWindowVisible($taskEditor)){throw 'Editor unavailable to accessibility'}
+ [PptDaemon.Native]::ShowWindow($taskEditor,0) | Out-Null
+ if(-not [PptDaemon.Native]::ExposeEditorForLinkedPictures($taskEditor.ToInt64(),$PID,$taskScope) -or -not [PptDaemon.Native]::IsWindowVisible($taskEditor)){throw 'Re-hidden editor unavailable to the same scope'}
+ if(-not [SyntheticPptEditor]::GetLayeredWindowAttributes($taskEditor,[ref]$taskKey,[ref]$taskAlpha,[ref]$taskFlags) -or $taskAlpha -ne 0){throw 'Re-hidden editor lost zero alpha'}
  if([PptDaemon.Native]::GetForegroundWindow() -ne $taskForeground){throw 'Invisible editor stole focus'}
  $taskAfter = New-Object PptDaemon.Native+RECT
  [PptDaemon.Native]::GetWindowRect($taskEditor,[ref]$taskAfter) | Out-Null

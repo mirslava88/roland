@@ -83,7 +83,11 @@ public static bool ExposeEditorForLinkedPictures(long hwnd, long processId, long
         var name = new System.Text.StringBuilder(64);
         GetClassName(window, name, name.Capacity);
         if (name.ToString() != "PPTFrameClass") return false;
-        if (_transparentEditorHwnd == hwnd) return true;
+        if (_transparentEditorHwnd == hwnd) {
+            // Open/Run can hide the editor again after the scope was armed.
+            // Keep its alpha=0 frame accessible until command completion.
+            return SetWindowPos(window, new System.IntPtr(1), 0, 0, 0, 0, 0x53);
+        }
         if (_transparentEditorHwnd != 0) return false;
         int style = GetWindowLong(window, -20);
         // Do not overwrite pre-existing transparency from Office/add-ins.
