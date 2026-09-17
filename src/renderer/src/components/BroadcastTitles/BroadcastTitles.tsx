@@ -499,6 +499,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
                   <label className="block">
                     <span className="mb-1 block text-[10px] text-gray-400">ФИО выступающего</span>
                     <input
+                      data-pdm-training-speaker-name
                       type="text"
                       maxLength={120}
                       value={selectedSpeaker.name}
@@ -579,6 +580,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
               </label>
 
               <textarea
+                data-pdm-training-event-info
                 maxLength={320}
                 rows={embedded ? 2 : 3}
                 value={broadcastTitles.eventInfo}

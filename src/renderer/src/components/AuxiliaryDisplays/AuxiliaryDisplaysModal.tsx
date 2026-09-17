@@ -662,6 +662,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
     <>
       <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/70">
         <div
+          data-pdm-display-modal
           className="w-[820px] max-w-[94vw] max-h-[88vh] overflow-hidden rounded-xl border border-gray-700 bg-surface-200 shadow-2xl flex flex-col"
           onClick={(event) => event.stopPropagation()}
         >
@@ -671,6 +672,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
             <p className="text-[10px] text-gray-500 mt-0.5">Назначение мониторов, суфлёр, мультимедиа и таймеры</p>
           </div>
           <button
+            data-pdm-training-close
             onClick={onClose}
             disabled={switchingPrimaryId !== null}
             className="text-lg text-gray-500 hover:text-white disabled:cursor-wait disabled:opacity-30"

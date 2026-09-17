@@ -166,6 +166,8 @@ export function FileItemGrid({
 
   return (
     <div
+      data-pdm-file-item
+      data-pdm-file-id={file.id}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData('application/json', JSON.stringify(file))

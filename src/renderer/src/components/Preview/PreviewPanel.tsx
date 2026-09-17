@@ -3511,6 +3511,7 @@ function ChannelPanel({
 
   return (
     <div
+      data-pdm-channel-id={label}
       className={`pdm-channel-card ${isLive ? 'is-live' : showSelected ? 'is-selected' : ''} flex-1 flex flex-col overflow-hidden ${compact ? 'rounded-md border' : 'rounded-lg border-2'} transition-colors cursor-pointer ${
         dragOver ? 'border-accent bg-accent/5' :
         isLive ? 'border-red-500/60' :
@@ -3862,6 +3863,7 @@ function ChannelPanel({
             </button>
           )}
           <button
+            data-pdm-channel-take={label}
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={isTaking || pptxIsPreparing}
@@ -4112,6 +4114,7 @@ function ChannelPanel({
             </label>
           )}
           <button
+            data-pdm-channel-take={label}
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
             disabled={isTaking}

@@ -10,5 +10,7 @@
 // encodeURIComponent safely encodes backslashes, colons, spaces and non-ASCII
 // (Cyrillic) characters, so the path round-trips through the URL untouched.
 export function mediaUrl(absPath: string): string {
+  // Bundled/generated training frames never need filesystem access.
+  if (absPath.startsWith('data:image/')) return absPath
   return `pdm-media://file/${encodeURIComponent(absPath)}`
 }

@@ -73,9 +73,9 @@ export function StreamControl(): JSX.Element {
     </button>
     {open && createPortal(
       <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/75 p-4" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        <section role="dialog" aria-modal="true" aria-label="Стрим" className="max-h-[92vh] w-[720px] max-w-[96vw] overflow-y-auto rounded-xl border border-gray-700 bg-gray-800 p-4 text-white shadow-2xl">
+        <section data-pdm-training-panel="stream" role="dialog" aria-modal="true" aria-label="Стрим" className="max-h-[92vh] w-[720px] max-w-[96vw] overflow-y-auto rounded-xl border border-gray-700 bg-gray-800 p-4 text-white shadow-2xl">
           <div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">Стрим</h2>
-            <button type="button" className={button} onClick={() => setOpen(false)} aria-label="Закрыть настройки стрима">✕</button></div>
+            <button data-pdm-training-close type="button" className={button} onClick={() => setOpen(false)} aria-label="Закрыть настройки стрима">✕</button></div>
           <p className="mb-3 text-xs text-gray-300">В трансляцию попадает всё, что видно на эфирном экране, включая PowerPoint, PiP, титры и QR. Посторонние окна на этом экране тоже будут видны.</p>
           <div className="mb-3 text-xs text-gray-300">Источник изображения: {display ? `${display.label || display.id} (${display.bounds.width}×${display.bounds.height})` : 'внутренний программный выход PDM (без дополнительного монитора)'}</div>
           {!display && <p className="mb-3 text-xs text-blue-200">Внутренний режим не показывает панель управления и работает при 25/30 кадрах в секунду.</p>}

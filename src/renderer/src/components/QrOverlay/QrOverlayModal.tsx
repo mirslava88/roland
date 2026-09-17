@@ -548,7 +548,7 @@ export function QrOverlayModal({
             <div hidden={settingsPanel !== 'content'}>
             {draft.contentType === 'url' ? (
               <label className="block text-xs text-gray-300">Ссылка
-                <input value={draft.url} onChange={(event) => update({ url: event.target.value })} placeholder="https://example.ru" className="mt-1 w-full rounded-md border border-gray-700 bg-surface-100 px-2.5 py-1.5 text-sm text-white outline-none focus:border-blue-500" />
+                <input data-pdm-training-qr-url value={draft.url} onChange={(event) => update({ url: event.target.value })} placeholder="https://example.ru" className="mt-1 w-full rounded-md border border-gray-700 bg-surface-100 px-2.5 py-1.5 text-sm text-white outline-none focus:border-blue-500" />
               </label>
             ) : draft.contentType === 'wifi' ? (
               <div className="grid grid-cols-2 gap-2">

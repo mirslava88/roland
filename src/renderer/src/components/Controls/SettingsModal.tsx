@@ -3,6 +3,7 @@ import { useAppStore, type DisplayOutputMode } from '../../stores/useAppStore'
 import { loadAppConfigFromFile, saveCurrentAppConfig } from '../../app-config'
 import { setDisplayAssignmentWithProgramRouting } from '../../program-display-routing'
 import { ToolbarAppearanceSettings } from './ToolbarAppearanceSettings'
+import { openIntroduction } from '../Onboarding/training-model'
 
 interface AudioDevice {
   id: string
@@ -194,6 +195,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   return (
     <div data-pdm-modal="settings" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
       <div
+        data-pdm-training-panel="settings"
         className="bg-surface-200 border border-gray-700 rounded-xl shadow-2xl w-[680px] max-w-[90vw] max-h-[80vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
@@ -209,6 +211,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               Вид
             </button>
             <button
+              data-pdm-settings-tab="audio"
               onClick={() => setTab('audio')}
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
                 tab === 'audio' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
@@ -246,10 +249,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                 tab === 'help' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
               }`}
             >
-              Инструкция
+              Помощь
             </button>
           </div>
           <button
+            data-pdm-training-close
             onClick={onClose}
             disabled={displayAssignmentBusyId !== null}
             className="text-gray-500 hover:text-white text-lg leading-none px-1 disabled:cursor-wait disabled:opacity-30"
@@ -362,6 +366,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   {devices.map((dev) => (
                     <button
                       key={dev.id}
+                      data-pdm-audio-device={dev.id}
+                      aria-pressed={dev.isDefault}
                       onClick={() => handleSetDevice(dev.id)}
                       className={`w-full text-left px-4 py-2.5 rounded-lg text-xs transition-colors flex items-center justify-between ${
                         dev.isDefault
@@ -624,6 +630,11 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
 
           {tab === 'help' && (
             <div className="space-y-5 text-xs text-gray-300 leading-relaxed">
+              <section className="rounded-lg border border-accent/30 bg-accent/10 p-4">
+                <h3 className="text-sm font-semibold text-white mb-2">Обучение</h3>
+                <p className="text-gray-400 mb-3">Пройдите первый показ прямо в настоящем интерфейсе PDM: экран, каналы, слайды и Сцена для эфира. Данные будут учебными, а рабочие материалы и настройки не изменятся.</p>
+                <button data-pdm-open-introduction onClick={() => { onClose(); openIntroduction() }} className="px-4 py-2 rounded bg-accent text-white hover:bg-accent-hover">Пройти знакомство</button>
+              </section>
               <section>
                 <h3 className="text-sm font-semibold text-white mb-2">Presentation Display Manager</h3>
                 <p className="text-gray-400 mb-3">
@@ -657,15 +668,15 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>Перетащите файл или внешний источник в любой канал и выберите этот канал. Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> станет доступна только для выбранного канала с контентом</li>
                   <li>Карандаш справа в заголовке канала добавляет понятную подпись. Нажмите Enter или щёлкните вне поля для сохранения, Escape — для отмены</li>
                   <li>Для запуска нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или дважды щёлкните по каналу</li>
-                  <li>PPTX и PDF начинают готовиться сразу после добавления в канал: PPTX скрыто открывается в PowerPoint и получает готовые эфирные слайды, а PDF — страницы под разрешение выбранного дисплея. Пока идёт подготовка, на карточке виден статус <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">Кэширование…</code>, а запуск этого PPTX в эфир временно недоступен</li>
+                  <li>PPTX и PDF готовятся после добавления в канал. PPTX можно запускать, когда готовы первые 25% слайдов и карточка показывает «можно в эфир»; остальные слайды продолжают кэшироваться в фоне</li>
                   <li>В карточке видеоканала слева от кнопки «В эфир» находится список «После». Выберите другой непустой канал для автоматического перехода либо «Не переключать»</li>
-                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◫ Сцена</code> открывает единый пульт с независимыми разделами «Картинка», «Текст», «QR-код» и «Титры»</li>
+                  <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◫ Сцена</code> открывает вкладки «Сцена для эфира» и «Титры». В предпросмотре нажмите правой кнопкой → «Добавить в сцену», чтобы добавить фон, текст, QR-код, таймер или медиаслой</li>
                   <li>Во всех разделах «Сцены» панель состояния и управления эфиром находится сразу под вкладками, предпросмотр — слева, настройки — справа. В «Титрах» кнопки «Выступающий» и «Мероприятие» независимо управляют двумя титрами и сами отжимаются после автоматического скрытия, а кнопка «Показать все» одновременно выводит оба заполненных титра</li>
-                  <li>Окно «Сцена» сохраняет один размер и положение при переключении между всеми четырьмя разделами</li>
-                  <li>В разделах «Картинка», «Текст» и «QR-код» управление «Показать в эфире» выполнено обычной кнопкой без флажка. Перемещение и редактирование в предпросмотре не меняет программный экран в процессе настройки; подготовленный вариант применяется целиком при повторном показе слоя или закрытии Сцены</li>
-                  <li>В разделе «QR-код» настройки применяются сразу: кнопка «Показать в эфире» немедленно включает или выключает QR, а отдельные кнопки сохранения и отмены не требуются</li>
+                  <li>Окно «Сцена» сохраняет один размер при смене вкладки или редактора. Клик по объекту открывает его настройки справа; меню «Настроить» даёт доступ и к скрытым слоям</li>
+                  <li>В «Сцене для эфира» одна общая красная кнопка «Показать в эфире» / «Выйти из эфира». Изменения в предпросмотре остаются черновиком до публикации. Кнопка ↻ рядом с показом обновляет подготовленную Сцену целиком</li>
+                  <li>QR-код в составе Сцены выводится общей кнопкой показа или ↻. Для самостоятельного наложения поверх канала используйте его контекстное меню → «Отобразить QR-код» / «Скрыть QR-код»</li>
                   <li>Настройки QR разделены на «Содержимое» и «Оформление». Положение задаётся прямо в предпросмотре; кнопка «Вернуть QR в центр» заменяет отдельную матрицу позиций</li>
-                  <li>В разделе «Картинка» ползунок «Высота камеры» увеличивает участника от 100 до 250%. Пропорции кадра сохраняются; камера заполняет выбранную область без растягивания изображения</li>
+                  <li>В «Сцене для эфира» ползунок «Высота камеры» и колесо над внешним источником меняют высоту от 100 до 250% с сохранением пропорций. Левый клик по источнику выбирает камеру, окно или экран; правый открывает хромакей</li>
                   <li>В панели управления видео доступны воспроизведение, пауза, остановка, переход по таймлайну и зацикливание ролика либо всего видеоплейлиста. Ролик после выхода в эфир запускается только вручную</li>
                   <li>Активный канал подсвечен красным; крестик <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> полностью закрывает показанный материал и освобождает его тяжёлые ресурсы: PDF-документ и кэши, видеодекодер либо презентацию PowerPoint, открытую PDM</li>
                   <li>Для PPTX и PDF: стрелки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">◀ ▶</code> и поле с номером слайда — введите номер и Enter для быстрого перехода</li>

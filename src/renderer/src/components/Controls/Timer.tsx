@@ -380,6 +380,7 @@ export function Timer(): JSX.Element {
       {/* Expanded panel */}
       {expanded && (
         <div
+          data-pdm-training-panel="timer"
           ref={panelRef}
           className="absolute top-full mt-1 left-1/2 -translate-x-1/2 bg-surface-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50 min-w-[320px]"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -578,6 +579,7 @@ export function Timer(): JSX.Element {
 
           {/* Close button */}
           <button
+            data-pdm-training-close
             onClick={() => setExpanded(false)}
             className="absolute top-2 right-2 text-gray-500 hover:text-white text-sm"
           >✕</button>

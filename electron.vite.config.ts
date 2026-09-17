@@ -47,6 +47,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           control: resolve(__dirname, 'src/renderer/index.html'),
+          training: resolve(__dirname, 'src/renderer/training.html'),
           presentation: resolve(__dirname, 'src/renderer/presentation.html'),
           auxiliary: resolve(__dirname, 'src/renderer/auxiliary.html'),
           ...(edition.stream ? { streaming: resolve(__dirname, 'src/renderer/streaming.html') } : {})

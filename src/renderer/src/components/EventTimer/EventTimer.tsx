@@ -213,6 +213,7 @@ export function EventTimer(): JSX.Element {
       {open && (
         <div className="event-timer-ui fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3">
           <div
+            data-pdm-training-panel="event-timer"
             className="flex h-[calc(100vh-24px)] w-[min(1440px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-gray-700 bg-surface-300 shadow-2xl"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
@@ -241,7 +242,7 @@ export function EventTimer(): JSX.Element {
                     </button>
                   </span>
                 )}
-                <button type="button" onClick={() => setOpen(false)} className="text-xl text-gray-500 hover:text-white">✕</button>
+                <button data-pdm-training-close type="button" onClick={() => setOpen(false)} className="text-xl text-gray-500 hover:text-white">✕</button>
               </div>
             </header>
 

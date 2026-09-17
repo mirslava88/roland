@@ -15,8 +15,10 @@ import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTit
 import { ProgramSceneBridge } from './components/ProgramScene/ProgramSceneBridge'
 import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
 import { InternalProgramOutputBridge } from './components/ProgramScene/InternalProgramOutputBridge'
+import { Introduction } from './components/Onboarding/Introduction'
+import { isIntroductionOpen } from './components/Onboarding/training-model'
 
-export default function App(): JSX.Element {
+export default function App({ training = false }: { training?: boolean } = {}): JSX.Element {
   const {
     captureSources,
     appTheme,
@@ -179,6 +181,7 @@ export default function App(): JSX.Element {
     })
 
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
+      if (isIntroductionOpen()) return
       if (queueNavigationDuringTransition(direction)) return
 
       const {
@@ -271,6 +274,7 @@ export default function App(): JSX.Element {
     })
 
     const flushQueuedNavigation = (event: Event): void => {
+      if (isIntroductionOpen()) return
       const requests = (event as CustomEvent<NavigationRequest[]>).detail || []
       void (async () => {
         window.api.dbgLog(`App: flushing queued navigation count=${requests.length}`)
@@ -309,7 +313,7 @@ export default function App(): JSX.Element {
     }
   }, [])
 
-  return (
+  const workspace = (
     <div className={`pdm-operator-shell h-screen flex flex-col overflow-hidden dark ${appTheme === 'broadcast-pro' ? 'theme-broadcast-pro' : 'theme-classic'}`}>
       <Toolbar />
       <NowPlaying />
@@ -329,4 +333,5 @@ export default function App(): JSX.Element {
       </div>
     </div>
   )
+  return training ? workspace : <Introduction>{workspace}</Introduction>
 }
