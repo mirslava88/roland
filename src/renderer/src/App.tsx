@@ -12,6 +12,7 @@ import type { NavigationRequest } from './navigation-transition'
 import { takeAdjacentChannel } from './channel-boundary-navigation'
 import { AuxiliaryDisplayBridge } from './components/AuxiliaryDisplays/AuxiliaryDisplayBridge'
 import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTitlesBridge'
+import { DirectStreamDeckBridge } from './components/StreamDeck/DirectStreamDeckBridge'
 import { ProgramSceneBridge } from './components/ProgramScene/ProgramSceneBridge'
 import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
 import { InternalProgramOutputBridge } from './components/ProgramScene/InternalProgramOutputBridge'
@@ -273,6 +274,11 @@ export default function App({ training = false }: { training?: boolean } = {}): 
       navigateSlide(direction)
     })
 
+    const handleDirectNavigation = (event: Event): void => {
+      const direction = (event as CustomEvent<'next' | 'prev'>).detail
+      if (direction === 'next' || direction === 'prev') void navigateSlide(direction)
+    }
+
     const flushQueuedNavigation = (event: Event): void => {
       if (isIntroductionOpen()) return
       const requests = (event as CustomEvent<NavigationRequest[]>).detail || []
@@ -298,6 +304,7 @@ export default function App({ training = false }: { training?: boolean } = {}): 
     }
 
     window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('pdm-direct-navigation', handleDirectNavigation)
     window.addEventListener('flush-take-navigation', flushQueuedNavigation)
 
     return () => {
@@ -309,6 +316,7 @@ export default function App({ training = false }: { training?: boolean } = {}): 
       unsubVideoTime()
       unsubGlobalKey()
       window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('pdm-direct-navigation', handleDirectNavigation)
       window.removeEventListener('flush-take-navigation', flushQueuedNavigation)
     }
   }, [])
@@ -319,6 +327,7 @@ export default function App({ training = false }: { training?: boolean } = {}): 
       <NowPlaying />
       <AuxiliaryDisplayBridge />
       <BroadcastTitlesBridge />
+      <DirectStreamDeckBridge />
       <ProgramSceneBridge />
       <InternalProgramOutputBridge />
       <QrOverlayBridge />

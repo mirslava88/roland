@@ -16,26 +16,31 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      edition: ${{ steps.edition.outputs.edition }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
       REQUESTED_EDITION: ${{ inputs.edition }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: npm
 
       - name: Select and validate edition
+        id: edition
         shell: pwsh
         run: |
           $edition = if ($env:GITHUB_REF_TYPE -eq 'tag') {
@@ -44,6 +49,7 @@ jobs:
           if ($edition -notin @('standard', 'stream')) { throw 'Invalid edition' }
           $env:PDM_EDITION = $edition
           "PDM_EDITION=$edition" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "edition=$edition" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           $version = node -e "console.log(require('./build/editions.cjs').editionInfo().version)"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve edition version' }
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
@@ -64,6 +70,9 @@ jobs:
       - name: PowerPoint output recovery regression tests
         run: npm run test:powerpoint-output-recovery
 
+      - name: Electron security regression tests
+        run: npm run test:security
+
       - name: Local streaming regression tests
         if: env.PDM_EDITION == 'stream'
         run: npm run test:streaming
@@ -74,7 +83,7 @@ jobs:
 
       - name: Upload installer as workflow artifact
         if: success()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-installer-${{ env.PDM_EDITION }}
           path: |
@@ -86,8 +95,27 @@ jobs:
         shell: pwsh
         run: node scripts/test-packaged-startup.mjs $env:PDM_EDITION
 
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      PDM_EDITION: ${{ needs.build-windows.outputs.edition }}
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download verified installer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: windows-installer-${{ env.PDM_EDITION }}
+          path: release-artifact
+
       - name: Publish GitHub Release (new tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,7 +126,7 @@ jobs:
             Write-Host 'Release already exists; preserving its notes and assets.'
             exit 0
           }
-          $installers = @(Get-ChildItem -LiteralPath "dist/$env:PDM_EDITION" -Filter *.exe)
+          $installers = @(Get-ChildItem -LiteralPath "release-artifact" -Filter *.exe -Recurse)
           if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
           $displayVersion = $tag.Substring(1).Replace('-stream', ' stream')
           $args = @('release', 'create', $tag, $installers[0].FullName,

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, screen } from 'electron'
+import type { IpcMainInvokeEvent } from 'electron'
 import { readdir, stat, readFile, writeFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
@@ -26,6 +27,8 @@ import {
   setActivePowerPointZoom,
   setActivePowerPointSceneLayout
 } from './program-scene-state'
+import { isTrustedWindowMainFrame } from './renderer-security'
+import { loadQrWifiPassword, saveQrWifiPassword } from './secure-secrets'
 
 const execFileAsync = promisify(execFile)
 
@@ -749,14 +752,30 @@ export interface FileEntry {
 export function registerIpcHandlers(
   controlWindow: BrowserWindow,
   getPresentationWindow: () => BrowserWindow | null,
-  onPowerPointOutputCommitted: () => void = () => undefined
+  onPowerPointOutputCommitted: () => void = () => undefined,
+  isTrustedOutputEvent: (event: IpcMainInvokeEvent, channel: string, args: unknown[]) => boolean = () => false
 ): void {
-  ipcMain.handle('get-app-version', (event): string => {
+  type Handler = (event: IpcMainInvokeEvent, ...args: any[]) => any
+  const handleControl = (channel: string, handler: Handler, allowOutput = false): void => {
+    ipcMain.handle(channel, (event, ...args) => {
+      const trustedControl = isTrustedWindowMainFrame(event, controlWindow, 'index.html')
+      if (!trustedControl && !(allowOutput && isTrustedOutputEvent(event, channel, args))) {
+        diagnosticLog('security', `blocked IPC channel=${channel} wc=${event.sender.id}`)
+        throw new Error('Недопустимый источник команды.')
+      }
+      return handler(event, ...args)
+    })
+  }
+
+  handleControl('get-app-version', (event): string => {
     if (event.sender.id !== controlWindow.webContents.id) return ''
     return __PDM_DISPLAY_VERSION__
   })
 
-  ipcMain.handle('save-app-config', async (event, content: string) => {
+  handleControl('qr-wifi-password-load', () => loadQrWifiPassword())
+  handleControl('qr-wifi-password-save', (_event, password: unknown) => saveQrWifiPassword(password))
+
+  handleControl('save-app-config', async (event, content: string) => {
     if (event.sender.id !== controlWindow.webContents.id) {
       return { success: false, canceled: false, error: 'Сохранение конфигурации запрещено.' }
     }
@@ -794,7 +813,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('load-app-config', async (event) => {
+  handleControl('load-app-config', async (event) => {
     if (event.sender.id !== controlWindow.webContents.id) {
       return { success: false, canceled: false, error: 'Загрузка конфигурации запрещена.' }
     }
@@ -824,7 +843,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('validate-config-paths', async (event, paths: unknown) => {
+  handleControl('validate-config-paths', async (event, paths: unknown) => {
     if (event.sender.id !== controlWindow.webContents.id || !Array.isArray(paths)) return []
     const uniquePaths = [...new Set(paths
       .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 32768)
@@ -839,14 +858,14 @@ export function registerIpcHandlers(
     }))
   })
 
-  ipcMain.handle('open-diagnostic-log-folder', async () => {
+  handleControl('open-diagnostic-log-folder', async () => {
     const path = getDiagnosticLogDirectory()
     diagnosticLog('diagnostics', `open log folder path=${path}`)
     const error = await shell.openPath(path)
     return { success: error.length === 0, path, error: error || undefined }
   })
 
-  ipcMain.handle('select-folder', async () => {
+  handleControl('select-folder', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openDirectory'],
       title: 'Select Presentation Folder'
@@ -866,7 +885,7 @@ export function registerIpcHandlers(
   let activeWatcher: ReturnType<typeof import('fs').watch> | null = null
   let activeWatchPath: string | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
-  ipcMain.handle('watch-folder', (_event, folderPath: string | null) => {
+  handleControl('watch-folder', (_event, folderPath: string | null) => {
     if (activeWatcher && activeWatchPath === folderPath) return
     if (activeWatcher) {
       try { activeWatcher.close() } catch { /* ignore */ }
@@ -895,7 +914,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('load-folder', async (_event, folderPath: string) => {
+  handleControl('load-folder', async (_event, folderPath: string) => {
     let entries: string[]
     try {
       entries = await readdir(folderPath)
@@ -942,7 +961,7 @@ export function registerIpcHandlers(
     return { files, subfolders }
   })
 
-  ipcMain.handle('check-powerpoint', async () => {
+  handleControl('check-powerpoint', async () => {
     if (process.platform === 'win32') {
       try {
         await execFileAsync('powershell.exe', [
@@ -975,7 +994,7 @@ export function registerIpcHandlers(
     return false
   })
 
-  ipcMain.handle('prepare-powerpoint', async (_event, filePath: string) => {
+  handleControl('prepare-powerpoint', async (_event, filePath: string) => {
     if (process.platform !== 'win32') {
       return { success: false, error: 'Unsupported platform' }
     }
@@ -1005,14 +1024,14 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('sync-prepared-powerpoints', async (_event, filePaths: unknown) => {
+  handleControl('sync-prepared-powerpoints', async (_event, filePaths: unknown) => {
     const paths = Array.isArray(filePaths)
       ? filePaths.filter((value): value is string => typeof value === 'string' && value.length > 0)
       : []
     return syncPreparedPowerPointsInternal(paths, 'renderer-request')
   })
 
-  ipcMain.handle(
+  handleControl(
     'launch-powerpoint',
     async (
       event,
@@ -1249,7 +1268,7 @@ export function registerIpcHandlers(
   // который PP только что отрисовал, захватывается в PNG и подкладывается
   // в оверлей перед hideOverlay. Оверлей и PP показывают пиксель-в-пиксель
   // одно изображение — композиторная гонка DWM перестаёт быть видимой.
-  ipcMain.handle('snapshot-slideshow', async (): Promise<string | null> => {
+  handleControl('snapshot-slideshow', async (): Promise<string | null> => {
     if (process.platform !== 'win32') return null
     try {
       const res = await pptDaemon.send('snapshot', {}, 5000)
@@ -1263,7 +1282,7 @@ export function registerIpcHandlers(
   // which corrupts presentation slides exported from PowerPoint. Native engine
   // renders pixel-perfect at any size. Results are cached on disk by content
   // hash to keep navigation snappy.
-  ipcMain.handle('render-pdf-page', async (_event, filePath: string, pageIndex: number, width: number): Promise<string | null> => {
+  handleControl('render-pdf-page', async (_event, filePath: string, pageIndex: number, width: number): Promise<string | null> => {
     if (process.platform !== 'win32') return null
     if (nativePdfRendererDisabledReason) {
       diagnosticLog(
@@ -1346,9 +1365,9 @@ export function registerIpcHandlers(
       diagnosticLog('pdf-render', `native failed page=${pageIndex + 1} width=${width} dur=${Date.now() - started}ms ${formatDiagnosticError(e)}`)
       return null
     }
-  })
+  }, true)
 
-  ipcMain.handle('powerpoint-command', async (
+  handleControl('powerpoint-command', async (
     _event,
     command: string,
     arg?: number | { stopAtBoundary?: boolean }
@@ -1411,7 +1430,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('prepare-pptx-cache', async (event, filePath: string) => {
+  handleControl('prepare-pptx-cache', async (event, filePath: string) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const result = await preparePptxCache(filePath, 1920, 1080, (progress: PptxCacheProgress) => {
@@ -1424,7 +1443,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('generate-pptx-thumbnails', async (_event, filePath: string) => {
+  handleControl('generate-pptx-thumbnails', async (_event, filePath: string) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const result = await preparePptxCache(filePath)
@@ -1434,7 +1453,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('relocate-powerpoint', async (
+  handleControl('relocate-powerpoint', async (
     _event,
     displayId: number,
     sceneLayout?: ProgramSceneLayoutConfig
@@ -1487,7 +1506,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('get-pptx-slide-notes', async (_event, filePath: string, slide: number) => {
+  handleControl('get-pptx-slide-notes', async (_event, filePath: string, slide: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const result = await pptDaemon.send('notes', { path: filePath, slide }, 20000)
@@ -1508,7 +1527,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('generate-pptx-slides', async (_event, filePath: string, width?: number, height?: number) => {
+  handleControl('generate-pptx-slides', async (_event, filePath: string, width?: number, height?: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const w = width && width > 0 ? width : 1920
     const h = height && height > 0 ? height : 1080
@@ -1520,12 +1539,19 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('read-file', async (_event, filePath: string) => {
+  handleControl('read-file', async (_event, filePath: string) => {
+    if (typeof filePath !== 'string' || filePath.length < 1 || filePath.length > 32_768) {
+      throw new Error('Некорректный путь к файлу.')
+    }
+    const info = await stat(filePath)
+    if (!info.isFile() || info.size > 1024 * 1024 * 1024) {
+      throw new Error('Файл недоступен или превышает безопасный размер.')
+    }
     const buffer = await readFile(filePath)
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
   })
 
-  ipcMain.handle('select-scene-layer-files', async () => {
+  handleControl('select-scene-layer-files', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openFile', 'multiSelections'],
       title: 'Добавить слой',
@@ -1537,7 +1563,7 @@ export function registerIpcHandlers(
     return result.canceled ? null : result.filePaths
   })
 
-  ipcMain.handle('select-backdrop-image', async () => {
+  handleControl('select-backdrop-image', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openFile'],
       title: 'Select Backdrop Image',
@@ -1547,7 +1573,7 @@ export function registerIpcHandlers(
     return result.filePaths[0]
   })
 
-  ipcMain.handle('select-information-media', async () => {
+  handleControl('select-information-media', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openFile'],
       title: 'Выберите файл для информационного дисплея',
@@ -1571,7 +1597,7 @@ export function registerIpcHandlers(
     return result.filePaths[0]
   })
 
-  ipcMain.handle('get-audio-devices', async () => {
+  handleControl('get-audio-devices', async () => {
     if (process.platform !== 'win32') return []
     try {
       const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
@@ -1583,7 +1609,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('set-audio-device', async (_event, deviceId: string) => {
+  handleControl('set-audio-device', async (_event, deviceId: string) => {
     if (process.platform !== 'win32') return { success: false }
     try {
       await enqueueAudioMutation('set-preferred', async () => {
@@ -1599,7 +1625,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('switch-audio-to-external', async () => {
+  handleControl('switch-audio-to-external', async () => {
     if (process.platform !== 'win32') return { success: false }
     try {
       return await enqueueAudioMutation('ensure-preferred', async () => {
@@ -1642,7 +1668,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('restore-audio-device', async () => {
+  handleControl('restore-audio-device', async () => {
     if (process.platform !== 'win32' || !originalAudioDeviceId) return
     try {
       await enqueueAudioMutation('restore-original', async () => {
@@ -1654,7 +1680,7 @@ export function registerIpcHandlers(
     } catch { /* ignore */ }
   })
 
-  ipcMain.handle('open-file-external', async (_event, filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
+  handleControl('open-file-external', async (_event, filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }) => {
     if (externalShutdownStarted) {
       return { success: false, error: 'PDM is shutting down; external file open was cancelled.' }
     }
@@ -1712,7 +1738,7 @@ export function registerIpcHandlers(
     })
   })
 
-  ipcMain.handle('select-qr-logo', async () => {
+  handleControl('select-qr-logo', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openFile'],
       title: 'Выберите логотип для QR-кода',
@@ -1722,7 +1748,7 @@ export function registerIpcHandlers(
     return result.filePaths[0]
   })
 
-  ipcMain.handle('select-qr-image', async () => {
+  handleControl('select-qr-image', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openFile'],
       title: 'Выберите изображение QR-кода',
@@ -1732,7 +1758,7 @@ export function registerIpcHandlers(
     return result.filePaths[0]
   })
 
-  ipcMain.handle('set-powerpoint-zoom', async (
+  handleControl('set-powerpoint-zoom', async (
     _event,
     displayId: number,
     zoom: Partial<ContentZoomState>
@@ -1756,7 +1782,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('set-external-file-zoom', async (
+  handleControl('set-external-file-zoom', async (
     _event,
     filePath: string,
     zoom: Partial<ContentZoomState>
@@ -1806,11 +1832,11 @@ export function registerIpcHandlers(
     })
   })
 
-  ipcMain.handle('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
+  handleControl('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
 
-  ipcMain.handle('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
+  handleControl('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
 
-  ipcMain.handle('restore-external-file', async (
+  handleControl('restore-external-file', async (
     _event,
     filePath?: string,
     displayBounds?: ExternalDisplayBounds,
@@ -1873,7 +1899,7 @@ export function registerIpcHandlers(
     })
   })
 
-  ipcMain.handle('select-sound-file', async () => {
+  handleControl('select-sound-file', async () => {
     const result = await dialog.showOpenDialog(controlWindow, {
       properties: ['openFile'],
       title: 'Выберите звуковой файл',
@@ -1883,7 +1909,7 @@ export function registerIpcHandlers(
     return result.filePaths[0]
   })
 
-  ipcMain.handle('move-file', async (_event, srcPath: string, destFolder: string) => {
+  handleControl('move-file', async (_event, srcPath: string, destFolder: string) => {
     try {
       const fileName = basename(srcPath)
       const destPath = join(destFolder, fileName)
@@ -1894,18 +1920,18 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('hide-taskbar', async (_event, displayBounds: { x: number; y: number; width: number; height: number }) => {
+  handleControl('hide-taskbar', async (_event, displayBounds: { x: number; y: number; width: number; height: number }) => {
     await hideTaskbarForDisplay(
       displayBounds,
       controlWindow.isDestroyed() ? undefined : controlWindow.getBounds()
     )
   })
 
-  ipcMain.handle('show-taskbar', async () => {
+  handleControl('show-taskbar', async () => {
     await showAllTaskbars()
   })
 
-  ipcMain.handle('get-drives', async () => {
+  handleControl('get-drives', async () => {
     if (process.platform !== 'win32') return []
     try {
       const { stdout } = await execFileAsync('powershell.exe', [
@@ -1942,7 +1968,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('rename-file', async (_event, filePath: string, newName: string) => {
+  handleControl('rename-file', async (_event, filePath: string, newName: string) => {
     try {
       // Guard (CWE-23): newName must be a bare file name. basename() strips any
       // directory part, so a value containing \ or / or '..' is rejected before
@@ -1963,7 +1989,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('copy-files-to-folder', async (_event, filePaths: string[], destFolder: string) => {
+  handleControl('copy-files-to-folder', async (_event, filePaths: string[], destFolder: string) => {
     const results: { success: boolean; name: string; error?: string }[] = []
     for (const srcPath of filePaths) {
       try {
@@ -1979,7 +2005,10 @@ export function registerIpcHandlers(
   })
 
   // Delete to recycle bin (shell) or permanently (shift+del)
-  ipcMain.handle('delete-items', async (_event, paths: string[], permanent: boolean) => {
+  handleControl('delete-items', async (_event, paths: string[], permanent: boolean) => {
+    if (!Array.isArray(paths) || paths.length > 500 || paths.some((item) => typeof item !== 'string' || item.length < 1 || item.length > 32_768)) {
+      throw new Error('Некорректный список файлов.')
+    }
     const results: { success: boolean; path: string; error?: string }[] = []
     for (const itemPath of paths) {
       try {
@@ -2007,7 +2036,7 @@ export function registerIpcHandlers(
   })
 
   // Copy folders recursively
-  ipcMain.handle('copy-items-to-folder', async (_event, srcPaths: string[], destFolder: string) => {
+  handleControl('copy-items-to-folder', async (_event, srcPaths: string[], destFolder: string) => {
     const results: { success: boolean; name: string; error?: string }[] = []
     for (const srcPath of srcPaths) {
       try {
@@ -2028,7 +2057,7 @@ export function registerIpcHandlers(
   })
 
   // Move folder (rename across same drive)
-  ipcMain.handle('move-item', async (_event, srcPath: string, destFolder: string) => {
+  handleControl('move-item', async (_event, srcPath: string, destFolder: string) => {
     try {
       const name = basename(srcPath)
       const destPath = join(destFolder, name)
@@ -2055,7 +2084,7 @@ export function registerIpcHandlers(
     }
   })
 
-  ipcMain.handle('generate-doc-preview', async (_event, filePath: string) => {
+  handleControl('generate-doc-preview', async (_event, filePath: string) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const scriptPath = resolveScript('document-preview.ps1')
     try {

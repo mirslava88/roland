@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { hasQrData } from '../../../../shared/qr-overlay'
 import { getProgramSceneRects } from '../../../../shared/program-scene'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
@@ -45,6 +45,35 @@ export function QrOverlayBridge(): null {
   const channels = useAppStore((state) => state.channels)
   const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
   const programScene = programSnapshot?.scene ?? draftProgramScene
+  const secretLoaded = useRef(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api.loadQrWifiPassword().then((wifiPassword) => {
+      if (cancelled) return
+      secretLoaded.current = true
+      const legacyPassword = useAppStore.getState().qrOverlay.wifiPassword
+      if (legacyPassword) {
+        // Rewriting through the sanitized persist projection removes plaintext
+        // left by older builds; the encrypted main-process store keeps it.
+        useAppStore.getState().setQrOverlay({ wifiPassword: legacyPassword })
+        void window.api.saveQrWifiPassword(legacyPassword)
+      } else if (wifiPassword) {
+        useAppStore.getState().setQrOverlay({ wifiPassword })
+      }
+    }).catch(() => {
+      secretLoaded.current = true
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!secretLoaded.current) return
+    const timer = setTimeout(() => {
+      void window.api.saveQrWifiPassword(draftConfig.wifiPassword)
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [draftConfig.wifiPassword])
 
   useEffect(() => {
     let cancelled = false

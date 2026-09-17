@@ -4,6 +4,7 @@ import { loadAppConfigFromFile, saveCurrentAppConfig } from '../../app-config'
 import { setDisplayAssignmentWithProgramRouting } from '../../program-display-routing'
 import { ToolbarAppearanceSettings } from './ToolbarAppearanceSettings'
 import { openIntroduction } from '../Onboarding/training-model'
+import { DirectStreamDeckSettings } from './DirectStreamDeckSettings'
 
 interface AudioDevice {
   id: string
@@ -48,7 +49,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     appTheme,
     setAppTheme
   } = useAppStore()
-  const [tab, setTab] = useState<'appearance' | 'audio' | 'display' | 'config' | 'diagnostics' | 'help'>('audio')
+  const [tab, setTab] = useState<'appearance' | 'audio' | 'display' | 'stream-deck' | 'config' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
   const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
@@ -196,12 +197,12 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     <div data-pdm-modal="settings" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
       <div
         data-pdm-training-panel="settings"
-        className="bg-surface-200 border border-gray-700 rounded-xl shadow-2xl w-[680px] max-w-[90vw] max-h-[80vh] flex flex-col"
+        className="bg-surface-200 border border-gray-700 rounded-xl shadow-2xl w-[820px] max-w-[94vw] max-h-[86vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-700">
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1">
             <button
               onClick={() => setTab('appearance')}
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
@@ -234,6 +235,14 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               }`}
             >
               Конфиг
+            </button>
+            <button
+              onClick={() => setTab('stream-deck')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                tab === 'stream-deck' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
+              }`}
+            >
+              Stream Deck
             </button>
             <button
               onClick={() => setTab('diagnostics')}
@@ -632,7 +641,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
             <div className="space-y-5 text-xs text-gray-300 leading-relaxed">
               <section className="rounded-lg border border-accent/30 bg-accent/10 p-4">
                 <h3 className="text-sm font-semibold text-white mb-2">Обучение</h3>
-                <p className="text-gray-400 mb-3">Пройдите первый показ прямо в настоящем интерфейсе PDM: экран, каналы, слайды и Сцена для эфира. Данные будут учебными, а рабочие материалы и настройки не изменятся.</p>
+                <p className="text-gray-400 mb-3">Пройдите краткое обучение по использованию данного приложения.</p>
                 <button data-pdm-open-introduction onClick={() => { onClose(); openIntroduction() }} className="px-4 py-2 rounded bg-accent text-white hover:bg-accent-hover">Пройти знакомство</button>
               </section>
               <section>
@@ -665,7 +674,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   <li>Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">+</code> справа сверху добавляет новую страницу из 4 или 9 каналов — в зависимости от выбранной раскладки</li>
                   <li>Навигация между страницами: кнопки <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">‹ ›</code> и номера внизу. Красная точка • отмечает страницу с live-каналом</li>
                   <li>Пустую страницу можно удалить кнопкой <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">✕</code> справа от пагинации</li>
-                  <li>Перетащите файл или внешний источник в любой канал и выберите этот канал. Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> станет доступна только для выбранного канала с контентом</li>
+                  <li>Перетяните файл или внешний источник в любой канал и выберите этот канал. Кнопка <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> станет доступна только для выбранного канала с контентом</li>
                   <li>Карандаш справа в заголовке канала добавляет понятную подпись. Нажмите Enter или щёлкните вне поля для сохранения, Escape — для отмены</li>
                   <li>Для запуска нажмите <code className="text-gray-300 bg-surface-400 px-1 rounded-sm">В эфир</code> или дважды щёлкните по каналу</li>
                   <li>PPTX и PDF готовятся после добавления в канал. PPTX можно запускать, когда готовы первые 25% слайдов и карточка показывает «можно в эфир»; остальные слайды продолжают кэшироваться в фоне</li>
@@ -845,6 +854,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
             </div>
           )}
+
+          {tab === 'stream-deck' && <DirectStreamDeckSettings />}
         </div>
         <div className="shrink-0 border-t border-gray-700 px-5 py-2 text-right text-[10px] text-gray-500">
           Presentation Display Manager · Версия {appVersion || '—'}

@@ -188,8 +188,16 @@ interface DriveInfo {
 }
 
 interface Api {
+  listDirectStreamDecks(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckDeviceInfo[]>
+  getDirectStreamDeckStatus(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
+  configureDirectStreamDeck(config: import('../../shared/direct-stream-deck').DirectStreamDeckConfig): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
+  connectDirectStreamDeck(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
+  disconnectDirectStreamDeck(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
+  updateDirectStreamDeckKeys(states: import('../../shared/direct-stream-deck').DirectStreamDeckKeyState[]): void
   streaming: import('../../shared/streaming').StreamingApi
   getAppVersion(): Promise<string>
+  loadQrWifiPassword(): Promise<string>
+  saveQrWifiPassword(password: string): Promise<boolean>
   saveAppConfig(content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }>
   loadAppConfig(): Promise<{ success: boolean; canceled: boolean; path?: string; content?: string; error?: string }>
   validateConfigPaths(paths: string[]): Promise<Array<{ path: string; exists: boolean; isDirectory: boolean }>>

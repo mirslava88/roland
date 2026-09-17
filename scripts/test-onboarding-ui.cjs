@@ -12,7 +12,8 @@ app.whenReady().then(async()=>{
   const js=code=>win.webContents.executeJavaScript(code)
   const frame=code=>js('(()=>{const w=document.querySelector("iframe")?.contentWindow,d=w?.document;return ('+code+')})()')
   const wait=async(check,label)=>{for(let i=0;i<160;i++){if(await check())return;await pause(80)}throw Error('Timed out: '+label)}
-  const step=async n=>wait(()=>frame('d.querySelector(".interface-tour-card header span")?.textContent.includes("Шаг '+(n+1)+' из 31")'),'tour step '+(n+1))
+  const rawStep=async n=>wait(()=>frame('d.querySelector(".interface-tour-card header span")?.textContent.includes("Шаг '+(n+1)+' из 31")'),'tour step '+(n+1))
+  const step=rawStep
   const screen=async name=>{await pause(120);writeFileSync(resolve('tmp/onboarding-ui/'+name+'.png'),(await win.webContents.capturePage()).toPNG())}
   const start=async()=>{await js('document.querySelector(".intro-primary").click()');await wait(()=>frame('!!w?.trainingStore && !!d.querySelector(".pdm-toolbar-row")'),'real operator frame');await step(0)}
   const click=async selector=>{await wait(()=>frame('!!d.querySelector('+JSON.stringify(selector)+')'),'control '+selector);await frame('d.querySelector('+JSON.stringify(selector)+').click()')}
@@ -20,6 +21,68 @@ app.whenReady().then(async()=>{
    await wait(()=>frame('!!d.querySelector('+JSON.stringify(selector)+')'),'right-click target '+selector)
    const point=await js('(()=>{const f=document.querySelector("iframe").getBoundingClientRect(),e=document.querySelector("iframe").contentWindow.document.querySelector('+JSON.stringify(selector)+'),r=e.getBoundingClientRect();return {x:Math.round(f.left+r.left+r.width/2),y:Math.round(f.top+r.top+r.height/2)}})()')
    win.webContents.sendInputEvent({type:'mouseDown',x:point.x,y:point.y,button:'right',clickCount:1});win.webContents.sendInputEvent({type:'mouseUp',x:point.x,y:point.y,button:'right',clickCount:1})
+  }
+  const dragFrame=async(selector,deltaX,deltaY)=>{
+   await wait(()=>frame('!!d.querySelector('+JSON.stringify(selector)+')'),'drag target '+selector)
+   const point=await js('(()=>{const f=document.querySelector("iframe").getBoundingClientRect(),e=document.querySelector("iframe").contentWindow.document.querySelector('+JSON.stringify(selector)+'),r=e.getBoundingClientRect();return {x:Math.round(f.left+r.left+r.width/2),y:Math.round(f.top+r.top+r.height/2)}})()')
+   win.webContents.sendInputEvent({type:'mouseDown',x:point.x,y:point.y,button:'left',clickCount:1})
+   for(let index=1;index<=4;index++){win.webContents.sendInputEvent({type:'mouseMove',x:Math.round(point.x+deltaX*index/4),y:Math.round(point.y+deltaY*index/4),button:'left'});await pause(25)}
+   win.webContents.sendInputEvent({type:'mouseUp',x:point.x+deltaX,y:point.y+deltaY,button:'left',clickCount:1})
+  }
+  const loadTrainingStep=async index=>{
+   await js('(()=>{const e=document.querySelector("iframe"),u=new URL(e.src);u.searchParams.set("step",'+index+');e.src=u.href;return true})()')
+   await rawStep(index)
+   await wait(()=>frame('!!w.trainingStore'),'training store for step '+(index+1))
+  }
+  const restoredStateMatches=async index=>frame(`(()=>{const s=w.trainingStore.getState(),a=s.channelIds[0],b=s.channelIds[1];switch(${index}){
+   case 0:return !s.channels[a]?.file;
+   case 1:return !!s.channels[a]?.file&&!s.channels[b]?.file;
+   case 2:return !!s.channels[a]?.file&&!!s.channels[b]?.file&&s.selectedChannel===null;
+   case 3:return s.selectedChannel===a&&!s.activeFile;
+   case 4:return s.liveChannel===a&&s.selectedChannel===a;
+   case 5:return s.liveChannel===a&&s.selectedChannel===b;
+   case 6:return s.liveChannel===b&&s.currentSlide===1;
+   case 7:return !d.querySelector("[data-pdm-training-panel=video]");
+   case 8:return !d.querySelector("[data-pdm-training-panel=music]");
+   case 9:return s.backdropImage===null;
+   case 10:return s.channelBoundaryNavigationEnabled===false;
+   case 11:return s.globalHookEnabled===true;
+   case 12:return !d.querySelector("[data-pdm-training-panel=timer]");
+   case 13:return !d.querySelector("[data-pdm-training-panel=event-timer]");
+   case 14:return !d.querySelector("[data-pdm-display-modal]");
+   case 15:return !d.querySelector("[data-program-scene-modal]");
+   case 16:return !!d.querySelector("[data-program-scene-modal]")&&!d.querySelector("[data-scene-add=text]");
+   case 17:return !!d.querySelector("[data-program-scene-modal]")&&!!d.querySelector("[data-scene-add=text]");
+   case 18:return !!d.querySelector("[data-program-scene-text-id]")&&!s.programScene.enabled;
+   case 19:return s.programScene.enabled&&!!s.programSnapshot;
+   case 20:return s.programScene.enabled&&!!s.programSnapshot&&JSON.stringify(s.programScene.textOverlays)!==JSON.stringify(s.programSnapshot.scene.textOverlays);
+   case 21:return !s.programScene.captureSourceId;
+   case 22:return !!s.programScene.captureSourceId&&!s.programScene.chromaKey.enabled;
+   case 23:return s.programScene.chromaKey.enabled&&s.qrOverlay.url==="https://";
+   case 24:return !!s.qrOverlay.url&&d.querySelector("[data-scene-panel=titles]")?.getAttribute("aria-selected")==="true"&&s.broadcastTitles.eventInfo==="";
+   case 25:return s.broadcastTitles.eventInfo.length>=4&&d.querySelector("[data-scene-panel=titles]")?.getAttribute("aria-selected")==="true";
+   case 26:return !!d.querySelector("[data-program-scene-modal]");
+   case 27:return !d.querySelector("[data-program-scene-modal]")&&s.programScene.viewMode!=="content";
+   case 28:return !d.querySelector("[data-pdm-training-panel=settings]");
+   case 29:return !d.querySelector("[data-pdm-training-panel=stream]");
+   case 30:return !!s.activeFile&&s.programScene.enabled;
+   default:return false;
+  }})()`)
+  const verifyEveryBackRestoration=async()=>{
+   for(let current=1;current<=30;current++){
+    await loadTrainingStep(current)
+    await click('.interface-tour-back')
+    const previous=current-1
+    await rawStep(previous)
+    await wait(()=>restoredStateMatches(previous),'restored prerequisites for step '+(previous+1))
+    const optionalStream=previous===29&&await frame('!d.querySelector("[data-toolbar-item=stream]")')
+    if(!optionalStream) assert.equal(await frame('d.querySelector("[data-pdm-training-tour]")?.getAttribute("data-pdm-training-ready")'), 'false', 'Back must restore step '+(previous+1)+' before its action')
+    assert.equal(await frame('d.querySelector(".interface-tour-card")?.textContent.includes("Вы уже проходили этот шаг")'),false,'Back must restore an actionable step, not passive review')
+    if(previous===26){
+     await click('[data-program-scene-modal] > div:first-child button:last-child')
+     await wait(()=>frame('d.querySelector(".interface-tour-card h3")?.textContent.trim()==="Готово"'),'replayed Scene close after Back')
+    }
+   }
   }
   const fill=async(selector,value)=>{await wait(()=>frame('!!d.querySelector('+JSON.stringify(selector)+')'),'field '+selector);await frame('(()=>{const e=d.querySelector('+JSON.stringify(selector)+'),p=e.tagName==="TEXTAREA"?w.HTMLTextAreaElement.prototype:w.HTMLInputElement.prototype,s=Object.getOwnPropertyDescriptor(p,"value").set;s.call(e,'+JSON.stringify(value)+');e.dispatchEvent(new w.Event("input",{bubbles:true}));return e.value})()')}
   const nextAfterDone=async nextIndex=>{
@@ -51,6 +114,8 @@ app.whenReady().then(async()=>{
   await js('window.openIntroduction()');await pause(80);await start()
   assert.equal(await frame('d.querySelectorAll(".pdm-toolbar-row").length'),2)
   assert.equal(await frame('!!d.querySelector(".pdm-channel-card") && !!d.querySelector(".pdm-main-workspace")'),true)
+  await verifyEveryBackRestoration()
+  await loadTrainingStep(0)
   await pause(1100);await step(0)
   await wait(()=>frame('!!d.querySelector(".interface-tour-drag-guide")'),'animated drag guide')
   assert.equal(await frame('w.getComputedStyle(d.querySelector(".interface-tour-drag-guide")).pointerEvents'),'none')
@@ -59,7 +124,7 @@ app.whenReady().then(async()=>{
    await frame('(()=>{const s=d.querySelector("[data-pdm-file-id=pdm-training-deck]"),t=d.querySelectorAll(".pdm-channel-card")[0],dt=new w.DataTransfer();s.dispatchEvent(new w.DragEvent("dragstart",{bubbles:true,cancelable:true,dataTransfer:dt}));t.dispatchEvent(new w.DragEvent("dragover",{bubbles:true,cancelable:true,dataTransfer:dt}));t.dispatchEvent(new w.DragEvent("drop",{bubbles:true,cancelable:true,dataTransfer:dt}));s.dispatchEvent(new w.DragEvent("dragend",{bubbles:true,dataTransfer:dt}));return dt.getData("application/json").includes("pdm-training-deck")})()');await step(1)
    assert.equal(await frame('(()=>{const e=d.querySelector("[data-pdm-file-id=pdm-training-deck-2]"),r=e.getBoundingClientRect();return d.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest("[data-pdm-file-item]")===e})()'),true,'Tour overlay must not block grabbing the second presentation')
    await frame('(()=>{const s=d.querySelector("[data-pdm-file-id=pdm-training-deck-2]"),t=d.querySelectorAll(".pdm-channel-card")[1],dt=new w.DataTransfer();s.dispatchEvent(new w.DragEvent("dragstart",{bubbles:true,cancelable:true,dataTransfer:dt}));t.dispatchEvent(new w.DragEvent("dragover",{bubbles:true,cancelable:true,dataTransfer:dt}));t.dispatchEvent(new w.DragEvent("drop",{bubbles:true,cancelable:true,dataTransfer:dt}));s.dispatchEvent(new w.DragEvent("dragend",{bubbles:true,dataTransfer:dt}));return dt.getData("application/json").includes("pdm-training-deck-2")})()')
-   await wait(()=>frame('d.querySelector(".interface-tour-card p")?.textContent.includes("оба материала готовы")'),'second presentation result')
+   await wait(()=>frame('d.querySelector(".interface-tour-card p")?.textContent.includes("Обе презентации готовы")'),'second presentation result')
    await pause(1200)
    assert.ok(await frame('d.querySelector(".interface-tour-card header span")?.textContent.includes("Шаг 2 из 31")'),'Step 2 result must remain readable before step 3')
    await nextAfterDone(2)
@@ -71,7 +136,7 @@ app.whenReady().then(async()=>{
    assert.equal(await frame('(()=>{const c=d.querySelectorAll(".pdm-channel-card")[1],b=c?.querySelector("[data-pdm-channel-take]");return !!b&&d.querySelector(".interface-tour-outline").getBoundingClientRect().left<=b.getBoundingClientRect().left&&d.querySelector(".interface-tour-outline").getBoundingClientRect().right>=b.getBoundingClientRect().right})()'),true,'Step 6 must highlight the take button inside the second channel')
    assert.equal(await frame('(()=>{const b=d.querySelectorAll(".pdm-channel-card")[1]?.querySelector("[data-pdm-channel-take]"),r=b.getBoundingClientRect();return d.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest("[data-pdm-channel-take]")===b})()'),true,'Step 6 overlay must leave the second channel take button clickable')
    await click('.pdm-channel-card:nth-child(2) [data-pdm-channel-take]')
-   await wait(()=>frame('d.querySelector(".interface-tour-card p")?.textContent.includes("Первый остаётся готовым")'),'seamless channel result')
+   await wait(()=>frame('d.querySelector(".interface-tour-card p")?.textContent.includes("Первый канал остаётся готовым")'),'seamless channel result')
    await nextAfterDone(6)
    await wait(()=>frame('d.querySelectorAll(".pdm-slide-thumb").length===3'),'real thumbnails')
    await frame('d.querySelectorAll(".pdm-slide-thumb")[1].click()');await step(7)
@@ -93,6 +158,7 @@ app.whenReady().then(async()=>{
   assert.equal(await frame('!!d.querySelector("[data-pdm-display-modal]")'),false,'Screens overview closes before Scene')
    await click('[data-toolbar-item="pip"] button');await step(16)
    await rightClickFrame('[data-program-scene-preview]');await step(17)
+  assert.equal(await frame('(()=>{const b=d.querySelector("[data-scene-add=text]")?.getBoundingClientRect(),o=d.querySelector(".interface-tour-outline")?.getBoundingClientRect();return !!b&&!!o&&Math.abs(b.left-o.left)<=7&&Math.abs(b.top-o.top)<=7&&Math.abs(b.width-o.width)<=12&&Math.abs(b.height-o.height)<=12})()'),true,'The Text command must be framed in blue before it is selected')
   await click('[data-scene-add="text"]')
   await wait(()=>frame('!!d.querySelector("[data-program-scene-inline-text]")'),'actual inline editor')
   await frame('(()=>{const e=d.querySelector("[data-program-scene-inline-text]");e.click();e.focus();const r=d.createRange();r.selectNodeContents(e);const s=w.getSelection();s.removeAllRanges();s.addRange(r);return true})()')
@@ -112,16 +178,28 @@ app.whenReady().then(async()=>{
    await nextAfterDone(23)
    assert.equal(await frame('(()=>{const p=d.querySelector("[data-program-scene-preview]").getBoundingClientRect(),c=d.querySelector(".interface-tour-card").getBoundingClientRect();return c.right<=p.left||c.left>=p.right||c.bottom<=p.top||c.top>=p.bottom})()'),true,'Step 24 card must not cover the Scene preview before the context menu opens')
    await rightClickFrame('[data-program-scene-preview]');await wait(()=>frame('!!d.querySelector("[data-scene-add=qr]")'),'QR command in real context menu')
-   await click('[data-scene-add="qr"]');await frame('d.querySelector("[data-pdm-training-qr-url]").focus()');await fill('[data-pdm-training-qr-url]','https://pdm.example');await pause(900)
+   await click('[data-scene-add="qr"]');await wait(()=>frame('!!d.querySelector("[data-pdm-training-qr-url]")'),'QR URL field')
+   await wait(()=>frame('(()=>{const f=d.querySelector("[data-pdm-training-qr-url]").getBoundingClientRect(),c=d.querySelector(".interface-tour-card").getBoundingClientRect();return c.right<=f.left||c.left>=f.right||c.bottom<=f.top||c.top>=f.bottom})()'),'QR lesson card clear of URL field')
+   assert.equal(await frame('(()=>{const c=d.querySelector(".interface-tour-card");return w.getComputedStyle(c).overflowY==="hidden"&&c.scrollHeight<=c.clientHeight+1})()'),true,'Step 24 hint must fit without a scrollbar or clipped content')
+   await frame('d.querySelector("[data-pdm-training-qr-url]").focus()');await fill('[data-pdm-training-qr-url]','https://pdm.example');await pause(900)
    assert.ok(await frame('d.querySelector(".interface-tour-card header span")?.textContent.includes("Шаг 24 из 31")'),'QR lesson must not advance while the address field is still focused')
    assert.equal(await frame('(()=>{const p=d.querySelector("[data-program-scene-preview]").getBoundingClientRect(),c=d.querySelector(".interface-tour-card").getBoundingClientRect();return c.right<=p.left||c.left>=p.right||c.bottom<=p.top||c.top>=p.bottom})()'),true,'QR preview must not be covered by the lesson card')
    assert.equal(await frame('(()=>{const e=d.querySelector("[data-program-scene-preview]"),r=e.getBoundingClientRect();return d.elementFromPoint(r.left+12,r.top+12)?.closest("[data-program-scene-preview]")===e})()'),true,'QR preview must remain clickable during the form lesson')
-   await frame('(()=>{d.activeElement.blur();d.querySelector("[data-program-scene-preview]").click();return true})()')
+   await wait(()=>frame('!!d.querySelector("[data-scene-qr-object]")'),'rendered QR in Scene preview')
+   assert.ok(await frame('d.querySelector(".interface-tour-card p")?.textContent.includes("перетяните появившийся QR-код")'),'QR lesson must explicitly ask the user to move the QR code')
+   assert.equal(await frame('(()=>{const q=d.querySelector("[data-scene-qr-object]").getBoundingClientRect(),o=d.querySelector(".interface-tour-outline").getBoundingClientRect();return Math.abs(q.left-o.left)<=7&&Math.abs(q.top-o.top)<=7&&Math.abs(q.width-o.width)<=12&&Math.abs(q.height-o.height)<=12})()'),true,'Ready QR must become the blue highlighted drag target')
+   const qrBefore=await frame('JSON.stringify({x:w.trainingStore.getState().qrOverlay.xPercent,y:w.trainingStore.getState().qrOverlay.yPercent})')
+   await dragFrame('[data-scene-qr-object]',45,24)
+   await wait(async()=>await frame('JSON.stringify({x:w.trainingStore.getState().qrOverlay.xPercent,y:w.trainingStore.getState().qrOverlay.yPercent})')!==qrBefore,'QR position changed after a real pointer drag')
    await wait(()=>frame('d.querySelector(".interface-tour-card h3")?.textContent.trim()==="Готово"'),'QR result visible')
+   assert.equal(await frame('(()=>{const c=d.querySelector(".interface-tour-card");return w.getComputedStyle(c).overflowY==="hidden"&&c.scrollHeight<=c.clientHeight+1})()'),true,'Completed Step 24 hint must still fit without a scrollbar')
    assert.equal(await frame('(()=>{const p=d.querySelector("[data-program-scene-preview]").getBoundingClientRect(),c=d.querySelector(".interface-tour-card").getBoundingClientRect();return c.right<=p.left||c.left>=p.right||c.bottom<=p.top||c.top>=p.bottom})()'),true,'Ready QR and its result card must both remain visible')
+   assert.equal(await frame('d.querySelector(".interface-tour-back")?.disabled'),false,'Back remains available on completed QR step')
    await screen('actual-qr-training');await nextAfterDone(24)
    await click('[data-scene-panel="titles"]')
    await wait(()=>frame('d.querySelector("[data-scene-panel=titles]")?.getAttribute("aria-selected")==="true"&&!d.querySelector("[data-scene-editor=titles]").hidden'),'titles editor visible')
+   await wait(()=>frame('d.querySelectorAll("[data-pdm-training-required-field-outline]").length===2'),'both required title fields outlined')
+   assert.equal(await frame('(()=>{const c=d.querySelector(".interface-tour-card");return w.getComputedStyle(c).overflowY==="hidden"&&c.scrollHeight<=c.clientHeight+1})()'),true,'Step 25 hint must fit without a scrollbar or clipped content')
    await frame('d.querySelector("[data-pdm-training-speaker-name]").focus()');await fill('[data-pdm-training-speaker-name]','А');await pause(350)
    assert.ok(await frame('d.querySelector(".interface-tour-card header span")?.textContent.includes("Шаг 25 из 31")'),'Titles lesson must stay on the same step after the first name character')
    assert.equal(await frame('d.activeElement===d.querySelector("[data-pdm-training-speaker-name]")'),true,'Speaker field must keep focus after the first character')
@@ -129,7 +207,9 @@ app.whenReady().then(async()=>{
    await fill('[data-pdm-training-speaker-name]','Анна Петрова')
    await frame('d.querySelector("[data-pdm-training-event-info]").focus()');await fill('[data-pdm-training-event-info]','Учебная конференция 2026');await pause(900)
    assert.ok(await frame('d.querySelector(".interface-tour-card header span")?.textContent.includes("Шаг 25 из 31")'),'Titles lesson must not advance while the event field is still focused')
-   await frame('(()=>{d.activeElement.blur();d.querySelector("[data-program-scene-preview]").click();return true})()');await screen('actual-titles-training');await nextAfterDone(25)
+   assert.ok(await frame('d.querySelector(".interface-tour-card p")?.textContent.includes("нажмите на предпросмотр титров слева")'),'Titles lesson must explicitly explain how to continue')
+   assert.equal(await frame('(()=>{const p=d.querySelector("[data-broadcast-titles-preview]").getBoundingClientRect(),o=d.querySelector(".interface-tour-outline").getBoundingClientRect();return Math.abs(p.left-o.left)<=7&&Math.abs(p.top-o.top)<=7&&Math.abs(p.width-o.width)<=12&&Math.abs(p.height-o.height)<=12})()'),true,'Completed title fields must move the blue frame to the title preview')
+   await click('[data-broadcast-titles-preview]');await screen('actual-titles-training');await nextAfterDone(25)
    await click('[data-broadcast-titles-show-all]');await nextAfterDone(26)
    await click('[data-program-scene-modal] > div:first-child button:last-child');await nextAfterDone(27)
    await click('[data-toolbar-item="pipViews"] button:nth-child(2)');await step(28)
@@ -165,5 +245,5 @@ app.whenReady().then(async()=>{
   assert.ok(await js('document.querySelector(".intro-primary").textContent.includes("Продолжить")'))
    console.log('PASS: 31-step real PDM tour teaches multiple channels, seamless TAKE, media, Scene, external camera, chroma key, QR, titles, audio output and stream; draft isolation, resume and real session/IPC safety hold')
   win.destroy();clearTimeout(deadline);app.exit(0)
- }catch(error){console.error(error);if(win){try{console.error(await win.webContents.executeJavaScript('JSON.stringify({parent:window.testErrors,frame:document.querySelector("iframe")?.contentWindow?.trainingErrors,html:document.querySelector("iframe")?.contentWindow?.document.body.innerText?.slice(-2400)})'));writeFileSync(resolve('tmp/onboarding-ui/failure.png'),(await win.webContents.capturePage()).toPNG())}catch{}}clearTimeout(deadline);app.exit(1)}
+ }catch(error){console.error(error);if(win){try{console.error(await win.webContents.executeJavaScript('(()=>{const f=document.querySelector("iframe")?.contentWindow,s=f?.trainingStore?.getState();return JSON.stringify({parent:window.testErrors,frame:f?.trainingErrors,state:s?{selectedChannel:s.selectedChannel,liveChannel:s.liveChannel,currentSlide:s.currentSlide,sceneOpen:!!f.document.querySelector("[data-program-scene-modal]"),chroma:s.programScene.chromaKey.enabled,qrUrl:s.qrOverlay.url,captureSourceId:s.programScene.captureSourceId}:null,html:f?.document.body.innerText?.slice(-2400)})})()'));writeFileSync(resolve('tmp/onboarding-ui/failure.png'),(await win.webContents.capturePage()).toPNG())}catch{}}clearTimeout(deadline);app.exit(1)}
 })

@@ -12,6 +12,7 @@
 .interface-tour-shade { position: fixed; z-index: 1; pointer-events: auto; background: #03080fa6; }
 .interface-tour.is-drag-step .interface-tour-shade, .interface-tour.is-form-step .interface-tour-shade { pointer-events: none; }
 .interface-tour-outline { position: fixed; z-index: 1; pointer-events: none; border: 2px solid #58caff; border-radius: 8px; box-shadow: 0 0 25px #1d9be756; }
+.interface-tour-required-field { position: fixed; z-index: 2; pointer-events: none; border: 2px solid #ffd54f; border-radius: 7px; box-shadow: 0 0 0 2px #061019, 0 0 22px #ffd54f75; animation: pdm-training-source-pulse .8s ease-in-out infinite alternate; }
 .interface-tour-drag-source { position: fixed; z-index: 2; pointer-events: none; border: 2px solid #ffd54f; border-radius: 8px; box-shadow: 0 0 22px #ffd54f70; animation: pdm-training-source-pulse .8s ease-in-out infinite alternate; }
 .interface-tour-drag-guide { position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; overflow: visible; pointer-events: none; filter: drop-shadow(0 2px 5px #001018); }
 .interface-tour-drag-guide path:not([d^='M0']) { fill: none; stroke: #ffd54f; stroke-width: 4; stroke-linecap: round; stroke-dasharray: 12 10; animation: pdm-training-arrow-flow .75s linear infinite; }
@@ -31,6 +32,22 @@
 .interface-tour-card > div { display: flex; gap: 8px; margin-top: 8px; }
 .interface-tour-card button.interface-tour-next { background: #118cd1; border-color: #4eb9f3; flex: 1; }
 .interface-tour-card button.interface-tour-later { border: 0; padding: 8px 0 0; background: transparent; color: #779bae; font-size: 10px; }
+.interface-tour.is-form-step .interface-tour-card { padding: 11px 14px; }
+.interface-tour.is-form-step .interface-tour-card h3 { margin: 5px 0 6px; font-size: 16px; }
+.interface-tour.is-form-step .interface-tour-card p { margin-bottom: 6px; font-size: 12px; line-height: 1.4; }
+.interface-tour.is-form-step .interface-tour-card small { margin: 5px 0; font-size: 11px; }
+.interface-tour.is-form-step .interface-tour-progress { margin: 6px 0 7px; }
+.interface-tour.is-form-step .interface-tour-card > div { margin-top: 5px; }
+.interface-tour.is-form-step .interface-tour-card button { padding: 5px 9px; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card { padding: 7px 12px; overflow: hidden; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card header { line-height: 1.15; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-progress { margin: 3px 0 4px; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card h3 { margin: 2px 0 3px; font-size: 15px; line-height: 1.2; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card p { margin-bottom: 3px; font-size: 11px; line-height: 1.3; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card small { margin: 2px 0; font-size: 10px; line-height: 1.2; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card > div { margin-top: 3px; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card button { padding: 3px 8px; font-size: 11px; }
+.interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card button.interface-tour-later { padding-top: 3px; font-size: 9px; }
 .interface-tour-chip { position: fixed; right: 14px; bottom: 14px; z-index: 3; pointer-events: auto; border: 1px solid #437da1; border-radius: 7px; padding: 9px 12px; background: #14334a; color: #a9defb; cursor: pointer; font-size: 11px; }
 @keyframes pdm-training-arrow-flow { to { stroke-dashoffset: -22; } }
 @keyframes pdm-training-move-hint { from { transform: translate(-50%, -100%) scale(.92); } to { transform: translate(-50%, -110%) scale(1.08); } }

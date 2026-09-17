@@ -3,6 +3,7 @@ import type { IpcMainInvokeEvent } from 'electron'
 import { existsSync } from 'fs'
 import { readFile, writeFile, rename } from 'fs/promises'
 import { join } from 'path'
+import { getTrustedRendererDevUrl } from './renderer-security'
 import { connect as tcpConnect } from 'net'
 import { connect as tlsConnect } from 'tls'
 import { DEFAULT_STREAM_SETTINGS, validateStreamSettings } from '../shared/streaming'
@@ -148,7 +149,7 @@ export class StreamingManager {
     worker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     worker.webContents.on('will-navigate', (event) => event.preventDefault())
     worker.webContents.on('render-process-gone', () => { if (this.worker === worker) this.fail('Процесс захвата остановился. Основной эфир продолжает работать.') })
-    const url = process.env['ELECTRON_RENDERER_URL']
+    const url = getTrustedRendererDevUrl()
     this.workerReady = url ? worker.loadURL(`${url.replace(/\/$/, '')}/streaming.html`) : worker.loadFile(join(__dirname, '../renderer/streaming.html'))
     return this.workerReady
   }

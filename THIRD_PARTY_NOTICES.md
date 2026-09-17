@@ -61,6 +61,19 @@ The complete qr-code-styling license is included at
 Sources: https://github.com/kozakdenys/qr-code-styling and
 https://github.com/kazuhikoarase/qrcode-generator
 
+## @elgato-stream-deck/node 7.6.3 and node-hid 3.4.0
+
+Direct USB communication with Stream Deck devices is provided by the
+community-maintained `@elgato-stream-deck/node` library under the MIT License
+and `node-hid` under the BSD 3-Clause License. This integration does not use or
+require the Elgato Stream Deck desktop application or an official Elgato
+plugin. The complete license texts are included at
+`resources/licenses/elgato-stream-deck-node-LICENSE.txt` and
+`resources/licenses/node-hid-LICENSE.txt`.
+
+Sources: https://github.com/Julusian/node-elgato-stream-deck and
+https://github.com/node-hid/node-hid
+
 ## Electron 44.1.1 and Chromium
 
 The desktop runtime is distributed under the MIT License and includes Chromium

@@ -10,6 +10,13 @@
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
   "scripts": {
+    "test:critical": "node scripts/test-critical.mjs all",
+    "test:critical:core": "node scripts/test-critical.mjs core",
+    "test:critical:ui": "node scripts/test-critical.mjs ui",
+    "test:critical:integration": "node scripts/test-critical.mjs integration",
+    "test:stream-deck": "node scripts/test-direct-stream-deck.mjs",
+    "test:scene-timer": "node scripts/test-scene-and-timer-commands.mjs",
+    "test:security": "node scripts/test-security-hardening.mjs",
     "test:onboarding:ui": "node scripts/test-onboarding-ui.mjs",
     "test:pip-audio": "node scripts/test-program-scene-audio.mjs",
     "test:pip-audio:ui": "node scripts/test-program-scene-audio-ui.mjs",
@@ -36,6 +43,7 @@
     "package:mac": "node scripts/build-edition.mjs standard package mac"
   },
   "dependencies": {
+    "@elgato-stream-deck/node": "^7.6.3",
     "@hyzyla/pdfium": "^2.1.13",
     "pdfjs-dist": "^6.3.289",
     "qr-code-styling": "^1.9.2",
@@ -62,6 +70,10 @@
   "build": {
     "appId": "com.roland.presentation-display-manager",
     "productName": "Presentation Display Manager",
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/node-hid/prebuilds/**/*"
+    ],
     "directories": {
       "output": "dist"
     },
@@ -127,6 +139,14 @@
       {
         "from": "node_modules/qr-code-styling/LICENSE",
         "to": "licenses/qr-code-styling-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/@elgato-stream-deck/node/LICENSE",
+        "to": "licenses/elgato-stream-deck-node-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/node-hid/LICENSE-bsd.txt",
+        "to": "licenses/node-hid-LICENSE.txt"
       }
     ],
     "afterPack": "./build/afterPack.js",

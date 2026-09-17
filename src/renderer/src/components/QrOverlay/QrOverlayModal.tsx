@@ -894,7 +894,7 @@ export function QrOverlayModal({
                 </div>
               ) : <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-gray-950 px-3 text-center text-[11px] text-gray-400">{previewError || 'Подготовка…'}</div>}
             </div>
-            <p className="mt-2 text-[10px] leading-4 text-gray-400">Перетащите весь блок для точного положения, вращайте колесо мыши для изменения размера. Белое поле вокруг кода нужно для надёжного считывания.</p>
+            <p className="mt-2 text-[10px] leading-4 text-gray-400">Перетяните весь блок для точного положения, вращайте колесо мыши для изменения размера. Белое поле вокруг кода нужно для надёжного считывания.</p>
           </div>}
         </div>
 

@@ -55,7 +55,11 @@ export function installTrainingRuntime(): void {
     preparePptxCache: asyncValue('preparePptxCache', cache), generatePptxSlides: asyncValue('generatePptxSlides', cache),
     generatePptxThumbnails: asyncValue('generatePptxThumbnails', cache),
     launchPowerPoint: asyncValue('launchPowerPoint', { success: true }),
-    validateConfigPaths: async (paths: string[]) => paths.map(path => ({ path, exists: path === TRAINING_FILE.path, isDirectory: false })),
+    validateConfigPaths: async (paths: string[]) => paths.map(path => ({
+      path,
+      exists: path === TRAINING_FILE.path || path === TRAINING_FILE_SECOND.path,
+      isDirectory: false
+    })),
     getTimerOverlayLayout: asyncValue('getTimerOverlayLayout', { x: .9, y: .9, scale: 1 }),
     selectBackdropImage: asyncValue('selectBackdropImage', trainingFrames[0]), switchAudioToExternal: asyncValue('switchAudioToExternal', { success: true }),
     selectSoundFile: asyncValue('selectSoundFile', null),

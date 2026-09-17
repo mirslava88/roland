@@ -214,7 +214,7 @@ export function SceneQrPreviewLayer({
           event.preventDefault()
           event.stopPropagation()
         }}
-        title={interactive ? 'Перетащите QR-код; колесо мыши меняет размер' : undefined}
+        title={interactive ? 'Перетяните QR-код; колесо мыши меняет размер' : undefined}
       >
         <img
           src={imageDataUrl}

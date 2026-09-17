@@ -57,6 +57,11 @@ interface AdHocTakeOptions {
   videoLoop?: boolean
 }
 
+interface QueuedChannelTake {
+  channelId: ChannelId
+  videoAutoplay: boolean
+}
+
 function supportsContentZoom(file?: FileEntry | null): boolean {
   return file?.type === 'presentation' ||
     file?.type === 'pdf' ||
@@ -264,7 +269,7 @@ export function PreviewPanel(): JSX.Element {
   } = useAppStore()
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
-  const queuedTakeRef = useRef<ChannelId | null>(null)
+  const queuedTakeRef = useRef<QueuedChannelTake | null>(null)
   const takeGenerationRef = useRef(0)
   const activeTakeIdRef = useRef<string | null>(null)
   const clearingChannelsRef = useRef<Set<ChannelId>>(new Set())
@@ -678,7 +683,10 @@ export function PreviewPanel(): JSX.Element {
     }
   }
 
-  const handleTake = async (ch: ChannelId): Promise<void> => {
+  const handleTake = async (
+    ch: ChannelId,
+    options: { videoAutoplay?: boolean } = {}
+  ): Promise<void> => {
     const freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
     if (!file) return
@@ -689,7 +697,9 @@ export function PreviewPanel(): JSX.Element {
       setTakeProgress({ channelId: ch, message: 'Подготовка первых 25% слайдов…' })
       const ready = await waitForPptxChannelStart(file.path)
       setTakeProgress((current) => current?.channelId === ch ? null : current)
-      if (ready.success && useAppStore.getState().channels[ch]?.file?.path === file.path) await handleTake(ch)
+      if (ready.success && useAppStore.getState().channels[ch]?.file?.path === file.path) {
+        await handleTake(ch, options)
+      }
       return
     }
     if (freshState.contentZoom.enabled) {
@@ -728,7 +738,9 @@ export function PreviewPanel(): JSX.Element {
     if (takeInFlightRef.current) {
       // Keep TAKE pipelines sequential (they share PowerPoint and the output
       // overlay), but never lose the operator's latest channel selection.
-      queuedTakeRef.current = takeInFlightRef.current === ch ? null : ch
+      queuedTakeRef.current = takeInFlightRef.current === ch && !options.videoAutoplay
+        ? null
+        : { channelId: ch, videoAutoplay: options.videoAutoplay === true }
       return
     }
 
@@ -767,7 +779,12 @@ export function PreviewPanel(): JSX.Element {
     try {
       beginNavigationTransition()
       setTakeProgress({ channelId: ch, message })
-      await doTake(ch, takeId, takeGeneration)
+      await doTake(ch, takeId, takeGeneration, options.videoAutoplay ? {
+        channel: freshState.channels[ch],
+        liveChannel: ch,
+        videoAutoplay: true,
+        videoLoop: freshState.videoLoopTrack
+      } : undefined)
     } catch (err) {
       console.error('[TAKE] unhandled error, forcing overlay hide:', err)
       const cancelledCleanup = cancelTakeCleanupRef.current
@@ -812,8 +829,8 @@ export function PreviewPanel(): JSX.Element {
 
       const queued = queuedTakeRef.current
       queuedTakeRef.current = null
-      if (queued && useAppStore.getState().channels[queued]?.file) {
-        void handleTake(queued)
+      if (queued && useAppStore.getState().channels[queued.channelId]?.file) {
+        void handleTake(queued.channelId, { videoAutoplay: queued.videoAutoplay })
       } else if (queuedNavigation.length > 0) {
         window.dispatchEvent(new CustomEvent('flush-take-navigation', {
           detail: queuedNavigation
@@ -3015,8 +3032,8 @@ export function PreviewPanel(): JSX.Element {
 
           const queued = queuedTakeRef.current
           queuedTakeRef.current = null
-          if (queued && useAppStore.getState().channels[queued]?.file) {
-            void handleTake(queued)
+          if (queued && useAppStore.getState().channels[queued.channelId]?.file) {
+            void handleTake(queued.channelId, { videoAutoplay: queued.videoAutoplay })
           }
         }
       })()
@@ -3038,6 +3055,21 @@ export function PreviewPanel(): JSX.Element {
     }
     window.addEventListener('take-channel', handler)
     return () => window.removeEventListener('take-channel', handler)
+  })
+
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const channelId = (event as CustomEvent<ChannelId>).detail
+      const state = useAppStore.getState()
+      if (!channelId || state.channels[channelId]?.file?.type !== 'video') return
+      void handleTake(channelId, { videoAutoplay: true }).finally(() => {
+        window.dispatchEvent(new CustomEvent('take-channel-completed', {
+          detail: { channelId }
+        }))
+      })
+    }
+    window.addEventListener('take-channel-video', handler)
+    return () => window.removeEventListener('take-channel-video', handler)
   })
 
   // A channel video can hand the live output to one explicitly selected
@@ -3719,7 +3751,7 @@ function ChannelPanel({
         ) : (
           <div className={`${compact ? 'text-[10px] p-1' : 'text-xs p-4'} text-gray-600 text-center select-none`}>
             <div className={`${compact ? 'text-lg mb-0.5' : 'text-2xl mb-2'} opacity-30`}>📥</div>
-            Перетащите материал сюда
+            Перетяните материал сюда
           </div>
         )}
         {channel.file?.type === 'capture' && (

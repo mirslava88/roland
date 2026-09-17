@@ -1,5 +1,6 @@
 import { BrowserWindow, Display, shell, screen } from 'electron'
 import { join } from 'path'
+import { getTrustedRendererDevUrl } from './renderer-security'
 
 export type AuxiliaryWindowRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop'
 
@@ -38,8 +39,9 @@ export function createControlWindow(): BrowserWindow {
     return { action: 'deny' }
   })
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  const devUrl = getTrustedRendererDevUrl()
+  if (devUrl) {
+    win.loadURL(devUrl)
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
@@ -69,7 +71,7 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     backgroundColor: '#000000',
     title: 'Presentation',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/output.js'),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
@@ -83,8 +85,9 @@ export function createPresentationWindow(display: Display): BrowserWindow {
 
   win.setMenuBarVisibility(false)
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/presentation.html`)
+  const devUrl = getTrustedRendererDevUrl()
+  if (devUrl) {
+    win.loadURL(`${devUrl}/presentation.html`)
   } else {
     win.loadFile(join(__dirname, '../renderer/presentation.html'))
   }
@@ -127,7 +130,7 @@ export function createAuxiliaryWindow(
     skipTaskbar: true,
     focusable: false,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/output.js'),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
@@ -139,8 +142,9 @@ export function createAuxiliaryWindow(
   win.removeMenu()
   win.setIgnoreMouseEvents(true)
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/auxiliary.html?role=${role}&displayId=${display.id}`)
+  const devUrl = getTrustedRendererDevUrl()
+  if (devUrl) {
+    win.loadURL(`${devUrl}/auxiliary.html?role=${role}&displayId=${display.id}`)
   } else {
     win.loadFile(join(__dirname, '../renderer/auxiliary.html'), {
       query: { role, displayId: String(display.id) }
@@ -302,11 +306,11 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
     hasShadow: false,
     title: '',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/timer.js'),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false
+      webSecurity: true
     }
   })
 
@@ -435,11 +439,6 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
         }
       };
 
-      window._playSound = function(type, filePath) {
-        const url = 'file:///' + filePath.replace(/\\\\/g, '/');
-        const audio = new Audio(url);
-        audio.play().catch(() => {});
-      };
     </script>
   </body></html>`
 
@@ -468,7 +467,7 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false
+      webSecurity: true
     }
   })
 
@@ -510,7 +509,7 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
       function loadAndPlay(autoplay) {
         if (currentIndex < 0 || currentIndex >= playlist.length) return;
         const filePath = playlist[currentIndex];
-        player.src = 'file:///' + filePath.replace(/\\\\/g, '/');
+        player.src = 'pdm-media://file/' + encodeURIComponent(filePath);
         // autoplay === false → only load the track (set src), don't start.
         if (autoplay !== false) player.play().catch(() => {});
         window._sendState();

@@ -189,6 +189,68 @@ export function BroadcastTitlesBridge(): JSX.Element | null {
     useAppStore.getState().setProgramCaptureTitlesSourceIdentity(null)
   }), [])
 
+  useEffect(() => {
+    const handleDirectCommand = (event: Event): void => {
+      type TitlesCommandKind = 'titles-speaker' | 'titles-event' | 'titles-all' | 'titles-hide'
+      const detail = (event as CustomEvent<
+        TitlesCommandKind | { kind: TitlesCommandKind; speakerId?: string }
+      >).detail
+      const command = typeof detail === 'string' ? detail : detail.kind
+      const requestedSpeakerId = typeof detail === 'string' ? undefined : detail.speakerId
+      const state = useAppStore.getState()
+      const sourceIdentity = effectiveProgramTitleSourceIdentity(state)
+      if (!sourceIdentity) return
+      if (command === 'titles-hide') {
+        state.setCaptureTitlesOutput(sourceIdentity, {
+          speakerVisible: false,
+          eventVisible: false
+        })
+        return
+      }
+      const draft = state.broadcastTitles
+      const speaker = draft.speakers.find((entry) => entry.id === requestedSpeakerId) ??
+        draft.speakers.find((entry) => entry.id === draft.selectedSpeakerId) ?? null
+      const showSpeaker = command === 'titles-speaker' || command === 'titles-all'
+      const showEvent = command === 'titles-event' || command === 'titles-all'
+      if (showSpeaker && speaker?.name.trim()) {
+        state.setCaptureTitlesOutput(sourceIdentity, {
+          speakerId: speaker.id,
+          speakerName: speaker.name,
+          speakerRole: speaker.role,
+          speakerEnterEffect: draft.speakerEnterEffect,
+          speakerExitEffect: draft.speakerExitEffect,
+          speakerAutoHideSeconds: draft.speakerAutoHideSeconds,
+          speakerStyle: draft.speakerStyle,
+          speakerTextColor: draft.speakerTextColor,
+          speakerBackgroundStart: draft.speakerBackgroundStart,
+          speakerBackgroundEnd: draft.speakerBackgroundEnd,
+          speakerAccentStart: draft.speakerAccentStart,
+          speakerAccentEnd: draft.speakerAccentEnd,
+          speakerVisible: true
+        })
+      }
+      if (showEvent && draft.eventInfo.trim()) {
+        state.setCaptureTitlesOutput(sourceIdentity, {
+          eventLabel: draft.eventLabel,
+          eventInfo: draft.eventInfo,
+          eventEnterEffect: draft.eventEnterEffect,
+          eventExitEffect: draft.eventExitEffect,
+          eventAutoHideSeconds: draft.eventAutoHideSeconds,
+          eventPosition: draft.eventPosition,
+          eventStyle: draft.eventStyle,
+          eventTextColor: draft.eventTextColor,
+          eventBackgroundStart: draft.eventBackgroundStart,
+          eventBackgroundEnd: draft.eventBackgroundEnd,
+          eventAccentStart: draft.eventAccentStart,
+          eventAccentEnd: draft.eventAccentEnd,
+          eventVisible: true
+        })
+      }
+    }
+    window.addEventListener('pdm-broadcast-titles-command', handleDirectCommand)
+    return () => window.removeEventListener('pdm-broadcast-titles-command', handleDirectCommand)
+  }, [])
+
   return (
     <>
       {Object.entries(captureOutputs).map(([sourceIdentity, captureOutput]) => (

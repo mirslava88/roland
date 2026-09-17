@@ -37,7 +37,18 @@ try {
     if (step >= 6) take(secondChannelId)
     if (step >= 7) state.setCurrentSlide(2)
     if (step >= 18) state.setProgramScene({ textOverlays: [{ id: 'training-text', text: 'Мой первый показ', visible: true, xPercent: 10, yPercent: 10, widthPercent: 34, fontFamily: 'arial', fontSizePercent: 4, color: '#ffffff' }] })
-    if (step >= 19) { state.setProgramScene({ enabled: true }); state.publishProgramSnapshot(secondChannelId); emitTraining('program-scene-applied', { revision: useAppStore.getState().programSnapshot?.revision }) }
+    const publishTrainingScene = (): void => {
+      state.publishProgramSnapshot(secondChannelId)
+      emitTraining('program-scene-applied', { revision: useAppStore.getState().programSnapshot?.revision })
+    }
+    if (step >= 19) { state.setProgramScene({ enabled: true }); publishTrainingScene() }
+    if (step >= 20) {
+      const textOverlays = useAppStore.getState().programScene.textOverlays.map(overlay => (
+        overlay.id === 'training-text' ? { ...overlay, fontSizePercent: overlay.fontSizePercent + 1 } : overlay
+      ))
+      state.setProgramScene({ textOverlays })
+    }
+    if (step >= 21) publishTrainingScene()
     if (step >= 22) {
       state.addCaptureSource({
         id: 'training-capture', name: 'Учебная камера с зелёным фоном', path: 'capture://training-capture', type: 'capture', extension: 'LIVE', size: 0, sceneOnly: true,
@@ -64,10 +75,28 @@ try {
     window.addEventListener('close-program-output', event => { event.stopImmediatePropagation(); stop() }, true)
     ReactDOM.createRoot(document.getElementById('root')!).render(React.createElement(React.Fragment, null,
       React.createElement(App, { training: true }), React.createElement(InterfaceTour, { initialStep: step })))
-    if (step >= 15 && step <= 26) {
+    if (step >= 16 && step <= 26) {
       setTimeout(() => {
         window.dispatchEvent(new Event('open-program-scene'))
-        if (step === 24 || step === 25) setTimeout(() => (document.querySelector('[data-scene-panel="titles"]') as HTMLButtonElement | null)?.click(), 450)
+        const prepareSceneStep = (attempt = 0): void => {
+          const preview = document.querySelector<HTMLElement>('[data-program-scene-preview]')
+          if (!preview && attempt < 20) {
+            setTimeout(() => prepareSceneStep(attempt + 1), 50)
+            return
+          }
+          if (step === 17 && preview) {
+            const rect = preview.getBoundingClientRect()
+            preview.dispatchEvent(new MouseEvent('contextmenu', {
+              bubbles: true,
+              clientX: rect.left + rect.width / 2,
+              clientY: rect.top + rect.height / 2
+            }))
+          }
+          if (step === 24 || step === 25) {
+            (document.querySelector('[data-scene-panel="titles"]') as HTMLButtonElement | null)?.click()
+          }
+        }
+        setTimeout(prepareSceneStep, 100)
       }, 350)
     }
     // Inspection is local to the sandbox, never exposed by the main preload.
@@ -77,6 +106,6 @@ try {
 
 function showFailure(error: unknown): void {
   const root = document.getElementById('root')!
-  root.textContent = `Не удалось открыть безопасное обучение: ${String(error)}. Закройте его и попробуйте снова.`
+  root.textContent = `Не удалось открыть обучение: ${String(error)}. Закройте его и попробуйте снова.`
   root.style.cssText = 'padding:32px;color:white;background:#10171d;height:100vh'
 }

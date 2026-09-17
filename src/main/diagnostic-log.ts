@@ -7,6 +7,33 @@ let logDirectory = ''
 let logPath = ''
 let initialized = false
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Logs are commonly attached to support messages. Keep them useful while
+ * avoiding disclosure of the Windows account name and broadcast credentials.
+ */
+export function redactDiagnosticText(value: unknown): string {
+  let text = String(value ?? '')
+  try {
+    const home = app.getPath('home')
+    if (home) text = text.replace(new RegExp(escapeRegExp(home), 'gi'), '%USERPROFILE%')
+  } catch { /* app paths may be unavailable during very early startup */ }
+
+  text = text.replace(/\brtmps?:\/\/[^\s"'<>]+/gi, '[REDACTED_STREAM_URL]')
+  text = text.replace(
+    /(["']?(?:wifiPassword|streamKey|stream_key|streamPassword|passphrase)["']?\s*[:=]\s*)(["'])(.*?)\2/gi,
+    '$1$2[REDACTED]$2'
+  )
+  text = text.replace(
+    /\b(wifiPassword|streamKey|stream_key|streamPassword|passphrase)\s*=\s*[^\s|,}]+/gi,
+    '$1=[REDACTED]'
+  )
+  return text
+}
+
 // A detached/dev Electron process can outlive the terminal that launched it.
 // Windows then closes the inherited stdout pipe; any later console.log emits
 // EPIPE. Without an error listener Node treats that stream error as uncaught
@@ -65,7 +92,7 @@ export function getDiagnosticLogPath(): string {
 
 export function diagnosticLog(scope: string, message: string): void {
   ensurePaths()
-  const line = `[${new Date().toISOString()}] [${scope}] ${message}`
+  const line = `[${new Date().toISOString()}] [${scope}] ${redactDiagnosticText(message)}`
   try {
     if (process.stdout?.writable && !process.stdout.destroyed) console.log(line)
   } catch { /* closed console pipe; continue with the persistent file */ }

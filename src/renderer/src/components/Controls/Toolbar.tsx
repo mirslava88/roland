@@ -10,6 +10,7 @@ import { AuxiliaryDisplaysModal } from '../AuxiliaryDisplays/AuxiliaryDisplaysMo
 import { ProgramSceneModal } from '../ProgramScene/ProgramSceneModal'
 import { acquireOutputTransition } from '../../output-transition-lock'
 import { canStartPptx } from '../../pptx-cache-readiness'
+import { resolveProgramSceneChannel } from '../../program-scene-channel'
 import type { ToolbarItemId } from '../../../../shared/toolbar'
 import {
   PROGRAM_SCENE_TRANSITION_DURATION_MS,
@@ -288,6 +289,83 @@ export function Toolbar(): JSX.Element {
     }
   }
 
+  const handleToggleProgramScene = async (): Promise<void> => {
+    const initial = useAppStore.getState()
+    if (initial.programSnapshot) {
+      window.dispatchEvent(new CustomEvent('close-program-output'))
+      return
+    }
+
+    // A Stream Deck scene command must wrap the source that is really on air.
+    // The draft may still remember a different preview channel from an earlier
+    // edit; only use it when there is no committed live channel.
+    const channelToTake = resolveProgramSceneChannel({
+      liveChannel: initial.liveChannel,
+      sceneContentChannelId: initial.programScene.contentChannelId,
+      selectedChannel: initial.selectedChannel,
+      channels: initial.channels
+    })
+    const channelFile = channelToTake ? initial.channels[channelToTake]?.file : null
+    if (channelToTake && channelFile && (
+      initial.liveChannel !== channelToTake || initial.activeFile?.path !== channelFile.path
+    )) {
+      await new Promise<void>((resolve) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const listener = (event: Event): void => {
+          const detail = (event as CustomEvent<{ channelId?: string }>).detail
+          if (detail?.channelId !== channelToTake) return
+          window.removeEventListener('take-channel-completed', listener)
+          if (timeout) clearTimeout(timeout)
+          resolve()
+        }
+        window.addEventListener('take-channel-completed', listener)
+        timeout = setTimeout(() => {
+          window.removeEventListener('take-channel-completed', listener)
+          resolve()
+        }, 30_000)
+        window.dispatchEvent(new CustomEvent('take-channel', { detail: channelToTake }))
+      })
+      const committed = useAppStore.getState()
+      if (committed.liveChannel !== channelToTake || committed.activeFile?.path !== channelFile.path) {
+        window.api.dbgLog(`Stream Deck scene start cancelled: channel ${channelToTake} was not committed`)
+        return
+      }
+    }
+
+    const state = useAppStore.getState()
+    state.setProgramScene({ enabled: true })
+    if (!state.activeFile && !state.isPresentationWindowOpen) {
+      const programDisplayId = connectedProgramDisplayId(state)
+      if (programDisplayId !== null) {
+        await window.api.openPresentationWindow(programDisplayId)
+        state.setPresentationWindowOpen(true)
+        window.api.setActiveContentType('backdrop')
+      } else if (state.internalProgramOutputActive) {
+        await window.api.prepareInternalProgramOutput()
+        state.setPresentationWindowOpen(true)
+        window.api.setActiveContentType('backdrop')
+      }
+    }
+    const revision = useAppStore.getState().publishProgramSnapshot(channelToTake)
+    window.api.dbgLog(`Stream Deck scene published revision=${revision} channel=${channelToTake ?? 'none'}`)
+  }
+
+  useEffect(() => {
+    const toggleScene = (): void => { void handleToggleProgramScene() }
+    const setSceneViewMode = (event: Event): void => {
+      const mode = (event as CustomEvent<ProgramSceneViewMode>).detail
+      if (mode !== 'content' && mode !== 'participant' && mode !== 'both') return
+      if (!useAppStore.getState().programSnapshot) return
+      void handleProgramSceneViewMode(mode)
+    }
+    window.addEventListener('pdm-toggle-program-scene', toggleScene)
+    window.addEventListener('pdm-program-scene-view-mode', setSceneViewMode)
+    return () => {
+      window.removeEventListener('pdm-toggle-program-scene', toggleScene)
+      window.removeEventListener('pdm-program-scene-view-mode', setSceneViewMode)
+    }
+  })
+
   const handleTogglePresentation = async (): Promise<void> => {
     if (isOutputActive) {
       if (outputCloseInFlightRef.current) return
@@ -450,8 +528,15 @@ export function Toolbar(): JSX.Element {
     const closeProgramOutput = (): void => {
       if (isOutputActive) void handleTogglePresentation()
     }
+    const toggleProgramOutput = (): void => {
+      void handleTogglePresentation()
+    }
     window.addEventListener('close-program-output', closeProgramOutput)
-    return () => window.removeEventListener('close-program-output', closeProgramOutput)
+    window.addEventListener('pdm-toggle-program-output', toggleProgramOutput)
+    return () => {
+      window.removeEventListener('close-program-output', closeProgramOutput)
+      window.removeEventListener('pdm-toggle-program-output', toggleProgramOutput)
+    }
   })
 
   const handleSelectBackdrop = async (): Promise<void> => {

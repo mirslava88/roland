@@ -163,7 +163,7 @@ export function SceneTimerPreviewLayer({
           event.preventDefault()
           event.stopPropagation()
         }}
-        title={interactive ? 'Перетащите таймер; колесо мыши меняет размер' : undefined}
+        title={interactive ? 'Перетяните таймер; колесо мыши меняет размер' : undefined}
       >
         {formatTime(remaining)}
       </div>

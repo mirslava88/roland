@@ -1925,7 +1925,7 @@ export const useAppStore = create<AppState>()(persist(
         viewMode: 'both',
         mediaLayersVisible: false
       },
-      qrOverlay: { ...state.qrOverlay, enabled: false },
+      qrOverlay: { ...state.qrOverlay, enabled: false, wifiPassword: '' },
       slidePositions: state.slidePositions,
       selectedDisplayId: state.selectedDisplayId,
       displayAssignments: state.displayAssignments,

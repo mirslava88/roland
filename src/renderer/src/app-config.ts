@@ -581,7 +581,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
     informationMedia: serializableInformationMedia(state.informationMedia),
     captureSources,
     programScene: { ...state.programScene, enabled: false, mediaLayersVisible: false },
-    qrOverlay: { ...state.qrOverlay, enabled: false },
+    qrOverlay: { ...state.qrOverlay, enabled: false, wifiPassword: '' },
     slidePositions,
     input: {
       globalHookEnabled: state.globalHookEnabled,

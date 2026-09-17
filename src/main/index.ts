@@ -17,8 +17,7 @@ import { Readable } from 'stream'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles, stopPptxCacheJobs, clearPptxDiskCaches } from './ipc-handlers'
 import { invalidateTaskbarVisibilityCache, showAllTaskbars } from './taskbar-manager'
-import { join } from 'path'
-import { pathToFileURL } from 'url'
+import { isAbsolute, join, resolve } from 'path'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 import { StreamingManager } from './streaming'
@@ -30,6 +29,11 @@ import {
   nativeWindowDaemon
 } from './native-window-daemon'
 import type { NativeTopLevelWindow } from './native-window-daemon'
+import { DirectStreamDeckManager } from './direct-stream-deck'
+import {
+  isTrustedWindowMainFrame,
+  matchesRendererPage
+} from './renderer-security'
 
 // Separate profiles let both editions be installed without overwriting settings.
 // Do this before Chromium sessions, diagnostics or streaming settings are opened.
@@ -63,8 +67,21 @@ interface NativeDesktopSourceRegistryEntry {
 }
 
 let controlWindow: BrowserWindow | null = null
+const directStreamDeckManager = new DirectStreamDeckManager(
+  (status) => {
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('direct-stream-deck-status', status)
+    }
+  },
+  (command) => {
+    if (controlWindow && !controlWindow.isDestroyed()) {
+      controlWindow.webContents.send('direct-stream-deck-command', command)
+    }
+  }
+)
 let streamingManager: StreamingManager | null = null
 let presentationWindow: BrowserWindow | null = null
+const outputReadablePaths = new Map<number, Set<string>>()
 const auxiliaryWindows = new Map<number, {
   role: AuxiliaryWindowRole
   window: BrowserWindow
@@ -230,9 +247,36 @@ function sendToAuxiliaryRole(
   roleMessages.set(channel, args)
   for (const entry of auxiliaryWindows.values()) {
     if (entry.role === role && !entry.window.isDestroyed()) {
+      authorizeOutputFilePaths(entry.window.webContents.id, args)
       entry.window.webContents.send(channel, ...args)
     }
   }
+}
+
+function normalizedOutputPath(filePath: string): string {
+  return resolve(filePath).toLowerCase()
+}
+
+function authorizeOutputFilePaths(contentsId: number, payload: unknown): void {
+  const paths = outputReadablePaths.get(contentsId) ?? new Set<string>()
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 6 || paths.size >= 2000 || value === null || value === undefined) return
+    if (typeof value === 'string') {
+      if (value.length <= 32_768 && isAbsolute(value)) paths.add(normalizedOutputPath(value))
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value.slice(0, 2000)) visit(entry, depth + 1)
+      return
+    }
+    if (typeof value === 'object') {
+      for (const entry of Object.values(value as Record<string, unknown>).slice(0, 2000)) {
+        visit(entry, depth + 1)
+      }
+    }
+  }
+  visit(payload, 0)
+  outputReadablePaths.set(contentsId, paths)
 }
 
 async function armProgramMirrorHold(
@@ -715,9 +759,7 @@ function startOverlayZOrderGuard(): void {
 
 ipcMain.on('presentation-ready', (event) => {
   if (
-    !presentationWindow ||
-    presentationWindow.isDestroyed() ||
-    event.sender.id !== presentationWindow.webContents.id
+    !isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html')
   ) return
 
   presentationWindowReady = true
@@ -749,6 +791,7 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
   presentationDisplayId = display.id
   presentationWindowReady = false
   const win = createPresentationWindow(display)
+  const presentationConsumerId = win.webContents.id
   // Keep the 4K native surface alive. On the affected PC a hidden window
   // takes 5–6 seconds to reactivate even when its renderer is already loaded.
   // A fully transparent Windows HWND still receives mouse input unless told
@@ -757,6 +800,7 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
   win.setIgnoreMouseEvents(true)
   win.setOpacity(0)
   win.on('closed', () => {
+    outputReadablePaths.delete(presentationConsumerId)
     if (presentationWindow !== win) return
     console.log(`[MAIN ${Date.now()}] presentation-window: closed`)
     presentationWindow = null
@@ -1037,6 +1081,42 @@ async function nativeWindowAppIcon(window: NativeTopLevelWindow): Promise<string
 function createWindows(): void {
   controlWindow = createControlWindow()
   const thisControlWindow = controlWindow
+  type InvokeHandler = (event: Electron.IpcMainInvokeEvent, ...args: any[]) => any
+  type EventHandler = (event: Electron.IpcMainEvent, ...args: any[]) => void
+  const trustedControlEvent = (event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean =>
+    isTrustedWindowMainFrame(event, thisControlWindow, 'index.html')
+  const handleControl = (channel: string, handler: InvokeHandler): void => {
+    ipcMain.handle(channel, (event, ...args) => {
+      if (!trustedControlEvent(event)) {
+        diagnosticLog('security', `blocked IPC channel=${channel} wc=${event.sender.id}`)
+        throw new Error('Недопустимый источник команды.')
+      }
+      return handler(event, ...args)
+    })
+  }
+  const onControl = (channel: string, handler: EventHandler): void => {
+    ipcMain.on(channel, (event, ...args) => {
+      if (!trustedControlEvent(event)) {
+        diagnosticLog('security', `blocked IPC channel=${channel} wc=${event.sender.id}`)
+        return
+      }
+      handler(event, ...args)
+    })
+  }
+  const isTrustedOutputInvoke = (
+    event: Electron.IpcMainInvokeEvent,
+    channel: string,
+    args: unknown[]
+  ): boolean => {
+    const trustedWindow = isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html') ||
+      [...auxiliaryWindows.values()].some((entry) => (
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
+      ))
+    if (!trustedWindow || channel !== 'render-pdf-page') return false
+    const filePath = args[0]
+    return typeof filePath === 'string' && isAbsolute(filePath) &&
+      outputReadablePaths.get(event.sender.id)?.has(normalizedOutputPath(filePath)) === true
+  }
   let allowControlWindowClose = false
   let closeConfirmationOpen = false
   registerIpcHandlers(controlWindow, () => presentationWindow, () => {
@@ -1045,7 +1125,7 @@ function createWindows(): void {
     overlaySafetyReady = false
     beginOverlayOperation()
     diagnosticLog('window', 'PowerPoint safety cover unlocked after verified output commit; awaiting normal reveal')
-  })
+  }, isTrustedOutputInvoke)
 
   const discardPreparedWorkspaceRecovery = async (): Promise<void> => {
     if (thisControlWindow.isDestroyed()) return
@@ -1082,7 +1162,7 @@ function createWindows(): void {
     }
   }
 
-  ipcMain.handle('open-auxiliary-window', async (
+  handleControl('open-auxiliary-window', async (
     _event,
     role: AuxiliaryWindowRole,
     displayId: number
@@ -1111,6 +1191,7 @@ function createWindows(): void {
       auxiliaryWindows.set(target.id, { role, window: win })
       const auxiliaryConsumerId = win.webContents.id
       win.webContents.once('destroyed', () => {
+        outputReadablePaths.delete(auxiliaryConsumerId)
         programMirrorHolds.delete(auxiliaryConsumerId)
         programMirrorHoldIntents.delete(auxiliaryConsumerId)
         void releaseBrowserFullscreenWindows(undefined, false, auxiliaryConsumerId)
@@ -1156,6 +1237,7 @@ function createWindows(): void {
       return { success: false, error: 'Окно дисплея было закрыто во время запуска' }
     }
     for (const [channel, args] of auxiliaryLastMessages.get(role) ?? []) {
+      authorizeOutputFilePaths(win.webContents.id, args)
       win.webContents.send(channel, ...args)
     }
     // A fullscreen BrowserWindow cannot be reliably moved with setBounds on
@@ -1185,7 +1267,7 @@ function createWindows(): void {
     return { success: true }
   })
 
-  ipcMain.handle('close-auxiliary-window', (
+  handleControl('close-auxiliary-window', (
     _event,
     role: AuxiliaryWindowRole,
     displayId?: number
@@ -1194,7 +1276,7 @@ function createWindows(): void {
     closeAuxiliaryWindow(role, displayId)
   })
 
-  ipcMain.on('send-to-auxiliary', (
+  onControl('send-to-auxiliary', (
     _event,
     role: AuxiliaryWindowRole,
     channel: string,
@@ -1203,7 +1285,7 @@ function createWindows(): void {
     sendToAuxiliaryRole(role, channel, ...args)
   })
 
-  ipcMain.handle('freeze-program-mirrors', async (
+  handleControl('freeze-program-mirrors', async (
     event,
     transitionId: string
   ): Promise<{ armed: number }> => {
@@ -1252,7 +1334,7 @@ function createWindows(): void {
     return { armed }
   })
 
-  ipcMain.handle('complete-program-mirror-transition', async (
+  handleControl('complete-program-mirror-transition', async (
     event,
     transitionId: string
   ): Promise<{ released: number; remaining: number }> => {
@@ -1311,9 +1393,7 @@ function createWindows(): void {
     }
     const trustedMirror = [...auxiliaryWindows.values()].some((entry) => (
       entry.role === 'mirror' &&
-      !entry.window.isDestroyed() &&
-      !entry.window.webContents.isDestroyed() &&
-      entry.window.webContents.id === event.sender.id
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
     ))
     if (!trustedMirror) return false
     return removeProgramMirrorHold(event.sender.id, transitionId)
@@ -1325,8 +1405,7 @@ function createWindows(): void {
   ): Promise<string | null> => {
     const trustedMirror = [...auxiliaryWindows.values()].some((entry) => (
       entry.role === 'mirror' &&
-      !entry.window.isDestroyed() &&
-      entry.window.webContents.id === event.sender.id
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
     ))
     if (!trustedMirror) {
       diagnosticLog('display', `mirror source denied wc=${event.sender.id}`)
@@ -1436,13 +1515,20 @@ function createWindows(): void {
   // diagnostics survive process exit and can be read after the session.
   const dbgLogFile = getDiagnosticLogPath()
   console.log(`[MAIN ${Date.now()}] dbg-log file: ${dbgLogFile}`)
-  ipcMain.on('dbg-log', (_event, msg: string) => {
-    const line = `[R ${Date.now()}] ${msg}`
+  ipcMain.on('dbg-log', (event, msg: string) => {
+    const trusted = trustedControlEvent(event) ||
+      isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html') ||
+      [...auxiliaryWindows.values()].some((entry) => (
+        isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
+      ))
+    if (!trusted || typeof msg !== 'string') return
+    const safeMessage = msg.replace(/[\r\n]+/g, ' ').slice(0, 2000)
+    const line = `[R ${Date.now()}] ${safeMessage}`
     console.log(line)
-    diagnosticLog('renderer', msg)
+    diagnosticLog('renderer', safeMessage)
   })
 
-  ipcMain.handle('prepare-internal-program-output', async (event) => {
+  handleControl('prepare-internal-program-output', async (event) => {
     if (!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) {
       throw new Error('Недопустимый источник команды.')
     }
@@ -1457,7 +1543,7 @@ function createWindows(): void {
     diagnosticLog('window', 'internal program output prepared (transparent, capture-only)')
   })
 
-  ipcMain.handle('open-presentation-window', async (
+  handleControl('open-presentation-window', async (
     _event,
     displayId?: number,
     behindPowerPoint = false
@@ -1561,7 +1647,7 @@ function createWindows(): void {
   // it is parked. PDF/video must be moved to that same display before their
   // next frame is prepared, otherwise PowerPoint and Chromium diverge onto two
   // different monitors.
-  ipcMain.handle('place-presentation-window', async (_event, displayId?: number): Promise<boolean> => {
+  handleControl('place-presentation-window', async (_event, displayId?: number): Promise<boolean> => {
     if (!presentationWindow || presentationWindow.isDestroyed()) return false
     const win = presentationWindow
 
@@ -1704,7 +1790,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('raise-presentation-window', (): boolean => {
+  handleControl('raise-presentation-window', (): boolean => {
     if (!presentationWindow || presentationWindow.isDestroyed()) return false
     try {
       if (!presentationWindow.isVisible()) presentationWindow.showInactive()
@@ -1719,7 +1805,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('close-presentation-window', () => {
+  handleControl('close-presentation-window', () => {
     presentationWindowRequestedVisible = false
     // This path bypasses renderer `send-to-presentation`, so invalidate any
     // prewarm command waiting for presentation-ready here as well. Otherwise
@@ -1743,7 +1829,7 @@ function createWindows(): void {
     scheduleMemoryReleaseSnapshots('presentation-window-parked')
   })
 
-  ipcMain.handle('show-overlay', async (
+  handleControl('show-overlay', async (
     _event,
     displayId?: number,
     freezeImageDataUrl?: string,
@@ -1925,7 +2011,7 @@ function createWindows(): void {
 
   // Grab a screenshot of the target display so the renderer can show it
   // as a "freeze-frame" inside the overlay during a channel switch.
-  ipcMain.handle('capture-display', async (_event, displayId?: number): Promise<string | null> => {
+  handleControl('capture-display', async (_event, displayId?: number): Promise<string | null> => {
     try {
       if (displayId === undefined && streamingManager?.isInternalProgramOutputActive()) {
         if (!presentationWindow || presentationWindow.isDestroyed()) return null
@@ -1959,7 +2045,7 @@ function createWindows(): void {
   // Enumerate program windows and displays only for the trusted operator
   // window. The selected source id is later opened by the already-sandboxed
   // presentation renderer, which owns all long-lived live capture streams.
-  ipcMain.handle('get-desktop-capture-sources', async (
+  handleControl('get-desktop-capture-sources', async (
     event,
     requestedTypes?: Array<'window' | 'screen'>,
     excludedDisplayId?: number
@@ -2123,12 +2209,11 @@ function createWindows(): void {
   ): Promise<{ success: boolean; source?: DesktopCaptureSourceInfo; error?: string }> => {
     const isInformationDisplay = [...auxiliaryWindows.values()].some((entry) => (
       entry.role === 'info' &&
-      !entry.window.isDestroyed() &&
-      entry.window.webContents.id === event.sender.id
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
     ))
+    const isControlDisplay = trustedControlEvent(event)
     if (
-      ((!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) &&
-        !isInformationDisplay) ||
+      (!isControlDisplay && !isInformationDisplay) ||
       typeof sourceKey !== 'string' ||
       sourceKey.length > 200
     ) {
@@ -2349,12 +2434,10 @@ function createWindows(): void {
   ): Promise<{ released: number; remaining: number }> => {
     const isInformationDisplay = [...auxiliaryWindows.values()].some((entry) => (
       entry.role === 'info' &&
-      !entry.window.isDestroyed() &&
-      entry.window.webContents.id === event.sender.id
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
     ))
     if (
-      (!controlWindow || controlWindow.isDestroyed() ||
-        event.sender.id !== controlWindow.webContents.id) &&
+      !trustedControlEvent(event) &&
       !isInformationDisplay
     ) {
       return { released: 0, remaining: fullscreenBrowserWindows.size }
@@ -2375,7 +2458,7 @@ function createWindows(): void {
   // using the same Chromium surface that capture-and-swap-overlay captures at
   // the end of the switch. Keeping both boundary frames in the same pixel
   // pipeline avoids the pdf.js-vs-Windows.Data.Pdf visual jump.
-  ipcMain.handle('capture-presentation-frame', async (): Promise<string | null> => {
+  handleControl('capture-presentation-frame', async (): Promise<string | null> => {
     if (!presentationWindow || presentationWindow.isDestroyed()) return null
     const t0 = Date.now()
     try {
@@ -2400,7 +2483,7 @@ function createWindows(): void {
   // The img element stays visible while the new src decodes; browser paints
   // the old image until the new bitmap is ready, then swaps atomically on
   // the next frame. No opacity toggle = no DWM flicker window.
-  ipcMain.handle('swap-overlay-image', async (_event, imagePath: string) => {
+  handleControl('swap-overlay-image', async (_event, imagePath: string) => {
     if (overlaySafetyLocked) return
     if (!overlayWindow || overlayWindow.isDestroyed()) return
     const targetOverlay = overlayWindow
@@ -2437,7 +2520,7 @@ function createWindows(): void {
   // TAKE and the first navigation click. Stop the aggressive 4ms z-order
   // guard once the target bitmap is installed; the window remains TOPMOST,
   // while other intentional overlays (notably the timer) can still surface.
-  ipcMain.handle('pin-overlay', async () => {
+  handleControl('pin-overlay', async () => {
     if (overlaySafetyLocked) return
     if (!overlayWindow || overlayWindow.isDestroyed()) return
     const targetOverlay = overlayWindow
@@ -2471,7 +2554,7 @@ function createWindows(): void {
   // hide-overlay превращается в «убрать идентичный слой поверх идентичного»,
   // любая DWM compositor гонка невидима. Паттерн зеркалит PPTX→PPTX где
   // snapshotSlideshow + swap даёт pixel-match и работает бесшовно.
-  ipcMain.handle('capture-and-swap-overlay', async (): Promise<boolean> => {
+  handleControl('capture-and-swap-overlay', async (): Promise<boolean> => {
     if (overlaySafetyLocked) return false
     if (!presentationWindow || presentationWindow.isDestroyed()) {
       console.log(`[MAIN ${Date.now()}] capture-and-swap-overlay: no presentation window, skip`)
@@ -2518,7 +2601,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('hide-overlay', async () => {
+  handleControl('hide-overlay', async () => {
     if (overlaySafetyLocked) {
       diagnosticLog('window', 'hide-overlay ignored: PowerPoint safety cover is locked')
       return false
@@ -2579,7 +2662,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.on('timer-overlay-update', (_event, data: {
+  onControl('timer-overlay-update', (_event, data: {
     remaining: number
     running: boolean
     duration: number
@@ -2609,9 +2692,9 @@ function createWindows(): void {
     broadcastWpfTimerToMirrors()
   })
 
-  ipcMain.handle('get-timer-overlay-layout', () => readWpfTimerLayout())
+  handleControl('get-timer-overlay-layout', () => readWpfTimerLayout())
 
-  ipcMain.handle('show-timer-overlay', async (_event, displayId?: number) => {
+  handleControl('show-timer-overlay', async (_event, displayId?: number) => {
     timerActive = true
     const displays = screen.getAllDisplays()
     const targetDisplay = typeof displayId === 'number'
@@ -2628,13 +2711,13 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('hide-timer-overlay', () => {
+  handleControl('hide-timer-overlay', () => {
     timerActive = false
     stopWpfTimerMirrorSync()
     hideWpfTimer()
   })
 
-  ipcMain.on('timer-play-sound', (_event, _type: string, filePath: string) => {
+  onControl('timer-play-sound', (_event, _type: string, filePath: string) => {
     const url = 'file:///' + filePath.replace(/\\/g, '/')
     const js = `(() => { const a = new Audio(${JSON.stringify(url)}); a.play().catch(() => {}); })()`
     // Play on control window (always exists) — presentation window may be closed for PPTX
@@ -2653,7 +2736,7 @@ function createWindows(): void {
     return musicPlayerWindow
   }
 
-  ipcMain.handle('select-music-files', async () => {
+  handleControl('select-music-files', async () => {
     const result = await dialog.showOpenDialog(controlWindow!, {
       properties: ['openFile', 'multiSelections'],
       title: 'Выберите музыкальные файлы',
@@ -2663,7 +2746,7 @@ function createWindows(): void {
     return result.filePaths
   })
 
-  ipcMain.handle('select-music-folder', async () => {
+  handleControl('select-music-folder', async () => {
     const result = await dialog.showOpenDialog(controlWindow!, {
       properties: ['openDirectory'],
       title: 'Выберите папку с музыкой'
@@ -2684,7 +2767,7 @@ function createWindows(): void {
     return files.length > 0 ? files : null
   })
 
-  ipcMain.handle('music-set-playlist', async (_event, files: string[], startIndex?: number, autoplay?: boolean) => {
+  handleControl('music-set-playlist', async (_event, files: string[], startIndex?: number, autoplay?: boolean) => {
     const win = ensureMusicWindow()
     // Number()/Boolean() каст защищает от JS-injection если renderer прислал
     // строку вроде "0); alert(1); (" вместо числа (audit 2026-04-20 F-005).
@@ -2693,61 +2776,61 @@ function createWindows(): void {
     )
   })
 
-  ipcMain.handle('music-play', async () => {
+  handleControl('music-play', async () => {
     const win = ensureMusicWindow()
     await win.webContents.executeJavaScript('window._play()')
   })
 
-  ipcMain.handle('music-pause', async () => {
+  handleControl('music-pause', async () => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript('window._pause()')
     }
   })
 
-  ipcMain.handle('music-stop', async () => {
+  handleControl('music-stop', async () => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript('window._stop()')
     }
   })
 
-  ipcMain.handle('music-next', async () => {
+  handleControl('music-next', async () => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript('window._next()')
     }
   })
 
-  ipcMain.handle('music-prev', async () => {
+  handleControl('music-prev', async () => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript('window._prev()')
     }
   })
 
-  ipcMain.handle('music-set-loop-track', async (_event, value: boolean) => {
+  handleControl('music-set-loop-track', async (_event, value: boolean) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       // Boolean() каст: см. audit F-005. Renderer может прислать строку.
       await musicPlayerWindow.webContents.executeJavaScript(`window._setLoopTrack(${Boolean(value)})`)
     }
   })
 
-  ipcMain.handle('music-set-loop-playlist', async (_event, value: boolean) => {
+  handleControl('music-set-loop-playlist', async (_event, value: boolean) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript(`window._setLoopPlaylist(${Boolean(value)})`)
     }
   })
 
-  ipcMain.handle('music-set-volume', async (_event, value: number) => {
+  handleControl('music-set-volume', async (_event, value: number) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript(`window._setVolume(${Number(value) || 0})`)
     }
   })
 
-  ipcMain.handle('music-seek', async (_event, time: number) => {
+  handleControl('music-seek', async (_event, time: number) => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       await musicPlayerWindow.webContents.executeJavaScript(`window._seek(${Number(time) || 0})`)
     }
   })
 
-  ipcMain.handle('music-get-state', async () => {
+  handleControl('music-get-state', async () => {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) {
       return await musicPlayerWindow.webContents.executeJavaScript('window._getState()')
     }
@@ -2757,7 +2840,7 @@ function createWindows(): void {
   // --- Video playlist: file dialogs only. Playback happens in the presentation
   // window via existing load-content + VideoViewer flow (control-side state
   // in useAppStore). ---
-  ipcMain.handle('select-video-files', async () => {
+  handleControl('select-video-files', async () => {
     const result = await dialog.showOpenDialog(controlWindow!, {
       properties: ['openFile', 'multiSelections'],
       title: 'Выберите видеофайлы',
@@ -2767,7 +2850,7 @@ function createWindows(): void {
     return result.filePaths
   })
 
-  ipcMain.handle('select-video-folder', async () => {
+  handleControl('select-video-folder', async () => {
     const result = await dialog.showOpenDialog(controlWindow!, {
       properties: ['openDirectory'],
       title: 'Выберите папку с видео'
@@ -2787,7 +2870,7 @@ function createWindows(): void {
     return files.length > 0 ? files : null
   })
 
-  ipcMain.handle('get-displays', () => {
+  handleControl('get-displays', () => {
     const displays = screen.getAllDisplays()
     const primary = screen.getPrimaryDisplay()
     return displays.map((d) => ({
@@ -2806,6 +2889,10 @@ function createWindows(): void {
   // Windows stretches it to 3840px. Resolve it in the main process where
   // Electron exposes authoritative per-monitor metrics.
   ipcMain.handle('get-window-display-scale-factor', (event) => {
+    if (
+      !trustedControlEvent(event) &&
+      !isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html')
+    ) return 1
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return 1
     const display = screen.getDisplayMatching(win.getBounds())
@@ -3046,13 +3133,13 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('open-display-settings', () => {
+  handleControl('open-display-settings', () => {
     if (process.platform === 'win32') {
       shell.openExternal('ms-settings:display')
     }
   })
 
-  ipcMain.handle('set-display-mode', (_event, mode: 'internal' | 'clone' | 'extend' | 'external') => {
+  handleControl('set-display-mode', (_event, mode: 'internal' | 'clone' | 'extend' | 'external') => {
     if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
     const flag = { internal: '/internal', clone: '/clone', extend: '/extend', external: '/external' }[mode]
     if (!flag) return { success: false, error: 'Invalid mode' }
@@ -3064,7 +3151,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('set-display-resolution', async (_event, deviceName: string, width: number, height: number, frequency?: number) => {
+  handleControl('set-display-resolution', async (_event, deviceName: string, width: number, height: number, frequency?: number) => {
     if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
     try {
       const srScript = scriptPath('set-resolution.ps1')
@@ -3091,7 +3178,7 @@ function createWindows(): void {
     }
   })
 
-  ipcMain.handle('get-display-modes', async () => {
+  handleControl('get-display-modes', async () => {
     if (process.platform !== 'win32') return []
     try {
       const gdmScript = scriptPath('get-display-modes.ps1')
@@ -3112,12 +3199,12 @@ function createWindows(): void {
     } catch { return [] }
   })
 
-  ipcMain.on('set-active-content-type', (_event, type: string) => {
+  onControl('set-active-content-type', (_event, type: string) => {
     activeContentType = type
     if (type && type !== 'backdrop') cancelMemoryReleaseSnapshots()
   })
 
-  ipcMain.on('send-to-presentation', (_event, channel: string, ...args: unknown[]) => {
+  onControl('send-to-presentation', (_event, channel: string, ...args: unknown[]) => {
     if (channel === 'load-content' && args[0]) {
       activeContentType = (args[0] as { type: string }).type
       if (activeContentType === 'backdrop') {
@@ -3165,16 +3252,47 @@ function createWindows(): void {
           diagnosticLog('pdf-cache', `skipped stale prewarm file=${filePath}`)
           return
         }
+        authorizeOutputFilePaths(target.webContents.id, args)
         target.webContents.send(channel, ...args)
       })
       return
     }
     if (presentationWindow && !presentationWindow.isDestroyed()) {
+      authorizeOutputFilePaths(presentationWindow.webContents.id, args)
       presentationWindow.webContents.send(channel, ...args)
     }
   })
 
-  ipcMain.on('send-to-control', (_event, channel: string, ...args: unknown[]) => {
+  ipcMain.on('send-to-control', (event, channel: string, ...args: unknown[]) => {
+    const presentationChannels = new Set([
+      'presentation-content-ready', 'presentation-content-committed',
+      'presentation-content-prepared', 'presentation-content-error',
+      'pdf-channel-cache-status', 'presentation-content-suspended',
+      'presentation-content-cleared', 'program-scene-applied',
+      'program-scene-ready', 'content-zoom-ready', 'broadcast-titles-ready',
+      'program-scene-powerpoint-hold-ready', 'program-scene-powerpoint-hold-error',
+      'slide-info', 'request-close-presentation',
+      'video-state', 'video-time', 'video-ended',
+      'capture-source-state', 'capture-preview-frame',
+      'capture-devices-response', 'capture-devices-changed', 'capture-hub-ready',
+      'program-scene-audio-status', 'program-scene-audio-ready'
+    ])
+    const auxiliaryChannels: Partial<Record<AuxiliaryWindowRole, Set<string>>> = {
+      speaker: new Set(['speaker-state-ready']),
+      'event-timer': new Set(['event-timer-ready']),
+      info: new Set(['information-video-state', 'information-video-ended', 'information-state-ready']),
+      mirror: new Set(['program-mirror-state-ready', 'program-mirror-ready'])
+    }
+    const trustedPresentation = isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html') &&
+      presentationChannels.has(channel)
+    const trustedAuxiliary = [...auxiliaryWindows.values()].some((entry) => (
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html') &&
+      auxiliaryChannels[entry.role]?.has(channel)
+    ))
+    if (!trustedPresentation && !trustedAuxiliary) {
+      diagnosticLog('security', `blocked IPC channel=send-to-control/${String(channel).slice(0, 80)} wc=${event.sender.id}`)
+      return
+    }
     if (controlWindow && !controlWindow.isDestroyed()) {
       controlWindow.webContents.send(channel, ...args)
     }
@@ -3220,7 +3338,7 @@ function createWindows(): void {
   // Register global shortcuts by default
   registerNavigationShortcuts()
 
-  ipcMain.handle('toggle-global-hook', (_event, enable: boolean) => {
+  handleControl('toggle-global-hook', (_event, enable: boolean) => {
     if (enable && !globalHookEnabled) {
       registerNavigationShortcuts()
       globalHookEnabled = true
@@ -3278,20 +3396,9 @@ function parseByteRange(value: string, size: number): { start: number; end: numb
   return { start, end: Math.min(end, size - 1) }
 }
 
-// Navigation hardening: deny any top-level navigation away from the app's own
-// origin (file:// in prod, the dev-server URL, or our self-built data: pages),
-// and deny window.open from non-control windows. The app never navigates
-// top-level or opens child windows, so this only blocks a hijacked renderer
-// from pivoting to a remote origin while still holding the privileged preload.
-function isAllowedNavigation(url: string): boolean {
-  const devUrl = process.env['ELECTRON_RENDERER_URL']
-  if (devUrl && url.startsWith(devUrl)) return true
-  // data: is intentionally NOT a permitted navigation target: the overlay/music
-  // windows load their data: page as the INITIAL load (not via will-navigate), so
-  // denying data: here closes an XSS-via-navigation vector without breaking them.
-  return url.startsWith('file://')
-}
-
+// Navigation hardening is installed for every webContents below. PDM never
+// performs top-level navigation after its initial load, so every later
+// navigation/redirect can be denied instead of relying on scheme prefixes.
 app.whenReady().then(() => {
   initDiagnosticLog()
   diagnosticLog('session', `crashDumps=${app.getPath('crashDumps')} localOnly=true`)
@@ -3300,10 +3407,31 @@ app.whenReady().then(() => {
     diagnosticLog('lifecycle', 'Windows shutdown requested')
   })
 
+  ipcMain.handle('read-output-file', async (event, filePath: unknown) => {
+    const trustedPresentation = isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html')
+    const trustedAuxiliary = [...auxiliaryWindows.values()].some((entry) => (
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
+    ))
+    if (!trustedPresentation && !trustedAuxiliary) throw new Error('Недопустимый источник команды.')
+    if (typeof filePath !== 'string' || filePath.length < 1 || filePath.length > 32_768 || !isAbsolute(filePath)) {
+      throw new Error('Некорректный путь к файлу.')
+    }
+    const allowed = outputReadablePaths.get(event.sender.id)
+    if (!allowed?.has(normalizedOutputPath(filePath))) {
+      diagnosticLog('security', `blocked output file read wc=${event.sender.id}`)
+      throw new Error('Файл не был передан этому экрану.')
+    }
+    const info = await stat(filePath)
+    if (!info.isFile() || info.size > 1024 * 1024 * 1024) {
+      throw new Error('Файл недоступен или превышает безопасный размер.')
+    }
+    const buffer = await readFile(filePath)
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+  })
+
   ipcMain.on('qr-overlay-update', async (event, raw: unknown) => {
     if (
-      !controlWindow || controlWindow.isDestroyed() ||
-      event.sender.id !== controlWindow.webContents.id
+      !isTrustedWindowMainFrame(event, controlWindow, 'index.html')
     ) return
     const payload = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
     const visible = payload.visible === true
@@ -3458,8 +3586,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('program-scene-media-overlay-update', async (event, raw: unknown) => {
     if (
-      !controlWindow || controlWindow.isDestroyed() ||
-      event.sender.id !== controlWindow.webContents.id
+      !isTrustedWindowMainFrame(event, controlWindow, 'index.html')
     ) return { success: false, error: 'Недопустимый источник команды.' }
 
     const payload = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
@@ -3611,30 +3738,11 @@ app.whenReady().then(() => {
   }))))
 
   const isPresentationRendererUrl = (url: string): boolean => {
-    try {
-      const current = new URL(url)
-      const devUrl = process.env['ELECTRON_RENDERER_URL']
-      if (devUrl) {
-        const expected = new URL(`${devUrl.replace(/\/$/, '')}/presentation.html`)
-        return current.origin === expected.origin && current.pathname === expected.pathname
-      }
-      return current.href === pathToFileURL(join(__dirname, '../renderer/presentation.html')).href
-    } catch {
-      return false
-    }
+    return matchesRendererPage(url, 'presentation.html')
   }
 
   const isAuxiliaryRendererUrl = (url: string): boolean => {
-    try {
-      const current = new URL(url)
-      const devUrl = process.env['ELECTRON_RENDERER_URL']
-      const expected = devUrl
-        ? new URL(`${devUrl.replace(/\/$/, '')}/auxiliary.html`)
-        : new URL(pathToFileURL(join(__dirname, '../renderer/auxiliary.html')).href)
-      return current.protocol === expected.protocol && current.pathname === expected.pathname
-    } catch {
-      return false
-    }
+    return matchesRendererPage(url, 'auxiliary.html')
   }
 
   const isTrustedMediaRequester = (contents: Electron.WebContents | null): boolean => {
@@ -3737,8 +3845,11 @@ app.whenReady().then(() => {
   })
 
   app.on('web-contents-created', (_e, contents) => {
-    contents.on('will-navigate', (e, url) => { if (!isAllowedNavigation(url)) e.preventDefault() })
-    contents.on('will-redirect', (e, url) => { if (!isAllowedNavigation(url)) e.preventDefault() })
+    // PDM has no legitimate top-level navigation after the initial load.
+    // Blocking all later navigation is stronger than a scheme/prefix allowlist:
+    // a preload-bearing window cannot pivot to another local file or UNC page.
+    contents.on('will-navigate', (event) => event.preventDefault())
+    contents.on('will-redirect', (event) => event.preventDefault())
     // Deny window.open by default. The control window installs its own handler
     // (with an http/https/mailto allow-list) that overrides this for itself.
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -3782,6 +3893,30 @@ app.whenReady().then(() => {
     )
   }
   createWindows()
+  ipcMain.handle('direct-stream-deck-list', (event) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return []
+    return directStreamDeckManager.listDevices()
+  })
+  ipcMain.handle('direct-stream-deck-status', (event) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return null
+    return directStreamDeckManager.getStatus()
+  })
+  ipcMain.handle('direct-stream-deck-configure', (event, config: unknown) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return null
+    return directStreamDeckManager.configure(config)
+  })
+  ipcMain.handle('direct-stream-deck-connect', async (event) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return null
+    return directStreamDeckManager.connect()
+  })
+  ipcMain.handle('direct-stream-deck-disconnect', async (event) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return null
+    return directStreamDeckManager.disconnect()
+  })
+  ipcMain.on('direct-stream-deck-keys', (event, states: unknown) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return
+    if (Array.isArray(states)) directStreamDeckManager.updateKeys(states)
+  })
   prewarmPresentationWindow()
   pptDaemon.warmup()
   nativeWindowDaemon.warmup()
@@ -3835,7 +3970,8 @@ app.on('before-quit', (event) => {
     // hide/show request. It is therefore guaranteed to run after an in-flight
     // hide, and all later hides become no-ops during shutdown.
     showAllTaskbars(true),
-    closeAllExternalFiles()
+    closeAllExternalFiles(),
+    directStreamDeckManager.shutdown()
   ])
     .then((results) => {
       if (results[0].status === 'rejected') {
@@ -3851,6 +3987,9 @@ app.on('before-quit', (event) => {
         diagnosticLog('shutdown', `External document cleanup failed: ${formatDiagnosticError(results[3].reason)}`)
       } else if (!results[3].value.success) {
         diagnosticLog('shutdown', `External document cleanup incomplete: ${results[3].value.error || 'unknown error'}`)
+      }
+      if (results[4].status === 'rejected') {
+        diagnosticLog('shutdown', `Stream Deck cleanup failed: ${formatDiagnosticError(results[4].reason)}`)
       }
     })
     .finally(() => {

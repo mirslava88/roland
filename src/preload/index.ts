@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { streamingApi } from './streaming-api'
+import type {
+  DirectStreamDeckConfig,
+  DirectStreamDeckDeviceInfo,
+  DirectStreamDeckKeyState,
+  DirectStreamDeckStatus
+} from '../shared/direct-stream-deck'
 
 interface DriveInfo {
   name: string
@@ -25,6 +31,27 @@ interface MusicState {
 const api = {
   ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
+  loadQrWifiPassword: (): Promise<string> => ipcRenderer.invoke('qr-wifi-password-load'),
+  saveQrWifiPassword: (password: string): Promise<boolean> =>
+    ipcRenderer.invoke('qr-wifi-password-save', password),
+
+  listDirectStreamDecks: (): Promise<DirectStreamDeckDeviceInfo[]> =>
+    ipcRenderer.invoke('direct-stream-deck-list'),
+
+  getDirectStreamDeckStatus: (): Promise<DirectStreamDeckStatus | null> =>
+    ipcRenderer.invoke('direct-stream-deck-status'),
+
+  configureDirectStreamDeck: (config: DirectStreamDeckConfig): Promise<DirectStreamDeckStatus | null> =>
+    ipcRenderer.invoke('direct-stream-deck-configure', config),
+
+  connectDirectStreamDeck: (): Promise<DirectStreamDeckStatus | null> =>
+    ipcRenderer.invoke('direct-stream-deck-connect'),
+
+  disconnectDirectStreamDeck: (): Promise<DirectStreamDeckStatus | null> =>
+    ipcRenderer.invoke('direct-stream-deck-disconnect'),
+
+  updateDirectStreamDeckKeys: (states: DirectStreamDeckKeyState[]): void =>
+    ipcRenderer.send('direct-stream-deck-keys', states),
 
   saveAppConfig: (content: string): Promise<{ success: boolean; canceled: boolean; path?: string; error?: string }> =>
     ipcRenderer.invoke('save-app-config', content),

@@ -80,13 +80,13 @@ export function Introduction({ children }: { children: ReactNode }): JSX.Element
           <button className="intro-welcome-close" aria-label="Закрыть знакомство" onClick={() => close('skipped')}>✕</button>
           <span className="intro-label">ДОБРО ПОЖАЛОВАТЬ В PDM</span>
           <h1>Подготовим ваш<br />первый показ</h1>
-          <p>Программа сама покажет, куда нажать и что перетащить. Выполните одно простое действие — и откроется следующая подсказка.</p>
+          <p>Программа по шагам покажет, как добавить презентацию, вывести её на экран и использовать основные возможности PDM.</p>
           <div className="intro-welcome-display"><span>▱ → ▱</span><div><strong>Перед настоящим показом подключите второй экран</strong><p>Это может быть телевизор, проектор или другой монитор. Если изображения на нём нет, нажмите клавиши Windows и P, затем выберите «Расширить».</p></div></div>
           <div className="intro-note">Обучение можно пройти и без второго экрана. Здесь можно нажимать всё без страха: ваши рабочие каналы останутся как были, а зрители ничего не увидят.</div>
           <div className="intro-welcome-actions"><button className="intro-primary" onClick={begin}>{step > 0 ? 'Продолжить обучение' : 'Пройти обучение'}</button><button onClick={() => close('skipped')}>Пропустить обучение</button></div>
           <small>Повторить знакомство: Настройки → Помощь → Обучение</small>
         </> : <>
-          <header className={`intro-interface-header${panelHint ? ' intro-interface-header-panel' : ''}`}><strong>Обучение PDM</strong><span>{panelHint || 'Настоящий интерфейс · Безопасное обучение · Эфир не включается'}</span><button onClick={() => close()} aria-label="Закрыть обучение">Продолжить позже ✕</button></header>
+          <header className={`intro-interface-header${panelHint ? ' intro-interface-header-panel' : ''}`}><strong>Обучение PDM</strong><span>{panelHint || 'Пошаговое знакомство с основными возможностями приложения'}</span><button onClick={() => close()} aria-label="Закрыть обучение">Продолжить позже ✕</button></header>
           {error ? <p className="intro-frame-error">{error}</p> : <iframe ref={frameRef} title="Интерактивное знакомство с интерфейсом PDM" src={src.href} sandbox="allow-scripts allow-same-origin" allow="camera 'none'; microphone 'none'; display-capture 'none'; autoplay 'none'" onError={() => setError('Не удалось открыть обучение. Закройте окно и попробуйте снова.')} />}
         </>}
       </div>

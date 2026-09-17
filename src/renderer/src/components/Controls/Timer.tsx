@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
-import { playTimerSound, TIMER_COMMAND_EVENT, type TimerCommand } from '../../timer-controls'
+import {
+  playTimerSound,
+  reduceTimerCommand,
+  TIMER_COMMAND_EVENT,
+  type TimerCommand
+} from '../../timer-controls'
 
 function formatTime(totalSeconds: number): string {
   const negative = totalSeconds < 0
@@ -269,65 +274,28 @@ export function Timer(): JSX.Element {
       const command = (event as CustomEvent<TimerCommand>).detail
       if (!command) return
       const state = useAppStore.getState()
-      if (command.type === 'apply-state') {
-        const duration = Math.max(0, Math.round(command.duration))
-        const remaining = Math.round(command.remaining)
-        if (duration <= 0) {
-          state.setTimerRunning(false)
-          state.setTimerDuration(0)
-          state.setTimerRemaining(0)
-          state.setTimerOutputState(false, null)
-          warnedRef.current = false
-          endedRef.current = false
-          return
-        }
-        state.setTimerDuration(duration)
-        state.setTimerRemaining(remaining)
-        state.setTimerRunning(command.running)
-        state.setTimerOutputState(true, 'scene')
-        warnedRef.current = remaining <= 60
-        endedRef.current = remaining <= 0
-        return
+      const current = {
+        duration: state.timerDuration,
+        remaining: state.timerRemaining,
+        running: state.timerRunning,
+        outputVisible: state.timerOutputVisible,
+        outputOwner: state.timerOutputOwner,
+        warned: warnedRef.current,
+        ended: endedRef.current
       }
-      if (command.type === 'set-duration') {
-        const seconds = Math.max(0, Math.round(command.seconds))
-        if (seconds <= 0) return
-        state.setTimerDuration(seconds)
-        warnedRef.current = false
-        endedRef.current = false
-        return
-      }
+      const next = reduceTimerCommand(current, command)
+      if (next === current) return
+      state.setTimerDuration(next.duration)
+      state.setTimerRemaining(next.remaining)
+      state.setTimerRunning(next.running)
+      state.setTimerOutputState(next.outputVisible, next.outputOwner)
+      warnedRef.current = next.warned
+      endedRef.current = next.ended
       if (command.type === 'start') {
-        const fresh = useAppStore.getState()
-        if (fresh.timerDuration <= 0) return
-        warnedRef.current = fresh.timerRemaining <= 60
-        endedRef.current = fresh.timerRemaining <= 0
-        fresh.setTimerRunning(true)
-        return
+        window.api.dbgLog(
+          `Timer: external command started countdown and enabled output owner=${next.outputOwner ?? 'toolbar'}`
+        )
       }
-      if (command.type === 'pause') {
-        state.setTimerRunning(false)
-        return
-      }
-      if (command.type === 'stop') {
-        state.setTimerRunning(false)
-        state.setTimerDuration(0)
-        state.setTimerRemaining(0)
-        state.setTimerOutputState(false, null)
-        warnedRef.current = false
-        endedRef.current = false
-        return
-      }
-      if (command.type === 'reset') {
-        state.resetTimer()
-        warnedRef.current = false
-        endedRef.current = false
-        return
-      }
-      state.addTimerMinutes(command.minutes)
-      const nextRemaining = useAppStore.getState().timerRemaining
-      if (nextRemaining > 0) endedRef.current = false
-      if (nextRemaining > 60) warnedRef.current = false
     }
     window.addEventListener(TIMER_COMMAND_EVENT, handleSceneCommand)
     return () => window.removeEventListener(TIMER_COMMAND_EVENT, handleSceneCommand)
