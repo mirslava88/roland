@@ -67,6 +67,7 @@ const OUTBOUND_CHANNELS = new Set([
   'program-scene-audio-ready',
   'speaker-state-ready',
   'event-timer-ready',
+  'timer-state-ready',
   'information-video-state',
   'information-video-ended',
   'information-state-ready',

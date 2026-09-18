@@ -144,10 +144,16 @@ assert.equal(safeKeys[0].disabled, true)
   assert.deepEqual(h.events, [['open-program-scene', { editor: 'qr' }]])
   assert.deepEqual(h.qrPatches, [])
   h.state.qrOverlay.url = 'https://example.test'
+  h.state.qrOverlay.sceneVisible = false
   h.state.programSnapshot = { revision: 1 }
   await executeDirectStreamDeckAction({ kind: 'qr-toggle' }, 6, h.environment)
-  assert.deepEqual(h.qrPatches, [{ enabled: true }])
+  assert.deepEqual(h.qrPatches, [{ enabled: true, sceneVisible: true }])
   assert.equal(h.published[0].qrOverlay.enabled, true, 'live snapshot must receive the same QR state')
+  assert.equal(h.published[0].qrOverlay.sceneVisible, true, 'Stream Deck must restore a QR hidden from the scene')
+  await executeDirectStreamDeckAction({ kind: 'qr-toggle' }, 6, h.environment)
+  assert.deepEqual(h.qrPatches[1], { enabled: false }, 'hiding QR must not remove it from the prepared scene')
+  assert.equal(h.published[1].qrOverlay.enabled, false)
+  assert.equal(h.published[1].qrOverlay.sceneVisible, true)
 }
 {
   const h = harness()

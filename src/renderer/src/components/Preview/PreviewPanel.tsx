@@ -3960,12 +3960,7 @@ function ChannelPanel({
                     state.publishProgramSnapshot(snapshot.contentChannelId, {
                       scene: snapshot.scene,
                       backdropImage: snapshot.backdropImage,
-                      qrOverlay: state.qrOverlay,
-                      timer: {
-                        ...snapshot.timer,
-                        remaining: state.timerRemaining,
-                        running: state.timerRunning
-                      }
+                      qrOverlay: state.qrOverlay
                     })
                   }
                   setTitlesMenu(null)

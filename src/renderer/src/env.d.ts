@@ -188,6 +188,7 @@ interface DriveInfo {
 }
 
 interface Api {
+  virtualCamera: import('../../shared/virtual-camera').VirtualCameraApi
   listDirectStreamDecks(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckDeviceInfo[]>
   getDirectStreamDeckStatus(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
   configureDirectStreamDeck(config: import('../../shared/direct-stream-deck').DirectStreamDeckConfig): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>

@@ -569,6 +569,62 @@
   100% { opacity: 0; }
 }
 
+@keyframes program-scene-refresh-attention {
+  0%, 100% {
+    filter: brightness(1);
+    box-shadow:
+      0 0 9px 2px rgba(59, 130, 246, .8),
+      0 0 20px 4px rgba(37, 99, 235, .52);
+  }
+  50% {
+    filter: brightness(1.24);
+    box-shadow:
+      0 0 15px 4px rgba(147, 197, 253, 1),
+      0 0 32px 9px rgba(37, 99, 235, .78);
+  }
+}
+
+@keyframes program-scene-refresh-ring {
+  0% {
+    opacity: .95;
+    transform: scale(.92);
+  }
+  75%, 100% {
+    opacity: 0;
+    transform: scale(1.65);
+  }
+}
+
+.program-scene-refresh-attention {
+  position: relative;
+  isolation: isolate;
+  animation: program-scene-refresh-attention 1.15s ease-in-out infinite;
+}
+
+.program-scene-refresh-attention::after {
+  position: absolute;
+  z-index: -1;
+  inset: -3px;
+  border: 2px solid rgba(147, 197, 253, .95);
+  border-radius: inherit;
+  pointer-events: none;
+  content: '';
+  animation: program-scene-refresh-ring 1.15s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .program-scene-refresh-attention {
+    animation: none;
+    filter: brightness(1.15);
+    box-shadow: 0 0 12px 3px rgba(147, 197, 253, .9), 0 0 25px 7px rgba(37, 99, 235, .65);
+  }
+
+  .program-scene-refresh-attention::after {
+    animation: none;
+    opacity: .8;
+  }
+}
+
 /* Only the PiP settings preview: clip the actual slide surface, not its
    letterboxed 16:9 wrapper. Channel previews and program output are unchanged. */
 .pdm-pip-content-preview img,

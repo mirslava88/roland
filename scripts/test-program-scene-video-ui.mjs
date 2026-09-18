@@ -119,7 +119,7 @@ window.api = { dbgLog() {}, on(event, fn) { if (!handlers.has(event)) handlers.s
   },
   updateQrOverlay(payload) { window.lastQrOverlay = payload; },
   async getTimerOverlayLayout() { return {x:.9,y:.9,scale:1}; },
-  updateTimerOverlay() {},
+  updateTimerOverlay(payload) { window.lastTimerOverlay = payload; },
   async showTimerOverlay() { window.timerOverlayShows++; },
   async hideTimerOverlay() { window.timerOverlayHides++; },
   async renderPdfPage(_filePath, pageIndex, width) {
@@ -155,13 +155,19 @@ function Output() {
     activeSceneStyle={scene.testDisplayMode === 'content' ? {left: rect.x, top: rect.y, width: rect.width, height: rect.height} : undefined}
     takeRequest={null} onTakeReady={() => {}} onTakeError={() => {}} />{scene.textOverlaysVisible !== false && <ProgramSceneTextOverlayLayer overlays={scene.textOverlays || []} />}</div>;
 }
-const root = createRoot(document.getElementById('root'));
-window.unmountTest = () => { clearInterval(cameraTick); root.unmount(); };
-root.render(location.search.includes('pdf-replace') || location.search.includes('pdf-native-dpi')
+let root = createRoot(document.getElementById('root'));
+const renderTest = () => root.render(location.search.includes('pdf-replace') || location.search.includes('pdf-native-dpi')
   ? <div style={{width:'100vw',height:'100vh'}}><PdfViewer filePath="mixed-pages.pdf" startSlide={1} requestId={1} /></div>
   : location.search.includes('output')
     ? <Output />
     : <><Timer /><ProgramSceneModal onClose={() => {}} /><BroadcastTitlesBridge /><InformationTitlesLayer /></>);
+window.unmountTest = () => { clearInterval(cameraTick); root.unmount(); };
+window.remountTest = () => {
+  root.unmount();
+  root = createRoot(document.getElementById('root'));
+  renderTest();
+};
+renderTest();
 `, loader: 'tsx', resolveDir: process.cwd() }, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic',
   define: { 'import.meta.url': JSON.stringify(pathToFileURL(resolve(directory, 'index.html')).href) },
   outfile: resolve(directory, 'render.js'), plugins: [{ name: 'synthetic-input', setup(build) {

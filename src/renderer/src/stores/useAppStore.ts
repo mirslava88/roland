@@ -33,6 +33,7 @@ import {
   normalizeQrOverlay,
   type QrOverlayConfig
 } from '../../../shared/qr-overlay'
+import { selectProgramSnapshotTimer } from '../program-snapshot-timer'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
 // для контекста. inflight = текущая chain promise; pendingTarget = последний
@@ -647,6 +648,7 @@ interface AppState {
   programSnapshot: ProgramSnapshot | null
   programOutputStatus: ProgramOutputStatus
   internalProgramOutputActive: boolean
+  internalProgramOutputConsumers: { stream: boolean; virtualCamera: boolean }
   qrOverlay: QrOverlayConfig
   contentZoom: ContentZoomState
   appTheme: AppTheme
@@ -723,6 +725,7 @@ interface AppState {
   failProgramSnapshot: (revision: number, error: string) => void
   clearProgramSnapshot: () => void
   setInternalProgramOutputActive: (active: boolean) => void
+  setInternalProgramOutputConsumer: (consumer: 'stream' | 'virtualCamera', active: boolean) => void
   setQrOverlay: (update: Partial<QrOverlayConfig>) => void
   setContentZoom: (update: Partial<ContentZoomState>) => void
   setAppTheme: (theme: AppTheme) => void
@@ -839,6 +842,7 @@ export const useAppStore = create<AppState>()(persist(
     error: null
   },
   internalProgramOutputActive: false,
+  internalProgramOutputConsumers: { stream: false, virtualCamera: false },
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   appTheme: readStoredAppTheme() ?? 'broadcast-pro',
@@ -1314,10 +1318,7 @@ export const useAppStore = create<AppState>()(persist(
       }))
     }
     const publishedQrOverlay = normalizeQrOverlay(overrides?.qrOverlay ?? state.qrOverlay)
-    const publishedTimer: ProgramSceneTimerSnapshot = overrides?.timer ? {
-      ...overrides.timer,
-      position: { ...overrides.timer.position }
-    } : {
+    const sceneDraftTimer: ProgramSceneTimerSnapshot = {
       duration: state.timerDuration,
       remaining: state.timerRemaining,
       running: state.timerRunning,
@@ -1329,6 +1330,11 @@ export const useAppStore = create<AppState>()(persist(
       overtimeTextColor: state.timerOvertimeTextColor,
       textOpacity: state.timerTextOpacity
     }
+    const { timer: publishedTimer, applyToLiveTimer } = selectProgramSnapshotTimer(
+      overrides?.timer,
+      state.programSnapshot?.timer,
+      sceneDraftTimer
+    )
     const snapshot = freezeProgramSnapshot({
       revision,
       publishedAt,
@@ -1343,17 +1349,19 @@ export const useAppStore = create<AppState>()(persist(
     set({
       programScene: overrides?.scene ? state.programScene : scene,
       qrOverlay: publishedQrOverlay,
-      timerDuration: Math.max(0, publishedTimer.duration),
-      timerRemaining: publishedTimer.remaining,
-      timerRunning: publishedTimer.running && publishedTimer.duration > 0,
-      timerOutputVisible: publishedTimer.visible && publishedTimer.duration > 0,
-      timerOutputOwner: publishedTimer.visible && publishedTimer.duration > 0 ? 'scene' : null,
-      timerOverlayPosition: { ...publishedTimer.position },
-      timerOverlayScale: publishedTimer.scale,
-      timerTextColor: publishedTimer.textColor,
-      timerWarningTextColor: publishedTimer.warningTextColor,
-      timerOvertimeTextColor: publishedTimer.overtimeTextColor,
-      timerTextOpacity: publishedTimer.textOpacity,
+      ...(applyToLiveTimer ? {
+        timerDuration: Math.max(0, publishedTimer.duration),
+        timerRemaining: publishedTimer.remaining,
+        timerRunning: publishedTimer.running && publishedTimer.duration > 0,
+        timerOutputVisible: publishedTimer.visible && publishedTimer.duration > 0,
+        timerOutputOwner: publishedTimer.visible && publishedTimer.duration > 0 ? 'scene' as const : null,
+        timerOverlayPosition: { ...publishedTimer.position },
+        timerOverlayScale: publishedTimer.scale,
+        timerTextColor: publishedTimer.textColor,
+        timerWarningTextColor: publishedTimer.warningTextColor,
+        timerOvertimeTextColor: publishedTimer.overtimeTextColor,
+        timerTextOpacity: publishedTimer.textOpacity
+      } : {}),
       programSnapshot: snapshot,
       programOutputStatus: {
         desiredRevision: revision,
@@ -1395,7 +1403,14 @@ export const useAppStore = create<AppState>()(persist(
       error: null
     }
   })),
-  setInternalProgramOutputActive: (active) => set({ internalProgramOutputActive: active }),
+  setInternalProgramOutputActive: (active) => set((state) => {
+    const consumers = { ...state.internalProgramOutputConsumers, stream: active }
+    return { internalProgramOutputConsumers: consumers, internalProgramOutputActive: consumers.stream || consumers.virtualCamera }
+  }),
+  setInternalProgramOutputConsumer: (consumer, active) => set((state) => {
+    const consumers = { ...state.internalProgramOutputConsumers, [consumer]: active }
+    return { internalProgramOutputConsumers: consumers, internalProgramOutputActive: consumers.stream || consumers.virtualCamera }
+  }),
   setQrOverlay: (update) => set((state) => ({
     qrOverlay: normalizeQrOverlay({ ...state.qrOverlay, ...update })
   })),

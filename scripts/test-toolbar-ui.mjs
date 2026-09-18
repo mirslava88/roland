@@ -56,6 +56,7 @@ window.api = {
   sendToPresentation:call('presentation-message'),
   musicGetState:call('music-status',{playing:true,currentIndex:0,currentTime:10,duration:100,volume:1,trackName:'Test music',loopTrack:false}),
   getAudioDevices:call('audio-devices',[]), getAppVersion:call('version','1.1.5 test'),
+  virtualCamera:{status:call('virtual-camera-status',{phase:'idle',supported:true,installed:true,available:true,source:null,error:null,name:'PDM Virtual Camera',width:1920,height:1080,fps:30,startedAt:null}),install:call('virtual-camera-install'),start:call('virtual-camera-start'),stop:call('virtual-camera-stop')},
   streaming:{load:call('stream-load',{settings:DEFAULT_STREAM_SETTINGS,available:true,canSave:true}),status:call('stream-status',{phase:'running',destinations:[]}),start:call('stream-start'),stop:call('stream-stop')}
 };
 window.setTestBusy = busy => {

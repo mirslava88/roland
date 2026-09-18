@@ -21,6 +21,7 @@ import { isAbsolute, join, resolve } from 'path'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 import { StreamingManager } from './streaming'
+import { VirtualCameraManager } from './virtual-camera'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
 import { getPowerPointNativePlacement } from './program-scene-state'
 import {
@@ -80,7 +81,13 @@ const directStreamDeckManager = new DirectStreamDeckManager(
   }
 )
 let streamingManager: StreamingManager | null = null
+let virtualCameraManager: VirtualCameraManager | null = null
 let presentationWindow: BrowserWindow | null = null
+
+function isInternalProgramOutputActive(): boolean {
+  return streamingManager?.isInternalProgramOutputActive() === true ||
+    virtualCameraManager?.isInternalProgramOutputActive() === true
+}
 const outputReadablePaths = new Map<number, Set<string>>()
 const auxiliaryWindows = new Map<number, {
   role: AuxiliaryWindowRole
@@ -1482,6 +1489,7 @@ function createWindows(): void {
 
   controlWindow.on('closed', () => {
     streamingManager?.stop()
+    virtualCameraManager?.stop()
     diagnosticLog('lifecycle', `control window closed trigger=${shutdownTrigger}`)
     cancelMemoryReleaseSnapshots()
     controlWindow = null
@@ -1557,7 +1565,7 @@ function createWindows(): void {
     if (displayId !== undefined && !explicitlyRequestedDisplay) {
       throw new Error(`Requested presentation display ${displayId} is disconnected`)
     }
-    const internalProgramOutput = streamingManager?.isInternalProgramOutputActive() === true
+    const internalProgramOutput = isInternalProgramOutputActive()
     const targetDisplay = explicitlyRequestedDisplay || (
       internalProgramOutput
         ? presentationWindow && !presentationWindow.isDestroyed()
@@ -1610,7 +1618,7 @@ function createWindows(): void {
       throw new Error('Presentation output changed or closed while it was becoming ready')
     }
 
-    if (streamingManager?.isInternalProgramOutputActive()) {
+    if (isInternalProgramOutputActive()) {
       targetWindow.setIgnoreMouseEvents(true)
       targetWindow.setOpacity(0)
       if (!targetWindow.isVisible()) targetWindow.showInactive()
@@ -1660,7 +1668,7 @@ function createWindows(): void {
       return false
     }
     const targetDisplay = explicitlyRequestedDisplay || (
-      streamingManager?.isInternalProgramOutputActive()
+      isInternalProgramOutputActive()
         ? displays.find((display) => display.bounds.x === win.getBounds().x && display.bounds.y === win.getBounds().y) || screen.getPrimaryDisplay()
         : undefined
     )
@@ -1837,7 +1845,7 @@ function createWindows(): void {
     placement: 'cover' | 'underlay' = 'cover',
     safetyLock = false
   ) => {
-    if (displayId === undefined && streamingManager?.isInternalProgramOutputActive()) {
+    if (displayId === undefined && isInternalProgramOutputActive()) {
       // The internal program renderer is captured directly. A native overlay
       // here would cover the operator's primary monitor and leak into neither
       // the hidden program surface nor its stream.
@@ -2013,7 +2021,7 @@ function createWindows(): void {
   // as a "freeze-frame" inside the overlay during a channel switch.
   handleControl('capture-display', async (_event, displayId?: number): Promise<string | null> => {
     try {
-      if (displayId === undefined && streamingManager?.isInternalProgramOutputActive()) {
+      if (displayId === undefined && isInternalProgramOutputActive()) {
         if (!presentationWindow || presentationWindow.isDestroyed()) return null
         const frame = await presentationWindow.webContents.capturePage()
         return frame.isEmpty() ? null : frame.toDataURL()
@@ -2021,7 +2029,7 @@ function createWindows(): void {
       const displays = screen.getAllDisplays()
       const targetDisplay = typeof displayId === 'number'
         ? displays.find((d) => d.id === displayId)
-        : streamingManager?.isInternalProgramOutputActive()
+        : isInternalProgramOutputActive()
           ? screen.getPrimaryDisplay()
           : undefined
       if (!targetDisplay) return null
@@ -2964,7 +2972,7 @@ function createWindows(): void {
     }
 
     let presentationTarget = byId.get(presentationDisplayId ?? -1)
-    if (!presentationTarget && streamingManager?.isInternalProgramOutputActive()) {
+    if (!presentationTarget && isInternalProgramOutputActive()) {
       presentationTarget = presentationWindow && !presentationWindow.isDestroyed()
         ? screen.getDisplayMatching(presentationWindow.getBounds())
         : primary
@@ -3279,6 +3287,7 @@ function createWindows(): void {
     ])
     const auxiliaryChannels: Partial<Record<AuxiliaryWindowRole, Set<string>>> = {
       speaker: new Set(['speaker-state-ready']),
+      timer: new Set(['timer-state-ready']),
       'event-timer': new Set(['event-timer-ready']),
       info: new Set(['information-video-state', 'information-video-ended', 'information-state-ready']),
       mirror: new Set(['program-mirror-state-ready', 'program-mirror-ready'])
@@ -3292,6 +3301,12 @@ function createWindows(): void {
     if (!trustedPresentation && !trustedAuxiliary) {
       diagnosticLog('security', `blocked IPC channel=send-to-control/${String(channel).slice(0, 80)} wc=${event.sender.id}`)
       return
+    }
+    if (trustedAuxiliary && channel === 'program-mirror-state-ready') {
+      // The mirror renderer installs its listeners after did-finish-load, so
+      // the cached timer overlay may have been replayed too early. Re-send the
+      // main-process-owned live timer snapshot as part of the ready handshake.
+      broadcastWpfTimerToMirrors(true)
     }
     if (controlWindow && !controlWindow.isDestroyed()) {
       controlWindow.webContents.send(channel, ...args)
@@ -3855,7 +3870,10 @@ app.whenReady().then(() => {
     contents.setWindowOpenHandler(() => ({ action: 'deny' }))
     contents.on('render-process-gone', (_event, details) => {
       const isControl = controlWindow?.webContents.id === contents.id
-      if (isControl) streamingManager?.stop()
+      if (isControl) {
+        streamingManager?.stop()
+        virtualCameraManager?.stop()
+      }
       const isPresentation = presentationWindow?.webContents.id === contents.id
       diagnosticLog(
         'renderer-failure',
@@ -3892,6 +3910,11 @@ app.whenReady().then(() => {
       () => presentationWindow
     )
   }
+  virtualCameraManager = new VirtualCameraManager(
+    () => controlWindow,
+    () => presentationDisplayId,
+    () => presentationWindow
+  )
   createWindows()
   ipcMain.handle('direct-stream-deck-list', (event) => {
     if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return []
@@ -3953,6 +3976,7 @@ app.on('before-quit', (event) => {
 
   quitCleanupStarted = true
   streamingManager?.stop()
+  virtualCameraManager?.stop()
   diagnosticLog('shutdown', 'waiting for PowerPoint, browser fullscreen and window-enumerator cleanup')
   void Promise.allSettled([
     (async () => {

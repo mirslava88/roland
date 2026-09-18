@@ -13,6 +13,21 @@
 .interface-tour.is-drag-step .interface-tour-shade, .interface-tour.is-form-step .interface-tour-shade { pointer-events: none; }
 .interface-tour-outline { position: fixed; z-index: 1; pointer-events: none; border: 2px solid #58caff; border-radius: 8px; box-shadow: 0 0 25px #1d9be756; }
 .interface-tour-required-field { position: fixed; z-index: 2; pointer-events: none; border: 2px solid #ffd54f; border-radius: 7px; box-shadow: 0 0 0 2px #061019, 0 0 22px #ffd54f75; animation: pdm-training-source-pulse .8s ease-in-out infinite alternate; }
+.interface-tour-action-button { position: fixed; z-index: 2; pointer-events: none; border: 2px solid #ffd54f; border-radius: 7px; box-shadow: 0 0 0 2px #061019, 0 0 22px #ffd54f75; animation: pdm-training-source-pulse .8s ease-in-out infinite alternate; }
+.interface-tour-right-click-guide { position: fixed; z-index: 2; pointer-events: none; display: grid; justify-items: center; gap: 9px; width: 230px; transform: translate(-50%, -50%); color: #ffe36d; text-align: center; text-shadow: 0 2px 5px #000; }
+.interface-tour-right-click-guide strong { font-size: 13px; line-height: 1.35; }
+.interface-tour-mouse-picture { position: relative; width: 58px; height: 78px; overflow: hidden; border: 3px solid #ffd54f; border-radius: 28px 28px 24px 24px; background: #182a37ed; box-shadow: 0 0 26px #ffd54f8c; }
+.interface-tour-mouse-picture::before { content: ''; position: absolute; left: 50%; top: 0; width: 2px; height: 31px; background: #ffd54f; transform: translateX(-50%); }
+.interface-tour-mouse-picture::after { content: ''; position: absolute; left: 0; right: 0; top: 30px; height: 2px; background: #ffd54f; }
+.interface-tour-mouse-picture i { position: absolute; left: 8px; top: 8px; width: 13px; height: 19px; border: 2px solid #ffd54f; border-radius: 7px; }
+.interface-tour-mouse-picture b { position: absolute; right: 2px; top: 2px; width: 25px; height: 27px; border-radius: 0 22px 0 7px; background: #ffd54f; animation: pdm-training-right-click 700ms ease-in-out infinite alternate; }
+.interface-tour-right-click-guide.is-compact { gap: 6px; width: 180px; }
+.interface-tour-right-click-guide.is-compact strong { font-size: 11px; }
+.interface-tour-right-click-guide.is-compact .interface-tour-mouse-picture { width: 42px; height: 58px; border-width: 2px; border-radius: 21px 21px 18px 18px; }
+.interface-tour-right-click-guide.is-compact .interface-tour-mouse-picture::before { height: 23px; width: 1px; }
+.interface-tour-right-click-guide.is-compact .interface-tour-mouse-picture::after { top: 22px; height: 1px; }
+.interface-tour-right-click-guide.is-compact .interface-tour-mouse-picture i { left: 6px; top: 6px; width: 9px; height: 14px; border-width: 1px; }
+.interface-tour-right-click-guide.is-compact .interface-tour-mouse-picture b { right: 1px; top: 1px; width: 18px; height: 20px; border-radius: 0 17px 0 5px; }
 .interface-tour-drag-source { position: fixed; z-index: 2; pointer-events: none; border: 2px solid #ffd54f; border-radius: 8px; box-shadow: 0 0 22px #ffd54f70; animation: pdm-training-source-pulse .8s ease-in-out infinite alternate; }
 .interface-tour-drag-guide { position: fixed; inset: 0; z-index: 2; width: 100vw; height: 100vh; overflow: visible; pointer-events: none; filter: drop-shadow(0 2px 5px #001018); }
 .interface-tour-drag-guide path:not([d^='M0']) { fill: none; stroke: #ffd54f; stroke-width: 4; stroke-linecap: round; stroke-dasharray: 12 10; animation: pdm-training-arrow-flow .75s linear infinite; }
@@ -30,7 +45,7 @@
 .interface-tour-card button:disabled { opacity: .4; cursor: default; }
 .interface-tour-card button:focus-visible, .intro-interface-header button:focus-visible { outline: 2px solid #83d3ff; outline-offset: 2px; }
 .interface-tour-card > div { display: flex; gap: 8px; margin-top: 8px; }
-.interface-tour-card button.interface-tour-next { background: #118cd1; border-color: #4eb9f3; flex: 1; }
+.interface-tour-card button.interface-tour-next { background: #118cd1; border: 2px solid #ffd54f; box-shadow: 0 0 18px #ffd54f70; flex: 1; }
 .interface-tour-card button.interface-tour-later { border: 0; padding: 8px 0 0; background: transparent; color: #779bae; font-size: 10px; }
 .interface-tour.is-form-step .interface-tour-card { padding: 11px 14px; }
 .interface-tour.is-form-step .interface-tour-card h3 { margin: 5px 0 6px; font-size: 16px; }
@@ -49,9 +64,11 @@
 .interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card button { padding: 3px 8px; font-size: 11px; }
 .interface-tour:is(.is-qr-step, .is-titles-step) .interface-tour-card button.interface-tour-later { padding-top: 3px; font-size: 9px; }
 .interface-tour-chip { position: fixed; right: 14px; bottom: 14px; z-index: 3; pointer-events: auto; border: 1px solid #437da1; border-radius: 7px; padding: 9px 12px; background: #14334a; color: #a9defb; cursor: pointer; font-size: 11px; }
+[data-pdm-training-clear-slide-border] { border-color: transparent !important; }
 @keyframes pdm-training-arrow-flow { to { stroke-dashoffset: -22; } }
 @keyframes pdm-training-move-hint { from { transform: translate(-50%, -100%) scale(.92); } to { transform: translate(-50%, -110%) scale(1.08); } }
 @keyframes pdm-training-source-pulse { to { box-shadow: 0 0 34px #ffd54faa; } }
+@keyframes pdm-training-right-click { from { opacity: .45; transform: scale(.9); } to { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .interface-tour-drag-guide path, .interface-tour-drag-source, .interface-tour-move-guide { animation: none; } }
 @media (max-width: 800px) { .intro-interface-header span { font-size: 9px; } }
 .intro-backdrop { position: fixed; inset: 0; z-index: 10000; display: flex; align-items: center; justify-content: center; padding: 20px; background: #03080fe8; backdrop-filter: blur(7px); color: #edf4fb; font-family: inherit; color-scheme: dark; }

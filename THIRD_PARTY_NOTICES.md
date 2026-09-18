@@ -93,3 +93,8 @@ application's `LICENSES.chromium.html` file under the `PDFium` section.
 Source: https://github.com/chromium/pdfium
 
 No endorsement by the third-party authors or contributors is implied.
+# Microsoft Windows-Camera virtual camera sample
+
+The native PDM virtual camera media source is derived from Microsoft's
+Windows-Camera VirtualCamera sample and is distributed under the MIT License.
+The complete license is included as `licenses/Microsoft-Windows-Camera-LICENSE.txt`.

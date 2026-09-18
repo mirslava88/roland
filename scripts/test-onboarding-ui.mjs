@@ -9,7 +9,7 @@ const compiled = await build({entryPoints:['src/renderer/src/components/Onboardi
 const model = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`)
 assert.equal(model.readIntroduction({getItem(){throw Error('blocked')}}).status,'new')
 for(const raw of ['null','{}','{bad','{"status":"paused","step":-2}','{"status":"paused","step":400}']){
- const p=model.readIntroduction({getItem:()=>raw});assert.ok(p.step>=0&&p.step<=30)
+ const p=model.readIntroduction({getItem:()=>raw});assert.ok(p.step>=0&&p.step<=31)
 }
 const runtime=readFileSync('src/renderer/src/components/Onboarding/training-runtime.ts','utf8')
 assert.ok(!runtime.includes('window.parent.api') && !runtime.includes('ipcRenderer'))

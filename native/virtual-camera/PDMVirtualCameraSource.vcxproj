@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{F6F83AB7-A85A-44B5-8681-53239787370E}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>PDMVirtualCameraSource</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><OutDir>$(MSBuildThisFileDirectory)bin\$(Platform)\$(Configuration)\</OutDir><IntDir>$(MSBuildThisFileDirectory)obj\Source\$(Platform)\$(Configuration)\</IntDir><TargetName>PDMVirtualCameraSource</TargetName></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)source;$(UserProfile)\.nuget\packages\microsoft.windows.implementationlibrary\1.0.260126.7\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WINAPI_FAMILY=WINAPI_FAMILY_DESKTOP_APP;WINAPI_PARTITION_DESKTOP=1;WINAPI_PARTITION_SYSTEM=1;WINAPI_PARTITION_APP=1;WINAPI_PARTITION_PC_APP=1;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel><SDLCheck>true</SDLCheck>
+    </ClCompile>
+    <Link><ModuleDefinitionFile>$(MSBuildThisFileDirectory)source\VirtualCameraMediaSource.def</ModuleDefinitionFile><AdditionalDependencies>mfplat.lib;mf.lib;mfuuid.lib;mfsensorgroup.lib;windowsapp.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="source\pch.cpp"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>
+    <ClCompile Include="source\dllmain.cpp"/><ClCompile Include="source\EventHandler.cpp"/><ClCompile Include="source\SimpleFrameGenerator.cpp"/>
+    <ClCompile Include="source\SimpleMediaSource.cpp"/><ClCompile Include="source\SimpleMediaStream.cpp"/><ClCompile Include="source\VirtualCameraMediaSourceActivate.cpp"/><ClCompile Include="source\winrtCommon.cpp"/>
+    <ClCompile Include="source\SourceSelfTest.cpp"/>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\pch.h"/><ClInclude Include="source\PdmSharedFrame.h"/><ClInclude Include="source\EventHandler.h"/><ClInclude Include="source\SimpleFrameGenerator.h"/>
+    <ClInclude Include="source\SimpleMediaSource.h"/><ClInclude Include="source\SimpleMediaStream.h"/><ClInclude Include="source\VirtualCameraMediaSource.h"/><ClInclude Include="source\VirtualCameraMediaSourceActivate.h"/>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -9,6 +9,10 @@ interface DeviceResponse {
   error?: string
 }
 
+const isPdmVirtualCamera = (device: CaptureDeviceDescriptor): boolean => (
+  device.kind === 'videoinput' && /^PDM Virtual Camera(?:\s|\(|$)/i.test(device.label.trim())
+)
+
 export function CaptureSourcesPanel(): JSX.Element {
   const {
     captureSources,
@@ -63,10 +67,15 @@ export function CaptureSourcesPanel(): JSX.Element {
         setError('Не удалось получить список устройств. Нажмите «Обновить список».')
         return
       }
-      setDevices(response.devices)
+      // PDM Virtual Camera is the program output, not another input. Feeding
+      // it back into PDM creates an output -> camera -> output recursion that
+      // looks like a flickering or mirrored picture and wastes capture/GPU
+      // resources. Keep the output out of PDM's own source picker.
+      const inputDevices = response.devices.filter((device) => !isPdmVirtualCamera(device))
+      setDevices(inputDevices)
       setError(response.error || null)
-      const videos = response.devices.filter((device) => device.kind === 'videoinput')
-      const audios = response.devices.filter((device) => device.kind === 'audioinput')
+      const videos = inputDevices.filter((device) => device.kind === 'videoinput')
+      const audios = inputDevices.filter((device) => device.kind === 'audioinput')
       setVideoDeviceId((current) => videos.some((device) => device.deviceId === current)
         ? current
         : videos[0]?.deviceId || '')
@@ -115,6 +124,10 @@ export function CaptureSourcesPanel(): JSX.Element {
     const video = videoDevices.find((device) => device.deviceId === videoDeviceId)
     if (!video) {
       setError('Выберите устройство видеозахвата.')
+      return
+    }
+    if (isPdmVirtualCamera(video)) {
+      setError('Виртуальная камера PDM является выходом эфира и не может быть добавлена обратно как источник.')
       return
     }
 

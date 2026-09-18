@@ -51,6 +51,19 @@ function currentInformationTitlesState(): Pick<InformationDisplayState, 'titleSo
   }
 }
 
+function currentTimerDisplayState(): TimerDisplayState {
+  const state = useAppStore.getState()
+  return {
+    remaining: state.timerRemaining,
+    running: state.timerRunning,
+    duration: state.timerDuration,
+    textColor: state.timerTextColor,
+    warningTextColor: state.timerWarningTextColor,
+    overtimeTextColor: state.timerOvertimeTextColor,
+    textOpacity: state.timerTextOpacity
+  }
+}
+
 function currentSpeakerDisplayState(
   state: ReturnType<typeof useAppStore.getState>
 ): SpeakerDisplayState {
@@ -429,6 +442,19 @@ export function AuxiliaryDisplayBridge(): null {
     window.api.sendToAuxiliary('info', 'information-titles-update', currentInformationTitlesState())
   }), [])
 
+  useEffect(() => window.api.on('timer-state-ready', (...args: unknown[]) => {
+    const data = args[0] as { displayId?: number | null } | undefined
+    const state = useAppStore.getState()
+    window.api.dbgLog(`timer display state listener ready display=${data?.displayId ?? 'unknown'}`)
+    window.api.sendToAuxiliary('timer', 'information-state', {
+      media: null,
+      displayTimer: state.timerOutputVisible && state.timerDuration > 0,
+      backdropImage: state.backdropImage,
+      titleSourceIdentity: null
+    } satisfies InformationDisplayState)
+    window.api.sendToAuxiliary('timer', 'timer-update', currentTimerDisplayState())
+  }), [])
+
   useEffect(() => window.api.on('speaker-state-ready', (...args: unknown[]) => {
     const data = args[0] as { displayId?: number | null } | undefined
     window.api.dbgLog(`speaker display state listener ready display=${data?.displayId ?? 'unknown'}`)
@@ -565,16 +591,7 @@ export function AuxiliaryDisplayBridge(): null {
   }, [informationSourceIdentity, informationTitles])
 
   useEffect(() => {
-    const timerState = {
-      remaining: timerRemaining,
-      running: timerRunning,
-      duration: timerDuration,
-      textColor: timerTextColor,
-      warningTextColor: timerWarningTextColor,
-      overtimeTextColor: timerOvertimeTextColor,
-      textOpacity: timerTextOpacity
-    } satisfies TimerDisplayState
-    window.api.sendToAuxiliary('timer', 'timer-update', timerState)
+    window.api.sendToAuxiliary('timer', 'timer-update', currentTimerDisplayState())
   }, [
     timerDuration,
     timerOvertimeTextColor,

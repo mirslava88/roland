@@ -380,7 +380,6 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     widthPercent: number
     heightPercent: number
   } | null>(null)
-  const lastPublishedQrRef = useRef(JSON.stringify(qrOverlay))
   const requestGenerationRef = useRef(0)
   const videoDevices = useMemo(
     () => devices.filter((device) => device.kind === 'videoinput'),
@@ -623,6 +622,19 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     // preview is off, the draft stays local during editing and is committed
     // once at the end instead of exposing every intermediate movement.
     setProgramScene({ textOverlays: textOverlayDraft, mediaLayers: mediaLayerDraft })
+    const state = useAppStore.getState()
+    // With the combined Scene off, the timer is an independent toolbar layer.
+    // Match QR behaviour: keep editing local while the modal is open, then
+    // apply its layout to the already-visible timer when the modal closes.
+    // A live combined Scene still requires the explicit refresh transaction.
+    if (!state.programSnapshot && !state.programScene.enabled && timerDraftDirty) {
+      state.setTimerOverlayPosition({ ...timerOverlayDraft.position })
+      state.setTimerOverlayScale(timerOverlayDraft.scale)
+      state.setTimerTextColor(timerOverlayDraft.textColor)
+      state.setTimerWarningTextColor(timerOverlayDraft.warningTextColor)
+      state.setTimerOvertimeTextColor(timerOverlayDraft.overtimeTextColor)
+      state.setTimerTextOpacity(timerOverlayDraft.textOpacity)
+    }
     onClose()
   }
 
@@ -760,11 +772,19 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   })
   const sceneDraftDirty = structuralDraftDirty || (
     programSnapshot !== null && previewChannelId !== programSnapshot.contentChannelId
-  ) || JSON.stringify(textOverlayDraft) !== JSON.stringify(
-    normalizeProgramSceneTextOverlays(storedProgramScene.textOverlays)
-  ) || JSON.stringify(mediaLayerDraft.map(({ currentTime: _currentTime, duration: _duration, playbackStartedAt: _playbackStartedAt, ...layer }) => layer)) !== JSON.stringify(
-    normalizeProgramSceneMediaLayers(storedProgramScene.mediaLayers).map(({ currentTime: _currentTime, duration: _duration, playbackStartedAt: _playbackStartedAt, ...layer }) => layer)
-  ) || JSON.stringify(qrOverlay) !== lastPublishedQrRef.current || timerDraftDirty || timerTimeDraftDirty
+  ) || (
+    programSnapshot !== null && JSON.stringify(textOverlayDraft) !== JSON.stringify(
+      normalizeProgramSceneTextOverlays(programSnapshot.scene.textOverlays)
+    )
+  ) || (
+    programSnapshot !== null && JSON.stringify(
+      mediaLayerDraft.map(({ currentTime: _currentTime, duration: _duration, playbackStartedAt: _playbackStartedAt, ...layer }) => layer)
+    ) !== JSON.stringify(
+      normalizeProgramSceneMediaLayers(programSnapshot.scene.mediaLayers).map(({ currentTime: _currentTime, duration: _duration, playbackStartedAt: _playbackStartedAt, ...layer }) => layer)
+    )
+  ) || (
+    programSnapshot !== null && JSON.stringify(qrOverlay) !== JSON.stringify(programSnapshot.qrOverlay)
+  ) || timerDraftDirty || timerTimeDraftDirty
   const programIsLive = programSnapshot !== null && programOutputStatus.phase !== 'idle'
 
   const selectBackdrop = async (): Promise<void> => {
@@ -937,7 +957,6 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
         window.api.setActiveContentType('backdrop')
       }
     }
-    lastPublishedQrRef.current = JSON.stringify(nextQr)
     const revision = useAppStore.getState().publishProgramSnapshot(channelToTake, {
       qrOverlay: nextQr,
       timer: {
@@ -1049,7 +1068,13 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
           <div>
             <h2 className="text-base font-semibold text-white">Сцена</h2>
           </div>
-          <button className="text-xl leading-none text-gray-400 hover:text-white" onClick={closeModal}>×</button>
+          <button
+            type="button"
+            data-program-scene-close
+            aria-label="Закрыть Сцену"
+            className="text-xl leading-none text-gray-400 hover:text-white"
+            onClick={closeModal}
+          >×</button>
         </div>
 
         <div className="mb-3 grid shrink-0 grid-cols-2 gap-1 rounded-lg bg-surface-200 p-1" role="tablist" aria-label="Разделы сцены">
@@ -1110,6 +1135,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
               <button
                 type="button"
                 data-program-scene-refresh
+                data-pending-changes={programIsLive && sceneDraftDirty ? 'true' : 'false'}
                 aria-label="Обновить сцену в эфире"
                 title={programIsLive
                   ? 'Передать в эфир изменения из предпросмотра'
@@ -1119,7 +1145,7 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                 className={`flex h-7 w-7 items-center justify-center rounded-full border text-base font-bold leading-none transition-colors ${!programIsLive
                   ? 'cursor-not-allowed border-gray-800 bg-surface-100 text-gray-600'
                   : sceneDraftDirty
-                    ? 'border-blue-300 bg-blue-600 text-white shadow-[0_0_10px_rgba(37,99,235,.45)] hover:bg-blue-500'
+                    ? 'program-scene-refresh-attention border-blue-300 bg-blue-600 text-white hover:bg-blue-500'
                     : 'border-gray-600 bg-surface-100 text-gray-300 hover:border-blue-400 hover:bg-blue-700 hover:text-white'}`}
               >
                 ↻

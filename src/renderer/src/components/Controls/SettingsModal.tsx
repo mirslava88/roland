@@ -5,6 +5,7 @@ import { setDisplayAssignmentWithProgramRouting } from '../../program-display-ro
 import { ToolbarAppearanceSettings } from './ToolbarAppearanceSettings'
 import { openIntroduction } from '../Onboarding/training-model'
 import { DirectStreamDeckSettings } from './DirectStreamDeckSettings'
+import { VirtualCameraSettings } from './VirtualCameraSettings'
 
 interface AudioDevice {
   id: string
@@ -49,7 +50,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
     appTheme,
     setAppTheme
   } = useAppStore()
-  const [tab, setTab] = useState<'appearance' | 'audio' | 'display' | 'stream-deck' | 'config' | 'diagnostics' | 'help'>('audio')
+  const [tab, setTab] = useState<'appearance' | 'audio' | 'display' | 'virtual-camera' | 'stream-deck' | 'config' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
   const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
@@ -227,6 +228,15 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               }`}
             >
               Дисплеи
+            </button>
+            <button
+              data-pdm-settings-tab="virtual-camera"
+              onClick={() => setTab('virtual-camera')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
+                tab === 'virtual-camera' ? 'bg-accent text-white' : 'text-gray-400 hover:text-white hover:bg-surface-100'
+              }`}
+            >
+              Виртуальная камера
             </button>
             <button
               onClick={() => setTab('config')}
@@ -854,6 +864,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               </section>
             </div>
           )}
+
+          {tab === 'virtual-camera' && <VirtualCameraSettings />}
 
           {tab === 'stream-deck' && <DirectStreamDeckSettings />}
         </div>

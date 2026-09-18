@@ -5,7 +5,7 @@ interface Lesson {
   title: string
   text: string
   selector: string
-  kind: 'file' | 'fileSecond' | 'channel' | 'channelSecond' | 'take' | 'takeSecond' | 'slide' | 'click' | 'panel' | 'scene' | 'menu' | 'text' | 'publish' | 'draft' | 'refresh' | 'external' | 'chroma' | 'qr' | 'titles' | 'titlesPublish' | 'closedScene' | 'layout' | 'settings' | 'exit'
+  kind: 'file' | 'fileSecond' | 'channel' | 'channelSecond' | 'take' | 'takeSecond' | 'slide' | 'click' | 'panel' | 'scene' | 'menu' | 'text' | 'publish' | 'draft' | 'refresh' | 'external' | 'chroma' | 'qr' | 'titles' | 'titlesPublish' | 'closedScene' | 'layout' | 'settings' | 'virtualCamera' | 'exit'
   panelSelector?: string
   panelHint?: string
   doneText?: string
@@ -41,7 +41,8 @@ const lessons: Lesson[] = [
   { title: 'Покажите титры', text: 'Нажмите красную кнопку «Показать все». Отдельными кнопками «Выступающий» и «Мероприятие» можно выводить каждый титр по отдельности.', selector: '[data-broadcast-titles-show-all]', kind: 'titlesPublish', doneText: 'Оба титра показаны поверх выбранной камеры. Настройки времени могут скрыть каждый из них автоматически.', holdMs: 3500 },
   { title: 'Закройте Сцену', text: 'Закройте окно крестиком. Подготовленная Сцена сохранится, и её можно будет открыть снова.', selector: '[data-program-scene-modal] > div:first-child button:last-child', kind: 'closedScene', doneText: 'Сцена сохранена. Открыть её снова можно той же кнопкой на панели.', holdMs: 4000 },
   { title: 'Выберите вид Сцены', text: 'Первая кнопка показывает участника, вторая — презентацию, третья — участника и презентацию вместе. Нажмите среднюю кнопку.', selector: '[data-toolbar-item="pipViews"] button:nth-child(2)', kind: 'layout' },
-  { title: 'Выберите аудиовыход', text: 'Нажмите «Настройки». В разделе «Аудиовыход» выберите «Проектор / HDMI», затем закройте окно крестиком.', selector: '[data-toolbar-item="settings"] button', kind: 'settings', panelSelector: '[data-pdm-training-panel="settings"]', panelHint: 'Выберите «Проектор / HDMI (учебный)», затем закройте настройки крестиком' },
+  { title: 'Выберите аудиовыход', text: 'Нажмите «Настройки». В разделе «Аудиовыход» выберите «Проектор / HDMI». Настройки закрывать не нужно — сразу перейдём к виртуальной камере.', selector: '[data-toolbar-item="settings"] button', kind: 'settings', panelSelector: '[data-pdm-training-panel="settings"]', panelHint: 'Выберите «Проектор / HDMI (учебный)» — затем перейдём к виртуальной камере' },
+  { title: 'Виртуальная камера', text: 'Если настройки закрыты, откройте их. Перейдите во вкладку «Виртуальная камера» и включите её. После этого PDM можно выбрать как обычную камеру в программе видеосвязи.', selector: '[data-toolbar-item="settings"] button', kind: 'virtualCamera', panelSelector: '[data-pdm-training-panel="settings"]', panelHint: 'Жёлтой рамкой выделена вкладка «Виртуальная камера». Откройте её, нажмите «Включить камеру», затем закройте настройки крестиком', doneText: 'В программе видеосвязи выберите «PDM Virtual Camera». Функция доступна в Windows 11 и новее и передаёт только изображение — микрофон или звуковую карту выберите отдельно.' },
   { title: 'Настройте трансляцию', text: 'Нажмите «Стрим». Здесь выбираются площадка, качество изображения и звук. Трансляцию можно запустить и без дополнительного монитора.', selector: '[data-toolbar-item="stream"] button', kind: 'panel', panelSelector: '[data-pdm-training-panel="stream"]' },
   { title: 'Завершите показ', text: 'Нажмите «Выйти из эфира». Презентация и элементы Сцены исчезнут с экрана зрителей.', selector: '[data-toolbar-item="output"]', kind: 'exit' }
 ]
@@ -62,12 +63,16 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
   const [dragSourceRect, setDragSourceRect] = useState<Rect | null>(null)
   const [moveGuide, setMoveGuide] = useState<Rect | null>(null)
   const [requiredFieldRects, setRequiredFieldRects] = useState<Rect[]>([])
+  const [actionButtonRect, setActionButtonRect] = useState<Rect | null>(null)
+  const [rightClickGuideRect, setRightClickGuideRect] = useState<Rect | null>(null)
+  const [virtualCameraStage, setVirtualCameraStage] = useState<'tab' | 'enable' | 'close'>('tab')
   const baseline = useRef('')
   const revision = useRef(0)
   const edited = useRef(false)
   const clicked = useRef(false)
   const panelOpened = useRef(false)
   const audioSelected = useRef(false)
+  const virtualCameraEnabled = useRef(false)
   const qrDragStart = useRef<{ x: number; y: number } | null>(null)
   const qrMoved = useRef(false)
   const titlesConfirmed = useRef(false)
@@ -84,9 +89,9 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
     return () => { window.parent.postMessage({ kind: 'pdm-training-panel-hint', open: false }, '*') }
   }, [panelVisible, current.title, current.panelHint])
   useEffect(() => {
-    baseline.current = ''; edited.current = false; clicked.current = false; panelOpened.current = false; audioSelected.current = false; qrDragStart.current = null; qrMoved.current = false; titlesConfirmed.current = false; advancing.current = false; readyStep.current = -1
+    baseline.current = ''; edited.current = false; clicked.current = false; panelOpened.current = false; audioSelected.current = false; virtualCameraEnabled.current = false; qrDragStart.current = null; qrMoved.current = false; titlesConfirmed.current = false; advancing.current = false; readyStep.current = -1
     revision.current = useAppStore.getState().programSnapshot?.revision ?? 0
-    setReady(false); setPanelVisible(false); setActionResult('')
+    setReady(false); setPanelVisible(false); setActionResult(''); setActionButtonRect(null); setRightClickGuideRect(null); setVirtualCameraStage('tab')
     const input = (event: Event): void => { if ((event.target as Element).closest('[data-program-scene-inline-text]')) edited.current = true }
     const click = (event: MouseEvent): void => {
       if (advancing.current) return
@@ -125,6 +130,12 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       const text = document.querySelector<HTMLElement>('[data-program-scene-text-id]')
       const textContent = text?.querySelector<HTMLElement>('[data-program-scene-inline-text]')?.innerText.trim() ?? ''
       const geometry = text ? `${text.style.left}|${text.style.top}|${text.style.width}|${text.style.fontSize}` : ''
+      const slideThumbs = document.querySelectorAll<HTMLElement>('.pdm-slide-thumb')
+      slideThumbs.forEach(thumb => {
+        thumb.toggleAttribute('data-pdm-training-clear-slide-border', current.kind === 'slide')
+        if (current.kind === 'slide') thumb.style.setProperty('border-color', 'transparent', 'important')
+        else thumb.style.removeProperty('border-color')
+      })
       if (current.kind === 'draft' && geometry && !baseline.current) baseline.current = geometry
       let complete = false
       if (current.kind === 'file') complete = !!channel?.file
@@ -144,7 +155,19 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       if (current.kind === 'settings') {
         if (panel) panelOpened.current = true
         if (document.querySelector('[data-pdm-audio-device="training-hdmi"][aria-pressed="true"]')) audioSelected.current = true
-        complete = panelOpened.current && audioSelected.current && !panel
+        complete = panelOpened.current && audioSelected.current
+        setPanelVisible(!!panel)
+      }
+      if (current.kind === 'virtualCamera') {
+        if (panel) panelOpened.current = true
+        const virtualCameraSettings = document.querySelector<HTMLElement>('[data-pdm-virtual-camera-settings]')
+        const virtualCameraIsEnabled = virtualCameraSettings?.textContent?.includes('Виртуальная камера включена') === true
+        if (virtualCameraIsEnabled) {
+          virtualCameraEnabled.current = true
+        }
+        const nextVirtualCameraStage = virtualCameraEnabled.current ? 'close' : virtualCameraSettings ? 'enable' : 'tab'
+        setVirtualCameraStage(old => old === nextVirtualCameraStage ? old : nextVirtualCameraStage)
+        complete = panelOpened.current && virtualCameraEnabled.current && !panel
         setPanelVisible(!!panel)
       }
       if (current.kind === 'scene') complete = !!scene
@@ -189,20 +212,44 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       if (current.kind === 'channel') target = document.querySelector<HTMLElement>(`[data-pdm-channel-id="${firstChannelId}"]`) ?? target
       if (current.kind === 'channelSecond') target = document.querySelector<HTMLElement>(`[data-pdm-channel-id="${secondChannelId}"]`) ?? target
       if (current.kind === 'takeSecond') target = document.querySelector<HTMLElement>(`[data-pdm-channel-id="${secondChannelId}"] [data-pdm-channel-take]`) ?? target
-      if (current.kind === 'external') target = document.querySelector<HTMLElement>('[data-scene-external-source-picker]') ?? target
-      if (current.kind === 'chroma') target = document.querySelector<HTMLElement>('[data-program-scene-chroma-toggle]') ?? document.querySelector<HTMLElement>('[data-scene-object-action="chroma"]') ?? target
+      if (current.kind === 'external') target = document.querySelector<HTMLElement>('[data-scene-external-source="device:training-camera"]') ?? document.querySelector<HTMLElement>('[data-scene-external-source-picker]') ?? target
+      if (current.kind === 'chroma') {
+        const chromaToggle = document.querySelector<HTMLElement>('[data-program-scene-chroma-toggle]')
+        target = chromaToggle?.closest<HTMLElement>('label') ?? document.querySelector<HTMLElement>('[data-scene-object-action="chroma"]') ?? target
+      }
       if (current.kind === 'text') target = document.querySelector<HTMLElement>('[data-scene-add="text"]') ?? text ?? target
       if (current.kind === 'qr') {
         const qrObject = document.querySelector<HTMLElement>('[data-scene-qr-object]')
         const qrInput = document.querySelector<HTMLElement>('[data-pdm-training-qr-url]')
         target = qrObject ?? qrInput ?? document.querySelector<HTMLElement>('[data-scene-add="qr"]') ?? target
       }
-      if (current.kind === 'titles') {
+      if (current.kind === 'qr') {
+        let qrAddressReady = false
+        try {
+          const address = new URL(s.qrOverlay.url.trim())
+          qrAddressReady = (address.protocol === 'http:' || address.protocol === 'https:') && !!address.hostname
+        } catch { /* keep the URL field highlighted */ }
+        const qrUrlField = qrAddressReady ? null : document.querySelector<HTMLElement>('[data-pdm-training-qr-url]')
+        const requiredFields = qrUrlField ? (() => {
+          const fieldRect = qrUrlField.getBoundingClientRect()
+          return [{
+            left: Math.max(0, fieldRect.left - 4),
+            top: Math.max(0, fieldRect.top - 4),
+            right: Math.min(innerWidth, fieldRect.right + 4),
+            bottom: Math.min(innerHeight, fieldRect.bottom + 4)
+          }]
+        })() : []
+        setRequiredFieldRects(old => old.length === requiredFields.length && old.every((oldRect, index) => (
+          Object.keys(oldRect).every(key => Math.abs(oldRect[key as keyof Rect] - requiredFields[index][key as keyof Rect]) < 1)
+        )) ? old : requiredFields)
+      } else if (current.kind === 'titles') {
         const titlesActive = document.querySelector('[data-scene-panel="titles"]')?.getAttribute('aria-selected') === 'true'
-        const requiredFields = [
+        const selectedSpeaker = s.broadcastTitles.speakers.find(speaker => speaker.id === s.broadcastTitles.selectedSpeakerId)
+        const titleFieldsComplete = (selectedSpeaker?.name.trim().length ?? 0) >= 3 && s.broadcastTitles.eventInfo.trim().length >= 4
+        const requiredFields = (titleFieldsComplete ? [] : [
           document.querySelector<HTMLElement>('[data-pdm-training-speaker-name]'),
           document.querySelector<HTMLElement>('[data-pdm-training-event-info]')
-        ].filter((field): field is HTMLElement => !!field).map((field) => {
+        ]).filter((field): field is HTMLElement => !!field).map((field) => {
           const fieldRect = field.getBoundingClientRect()
           return {
             left: Math.max(0, fieldRect.left - 4),
@@ -217,13 +264,87 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
         if (titlesActive) {
           const speakerInput = document.querySelector<HTMLElement>('[data-pdm-training-speaker-name]')
           const eventInput = document.querySelector<HTMLElement>('[data-pdm-training-event-info]')
-          const selectedSpeaker = s.broadcastTitles.speakers.find(speaker => speaker.id === s.broadcastTitles.selectedSpeakerId)
           if ((selectedSpeaker?.name.trim().length ?? 0) < 3) target = speakerInput ?? target
           else if (s.broadcastTitles.eventInfo.trim().length < 4) target = eventInput ?? target
           else target = document.querySelector<HTMLElement>('[data-broadcast-titles-preview]') ?? target
         }
+      } else if (current.kind === 'settings') {
+        const audioDevice = document.querySelector<HTMLElement>('[data-pdm-audio-device="training-hdmi"]')
+        const requiredFields = audioDevice ? (() => {
+          const deviceRect = audioDevice.getBoundingClientRect()
+          return [{
+            left: Math.max(0, deviceRect.left - 4),
+            top: Math.max(0, deviceRect.top - 4),
+            right: Math.min(innerWidth, deviceRect.right + 4),
+            bottom: Math.min(innerHeight, deviceRect.bottom + 4)
+          }]
+        })() : []
+        setRequiredFieldRects(old => old.length === requiredFields.length && old.every((oldRect, index) => (
+          Object.keys(oldRect).every(key => Math.abs(oldRect[key as keyof Rect] - requiredFields[index][key as keyof Rect]) < 1)
+        )) ? old : requiredFields)
+      } else if (current.kind === 'virtualCamera') {
+        const virtualCameraSettings = document.querySelector<HTMLElement>('[data-pdm-virtual-camera-settings]')
+        const target = virtualCameraEnabled.current
+          ? document.querySelector<HTMLElement>('[data-pdm-training-panel="settings"] [data-pdm-training-close]')
+          : virtualCameraSettings
+            ? document.querySelector<HTMLElement>('[data-pdm-virtual-camera-start]')
+            : document.querySelector<HTMLElement>('[data-pdm-settings-tab="virtual-camera"]')
+        const requiredFields = target ? (() => {
+          const tabRect = target.getBoundingClientRect()
+          return [{
+            left: Math.max(0, tabRect.left - 4),
+            top: Math.max(0, tabRect.top - 4),
+            right: Math.min(innerWidth, tabRect.right + 4),
+            bottom: Math.min(innerHeight, tabRect.bottom + 4)
+          }]
+        })() : []
+        setRequiredFieldRects(old => old.length === requiredFields.length && old.every((oldRect, index) => (
+          Object.keys(oldRect).every(key => Math.abs(oldRect[key as keyof Rect] - requiredFields[index][key as keyof Rect]) < 1)
+        )) ? old : requiredFields)
       } else setRequiredFieldRects(old => old.length === 0 ? old : [])
       if ((current.kind === 'scene' || current.kind === 'menu' || current.kind === 'draft') && scene) target = scene
+      const rightClickTarget = current.kind === 'menu' && !document.querySelector('[data-scene-add="text"]')
+        ? document.querySelector<HTMLElement>('[data-program-scene-preview]')
+        : current.kind === 'chroma' && !document.querySelector('[data-scene-object-action="chroma"]') && !document.querySelector('[data-program-scene-chroma-toggle]')
+          ? document.querySelector<HTMLElement>('[data-program-scene-participant-preview]')
+          : current.kind === 'qr' && !document.querySelector('[data-scene-add="qr"]') && !document.querySelector('[data-pdm-training-qr-url]') && !document.querySelector('[data-scene-qr-object]')
+            ? document.querySelector<HTMLElement>('[data-program-scene-preview]')
+            : null
+      if (rightClickTarget) {
+        const previewRect = rightClickTarget.getBoundingClientRect()
+        const nextGuideRect = { left: previewRect.left, top: previewRect.top, right: previewRect.right, bottom: previewRect.bottom }
+        setRightClickGuideRect(old => old && nextGuideRect && Object.keys(old).every(key => Math.abs(old[key as keyof Rect] - nextGuideRect[key as keyof Rect]) < 1) ? old : nextGuideRect)
+      } else setRightClickGuideRect(old => old === null ? old : null)
+      let actionButton: HTMLElement | null = null
+      if (current.kind === 'settings' && !panel) {
+        actionButton = target?.matches('button') ? target : target?.querySelector<HTMLElement>('button') ?? null
+      } else if (current.kind !== 'settings' && current.kind !== 'virtualCamera') {
+        if (current.kind === 'panel' && panel) {
+          actionButton = panel.querySelector<HTMLElement>('[data-pdm-training-close]')
+        } else if (current.kind === 'slide') {
+          actionButton = document.querySelectorAll<HTMLElement>('.pdm-slide-thumb')[1] ?? null
+        } else if (current.kind === 'channel' || current.kind === 'channelSecond') {
+          actionButton = target
+        } else if (current.kind === 'chroma' && target?.querySelector('[data-program-scene-chroma-toggle]')) {
+          actionButton = target
+        } else if (current.kind === 'qr' && target?.matches('[data-scene-qr-object]')) {
+          actionButton = target
+        } else if (target?.matches('button, [role="button"], [data-pdm-channel-take], [data-program-scene-picture-visible], [data-program-scene-refresh], [data-program-scene-select-external-source], [data-scene-add], [data-scene-panel], [data-scene-object-action], [data-scene-external-source], [data-broadcast-titles-preview], [data-broadcast-titles-show-all]')) {
+          actionButton = target
+        } else if (target?.matches('[data-toolbar-item]')) {
+          actionButton = target.querySelector<HTMLElement>('button')
+        }
+      }
+      if (actionButton) {
+        const buttonRect = actionButton.getBoundingClientRect()
+        const nextActionButtonRect = {
+          left: Math.max(0, buttonRect.left - 4),
+          top: Math.max(0, buttonRect.top - 4),
+          right: Math.min(innerWidth, buttonRect.right + 4),
+          bottom: Math.min(innerHeight, buttonRect.bottom + 4)
+        }
+        setActionButtonRect(old => old && Object.keys(old).every(key => Math.abs(old[key as keyof Rect] - nextActionButtonRect[key as keyof Rect]) < 1) ? old : nextActionButtonRect)
+      } else setActionButtonRect(old => old === null ? old : null)
       if (target) {
         const r = target.getBoundingClientRect()
         const next = { left: Math.max(0, r.left - 5), top: Math.max(0, r.top - 5), right: Math.min(innerWidth, r.right + 5), bottom: Math.min(innerHeight, r.bottom + 5) }
@@ -265,6 +386,10 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       document.removeEventListener('pointermove', pointerMove, true)
       document.removeEventListener('pointerup', pointerEnd, true)
       document.removeEventListener('pointercancel', pointerEnd, true)
+      document.querySelectorAll<HTMLElement>('[data-pdm-training-clear-slide-border]').forEach(thumb => {
+        thumb.removeAttribute('data-pdm-training-clear-slide-border')
+        thumb.style.removeProperty('border-color')
+      })
     }
   }, [step])
 
@@ -305,19 +430,58 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
   const formCardMaxHeight = formPreviewTop === undefined ? undefined : Math.max(170, formPreviewTop - 28)
   const left = formStep ? 16 : defaultLeft
   const top = formStep ? 8 : rect.bottom + 335 < innerHeight ? rect.bottom + 12 : Math.max(14, innerHeight - 360)
-  return <div className={`interface-tour${dragStep ? ' is-drag-step' : ''}${formStep ? ' is-form-step' : ''}${current.kind === 'qr' ? ' is-qr-step' : ''}${current.kind === 'titles' ? ' is-titles-step' : ''}`} data-pdm-training-tour data-pdm-training-ready={ready ? 'true' : 'false'}>
+  const virtualCameraTargetRect = requiredFieldRects[0]
+  const virtualCameraCardHeight = 270
+  const virtualCameraCardPosition = (() => {
+    if (current.kind !== 'virtualCamera' || !virtualCameraTargetRect) return { left, top }
+    const gap = 14
+    const margin = 12
+    const clampedTop = Math.max(margin, Math.min(innerHeight - virtualCameraCardHeight - margin, virtualCameraTargetRect.top))
+    if (virtualCameraTargetRect.right + gap + cardWidth <= innerWidth - margin) {
+      return { left: virtualCameraTargetRect.right + gap, top: clampedTop }
+    }
+    if (virtualCameraTargetRect.left - gap - cardWidth >= margin) {
+      return { left: virtualCameraTargetRect.left - gap - cardWidth, top: clampedTop }
+    }
+    const centeredLeft = Math.max(margin, Math.min(innerWidth - cardWidth - margin, (virtualCameraTargetRect.left + virtualCameraTargetRect.right - cardWidth) / 2))
+    if (virtualCameraTargetRect.bottom + gap + virtualCameraCardHeight <= innerHeight - margin) {
+      return { left: centeredLeft, top: virtualCameraTargetRect.bottom + gap }
+    }
+    return { left: centeredLeft, top: Math.max(margin, virtualCameraTargetRect.top - virtualCameraCardHeight - gap) }
+  })()
+  const virtualCameraInstruction = virtualCameraStage === 'tab'
+    ? 'Виртуальная камера передаёт итоговое изображение PDM в программу видеосвязи — как обычная камера. Нажмите вкладку «Виртуальная камера».'
+    : virtualCameraStage === 'enable'
+      ? 'Нажмите «Включить камеру».'
+      : 'Виртуальная камера включена. Теперь закройте настройки крестиком.'
+  const showPrimaryOutline = !actionButtonRect && requiredFieldRects.length === 0
+  return <div className={`interface-tour${dragStep ? ' is-drag-step' : ''}${formStep ? ' is-form-step' : ''}${current.kind === 'slide' ? ' is-slide-step' : ''}${current.kind === 'qr' ? ' is-qr-step' : ''}${current.kind === 'titles' ? ' is-titles-step' : ''}`} data-pdm-training-tour data-pdm-training-ready={ready ? 'true' : 'false'}>
     {!finished && <>
       <div className="interface-tour-shade" style={{ inset: '0 0 auto 0', height: rect.top }} />
       <div className="interface-tour-shade" style={{ left: 0, top: rect.top, width: rect.left, height: rect.bottom - rect.top }} />
       <div className="interface-tour-shade" style={{ right: 0, top: rect.top, width: innerWidth - rect.right, height: rect.bottom - rect.top }} />
       <div className="interface-tour-shade" style={{ inset: `${rect.bottom}px 0 0 0` }} />
-      <div className="interface-tour-outline" style={{ left: rect.left, top: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top }} />
+      {showPrimaryOutline && <div className="interface-tour-outline" style={{ left: rect.left, top: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top }} />}
       {requiredFieldRects.map((fieldRect, index) => <div
         key={index}
         className="interface-tour-required-field"
         data-pdm-training-required-field-outline
         style={{ left: fieldRect.left, top: fieldRect.top, width: fieldRect.right - fieldRect.left, height: fieldRect.bottom - fieldRect.top }}
       />)}
+      {actionButtonRect && <div
+        className="interface-tour-action-button"
+        data-pdm-training-action-button-outline
+        style={{ left: actionButtonRect.left, top: actionButtonRect.top, width: actionButtonRect.right - actionButtonRect.left, height: actionButtonRect.bottom - actionButtonRect.top }}
+      />}
+      {rightClickGuideRect && <div
+        className={`interface-tour-right-click-guide${current.kind === 'chroma' || current.kind === 'qr' ? ' is-compact' : ''}`}
+        data-pdm-training-right-click-guide
+        style={{ left: (rightClickGuideRect.left + rightClickGuideRect.right) / 2, top: (rightClickGuideRect.top + rightClickGuideRect.bottom) / 2 }}
+        aria-hidden="true"
+      >
+        <div className="interface-tour-mouse-picture"><i /><b /></div>
+        <strong>{current.kind === 'chroma' ? 'Нажмите правую кнопку на камере' : current.kind === 'qr' ? 'Нажмите правую кнопку в Сцене' : 'Нажмите правую кнопку мыши'}</strong>
+      </div>}
       {dragSourceRect && <div className="interface-tour-drag-source" aria-hidden="true" style={{ left: dragSourceRect.left, top: dragSourceRect.top, width: dragSourceRect.right - dragSourceRect.left, height: dragSourceRect.bottom - dragSourceRect.top }} />}
       {dragGuide && <svg className="interface-tour-drag-guide" aria-hidden="true" viewBox={`0 0 ${innerWidth} ${innerHeight}`}>
         <defs><marker id="training-arrow-head" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" /></marker></defs>
@@ -326,12 +490,12 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       </svg>}
       {moveGuide && <div className="interface-tour-move-guide" aria-hidden="true" style={{ left: moveGuide.left + (moveGuide.right - moveGuide.left) / 2, top: moveGuide.top - 22 }}>↔ ↕</div>}
     </>}
-    {panelVisible ? null : collapsed ? <button className="interface-tour-chip" onClick={() => setCollapsed(false)}>Шаг {step + 1} · Развернуть подсказку</button>
-      : <section className="interface-tour-card" style={{ left, top, width: cardWidth, maxHeight: formCardMaxHeight }} aria-live="polite">
+    {panelVisible && current.kind !== 'virtualCamera' ? null : collapsed ? <button className="interface-tour-chip" onClick={() => setCollapsed(false)}>Шаг {step + 1} · Развернуть подсказку</button>
+      : <section className="interface-tour-card" style={{ left: virtualCameraCardPosition.left, top: virtualCameraCardPosition.top, width: cardWidth, maxHeight: formCardMaxHeight }} aria-live="polite">
         <header><span>{finished ? 'Знакомство пройдено' : `Шаг ${step + 1} из ${lessons.length}`}</span><button title="Свернуть подсказку" aria-label="Свернуть подсказку" onClick={() => setCollapsed(true)}>−</button></header>
         {!finished && <div className="interface-tour-progress"><i style={{ width: `${(step + 1) / lessons.length * 100}%` }} /></div>}
         <h3>{finished ? 'Теперь вы знаете, как пользоваться PDM' : ready && (actionResult || current.doneText) ? 'Готово' : current.title}</h3>
-        <p>{finished ? 'Теперь вы знаете, как пользоваться PDM: добавлять материалы, переключать презентации, собирать Сцену и управлять показом.' : ready && (actionResult || current.doneText) ? actionResult || current.doneText : current.text}</p>
+        <p>{finished ? 'Теперь вы знаете, как пользоваться PDM: добавлять материалы, переключать презентации, собирать Сцену и управлять показом.' : ready && (actionResult || current.doneText) ? actionResult || current.doneText : current.kind === 'virtualCamera' ? virtualCameraInstruction : current.text}</p>
         {!finished && <small>{ready ? current.doneText || actionResult ? '✓ Готово — прочитайте и нажмите «Далее»' : '✓ Готово — переходим дальше…' : 'Выполните действие в выделенной области'}</small>}
         <div>
           {!finished && <button className="interface-tour-back" disabled={step === 0} onClick={goBack}>Назад</button>}

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
+import { readFile } from 'node:fs/promises'
 
 async function moduleFrom(path) {
   const result = await build({ entryPoints: [path], bundle: true, platform: 'node', format: 'esm', write: false })
@@ -8,6 +9,7 @@ async function moduleFrom(path) {
 
 const { resolveProgramSceneChannel } = await moduleFrom('src/renderer/src/program-scene-channel.ts')
 const { reduceTimerCommand } = await moduleFrom('src/renderer/src/timer-controls.ts')
+const { selectProgramSnapshotTimer } = await moduleFrom('src/renderer/src/program-snapshot-timer.ts')
 
 const channels = {
   live: { file: { path: 'live.pdf' } },
@@ -84,4 +86,48 @@ assert.deepEqual(timer, {
 assert.equal(reduceTimerCommand(base, { type: 'set-duration', seconds: 0 }), base)
 assert.equal(reduceTimerCommand({ ...base, duration: 0 }, { type: 'start' }).outputVisible, false)
 
-console.log('PASS: live Scene channel priority and timer start/pause/overtime/reset/output ownership transitions')
+const publishedSceneTimer = {
+  duration: 900,
+  remaining: 420,
+  running: true,
+  visible: true,
+  position: { x: 74, y: 12 },
+  scale: 1.4
+}
+const independentToolbarTimer = {
+  ...publishedSceneTimer,
+  duration: 600,
+  remaining: 295,
+  position: { x: 50, y: 50 }
+}
+let selectedTimer = selectProgramSnapshotTimer(undefined, publishedSceneTimer, independentToolbarTimer)
+assert.deepEqual(selectedTimer.timer, publishedSceneTimer, 'QR-only publication must preserve the published Scene timer')
+assert.equal(selectedTimer.applyToLiveTimer, false, 'QR-only publication must not take ownership of the live toolbar timer')
+assert.notEqual(selectedTimer.timer.position, publishedSceneTimer.position, 'published timer geometry must remain immutable')
+
+selectedTimer = selectProgramSnapshotTimer(independentToolbarTimer, publishedSceneTimer, publishedSceneTimer)
+assert.deepEqual(selectedTimer.timer, independentToolbarTimer, 'an explicit Scene timer publication must use the new draft')
+assert.equal(selectedTimer.applyToLiveTimer, true, 'only an explicit timer publication may replace live timer state')
+
+const [auxiliaryBridge, auxiliaryApp, outputPreload, mainProcess] = await Promise.all([
+  readFile('src/renderer/src/components/AuxiliaryDisplays/AuxiliaryDisplayBridge.tsx', 'utf8'),
+  readFile('src/renderer/src/AuxiliaryApp.tsx', 'utf8'),
+  readFile('src/preload/output.ts', 'utf8'),
+  readFile('src/main/index.ts', 'utf8')
+])
+assert.match(auxiliaryApp, /role === 'timer'[\s\S]*sendToControl\('timer-state-ready'/,
+  'a newly opened timer display must announce that its listeners are ready')
+assert.match(auxiliaryBridge, /on\('timer-state-ready'[\s\S]*sendToAuxiliary\('timer', 'information-state'[\s\S]*sendToAuxiliary\('timer', 'timer-update'/,
+  'the timer ready handshake must replay visibility and the complete running timer snapshot')
+assert.match(outputPreload, /'timer-state-ready'/,
+  'the restricted output preload must allow the timer ready handshake')
+assert.match(mainProcess, /timer: new Set\(\['timer-state-ready'\]\)/,
+  'main must accept the timer handshake only from a timer auxiliary window')
+assert.match(mainProcess, /channel === 'program-mirror-state-ready'[\s\S]*broadcastWpfTimerToMirrors\(true\)/,
+  'a newly ready live copy must receive the current program timer overlay')
+assert.match(auxiliaryApp, /PROGRAM_MIRROR_RETRY_DELAY_MS[\s\S]*retry scheduled[\s\S]*setReconnectRevision/,
+  'a live copy must continue reconnecting after transient Windows capture failures')
+assert.doesNotMatch(auxiliaryApp, /failure < PROGRAM_MIRROR_MAX_RETRIES/,
+  'a live copy must not permanently stop after a fixed number of retries')
+
+console.log('PASS: live Scene channel priority, timer transitions, auxiliary timer readiness, mirror recovery and QR-only publication ownership isolation')

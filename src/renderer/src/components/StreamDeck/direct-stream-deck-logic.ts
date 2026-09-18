@@ -108,8 +108,10 @@ export async function executeDirectStreamDeckAction(
         environment.dispatch('open-program-scene', { editor: 'qr' })
         return
       }
-      const qrOverlay = { ...state.qrOverlay, enabled: !state.qrOverlay.enabled }
-      state.setQrOverlay({ enabled: qrOverlay.enabled })
+      const enabled = !state.qrOverlay.enabled
+      const visibilityPatch = enabled ? { sceneVisible: true } : {}
+      const qrOverlay = { ...state.qrOverlay, enabled, ...visibilityPatch }
+      state.setQrOverlay({ enabled, ...visibilityPatch })
       if (state.programSnapshot) state.publishProgramSnapshot(undefined, { qrOverlay })
       return
     }

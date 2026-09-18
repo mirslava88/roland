@@ -10,6 +10,71 @@ app.whenReady().then(async () => {
   try {
     win = new BrowserWindow({ show: false, width: 1280, height: 800, useContentSize: true,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+    if (process.env.PDM_SCENE_TIMER_CLOSE_ONLY) {
+      stage = 'independent timer layout applies when the Scene closes'
+      await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
+      await new Promise(done => setTimeout(done, 350))
+      const before = await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`)
+      await win.webContents.executeJavaScript(`(() => {
+        const timer=document.querySelector('[data-program-scene-timer-preview]');
+        const layer=document.querySelector('[data-program-scene-timer-layer]');
+        const preview=document.querySelector('[data-program-scene-preview]').getBoundingClientRect();
+        const rect=timer.getBoundingClientRect(); const pointerId=40;
+        timer.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,pointerId,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2}));
+        layer.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId,clientX:preview.left+preview.width*.68,clientY:preview.top+preview.height*.62}));
+        layer.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId,clientX:preview.left+preview.width*.68,clientY:preview.top+preview.height*.62}));
+      })()`)
+      await new Promise(done => setTimeout(done, 50))
+      await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-close]').click()`)
+      await new Promise(done => setTimeout(done, 80))
+      assert.deepEqual(await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`), before,
+        'Closing a live combined Scene must not bypass the explicit refresh transaction')
+      await win.webContents.executeJavaScript(`window.remountTest();window.testScene.setProgramScene({enabled:false})`)
+      await new Promise(done => setTimeout(done, 120))
+      await win.webContents.executeJavaScript(`(() => {
+        const timer=document.querySelector('[data-program-scene-timer-preview]');
+        const layer=document.querySelector('[data-program-scene-timer-layer]');
+        const preview=document.querySelector('[data-program-scene-preview]').getBoundingClientRect();
+        const rect=timer.getBoundingClientRect(); const pointerId=41;
+        timer.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,pointerId,clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2}));
+        layer.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerId,clientX:preview.left+preview.width*.32,clientY:preview.top+preview.height*.28}));
+        layer.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId,clientX:preview.left+preview.width*.32,clientY:preview.top+preview.height*.28}));
+      })()`)
+      await new Promise(done => setTimeout(done, 50))
+      assert.deepEqual(await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`), before,
+        'Moving the independent timer in Scene preview must stay local until the Scene window closes')
+      await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-close]').click()`)
+      await new Promise(done => setTimeout(done, 100))
+      const after = await win.webContents.executeJavaScript(`({position:{...window.testScene.timerOverlayPosition},visible:window.testScene.timerOutputVisible,owner:window.testScene.timerOutputOwner,snapshot:window.testScene.programSnapshot,lastOverlay:window.lastTimerOverlay})`)
+      assert.notDeepEqual(after.position, before, 'Closing a disabled Scene must apply the drafted timer position')
+      assert.equal(after.visible, true, 'Applying the timer layout must not hide the independent timer')
+      assert.equal(after.owner, 'toolbar', 'Applying the timer layout must preserve independent timer ownership')
+      assert.equal(after.snapshot, null, 'Applying the independent timer layout must not enable the combined Scene')
+      assert.equal(after.lastOverlay?.posX, after.position.x, 'The live timer overlay must receive the applied horizontal position')
+      assert.equal(after.lastOverlay?.posY, after.position.y, 'The live timer overlay must receive the applied vertical position')
+      await win.webContents.executeJavaScript(`window.unmountTest()`)
+      clearTimeout(deadline);win.destroy();app.quit()
+      console.log('PASS: disabled Scene applies timer layout on close without changing timer ownership or visibility')
+      return
+    }
+    if (process.env.PDM_SCENE_DIRTY_ONLY) {
+      stage = 'Scene refresh attention survives editor remount'
+      await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
+      await new Promise(done => setTimeout(done, 350))
+      assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').dataset.pendingChanges`), 'false')
+      await win.webContents.executeJavaScript(`window.testScene.setProgramScene({textOverlays:[{id:'persistent-draft',text:'Р§РµСЂРЅРѕРІРёРє',xPercent:50,yPercent:50,widthPercent:30,fontSizePercent:36,fontFamily:'Arial',fontWeight:700,color:'#ffffff',backgroundColor:'#000000',backgroundOpacity:.4,textAlign:'left',visible:true}]});window.remountTest()`)
+      await new Promise(done => setTimeout(done, 120))
+      assert.deepEqual(await win.webContents.executeJavaScript(`(() => {const button=document.querySelector('[data-program-scene-refresh]');return {pending:button.dataset.pendingChanges,blue:button.className.includes('bg-blue-600'),attention:button.className.includes('program-scene-refresh-attention')}})()`),
+        {pending:'true',blue:true,attention:true}, 'A saved Scene draft must keep the blue glowing refresh button after reopening the editor')
+      await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-refresh]').click()`)
+      await new Promise(done => setTimeout(done, 100))
+      assert.deepEqual(await win.webContents.executeJavaScript(`(() => {const button=document.querySelector('[data-program-scene-refresh]');return {pending:button.dataset.pendingChanges,attention:button.className.includes('program-scene-refresh-attention')}})()`),
+        {pending:'false',attention:false}, 'Publishing the Scene draft must clear refresh attention')
+      await win.webContents.executeJavaScript(`window.unmountTest()`)
+      clearTimeout(deadline);win.destroy();app.quit()
+      console.log('PASS: Scene refresh attention survives reopening and clears after publication')
+      return
+    }
     if (process.env.PDM_SCENE_CONTENT_FOLLOW_ONLY) {
       stage = 'Scene content follows committed channels, not a stale video'
       await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&content-follow' })

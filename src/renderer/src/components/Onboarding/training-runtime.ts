@@ -1,3 +1,5 @@
+import type { VirtualCameraStatus } from '../../../../shared/virtual-camera'
+
 // Installed before importing App/store. No preload, main process or parent API.
 const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
 export const emitTraining = (event: string, ...args: unknown[]): void => {
@@ -43,6 +45,10 @@ export function installTrainingRuntime(): void {
     { id: 'training-speakers', name: 'Динамики компьютера (учебные)', isDefault: true },
     { id: 'training-hdmi', name: 'Проектор / HDMI (учебный)', isDefault: false }
   ]
+  let virtualCameraStatus: VirtualCameraStatus = {
+    phase: 'idle', supported: true, installed: true, available: true, source: null,
+    error: null, name: 'PDM Virtual Camera', width: 1920, height: 1080, fps: 30, startedAt: null
+  }
   const trainingCaptureDevices = [
     { deviceId: 'training-camera', kind: 'videoinput', label: 'Учебная камера с зелёным фоном', groupId: 'training-camera-group' },
     { deviceId: 'training-microphone', kind: 'audioinput', label: 'Микрофон учебной камеры', groupId: 'training-camera-group' }
@@ -78,6 +84,20 @@ export function installTrainingRuntime(): void {
       if (!audioDevices.some(device => device.id === deviceId)) return Promise.resolve({ success: false, error: 'Учебное устройство не найдено' })
       audioDevices = audioDevices.map(device => ({ ...device, isDefault: device.id === deviceId }))
       return Promise.resolve({ success: true })
+    },
+    virtualCamera: {
+      status: () => { trainingCalls.push('virtualCamera.status'); return Promise.resolve({ ...virtualCameraStatus }) },
+      install: () => { trainingCalls.push('virtualCamera.install'); return Promise.resolve({ ...virtualCameraStatus }) },
+      start: () => {
+        trainingCalls.push('virtualCamera.start')
+        virtualCameraStatus = { ...virtualCameraStatus, phase: 'running', source: 'display', startedAt: Date.now() }
+        return Promise.resolve({ ...virtualCameraStatus })
+      },
+      stop: () => {
+        trainingCalls.push('virtualCamera.stop')
+        virtualCameraStatus = { ...virtualCameraStatus, phase: 'idle', source: null, startedAt: null }
+        return Promise.resolve({ ...virtualCameraStatus })
+      }
     },
     getAppVersion: asyncValue('getAppVersion', 'Учебный режим'),
     getDesktopCaptureSources: asyncValue('getDesktopCaptureSources', []),

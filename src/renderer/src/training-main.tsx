@@ -7,7 +7,7 @@ try {
   // Dynamic imports ensure the real store hydrates only from in-memory storage.
   void Promise.all([import('react'), import('react-dom/client'), import('./App'), import('./stores/useAppStore'), import('./components/Onboarding/InterfaceTour')]).then(([React, ReactDOM, { default: App }, { useAppStore }, { InterfaceTour }]) => {
     const query = new URLSearchParams(location.search)
-    const step = Math.max(0, Math.min(30, Number(query.get('step')) || 0))
+    const step = Math.max(0, Math.min(31, Number(query.get('step')) || 0))
     const theme = query.get('theme') === 'classic' ? 'classic' : 'broadcast-pro'
     const state = useAppStore.getState()
     const channelId = state.channelIds[0]

@@ -6,6 +6,7 @@ import type {
   DirectStreamDeckKeyState,
   DirectStreamDeckStatus
 } from '../shared/direct-stream-deck'
+import type { VirtualCameraApi } from '../shared/virtual-camera'
 
 interface DriveInfo {
   name: string
@@ -31,6 +32,12 @@ interface MusicState {
 const api = {
   ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
+  virtualCamera: {
+    status: () => ipcRenderer.invoke('virtual-camera-status'),
+    install: () => ipcRenderer.invoke('virtual-camera-install'),
+    start: (displayId: number | null) => ipcRenderer.invoke('virtual-camera-start', displayId),
+    stop: () => ipcRenderer.invoke('virtual-camera-stop')
+  } satisfies VirtualCameraApi,
   loadQrWifiPassword: (): Promise<string> => ipcRenderer.invoke('qr-wifi-password-load'),
   saveQrWifiPassword: (password: string): Promise<boolean> =>
     ipcRenderer.invoke('qr-wifi-password-save', password),

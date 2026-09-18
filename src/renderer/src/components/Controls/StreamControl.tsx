@@ -21,7 +21,7 @@ export function StreamControl(): JSX.Element {
   const mounted = useRef(true)
   const selectedDisplayId = useAppStore((s) => s.selectedDisplayId)
   const displayAssignments = useAppStore((s) => s.displayAssignments)
-  const setInternalProgramOutputActive = useAppStore((s) => s.setInternalProgramOutputActive)
+  const setInternalProgramOutputConsumer = useAppStore((s) => s.setInternalProgramOutputConsumer)
   const displays = useAppStore((s) => s.displays)
   const pipAudioEnabled = useAppStore((s) => s.programScene.enabled && s.programScene.audio?.enabled)
   const active = status?.phase === 'running' || status?.phase === 'starting'
@@ -61,8 +61,8 @@ export function StreamControl(): JSX.Element {
 
   useEffect(() => {
     if (status?.source !== 'internal') return
-    if (status.phase === 'idle' || status.phase === 'error') setInternalProgramOutputActive(false)
-  }, [setInternalProgramOutputActive, status?.phase, status?.source])
+    if (status.phase === 'idle' || status.phase === 'error') setInternalProgramOutputConsumer('stream', false)
+  }, [setInternalProgramOutputConsumer, status?.phase, status?.source])
 
   return <>
     <button type="button" onClick={() => setOpen(true)}
@@ -123,10 +123,10 @@ export function StreamControl(): JSX.Element {
             <div className="flex gap-2"><button type="button" className={button} onClick={() => setOpen(false)}>Закрыть</button>
               {active ? <button type="button" className="rounded bg-red-600 px-4 py-1.5 text-sm hover:bg-red-500" onClick={() => void run(async () => {
                 try { await window.api.streaming.stop() }
-                finally { setInternalProgramOutputActive(false) }
+                finally { setInternalProgramOutputConsumer('stream', false) }
               })}>Остановить стрим</button>
                 : <button type="button" className="rounded bg-red-600 px-4 py-1.5 text-sm hover:bg-red-500 disabled:opacity-40" disabled={busy || !available || (programDisplayId === null && settings.fps > 30)} onClick={() => void run(async () => {
-                  setInternalProgramOutputActive(programDisplayId === null)
+                  setInternalProgramOutputConsumer('stream', programDisplayId === null)
                   try {
                     if (programDisplayId === null) await window.api.prepareInternalProgramOutput()
                     else if (!await window.api.placePresentationWindow(programDisplayId)) {
@@ -134,7 +134,7 @@ export function StreamControl(): JSX.Element {
                     }
                     await window.api.streaming.start(settings, programDisplayId)
                   }
-                  catch (error) { setInternalProgramOutputActive(false); throw error }
+                  catch (error) { setInternalProgramOutputConsumer('stream', false); throw error }
                 })}>Начать трансляцию</button>}
             </div>
           </div>

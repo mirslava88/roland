@@ -12,7 +12,8 @@ const MIRROR_PDF_SAFE_WIDTH_RATIO = 0.96
 const MIRROR_PDF_MAX_HORIZONTAL_STRETCH = 1.08
 const PROGRAM_MIRROR_CONNECTING_STATUS = 'Подключение к основному эфиру…'
 const PROGRAM_MIRROR_FRAME_TIMEOUT_MS = 5_000
-const PROGRAM_MIRROR_MAX_RETRIES = 4
+const PROGRAM_MIRROR_FAST_RETRIES = 4
+const PROGRAM_MIRROR_RETRY_DELAY_MS = 5000
 const role: AuxiliaryDisplayRole = requestedRole === 'mirror' ||
   requestedRole === 'info' ||
   requestedRole === 'timer' ||
@@ -830,6 +831,8 @@ function InformationDisplay(): JSX.Element {
     })
     if (role === 'info') {
       window.api.sendToControl('information-state-ready', { displayId: auxiliaryDisplayId })
+    } else if (role === 'timer') {
+      window.api.sendToControl('timer-state-ready', { displayId: auxiliaryDisplayId })
     }
     return () => { offState(); offTimer() }
   }, [])
@@ -1342,18 +1345,18 @@ function ProgramMirrorDisplay(): JSX.Element {
           const failure = ++reconnectFailuresRef.current
           window.api.dbgLog(
             `program mirror failed display=${mirrorState.sourceDisplayId} ` +
-            `attempt=${failure}/${PROGRAM_MIRROR_MAX_RETRIES}: ${String(error)}`
+            `attempt=${failure}: ${String(error)}; retry scheduled`
           )
-          if (failure < PROGRAM_MIRROR_MAX_RETRIES) {
-            setStatus(PROGRAM_MIRROR_CONNECTING_STATUS)
-            const retryDelay = Math.min(3_000, 500 * (2 ** (failure - 1)))
-            retryTimer = setTimeout(() => {
-              retryTimer = null
-              if (!cancelled) setReconnectRevision((value) => value + 1)
-            }, retryDelay)
-          } else {
-            setStatus(`Не удалось показать копию эфира: ${String(error)}`)
-          }
+          setStatus(failure < PROGRAM_MIRROR_FAST_RETRIES
+            ? PROGRAM_MIRROR_CONNECTING_STATUS
+            : 'Живая копия временно недоступна. Восстанавливаем подключение…')
+          const retryDelay = failure < PROGRAM_MIRROR_FAST_RETRIES
+            ? Math.min(3_000, 500 * (2 ** (failure - 1)))
+            : PROGRAM_MIRROR_RETRY_DELAY_MS
+          retryTimer = setTimeout(() => {
+            retryTimer = null
+            if (!cancelled) setReconnectRevision((value) => value + 1)
+          }, retryDelay)
         }
       }
     }

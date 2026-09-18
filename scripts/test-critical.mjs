@@ -13,6 +13,7 @@ const integrationChecks = [
 const suites = {
   core: [
     ['Security hardening', process.execPath, ['scripts/test-security-hardening.mjs']],
+    ['Virtual camera', process.execPath, ['scripts/test-virtual-camera.mjs']],
     ['Stream Deck commands', process.execPath, ['scripts/test-direct-stream-deck.mjs']],
     ['Scene and timer commands', process.execPath, ['scripts/test-scene-and-timer-commands.mjs']],
     ['PPTX cache', process.execPath, ['scripts/test-pptx-cache.mjs']],
