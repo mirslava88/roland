@@ -4,7 +4,7 @@
     <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
     <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
   </ItemGroup>
-  <PropertyGroup Label="Globals"><ProjectGuid>{BBAB64B2-CB9B-4323-9670-118A3866C122}</ProjectGuid><Keyword>Win32Proj</Keyword><RootNamespace>PDMVirtualCameraHost</RootNamespace><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{BBAB64B2-CB9B-4323-9670-118A3866C122}</ProjectGuid><Keyword>Win32Proj</Keyword><RootNamespace>PDMVirtualCameraHost</RootNamespace><WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion><MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\NuGet\Host\</MSBuildProjectExtensionsPath></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration"><ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration"><ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>

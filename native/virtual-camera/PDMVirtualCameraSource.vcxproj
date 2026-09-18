@@ -9,6 +9,9 @@
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>PDMVirtualCameraSource</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <TargetFrameworkIdentifier>native</TargetFrameworkIdentifier>
+    <TargetFrameworkVersion>v0.0</TargetFrameworkVersion>
+    <MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\NuGet\Source\</MSBuildProjectExtensionsPath>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
@@ -22,7 +25,7 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <LanguageStandard>stdcpp20</LanguageStandard><PrecompiledHeader>Use</PrecompiledHeader><PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)source;$(UserProfile)\.nuget\packages\microsoft.windows.implementationlibrary\1.0.260126.7\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WINAPI_FAMILY=WINAPI_FAMILY_DESKTOP_APP;WINAPI_PARTITION_DESKTOP=1;WINAPI_PARTITION_SYSTEM=1;WINAPI_PARTITION_APP=1;WINAPI_PARTITION_PC_APP=1;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary><RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel><SDLCheck>true</SDLCheck>
@@ -38,6 +41,9 @@
   <ItemGroup>
     <ClInclude Include="source\pch.h"/><ClInclude Include="source\PdmSharedFrame.h"/><ClInclude Include="source\EventHandler.h"/><ClInclude Include="source\SimpleFrameGenerator.h"/>
     <ClInclude Include="source\SimpleMediaSource.h"/><ClInclude Include="source\SimpleMediaStream.h"/><ClInclude Include="source\VirtualCameraMediaSource.h"/><ClInclude Include="source\VirtualCameraMediaSourceActivate.h"/>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.ImplementationLibrary" Version="1.0.260126.7" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

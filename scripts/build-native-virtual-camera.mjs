@@ -43,7 +43,7 @@ if (!msbuild) {
 }
 if (!msbuild) throw new Error('MSBuild with the Visual C++ tools is required to build the PDM virtual camera.')
 
-const result = spawnSync(msbuild, [solution, '/m', '/p:Configuration=Release', '/p:Platform=x64', '/v:minimal'], {
+const result = spawnSync(msbuild, [solution, '/restore', '/m', '/p:Configuration=Release', '/p:Platform=x64', '/v:minimal'], {
   cwd: root,
   stdio: 'inherit',
   windowsHide: true
