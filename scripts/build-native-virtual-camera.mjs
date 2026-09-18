@@ -20,6 +20,24 @@ const candidates = [
 
 let msbuild = candidates.find((candidate) => existsSync(candidate))
 if (!msbuild) {
+  const vswhereCandidates = [
+    'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe',
+    'C:\\Program Files\\Microsoft Visual Studio\\Installer\\vswhere.exe'
+  ]
+  const vswhere = vswhereCandidates.find((candidate) => existsSync(candidate))
+  if (vswhere) {
+    const located = spawnSync(vswhere, [
+      '-latest',
+      '-products', '*',
+      '-requires', 'Microsoft.Component.MSBuild',
+      '-find', 'MSBuild\\**\\Bin\\MSBuild.exe'
+    ], { encoding: 'utf8', windowsHide: true })
+    msbuild = located.status === 0
+      ? located.stdout.split(/\r?\n/).map((value) => value.trim()).find((value) => value && existsSync(value))
+      : undefined
+  }
+}
+if (!msbuild) {
   const where = spawnSync('where.exe', ['msbuild.exe'], { encoding: 'utf8', windowsHide: true })
   msbuild = where.status === 0 ? where.stdout.split(/\r?\n/).find(Boolean) : undefined
 }
