@@ -92,7 +92,54 @@ const outputReadablePaths = new Map<number, Set<string>>()
 const auxiliaryWindows = new Map<number, {
   role: AuxiliaryWindowRole
   window: BrowserWindow
+  placementKey: string | null
 }>()
+// Windows can emit display-added, several metrics changes and display-removed
+// for the same physical hotplug within a few milliseconds. BrowserWindow
+// fullscreen operations for one HWND must never overlap. Keep every native
+// operation for a display in one lane and invalidate queued work as soon as
+// that display disappears or its role is closed.
+const auxiliaryWindowOperationChains = new Map<number, Promise<void>>()
+const auxiliaryWindowOperationEpochs = new Map<number, number>()
+
+function getAuxiliaryWindowOperationEpoch(displayId: number): number {
+  return auxiliaryWindowOperationEpochs.get(displayId) ?? 0
+}
+
+function invalidateAuxiliaryWindowOperations(displayId: number): void {
+  auxiliaryWindowOperationEpochs.set(
+    displayId,
+    getAuxiliaryWindowOperationEpoch(displayId) + 1
+  )
+}
+
+function isAuxiliaryWindowOperationCurrent(displayId: number, epoch: number): boolean {
+  return getAuxiliaryWindowOperationEpoch(displayId) === epoch
+}
+
+function enqueueAuxiliaryWindowOperation<T>(
+  displayId: number,
+  operation: (epoch: number) => Promise<T> | T
+): Promise<T> {
+  const epoch = getAuxiliaryWindowOperationEpoch(displayId)
+  const previous = auxiliaryWindowOperationChains.get(displayId) ?? Promise.resolve()
+  const task = previous
+    .catch(() => undefined)
+    .then(() => operation(epoch))
+  const tail = task.then(() => undefined, () => undefined)
+  auxiliaryWindowOperationChains.set(displayId, tail)
+  void tail.then(() => {
+    if (auxiliaryWindowOperationChains.get(displayId) === tail) {
+      auxiliaryWindowOperationChains.delete(displayId)
+    }
+  })
+  return task
+}
+
+function auxiliaryWindowPlacementKey(display: Display): string {
+  const { x, y, width, height } = display.bounds
+  return `${display.id}:${x}:${y}:${width}:${height}:${display.scaleFactor}:${display.rotation}`
+}
 const auxiliaryLastMessages = new Map<AuxiliaryWindowRole, Map<string, unknown[]>>()
 const programMirrorHolds = new Map<number, {
   transitionId: string
@@ -460,6 +507,7 @@ function broadcastWpfTimerToMirrors(force = false): void {
     warningTextColor: String(lastWpfTimerData.warningTextColor || '#facc15'),
     overtimeTextColor: String(lastWpfTimerData.overtimeTextColor || '#ef4444'),
     textOpacity: Math.max(0.1, Math.min(1, Number(lastWpfTimerData.textOpacity || 1))),
+    dpiScale: Math.max(0.5, screen.getPrimaryDisplay().scaleFactor || 1),
     ...readWpfTimerLayout()
   }
   const signature = JSON.stringify(payload)
@@ -481,26 +529,39 @@ function stopWpfTimerMirrorSync(): void {
   broadcastWpfTimerToMirrors(true)
 }
 
+function disposeAuxiliaryWindowEntry(
+  id: number,
+  entry: { role: AuxiliaryWindowRole; window: BrowserWindow; placementKey: string | null },
+  notify = false
+): void {
+  const consumerId = entry.window.webContents.id
+  programMirrorHolds.delete(consumerId)
+  programMirrorHoldIntents.delete(consumerId)
+  // React cleanup is best-effort during window teardown. Release the native
+  // browser lease from main as well, while this renderer identity is known.
+  void releaseBrowserFullscreenWindows(undefined, false, consumerId)
+  auxiliaryWindows.delete(id)
+  if (!entry.window.isDestroyed()) entry.window.close()
+  if (notify && controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.webContents.send('auxiliary-window-closed', { role: entry.role, displayId: id })
+  }
+}
+
 function closeAuxiliaryWindow(
   role: AuxiliaryWindowRole,
   displayId?: number,
   notify = false
 ): void {
+  if (displayId !== undefined) {
+    // Also cancel a request that is queued but has not created its window yet.
+    invalidateAuxiliaryWindowOperations(displayId)
+  }
   const entries = [...auxiliaryWindows.entries()].filter(([id, entry]) => (
     entry.role === role && (displayId === undefined || id === displayId)
   ))
   for (const [id, entry] of entries) {
-    const consumerId = entry.window.webContents.id
-    programMirrorHolds.delete(consumerId)
-    programMirrorHoldIntents.delete(consumerId)
-    // React cleanup is best-effort during window teardown. Release the native
-    // browser lease from main as well, while this renderer identity is known.
-    void releaseBrowserFullscreenWindows(undefined, false, consumerId)
-    auxiliaryWindows.delete(id)
-    if (!entry.window.isDestroyed()) entry.window.close()
-    if (notify && controlWindow && !controlWindow.isDestroyed()) {
-      controlWindow.webContents.send('auxiliary-window-closed', { role, displayId: id })
-    }
+    if (displayId === undefined) invalidateAuxiliaryWindowOperations(id)
+    disposeAuxiliaryWindowEntry(id, entry, notify)
   }
 }
 
@@ -1177,101 +1238,118 @@ function createWindows(): void {
     if (!(['mirror', 'speaker', 'info', 'timer', 'event-timer', 'backdrop'] as AuxiliaryWindowRole[]).includes(role)) {
       return { success: false, error: 'Unknown auxiliary display role' }
     }
-    const primary = screen.getPrimaryDisplay()
-    const displays = screen.getAllDisplays()
-    const target = displays.find((display) => display.id === displayId)
-    if (!target || target.id === primary.id) {
-      return {
-        success: false,
-        error: 'Назначенный внешний монитор не подключён'
+    return enqueueAuxiliaryWindowOperation(displayId, async (epoch) => {
+      const resolveTarget = (): Display | undefined => {
+        const primary = screen.getPrimaryDisplay()
+        return screen.getAllDisplays().find((display) => (
+          display.id === displayId && display.id !== primary.id
+        ))
       }
-    }
+      let target = resolveTarget()
+      if (!target || !isAuxiliaryWindowOperationCurrent(displayId, epoch)) {
+        return { success: false, error: 'Назначенный внешний монитор не подключён' }
+      }
 
-    const existing = auxiliaryWindows.get(target.id)
-    if (existing && (existing.role !== role || existing.window.isDestroyed())) {
-      closeAuxiliaryWindow(existing.role, target.id)
-    }
+      const existing = auxiliaryWindows.get(target.id)
+      if (existing && (existing.role !== role || existing.window.isDestroyed())) {
+        // This replacement already owns the operation lane. Disposing the old
+        // role here must not invalidate the new request itself.
+        disposeAuxiliaryWindowEntry(target.id, existing)
+      }
 
-    let win = auxiliaryWindows.get(target.id)?.window ?? null
-    if (!win || win.isDestroyed()) {
-      win = createAuxiliaryWindow(target, role)
-      auxiliaryWindows.set(target.id, { role, window: win })
-      const auxiliaryConsumerId = win.webContents.id
-      win.webContents.once('destroyed', () => {
-        outputReadablePaths.delete(auxiliaryConsumerId)
-        programMirrorHolds.delete(auxiliaryConsumerId)
-        programMirrorHoldIntents.delete(auxiliaryConsumerId)
-        void releaseBrowserFullscreenWindows(undefined, false, auxiliaryConsumerId)
-      })
-      win.on('closed', () => {
-        if (auxiliaryWindows.get(target.id)?.window === win) {
-          auxiliaryWindows.delete(target.id)
-        }
-      })
-    }
+      let win = auxiliaryWindows.get(target.id)?.window ?? null
+      if (!win || win.isDestroyed()) {
+        win = createAuxiliaryWindow(target, role)
+        auxiliaryWindows.set(target.id, { role, window: win, placementKey: null })
+        const auxiliaryConsumerId = win.webContents.id
+        win.webContents.once('destroyed', () => {
+          outputReadablePaths.delete(auxiliaryConsumerId)
+          programMirrorHolds.delete(auxiliaryConsumerId)
+          programMirrorHoldIntents.delete(auxiliaryConsumerId)
+          void releaseBrowserFullscreenWindows(undefined, false, auxiliaryConsumerId)
+        })
+        win.on('closed', () => {
+          if (auxiliaryWindows.get(displayId)?.window === win) {
+            auxiliaryWindows.delete(displayId)
+          }
+        })
+      }
 
-    if (win.webContents.isLoading()) {
-      const contents = win.webContents
-      const loaded = await new Promise<boolean>((resolve) => {
-        let settled = false
-        const finish = (success: boolean): void => {
-          if (settled) return
-          settled = true
-          clearTimeout(timeout)
-          contents.removeListener('did-finish-load', onLoaded)
-          contents.removeListener('did-fail-load', onFailed)
-          contents.removeListener('destroyed', onDestroyed)
-          resolve(success)
-        }
-        const onLoaded = (): void => finish(true)
-        const onFailed = (): void => finish(false)
-        const onDestroyed = (): void => finish(false)
-        const timeout = setTimeout(() => finish(false), 8000)
-        contents.once('did-finish-load', onLoaded)
-        contents.once('did-fail-load', onFailed)
-        contents.once('destroyed', onDestroyed)
-      })
-      if (!loaded) {
-        return {
-          success: false,
-          error: win.isDestroyed() || contents.isDestroyed()
-            ? 'Окно дисплея было закрыто во время запуска'
-            : 'Окно дисплея не успело загрузиться'
+      if (win.webContents.isLoading()) {
+        const contents = win.webContents
+        const loaded = await new Promise<boolean>((resolve) => {
+          let settled = false
+          const finish = (success: boolean): void => {
+            if (settled) return
+            settled = true
+            clearTimeout(timeout)
+            contents.removeListener('did-finish-load', onLoaded)
+            contents.removeListener('did-fail-load', onFailed)
+            contents.removeListener('destroyed', onDestroyed)
+            resolve(success)
+          }
+          const onLoaded = (): void => finish(true)
+          const onFailed = (): void => finish(false)
+          const onDestroyed = (): void => finish(false)
+          const timeout = setTimeout(() => finish(false), 8000)
+          contents.once('did-finish-load', onLoaded)
+          contents.once('did-fail-load', onFailed)
+          contents.once('destroyed', onDestroyed)
+        })
+        if (!loaded) {
+          return {
+            success: false,
+            error: win.isDestroyed() || contents.isDestroyed()
+              ? 'Окно дисплея было закрыто во время запуска'
+              : 'Окно дисплея не успело загрузиться'
+          }
         }
       }
-    }
-    if (win.isDestroyed() || win.webContents.isDestroyed()) {
-      return { success: false, error: 'Окно дисплея было закрыто во время запуска' }
-    }
-    for (const [channel, args] of auxiliaryLastMessages.get(role) ?? []) {
-      authorizeOutputFilePaths(win.webContents.id, args)
-      win.webContents.send(channel, ...args)
-    }
-    // A fullscreen BrowserWindow cannot be reliably moved with setBounds on
-    // Windows. Place it while windowed, then enter fullscreen on that monitor.
-    // This is especially important when a Full HD display and an ultrawide
-    // display are both connected: otherwise the renderer can inherit the
-    // geometry of the wrong screen and size the live copy incorrectly.
-    const actualBeforePlacement = win.getBounds()
-    const alreadyPlaced = actualBeforePlacement.x === target.bounds.x &&
-      actualBeforePlacement.y === target.bounds.y &&
-      actualBeforePlacement.width === target.bounds.width &&
-      actualBeforePlacement.height === target.bounds.height
-    if (!alreadyPlaced || !win.isFullScreen()) {
-      if (win.isFullScreen()) win.setFullScreen(false)
-      win.setBounds(target.bounds)
-      if (!win.isVisible()) win.showInactive()
-      win.setFullScreen(true)
-    } else if (!win.isVisible()) {
-      win.showInactive()
-    }
-    win.setAlwaysOnTop(false)
-    diagnosticLog(
-      'display',
-      `auxiliary open role=${role} display=${target.id} requested=${JSON.stringify(target.bounds)} ` +
-      `actual=${JSON.stringify(win.getBounds())} fullscreen=${win.isFullScreen()}`
-    )
-    return { success: true }
+
+      // The monitor may have disappeared and returned while the renderer was
+      // loading. Re-read topology and ownership after every asynchronous gap.
+      target = resolveTarget()
+      const entry = auxiliaryWindows.get(displayId)
+      if (
+        !target ||
+        !isAuxiliaryWindowOperationCurrent(displayId, epoch) ||
+        entry?.window !== win ||
+        entry.role !== role ||
+        win.isDestroyed() ||
+        win.webContents.isDestroyed()
+      ) {
+        return { success: false, error: 'Окно дисплея было закрыто во время запуска' }
+      }
+      for (const [channel, args] of auxiliaryLastMessages.get(role) ?? []) {
+        authorizeOutputFilePaths(win.webContents.id, args)
+        win.webContents.send(channel, ...args)
+      }
+
+      const placementKey = auxiliaryWindowPlacementKey(target)
+      try {
+        // Auxiliary outputs are borderless windows sized to the full display,
+        // not native fullscreen windows. Chromium's Windows fullscreen HWND
+        // can crash if its monitor vanishes while that state is being closed.
+        if (entry.placementKey !== placementKey) {
+          win.setBounds(target.bounds)
+          entry.placementKey = placementKey
+        }
+        if (!win.isVisible()) win.showInactive()
+        win.setAlwaysOnTop(false)
+        diagnosticLog(
+          'display',
+          `auxiliary open role=${role} display=${target.id} requested=${JSON.stringify(target.bounds)} ` +
+          `actual=${JSON.stringify(win.getBounds())} fullscreen=${win.isFullScreen()}`
+        )
+        return { success: true }
+      } catch (error) {
+        diagnosticLog(
+          'display',
+          `auxiliary open failed role=${role} display=${displayId} ${formatDiagnosticError(error)}`
+        )
+        return { success: false, error: 'Окно дисплея не удалось разместить на мониторе' }
+      }
+    })
   })
 
   handleControl('close-auxiliary-window', (
@@ -2995,9 +3073,35 @@ function createWindows(): void {
       placeWindow(overlayWindow, overlayTarget, 'transition overlay')
     }
 
-    for (const [displayId, entry] of auxiliaryWindows) {
-      placeWindow(entry.window, byId.get(displayId), `auxiliary role=${entry.role}`)
-    }
+    const auxiliaryPlacements = [...auxiliaryWindows.entries()].map(([displayId, queuedEntry]) => (
+      enqueueAuxiliaryWindowOperation(displayId, (epoch) => {
+        if (!isAuxiliaryWindowOperationCurrent(displayId, epoch)) return
+        const target = screen.getAllDisplays().find((display) => display.id === displayId)
+        const entry = auxiliaryWindows.get(displayId)
+        if (!target || entry !== queuedEntry || entry.window.isDestroyed()) return
+        const placementKey = auxiliaryWindowPlacementKey(target)
+        if (entry.placementKey === placementKey) return
+        try {
+          const previous = entry.window.getBounds()
+          entry.window.setBounds(target.bounds)
+          if (!entry.window.isVisible()) entry.window.showInactive()
+          entry.placementKey = placementKey
+          diagnosticLog(
+            'display',
+            `auxiliary role=${entry.role} resized display=${target.id} ` +
+            `from=${JSON.stringify(previous)} to=${JSON.stringify(target.bounds)}`
+          )
+        } catch (error) {
+          diagnosticLog(
+            'display',
+            `auxiliary role=${entry.role} resize failed ${formatDiagnosticError(error)}`
+          )
+        }
+      })
+    ))
+    // Auxiliary renderers may still be loading. Their serialized placement
+    // must not delay PowerPoint relocation or timer recovery on other outputs.
+    void Promise.allSettled(auxiliaryPlacements)
 
     if (timerActive) {
       const timerTarget = byId.get(wpfTimerDisplayId ?? -1) || presentationTarget
@@ -3102,6 +3206,11 @@ function createWindows(): void {
     sendDisplays()
     scheduleDisplayMetricsSync('display-removed')
     const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
+    for (const displayId of auxiliaryWindowOperationChains.keys()) {
+      if (!connectedIds.has(displayId) && !auxiliaryWindows.has(displayId)) {
+        invalidateAuxiliaryWindowOperations(displayId)
+      }
+    }
     if (qrOverlayDisplayId !== null && !connectedIds.has(qrOverlayDisplayId)) {
       qrOverlayRevision += 1
       if (qrOverlayWindow && !qrOverlayWindow.isDestroyed()) qrOverlayWindow.destroy()

@@ -258,6 +258,45 @@ function SpeakerImageFrame({ path, isEnd = false }: { path?: string | null; isEn
   return <img src={mediaUrl(path)} className="h-full w-full object-contain bg-black" draggable={false} />
 }
 
+const EMPTY_SPEAKER_TIMER: SpeakerTimerDisplayState = {
+  visible: false,
+  remaining: 0,
+  running: false,
+  duration: 0,
+  textColor: '#ffffff',
+  warningTextColor: '#facc15',
+  overtimeTextColor: '#ef4444',
+  textOpacity: 1,
+  x: 50,
+  y: 10,
+  scale: 1
+}
+
+function SpeakerTimerOverlay({ timer }: { timer: SpeakerTimerDisplayState }): JSX.Element | null {
+  if (!timer.visible || timer.duration <= 0) return null
+  return (
+    <div
+      data-speaker-timer-overlay
+      className="pointer-events-none absolute z-50 px-2 py-1"
+      style={{
+        left: `${Math.max(8, Math.min(92, timer.x))}%`,
+        top: `${Math.max(8, Math.min(92, timer.y))}%`,
+        transform: `translate(-50%, -50%) scale(${Math.max(0.5, Math.min(2, timer.scale))})`,
+        transformOrigin: 'center center',
+        textShadow: '0 2px 8px rgba(0,0,0,0.95)',
+        minWidth: timer.duration >= 3600 || timer.remaining >= 3600 || timer.remaining <= -3600
+          ? '9ch'
+          : '6ch',
+        textAlign: 'center'
+      }}
+    >
+      <div className="text-[clamp(34px,4.8vw,82px)]">
+        <TimerValue timer={timer} />
+      </div>
+    </div>
+  )
+}
+
 function SpeakerDisplay(): JSX.Element {
   const [state, setState] = useState<SpeakerDisplayState>({
     active: false,
@@ -269,26 +308,33 @@ function SpeakerDisplay(): JSX.Element {
     notes: '',
     backdropImage: null
   })
+  const [timer, setTimer] = useState<SpeakerTimerDisplayState>(EMPTY_SPEAKER_TIMER)
 
   useEffect(() => {
-    const unsubscribe = window.api.on('speaker-state', (...args: unknown[]) => {
+    const offState = window.api.on('speaker-state', (...args: unknown[]) => {
       setState(args[0] as SpeakerDisplayState)
     })
+    const offTimer = window.api.on('speaker-timer-update', (...args: unknown[]) => {
+      setTimer(args[0] as SpeakerTimerDisplayState)
+    })
     window.api.sendToControl('speaker-state-ready', { displayId: auxiliaryDisplayId })
-    return unsubscribe
+    return () => { offState(); offTimer() }
   }, [])
 
   if (!state.active || !state.filePath || !state.fileType) {
     if (state.backdropImage) {
       return (
         <div
-          className="h-screen w-screen bg-black bg-cover bg-center bg-no-repeat select-none"
+          className="relative h-screen w-screen bg-black bg-cover bg-center bg-no-repeat select-none"
           style={{ backgroundImage: `url("${mediaUrl(state.backdropImage)}")` }}
-        />
+        >
+          <SpeakerTimerOverlay timer={timer} />
+        </div>
       )
     }
     return (
-      <div className="h-screen w-screen bg-black flex flex-col items-center justify-center text-gray-400 select-none">
+      <div className="relative h-screen w-screen bg-black flex flex-col items-center justify-center text-gray-400 select-none">
+        <SpeakerTimerOverlay timer={timer} />
         <div className="text-4xl mb-3">Суфлёр</div>
         <div className="text-xl">Ожидание презентации</div>
       </div>
@@ -300,7 +346,7 @@ function SpeakerDisplay(): JSX.Element {
 
   return (
     <div
-      className={`h-screen w-screen bg-[#090b10] text-white p-5 grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] gap-4 select-none ${
+      className={`relative h-screen w-screen bg-[#090b10] text-white p-5 grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] gap-4 select-none ${
         isPdf
           ? 'grid-rows-[minmax(0,1fr)]'
           : 'grid-rows-[minmax(0,1fr)_minmax(150px,0.34fr)]'
@@ -339,6 +385,7 @@ function SpeakerDisplay(): JSX.Element {
           </div>
         </section>
       )}
+      <SpeakerTimerOverlay timer={timer} />
     </div>
   )
 }
@@ -364,6 +411,7 @@ interface ProgramTimerOverlayState extends TimerDisplayState {
   x: number
   y: number
   scale: number
+  dpiScale: number
 }
 
 const EMPTY_PROGRAM_TIMER: ProgramTimerOverlayState = {
@@ -377,15 +425,16 @@ const EMPTY_PROGRAM_TIMER: ProgramTimerOverlayState = {
   textOpacity: 1,
   x: 0.976,
   y: 0.96,
-  scale: 1
+  scale: 1,
+  dpiScale: 1
 }
 
 function ProgramTimerOverlay({
   timer,
-  sourceDipHeight
+  sourcePixelHeight
 }: {
   timer: ProgramTimerOverlayState
-  sourceDipHeight: number | null
+  sourcePixelHeight: number | null
 }): JSX.Element | null {
   if (!timer.visible || timer.duration <= 0) return null
   const color = timer.remaining < 0
@@ -393,16 +442,15 @@ function ProgramTimerOverlay({
     : timer.remaining <= 60 && timer.remaining >= 0 && timer.running
       ? timer.warningTextColor
       : timer.textColor
-  const background = timer.remaining < 0
-    ? 'rgba(60, 0, 0, 0.71)'
-    : timer.remaining <= 60 && timer.remaining >= 0 && timer.running
-      ? 'rgba(60, 20, 0, 0.63)'
-      : 'rgba(0, 0, 0, 0.5)'
-  const sourceHeight = Math.max(1, sourceDipHeight || 1080)
-  const fontVh = 100 * 48 * timer.scale / sourceHeight
-  const horizontalPaddingVh = 100 * 24 * timer.scale / sourceHeight
-  const verticalPaddingVh = 100 * 8 * timer.scale / sourceHeight
-  const radiusVh = 100 * 10 * timer.scale / sourceHeight
+  const sourceHeight = Math.max(1, sourcePixelHeight || 1080)
+  const dpiScale = Math.max(0.5, Math.min(4, timer.dpiScale || 1))
+  const fontVh = 100 * 48 * timer.scale * dpiScale / sourceHeight
+  const horizontalPaddingVh = 100 * 4 * timer.scale * dpiScale / sourceHeight
+  const verticalPaddingVh = 100 * 2 * timer.scale * dpiScale / sourceHeight
+  const radiusVh = 100 * 10 * timer.scale * dpiScale / sourceHeight
+  const fixedTextWidthEm = timer.duration >= 3600 || timer.remaining >= 3600 || timer.remaining <= -3600
+    ? 5.42
+    : 3.67
   const x = Math.max(0, Math.min(1, timer.x))
   const y = Math.max(0, Math.min(1, timer.y))
   return (
@@ -413,9 +461,10 @@ function ProgramTimerOverlay({
         top: `${y * 100}%`,
         transform: `translate(-${x * 100}%, -${y * 100}%)`,
         color,
-        background,
         fontSize: `${fontVh}vh`,
         padding: `${verticalPaddingVh}vh ${horizontalPaddingVh}vh`,
+        minWidth: `${fixedTextWidthEm}em`,
+        textAlign: x <= 0.001 ? 'left' : x >= 0.999 ? 'right' : 'center',
         borderRadius: `${radiusVh}vh`,
         textShadow: '0 2px 8px rgba(0,0,0,0.8)'
       }}
@@ -1627,7 +1676,7 @@ function ProgramMirrorDisplay(): JSX.Element {
         </div>
       )}
       {mirrorState.active && hasDirectContent && nativeReady && (
-        <ProgramTimerOverlay timer={programTimer} sourceDipHeight={mirrorState.sourceDipHeight} />
+        <ProgramTimerOverlay timer={programTimer} sourcePixelHeight={mirrorState.sourcePixelHeight} />
       )}
     </div>
   )

@@ -12,6 +12,7 @@ interface Props {
   textOpacity: number
   outputWidth: number
   outputHeight: number
+  dpiScale?: number
   interactive?: boolean
   selected?: boolean
   onSelect?: () => void
@@ -46,6 +47,7 @@ export function SceneTimerPreviewLayer({
   textOpacity,
   outputWidth,
   outputHeight,
+  dpiScale = 1,
   interactive = false,
   selected = false,
   onSelect,
@@ -56,20 +58,33 @@ export function SceneTimerPreviewLayer({
   const timerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null)
   const safeScale = clamp(scale, 0.5, 8)
+  const safeDpiScale = clamp(dpiScale, 0.5, 4)
+  const wideTime = duration >= 3600 || remaining >= 3600 || remaining <= -3600
 
   const geometry = useMemo(() => {
-    // The native WPF timer is SizeToContent. These dimensions mirror its
-    // normal 48 px Consolas text and 24/8 px padding closely enough that the
-    // preview uses the same normalized travel coordinates as the output.
-    const widthPercent = clamp(280 * safeScale / Math.max(1, outputWidth) * 100, 1, 100)
-    const heightPercent = clamp(80 * safeScale / Math.max(1, outputHeight) * 100, 1, 100)
+    // Exact SizeToContent footprint of timer-overlay.ps1: a 176/260 DIP text
+    // reserve, 48 DIP one-line text and 4x2 DIP transparent padding. WPF uses
+    // the operator display DPI, so preview and internal Program use the same
+    // physical ratio instead of the former approximate 280x80 rectangle.
+    const widthDip = (wideTime ? 260 : 176) + 8
+    const heightDip = 48 + 4
+    const widthPercent = clamp(
+      widthDip * safeScale * safeDpiScale / Math.max(1, outputWidth) * 100,
+      1,
+      100
+    )
+    const heightPercent = clamp(
+      heightDip * safeScale * safeDpiScale / Math.max(1, outputHeight) * 100,
+      1,
+      100
+    )
     return {
       widthPercent,
       heightPercent,
       leftPercent: clamp(position.x, 0, 100) / 100 * (100 - widthPercent),
       topPercent: clamp(position.y, 0, 100) / 100 * (100 - heightPercent)
     }
-  }, [outputHeight, outputWidth, position.x, position.y, safeScale])
+  }, [outputHeight, outputWidth, position.x, position.y, safeDpiScale, safeScale, wideTime])
 
   useEffect(() => {
     const timer = timerRef.current
@@ -91,11 +106,11 @@ export function SceneTimerPreviewLayer({
   const warning = remaining >= 0 && remaining <= 60 && running
   const overtime = remaining < 0
   const foreground = overtime ? overtimeTextColor : warning ? warningTextColor : textColor
-  const background = overtime
-    ? 'rgba(60, 0, 0, 0.71)'
-    : warning
-      ? 'rgba(60, 20, 0, 0.63)'
-      : 'rgba(0, 0, 0, 0.5)'
+  const edgeAlignment = position.x <= 0.001
+    ? 'flex-start'
+    : position.x >= 99.999
+      ? 'flex-end'
+      : 'center'
 
   const move = (event: React.PointerEvent<HTMLDivElement>): void => {
     const drag = dragRef.current
@@ -129,6 +144,7 @@ export function SceneTimerPreviewLayer({
       ref={layerRef}
       className="pointer-events-none absolute inset-0 z-[12] overflow-hidden"
       data-program-scene-timer-layer
+      style={{ containerType: 'inline-size' }}
       onPointerMove={move}
       onPointerUp={finishDrag}
       onPointerCancel={finishDrag}
@@ -137,7 +153,7 @@ export function SceneTimerPreviewLayer({
         ref={timerRef}
         data-program-scene-timer-preview
         data-timer-scale={safeScale}
-        className={`absolute flex items-center justify-center overflow-hidden rounded-[10px] font-mono font-bold tabular-nums shadow-lg ${interactive ? `pointer-events-auto cursor-move touch-none select-none ${selected ? 'ring-2 ring-blue-300' : 'ring-1 ring-blue-300/50 hover:ring-2'}` : ''}`}
+        className={`absolute flex items-center overflow-hidden font-mono font-black tabular-nums leading-none ${interactive ? `pointer-events-auto cursor-move touch-none select-none ${selected ? 'ring-2 ring-blue-300' : 'ring-1 ring-blue-300/50 hover:ring-2'}` : ''}`}
         style={{
           left: `${geometry.leftPercent}%`,
           top: `${geometry.topPercent}%`,
@@ -145,9 +161,12 @@ export function SceneTimerPreviewLayer({
           height: `${geometry.heightPercent}%`,
           color: foreground,
           opacity: clamp(textOpacity, 0.1, 1),
-          background,
-          fontSize: `${48 * safeScale / Math.max(1, outputWidth) * 100}cqw`,
-          lineHeight: 1
+          justifyContent: edgeAlignment,
+          boxSizing: 'border-box',
+          padding: `${2 * safeScale * safeDpiScale / Math.max(1, outputWidth) * 100}cqw ${4 * safeScale * safeDpiScale / Math.max(1, outputWidth) * 100}cqw`,
+          fontSize: `${48 * safeScale * safeDpiScale / Math.max(1, outputWidth) * 100}cqw`,
+          lineHeight: 1,
+          textShadow: '0 2px 8px rgba(0,0,0,0.8)'
         }}
         onPointerDown={(event) => {
           const layer = layerRef.current

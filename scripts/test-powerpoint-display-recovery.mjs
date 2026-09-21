@@ -11,6 +11,14 @@ const [daemon, main, preview, store, pdfium, routing, auxiliaryBridge, auxiliary
   readFile(new URL('../src/renderer/src/components/AuxiliaryDisplays/AuxiliaryDisplayBridge.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/renderer/src/AuxiliaryApp.tsx', import.meta.url), 'utf8')
 ])
+const auxiliaryOpenHandler = main.slice(
+  main.indexOf("handleControl('open-auxiliary-window'"),
+  main.indexOf("handleControl('close-auxiliary-window'")
+)
+const auxiliaryMetricsPlacement = main.slice(
+  main.indexOf('const auxiliaryPlacements ='),
+  main.indexOf('if (timerActive)', main.indexOf('const auxiliaryPlacements ='))
+)
 
 assert.match(
   daemon,
@@ -31,6 +39,41 @@ assert.match(
   main,
   /scheduleDisplayMetricsSync\('display-added-stable'\)/,
   'a returned monitor must receive a stable delayed PowerPoint relocation pass'
+)
+assert.match(
+  main,
+  /const auxiliaryWindowOperationChains = new Map<number, Promise<void>>\(\)[\s\S]*?enqueueAuxiliaryWindowOperation/,
+  'native auxiliary-window operations must be serialized per display'
+)
+assert.match(
+  main,
+  /function closeAuxiliaryWindow[\s\S]*?invalidateAuxiliaryWindowOperations\(id\)[\s\S]*?disposeAuxiliaryWindowEntry/,
+  'disconnecting an auxiliary display must invalidate already queued window work'
+)
+assert.match(
+  main,
+  /return enqueueAuxiliaryWindowOperation\(displayId, async \(epoch\)[\s\S]*?target = resolveTarget\(\)[\s\S]*?!isAuxiliaryWindowOperationCurrent\(displayId, epoch\)/,
+  'an auxiliary window open must revalidate topology after its asynchronous load'
+)
+assert.match(
+  main,
+  /const auxiliaryPlacements =[\s\S]*?enqueueAuxiliaryWindowOperation\(displayId,[\s\S]*?Promise\.allSettled\(auxiliaryPlacements\)/,
+  'display-metrics placement must use the same serialized lane as window opening'
+)
+assert.match(
+  main,
+  /entry\.placementKey !== placementKey[\s\S]*?entry\.placementKey = placementKey/,
+  'duplicate topology events must not repeatedly place an already positioned auxiliary window'
+)
+assert.doesNotMatch(
+  auxiliaryOpenHandler + auxiliaryMetricsPlacement,
+  /setFullScreen/,
+  'hot-pluggable auxiliary outputs must not use crash-prone native fullscreen transitions'
+)
+assert.match(
+  auxiliaryBridge,
+  /reconcileChainRef[\s\S]*?reconcileRevisionRef[\s\S]*?revision !== reconcileRevisionRef\.current/,
+  'renderer hotplug reconciles must discard stale topology revisions'
 )
 assert.match(
   main,

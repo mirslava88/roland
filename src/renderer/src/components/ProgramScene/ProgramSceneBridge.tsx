@@ -4,6 +4,7 @@ import { waitForNavigationTransitionEnd } from '../../navigation-transition'
 import { PROGRAM_SCENE_TRANSITION_DURATION_MS } from '../../../../shared/program-scene'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
 import { hasQrData } from '../../../../shared/qr-overlay'
+import { shouldShowTimerOnProgram } from '../../timer-controls'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -51,6 +52,15 @@ export function ProgramSceneBridge(): null {
   const internalProgramOutputActive = useAppStore((state) => state.internalProgramOutputActive)
   const timerRemaining = useAppStore((state) => state.timerRemaining)
   const timerRunning = useAppStore((state) => state.timerRunning)
+  const timerDuration = useAppStore((state) => state.timerDuration)
+  const timerOutputVisible = useAppStore((state) => state.timerOutputVisible)
+  const timerOutputOwner = useAppStore((state) => state.timerOutputOwner)
+  const timerOverlayPosition = useAppStore((state) => state.timerOverlayPosition)
+  const timerOverlayScale = useAppStore((state) => state.timerOverlayScale)
+  const timerTextColor = useAppStore((state) => state.timerTextColor)
+  const timerWarningTextColor = useAppStore((state) => state.timerWarningTextColor)
+  const timerOvertimeTextColor = useAppStore((state) => state.timerOvertimeTextColor)
+  const timerTextOpacity = useAppStore((state) => state.timerTextOpacity)
   const pptxAspectRatios = useAppStore((state) => state.pptxAspectRatios)
   const previousViewModeRef = useRef(programScene.viewMode)
   const rendererAppliedRevisionRef = useRef(0)
@@ -80,6 +90,15 @@ export function ProgramSceneBridge(): null {
     ? pptxAspectRatios[activeFile.path] ?? null
     : null
   const targetDisplayId = connectedProgramDisplayId({ displays, selectedDisplayId, displayAssignments })
+  const hasDedicatedTimerDisplay = displays.some((display) => (
+    !display.isPrimary && displayAssignments[String(display.id)] === 'timer'
+  ))
+  const timerTargetsProgram = shouldShowTimerOnProgram({
+    duration: timerDuration,
+    outputVisible: timerOutputVisible,
+    outputOwner: timerOutputOwner,
+    hasDedicatedTimerDisplay
+  })
   const upperMediaLayers = useMemo(
     () => programScene.mediaLayers.filter((layer) => layer.visible && layer.aboveContent),
     [programScene.mediaLayers]
@@ -120,8 +139,22 @@ export function ProgramSceneBridge(): null {
         programSnapshot.qrOverlay.sceneVisible !== false && hasQrData(programSnapshot.qrOverlay)
         ? { ...programSnapshot.qrOverlay, enabled: true }
         : null,
-      timer: internalProgramOutputActive && programSnapshot?.timer.visible
-        ? { ...programSnapshot.timer, remaining: timerRemaining, running: timerRunning }
+      // The live timer store is the single authority after a Scene snapshot
+      // has been published. This keeps toolbar/Stream Deck updates and the
+      // internal Program output in lockstep with the native WPF overlay.
+      timer: internalProgramOutputActive && timerTargetsProgram
+        ? {
+            duration: timerDuration,
+            remaining: timerRemaining,
+            running: timerRunning,
+            visible: true,
+            position: { ...timerOverlayPosition },
+            scale: timerOverlayScale,
+            textColor: timerTextColor,
+            warningTextColor: timerWarningTextColor,
+            overtimeTextColor: timerOvertimeTextColor,
+            textOpacity: timerTextOpacity
+          }
         : null
     })
     const revision = programSnapshot?.revision ?? 0
@@ -138,7 +171,7 @@ export function ProgramSceneBridge(): null {
       window.api.dbgLog(`program scene media overlay update failed: ${message}`)
       if (revision > 0) useAppStore.getState().failProgramSnapshot(revision, message)
     })
-  }, [active, backdropImage, background, confirmPublishedRevision, contentAspectRatio, externalMediaOverlayActive, internalProgramOutputActive, programScene.chromaKey, programScene.cornerStyle, programScene.mediaLayers, programScene.mediaLayersVisible, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.textOverlays, programScene.textOverlaysVisible, programScene.transitionEffect, programScene.viewMode, programSnapshot, selectedCapture, targetDisplayId, timerRemaining, timerRunning, transitionDurationMs, upperMediaLayers])
+  }, [active, backdropImage, background, confirmPublishedRevision, contentAspectRatio, externalMediaOverlayActive, internalProgramOutputActive, programScene.chromaKey, programScene.cornerStyle, programScene.mediaLayers, programScene.mediaLayersVisible, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.textOverlays, programScene.textOverlaysVisible, programScene.transitionEffect, programScene.viewMode, programSnapshot, selectedCapture, targetDisplayId, timerDuration, timerOverlayPosition, timerOverlayScale, timerOvertimeTextColor, timerRemaining, timerRunning, timerTargetsProgram, timerTextColor, timerTextOpacity, timerWarningTextColor, transitionDurationMs, upperMediaLayers])
 
   // Audio changes must not touch native Office placement, video registration or
   // the held PowerPoint frame used for smooth PiP transitions.

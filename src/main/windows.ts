@@ -116,11 +116,10 @@ export function createAuxiliaryWindow(
     y,
     width,
     height,
-    // Do not enter fullscreen until main/index.ts has placed the window on
-    // the requested display. On Windows, creating a hidden fullscreen window
-    // can make Chromium choose the primary/previous monitor first. The URL
-    // still carries the requested display id, so the mirror would then render
-    // for (for example) 3440x1440 while its real monitor was 1920x1080.
+    // Keep auxiliary outputs as borderless full-display windows instead of
+    // native fullscreen HWNDs. Chromium can crash on Windows when a fullscreen
+    // window's physical monitor disappears during an input switch/hotplug.
+    // Exact display bounds provide the same output surface without that state.
     fullscreen: false,
     frame: false,
     show: false,
@@ -357,9 +356,9 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
       text-shadow: 0 2px 8px rgba(0,0,0,0.8);
       display: none;
     }
-    .timer-normal { color: #fff; background: rgba(0,0,0,0.5); border-radius: 10px; }
-    .timer-warning { color: #facc15; background: rgba(60,20,0,0.6); border-radius: 10px; }
-    .timer-overtime { color: #ef4444; background: rgba(60,0,0,0.6); border-radius: 10px; }
+    .timer-normal { color: #fff; }
+    .timer-warning { color: #facc15; }
+    .timer-overtime { color: #ef4444; }
   </style></head><body>
     <div id="timer-display" class="timer-normal">--:--</div>
     <script>

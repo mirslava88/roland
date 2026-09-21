@@ -8,7 +8,7 @@ async function moduleFrom(path) {
 }
 
 const { resolveProgramSceneChannel } = await moduleFrom('src/renderer/src/program-scene-channel.ts')
-const { reduceTimerCommand } = await moduleFrom('src/renderer/src/timer-controls.ts')
+const { reduceTimerCommand, shouldShowTimerOnProgram } = await moduleFrom('src/renderer/src/timer-controls.ts')
 const { selectProgramSnapshotTimer } = await moduleFrom('src/renderer/src/program-snapshot-timer.ts')
 
 const channels = {
@@ -48,10 +48,32 @@ assert.equal(timer.outputVisible, true, 'pause must not remove timer from output
 timer = reduceTimerCommand({ ...base, duration: 300, remaining: 300, outputVisible: true, outputOwner: 'scene' }, {
   type: 'add-minutes', minutes: -10
 })
-assert.equal(timer.duration, 0)
+assert.equal(timer.duration, 300, '+/- minutes must not change the Reset baseline')
 assert.equal(timer.remaining, -300)
 assert.equal(timer.outputVisible, true, 'overtime after subtraction must remain visible')
 assert.equal(timer.outputOwner, 'scene')
+
+const unsetTimer = { ...base, duration: 0, remaining: 0 }
+assert.equal(
+  reduceTimerCommand(unsetTimer, { type: 'add-minutes', minutes: -5 }),
+  unsetTimer,
+  'subtracting from an unset timer must not create an invisible negative timer'
+)
+assert.deepEqual(
+  reduceTimerCommand(unsetTimer, { type: 'add-minutes', minutes: 5 }),
+  { ...unsetTimer, duration: 300, remaining: 300, outputVisible: true, outputOwner: 'toolbar' },
+  'a positive adjustment may initialize an unset timer consistently with Scene'
+)
+
+assert.equal(shouldShowTimerOnProgram({
+  duration: 900, outputVisible: true, outputOwner: 'toolbar', hasDedicatedTimerDisplay: false
+}), true)
+assert.equal(shouldShowTimerOnProgram({
+  duration: 900, outputVisible: true, outputOwner: 'toolbar', hasDedicatedTimerDisplay: true
+}), false, 'a toolbar timer assigned to its own screen must not leak into Program')
+assert.equal(shouldShowTimerOnProgram({
+  duration: 900, outputVisible: true, outputOwner: 'scene', hasDedicatedTimerDisplay: true
+}), true, 'a Scene timer remains a Program overlay even with a dedicated timer display')
 
 timer = reduceTimerCommand({ ...base, remaining: -5, warned: true, ended: true }, {
   type: 'add-minutes', minutes: 5
@@ -109,11 +131,19 @@ selectedTimer = selectProgramSnapshotTimer(independentToolbarTimer, publishedSce
 assert.deepEqual(selectedTimer.timer, independentToolbarTimer, 'an explicit Scene timer publication must use the new draft')
 assert.equal(selectedTimer.applyToLiveTimer, true, 'only an explicit timer publication may replace live timer state')
 
-const [auxiliaryBridge, auxiliaryApp, outputPreload, mainProcess] = await Promise.all([
+const [auxiliaryBridge, auxiliaryApp, outputPreload, mainProcess, timerControl, appStore, timerOverlayScript, windowsSource, sceneModal, sceneBridge, presentationApp, sceneTimerLayer] = await Promise.all([
   readFile('src/renderer/src/components/AuxiliaryDisplays/AuxiliaryDisplayBridge.tsx', 'utf8'),
   readFile('src/renderer/src/AuxiliaryApp.tsx', 'utf8'),
   readFile('src/preload/output.ts', 'utf8'),
-  readFile('src/main/index.ts', 'utf8')
+  readFile('src/main/index.ts', 'utf8'),
+  readFile('src/renderer/src/components/Controls/Timer.tsx', 'utf8'),
+  readFile('src/renderer/src/stores/useAppStore.ts', 'utf8'),
+  readFile('scripts/timer-overlay.ps1', 'utf8'),
+  readFile('src/main/windows.ts', 'utf8'),
+  readFile('src/renderer/src/components/ProgramScene/ProgramSceneModal.tsx', 'utf8'),
+  readFile('src/renderer/src/components/ProgramScene/ProgramSceneBridge.tsx', 'utf8'),
+  readFile('src/renderer/src/PresentationApp.tsx', 'utf8'),
+  readFile('src/renderer/src/components/ProgramScene/SceneTimerPreviewLayer.tsx', 'utf8')
 ])
 assert.match(auxiliaryApp, /role === 'timer'[\s\S]*sendToControl\('timer-state-ready'/,
   'a newly opened timer display must announce that its listeners are ready')
@@ -129,5 +159,97 @@ assert.match(auxiliaryApp, /PROGRAM_MIRROR_RETRY_DELAY_MS[\s\S]*retry scheduled[
   'a live copy must continue reconnecting after transient Windows capture failures')
 assert.doesNotMatch(auxiliaryApp, /failure < PROGRAM_MIRROR_MAX_RETRIES/,
   'a live copy must not permanently stop after a fixed number of retries')
+assert.match(timerControl, /data-timer-speaker-output[\s\S]*disabled=\{!hasSpeakerDisplay\}[\s\S]*Отправить в суфлёр/,
+  'the timer panel must enable its speaker-output checkbox only for a connected speaker display')
+assert.match(appStore, /timerSpeakerOutputEnabled: boolean[\s\S]*setTimerSpeakerOutputEnabled[\s\S]*timerSpeakerOutputEnabled: false/,
+  'speaker timer routing must have an explicit session state instead of changing normal timer output ownership')
+assert.match(appStore, /timerSpeakerPosition: \{ x: number; y: number \}[\s\S]*timerSpeakerScale: number[\s\S]*setTimerSpeakerPosition[\s\S]*setTimerSpeakerScale/,
+  'speaker timer placement and scale must be independent from the normal program timer layout')
+assert.match(appStore, /timerSpeakerPosition: state\.timerSpeakerPosition,[\s\S]*timerSpeakerScale: state\.timerSpeakerScale/,
+  'speaker timer placement and scale must survive an application restart')
+assert.equal((timerControl.match(/data-timer-layout-preview/g) || []).length, 1,
+  'timer settings must render exactly one shared output preview')
+assert.match(timerControl, /data-timer-layout-preview[\s\S]*onPointerDown[\s\S]*onPointerMove[\s\S]*onWheel/,
+  'the shared timer preview must provide direct drag and wheel controls')
+assert.match(timerControl, /hasSpeakerDisplay && timerSpeakerOutputEnabled[\s\S]*data-timer-preview-selector[\s\S]*data-timer-preview-target="program"[\s\S]*data-timer-preview-target="speaker"/,
+  'enabling speaker output must reveal a target selector above the same preview')
+assert.match(timerControl, /timerPreviewTarget[\s\S]*activePreviewTarget[\s\S]*data-preview-target=\{activePreviewTarget\}/,
+  'the single preview must switch between program and speaker layouts instead of rendering both')
+assert.match(timerControl, /programDraftPosition[\s\S]*speakerDraftPosition[\s\S]*data-timer-layout-refresh[\s\S]*setTimerSpeakerPosition\(speakerDraftPosition\)[\s\S]*setTimerSpeakerScale\(speakerDraftScale\)[\s\S]*setTimerOverlayPosition\(programDraftPosition\)[\s\S]*setTimerOverlayScale\(programDraftScale\)/,
+  'each output geometry must remain an independent draft until the shared round refresh button publishes it')
+assert.match(timerControl, /timerPreviewValueRef[\s\S]*timer\.offsetWidth \* scale \/ preview\.clientWidth[\s\S]*timer\.offsetHeight \* scale \/ preview\.clientHeight[\s\S]*clampSpeakerDraftPosition/,
+  'speaker timer dragging must keep the complete scaled text inside the preview instead of clamping only its center')
+assert.match(timerControl, /horizontalInset = Math\.max\(8,[\s\S]*verticalInset = Math\.max\(8,/,
+  'speaker preview clamping must use the same 8–92 percent contract as the persisted speaker output')
+assert.match(timerControl, /speakerOutputFontSize = Math\.max\(34, Math\.min\(speakerDisplayWidth \* 0\.048, 82\)\)[\s\S]*speakerPreviewFontCqw[\s\S]*containerType: 'inline-size'[\s\S]*fontSize: `\$\{speakerPreviewFontCqw\}cqw`/,
+  'speaker preview timer typography must use the exact relative size of the assigned speaker display')
+assert.match(timerControl, /const nextScale =[\s\S]*setSpeakerDraftScale\(nextScale\)[\s\S]*clampSpeakerDraftPosition\(current, nextScale\)/,
+  'speaker timer wheel scaling must pull the timer back inside the preview when its footprint grows')
+assert.match(timerControl, /speakerCurrentFrame[\s\S]*mediaUrl\(speakerCurrentFrame\)[\s\S]*speakerNextFrame[\s\S]*mediaUrl\(speakerNextFrame\)/,
+  'the speaker timer preview must show the real current and next speaker frames')
+assert.match(timerControl, /updateProgramTimerPosition[\s\S]*availableWidth[\s\S]*desiredLeft[\s\S]*setProgramDraftPosition/,
+  'program timer dragging must use the available output travel after accounting for the timer footprint')
+assert.match(timerControl, /programPreviewFontCqw[\s\S]*transform: `translate\(-\$\{programDraftPosition\.x\}%, -\$\{programDraftPosition\.y\}%\)`[\s\S]*fontSize: `\$\{programPreviewFontCqw \* programDraftScale\}cqw`/,
+  'program preview typography and travel coordinates must match the real program timer overlay')
+assert.match(timerControl, /programDisplayWidth[\s\S]*programOverlayDpiScale[\s\S]*boxSizing: 'content-box'/,
+  'program preview must include the native WPF DPI scale and padding outside its reserved text width')
+assert.match(sceneTimerLayer, /const widthDip = \(wideTime \? 260 : 176\) \+ 8[\s\S]*const heightDip = 48 \+ 4/,
+  'the Scene timer must use the exact compact WPF footprint instead of the old approximate rectangle')
+assert.doesNotMatch(sceneTimerLayer, /rgba\(60, 0, 0|rgba\(60, 20, 0|rgba\(0, 0, 0, 0\.5\)/,
+  'the Scene and internal Program timer must not restore an obsolete backing plate')
+assert.match(sceneModal, /timerOutputWidth[\s\S]*timerOutputHeight[\s\S]*dpiScale=\{timerDpiScale\}/,
+  'the Scene preview must account for physical Program dimensions and the native timer DPI')
+assert.match(sceneBridge, /shouldShowTimerOnProgram[\s\S]*internalProgramOutputActive && timerTargetsProgram[\s\S]*timerOverlayPosition[\s\S]*timerTextOpacity/,
+  'the internal Program output must follow the live timer store and the same routing rule as native Program')
+assert.match(presentationApp, /\{programScene\.timer\?\.visible && \([\s\S]*<SceneTimerPreviewLayer[\s\S]*dpiScale=\{window\.devicePixelRatio \|\| 1\}/,
+  'a standalone timer must render in the internal Program output even when Scene composition is disabled')
+assert.doesNotMatch(timerControl, />\s*Сбросить\s*</,
+  'timer output preview must not show the removed reset action')
+const closeModalSource = sceneModal.slice(
+  sceneModal.indexOf('const closeModal ='),
+  sceneModal.indexOf('useEffect(() =>', sceneModal.indexOf('const closeModal ='))
+)
+assert.doesNotMatch(closeModalSource, /setTimerOverlayPosition|setTimerOverlayScale|setTimerTextColor|setTimerWarningTextColor|setTimerOvertimeTextColor|setTimerTextOpacity/,
+  'closing an inactive Scene must discard its local timer layout instead of moving the standalone on-air timer')
+assert.match(auxiliaryBridge, /on\('speaker-state-ready'[\s\S]*?'speaker-timer-update'[\s\S]*?currentSpeakerTimerDisplayState/,
+  'a reconnected speaker display must receive the current timer routing state after listener readiness')
+assert.match(auxiliaryBridge, /sendToAuxiliary\('speaker', 'speaker-timer-update', currentSpeakerTimerDisplayState\(\)\)/,
+  'timer ticks and visibility changes must be forwarded independently to the speaker display')
+assert.match(auxiliaryBridge, /x: state\.timerSpeakerPosition\.x,[\s\S]*y: state\.timerSpeakerPosition\.y,[\s\S]*scale: state\.timerSpeakerScale/,
+  'speaker timer updates must carry the independently configured placement and scale')
+assert.match(outputPreload, /'speaker-timer-update'/,
+  'the restricted output preload must allow speaker timer updates')
+assert.match(auxiliaryApp, /on\('speaker-timer-update'[\s\S]*?<SpeakerTimerOverlay timer=\{timer\}/,
+  'the speaker renderer must show the timer overlay without replacing slide or notes content')
+assert.match(auxiliaryApp, /left: `\$\{Math\.max\(8, Math\.min\(92, timer\.x\)\)\}%`[\s\S]*top: `\$\{Math\.max\(8, Math\.min\(92, timer\.y\)\)\}%`[\s\S]*timer\.scale/,
+  'the speaker renderer must apply the operator-selected timer position and scale')
+assert.match(auxiliaryApp, /data-speaker-timer-overlay[\s\S]*textShadow: '0 2px 8px rgba\(0,0,0,0\.95\)'/,
+  'the speaker timer must remain readable without an opaque backing plate')
+assert.doesNotMatch(auxiliaryApp, /data-speaker-timer-overlay[\s\S]{0,600}background,/,
+  'the speaker timer overlay must not restore a colored or dark backing plate')
+assert.match(timerOverlayScript, /MinWidth = useWideTimeLayout \? 260 : 176[\s\S]*new Thickness\(4, 2, 4, 2\)/,
+  'the native timer backing area must be compact while reserving stable room for a minus sign')
+assert.match(timerOverlayScript, /LineHeight = 48[\s\S]*LineStackingStrategy = LineStackingStrategy\.BlockLineHeight[\s\S]*text\.LineHeight = timerFontSize/,
+  'the native timer must use the same one-line height as the leading-none Program preview')
+assert.match(mainProcess, /broadcastWpfTimerToMirrors[\s\S]*dpiScale: Math\.max\(0\.5, screen\.getPrimaryDisplay\(\)\.scaleFactor \|\| 1\)/,
+  'live copies must receive the DPI used by the native WPF timer')
+assert.match(auxiliaryApp, /ProgramTimerOverlay[\s\S]*sourcePixelHeight[\s\S]*timer\.dpiScale[\s\S]*fontVh = 100 \* 48 \* timer\.scale \* dpiScale \/ sourceHeight/,
+  'live copies must size the timer from the physical Program height and native DPI')
+assert.match(timerOverlayScript, /NeedsWideTimeLayout\(duration, remaining\)[\s\S]*text\.MinWidth = Math\.Round\(\(useWideTimeLayout \? 260 : 176\) \* scale\)/,
+  'hour timers must reserve their wider stable width before overtime changes the text')
+assert.match(timerOverlayScript, /Background = Brushes\.Transparent/,
+  'the native program timer must use a fully transparent backing surface')
+assert.doesNotMatch(timerOverlayScript, /border\.Background = new SolidColorBrush/,
+  'warning and overtime updates must change only timer text color, not restore a backing plate')
+assert.match(timerOverlayScript, /UpdateTextAlignment\(\)[\s\S]*positionX <= 0\.001[\s\S]*TextAlignment\.Left[\s\S]*positionX >= 0\.999[\s\S]*TextAlignment\.Right/,
+  'the native timer must align visible digits toward an edge while keeping the stable minus-sign reserve')
+const programTimerOverlaySource = auxiliaryApp.slice(
+  auxiliaryApp.indexOf('function ProgramTimerOverlay('),
+  auxiliaryApp.indexOf('function EventTimerDisplay(')
+)
+assert.doesNotMatch(programTimerOverlaySource, /background[,:]/,
+  'the live-copy program timer must match the transparent native timer')
+assert.match(windowsSource, /\.timer-normal \{ color: #fff; \}[\s\S]*\.timer-warning \{ color: #facc15; \}[\s\S]*\.timer-overtime \{ color: #ef4444; \}/,
+  'the legacy Electron timer fallback must not draw a background plate')
 
-console.log('PASS: live Scene channel priority, timer transitions, auxiliary timer readiness, mirror recovery and QR-only publication ownership isolation')
+console.log('PASS: live Scene channel priority, timer transitions, speaker timer routing, auxiliary readiness, mirror recovery and QR-only publication ownership isolation')

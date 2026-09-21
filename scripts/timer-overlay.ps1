@@ -70,6 +70,7 @@ public class TimerOverlay
     private double scale = 1.0;
     private double positionX = 1.0;
     private double positionY = 1.0;
+    private bool useWideTimeLayout = false;
     private bool hasSavedPosition = false;
     private int savedOffsetX = 0;
     private int savedOffsetY = 0;
@@ -123,7 +124,12 @@ public class TimerOverlay
             {
                 string initialPayload = File.ReadAllText(dataFile).Trim();
                 if (!string.IsNullOrWhiteSpace(initialPayload))
-                    initialText = FormatTime(GetJsonInt(initialPayload, "remaining"));
+                {
+                    int initialRemaining = GetJsonInt(initialPayload, "remaining");
+                    int initialDuration = GetJsonInt(initialPayload, "duration");
+                    initialText = FormatTime(initialRemaining);
+                    useWideTimeLayout = NeedsWideTimeLayout(initialDuration, initialRemaining);
+                }
             }
         }
         catch {}
@@ -136,10 +142,14 @@ public class TimerOverlay
             Text = initialText,
             FontFamily = new FontFamily("Consolas"),
             FontSize = 48,
+            LineHeight = 48,
+            LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
             FontWeight = FontWeights.Bold,
             Foreground = Brushes.White,
-            MinWidth = 220,
-            TextAlignment = TextAlignment.Center,
+            MinWidth = useWideTimeLayout ? 260 : 176,
+            TextAlignment = positionX <= 0.001
+                ? TextAlignment.Left
+                : positionX >= 0.999 ? TextAlignment.Right : TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Effect = new DropShadowEffect
@@ -153,9 +163,9 @@ public class TimerOverlay
 
         border = new Border
         {
-            Background = new SolidColorBrush(Color.FromArgb(128, 0, 0, 0)),
+            Background = Brushes.Transparent,
             CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(24, 8, 24, 8),
+            Padding = new Thickness(4, 2, 4, 2),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Child = text
@@ -296,6 +306,7 @@ public class TimerOverlay
                 positionX = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(line, "layoutX", positionX)));
                 positionY = Math.Max(0.0, Math.Min(1.0, GetJsonDouble(line, "layoutY", positionY)));
                 scale = Math.Max(0.5, Math.Min(8.0, GetJsonDouble(line, "layoutScale", scale)));
+                UpdateTextAlignment();
                 hasSavedPosition = true;
                 hasSavedPixelPosition = false;
                 lastLayoutRevision = layoutRevision;
@@ -310,6 +321,13 @@ public class TimerOverlay
             int remaining = GetJsonInt(line, "remaining");
             int duration = GetJsonInt(line, "duration");
 
+            bool nextWideTimeLayout = NeedsWideTimeLayout(duration, remaining);
+            if (nextWideTimeLayout != useWideTimeLayout)
+            {
+                useWideTimeLayout = nextWideTimeLayout;
+                ApplyScale();
+            }
+
             text.Text = FormatTime(remaining);
 
             bool running = line.Contains("\"running\":true");
@@ -317,19 +335,16 @@ public class TimerOverlay
             string defaultTextColor;
             if (remaining < 0)
             {
-                border.Background = new SolidColorBrush(Color.FromArgb(180, 60, 0, 0));
                 colorKey = "overtimeTextColor";
                 defaultTextColor = "#EF4444";
             }
             else if (remaining <= 60 && remaining >= 0 && running)
             {
-                border.Background = new SolidColorBrush(Color.FromArgb(160, 60, 20, 0));
                 colorKey = "warningTextColor";
                 defaultTextColor = "#FACC15";
             }
             else
             {
-                border.Background = new SolidColorBrush(Color.FromArgb(128, 0, 0, 0));
                 colorKey = "textColor";
                 defaultTextColor = "#FFFFFF";
             }
@@ -410,10 +425,30 @@ public class TimerOverlay
 
     private void ApplyScale()
     {
-        text.FontSize = Math.Round(48 * scale);
+        double timerFontSize = Math.Round(48 * scale);
+        text.FontSize = timerFontSize;
+        // WPF's default font line spacing is taller than the CSS `leading-none`
+        // preview even for a single line. Keep the line box equal to the timer
+        // font so normalized top/bottom positions describe the same visible
+        // footprint in preview, native Program output and live copies.
+        text.LineHeight = timerFontSize;
+        text.MinWidth = Math.Round((useWideTimeLayout ? 260 : 176) * scale);
         border.Padding = new Thickness(
-            Math.Round(24 * scale), Math.Round(8 * scale),
-            Math.Round(24 * scale), Math.Round(8 * scale));
+            Math.Round(4 * scale), Math.Round(2 * scale),
+            Math.Round(4 * scale), Math.Round(2 * scale));
+    }
+
+    private void UpdateTextAlignment()
+    {
+        if (text == null) return;
+        text.TextAlignment = positionX <= 0.001
+            ? TextAlignment.Left
+            : positionX >= 0.999 ? TextAlignment.Right : TextAlignment.Center;
+    }
+
+    private static bool NeedsWideTimeLayout(int duration, int remaining)
+    {
+        return duration >= 3600 || remaining >= 3600 || remaining <= -3600;
     }
 
     private static string FormatTime(int remaining)
@@ -486,6 +521,7 @@ public class TimerOverlay
         try
         {
             CapturePosition();
+            UpdateTextAlignment();
             string directory = Path.GetDirectoryName(stateFile);
             if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
             string json = string.Format(

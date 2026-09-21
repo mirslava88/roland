@@ -101,6 +101,7 @@ export function Toolbar(): JSX.Element {
   const [programSceneInitialEditor, setProgramSceneInitialEditor] = useState<'qr' | undefined>()
   const outputCloseInFlightRef = useRef(false)
   const programSceneFocusGenerationRef = useRef(0)
+  const resizeToolbarButtonsRef = useRef<() => void>(() => undefined)
   const {
     isPresentationWindowOpen,
     setPresentationWindowOpen,
@@ -124,9 +125,7 @@ export function Toolbar(): JSX.Element {
   const setProgramScene = useAppStore((state) => state.setProgramScene)
   const qrOverlay = useAppStore((state) => state.qrOverlay)
   const toolbarVisibility = useAppStore((state) => state.toolbarVisibility)
-  const videoQuickControls = useAppStore((state) => state.videoPlaylist.length > 0)
-  const musicQuickControls = useAppStore((state) => state.musicPlaylist.length > 0)
-  const timerQuickControls = useAppStore((state) => state.timerDuration > 0)
+  const appTheme = useAppStore((state) => state.appTheme)
 
   useEffect(() => {
     const openProgramScene = (event: Event): void => {
@@ -153,7 +152,14 @@ export function Toolbar(): JSX.Element {
           const primary = item.dataset.toolbarItem === 'pipViews' ? null : item.querySelector<HTMLElement>(
             ':scope > button, :scope > div:not(.fixed):not(.absolute) > button:first-child'
           )
-          fixedWidth += item.getBoundingClientRect().width - (primary?.getBoundingClientRect().width ?? 0)
+          let secondaryWidth = item.getBoundingClientRect().width - (primary?.getBoundingClientRect().width ?? 0)
+          // Video, music and timer can add two compact buttons after their
+          // state changes. Reserve that exact footprint even while idle so a
+          // late React commit cannot temporarily reuse the wider idle layout.
+          if (primary && ['video', 'music', 'timer'].includes(item.dataset.toolbarItem ?? '')) {
+            secondaryWidth = Math.max(secondaryWidth, window.matchMedia('(max-width: 950px)').matches ? 60 : 64)
+          }
+          fixedWidth += secondaryWidth
           if (primary) mainCount++
         }
         const available = row.clientWidth - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight)
@@ -161,23 +167,50 @@ export function Toolbar(): JSX.Element {
       })
       if (widths.length) {
         const width = `${Math.max(1, Math.floor(Math.min(...widths) * 4) / 4)}px`
-        if (toolbar.style.getPropertyValue('--pdm-toolbar-button-width') !== width) {
-          toolbar.style.setProperty('--pdm-toolbar-button-width', width)
+        if (toolbar.style.getPropertyValue('--pdm-toolbar-button-width-dynamic') !== width) {
+          toolbar.style.setProperty('--pdm-toolbar-button-width-dynamic', width)
         }
       }
     }
+    resizeToolbarButtonsRef.current = resizeButtons
     resizeButtons()
-    let previousWidth = toolbar.clientWidth
     let frame = 0
-    const observer = new ResizeObserver(() => {
-      if (toolbar.clientWidth === previousWidth) return
-      previousWidth = toolbar.clientWidth
+    const scheduleResize = (): void => {
+      // Hidden/minimized Electron windows can throttle animation frames. Apply
+      // the layout immediately, then repeat on the next frame after painting.
+      resizeButtons()
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(resizeButtons)
-    })
+    }
+    const observer = new ResizeObserver(scheduleResize)
+    // Music/video controls finish loading asynchronously and can add their
+    // compact play/stop buttons without changing the toolbar's own width.
+    // Recalculate the shared primary-button width when that subtree changes.
+    const contentObserver = new MutationObserver(scheduleResize)
     observer.observe(toolbar)
-    return () => { observer.disconnect(); cancelAnimationFrame(frame) }
-  }, [toolbarVisibility, videoQuickControls, musicQuickControls, timerQuickControls])
+    toolbar.querySelectorAll<HTMLElement>('.pdm-toolbar-row').forEach((row) => observer.observe(row))
+    contentObserver.observe(toolbar, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['hidden']
+    })
+    window.addEventListener('resize', scheduleResize)
+    return () => {
+      observer.disconnect()
+      contentObserver.disconnect()
+      window.removeEventListener('resize', scheduleResize)
+      cancelAnimationFrame(frame)
+      resizeToolbarButtonsRef.current = () => undefined
+    }
+  }, [])
+
+  // Zustand-driven quick controls are committed in the same React update as
+  // their buttons. Recalculate synchronously after that commit; the persistent
+  // observers above cover later asynchronous player and window changes.
+  useLayoutEffect(() => {
+    resizeToolbarButtonsRef.current()
+  }, [appTheme, toolbarVisibility])
 
   const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
 

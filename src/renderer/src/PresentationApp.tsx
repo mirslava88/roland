@@ -1227,7 +1227,7 @@ export function PresentationApp(): JSX.Element {
           outputHeight={viewport.height}
         />
       )}
-      {sceneActive && programScene.timer?.visible && (
+      {programScene.timer?.visible && (
         <SceneTimerPreviewLayer
           remaining={programScene.timer.remaining}
           running={programScene.timer.running}
@@ -1238,8 +1238,9 @@ export function PresentationApp(): JSX.Element {
           warningTextColor={programScene.timer.warningTextColor}
           overtimeTextColor={programScene.timer.overtimeTextColor}
           textOpacity={programScene.timer.textOpacity}
-          outputWidth={viewport.width}
-          outputHeight={viewport.height}
+          outputWidth={viewport.width * (window.devicePixelRatio || 1)}
+          outputHeight={viewport.height * (window.devicePixelRatio || 1)}
+          dpiScale={window.devicePixelRatio || 1}
         />
       )}
       {!hasVisibleContent && !sceneActive && (

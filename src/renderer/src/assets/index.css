@@ -84,6 +84,7 @@
 .pdm-toolbar {
   width: 100%;
   min-width: 0;
+  --pdm-toolbar-button-width: min(var(--pdm-toolbar-button-width-dynamic, 154px), calc((100vw - 200px) / 7));
 }
 
 .pdm-toolbar-row {
@@ -134,6 +135,9 @@
 /* Compact only the controls, never the surrounding application or popovers.
    This also leaves room for player play/stop buttons at the 900px minimum. */
 @media (max-width: 1050px) {
+  .pdm-toolbar {
+    --pdm-toolbar-button-width: min(var(--pdm-toolbar-button-width-dynamic, 154px), calc((100vw - 174px) / 7));
+  }
   .pdm-toolbar-row { gap: 4px; padding-inline: 8px; }
   .pdm-toolbar-row > .pdm-toolbar-item > button,
   .pdm-toolbar-row > .pdm-toolbar-item > div:not(.fixed):not(.absolute) > button { font-size: 10px; }
@@ -486,6 +490,12 @@
 }
 
 @media (max-width: 950px) {
+  .pdm-toolbar {
+    /* A delayed Electron resize notification must never leave the previous
+       wide inline calculation overflowing the minimum supported window. */
+    --pdm-toolbar-button-width: min(var(--pdm-toolbar-button-width-dynamic, 154px), calc((100vw - 150px) / 7));
+  }
+
   .pdm-toolbar-row,
   .pdm-operator-shell.theme-broadcast-pro .pdm-toolbar-row {
     gap: 2px;

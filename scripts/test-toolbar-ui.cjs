@@ -40,7 +40,7 @@ app.whenReady().then(async()=>{
             await js(`window.setTestBusy(${busy})`); await pause(80)
             const layout=await js(`(() => {
               const rows=Array.from(document.querySelectorAll('.pdm-toolbar-row'));
-              return {width:innerWidth,rows:rows.map(row=>({height:row.getBoundingClientRect().height,gap:parseFloat(getComputedStyle(row).columnGap),padding:parseFloat(getComputedStyle(row).paddingLeft),items:Array.from(row.querySelectorAll('[data-toolbar-item]:not([hidden])')).map(item=>{const r=item.getBoundingClientRect();const controls=Array.from(item.querySelectorAll(':scope > button, :scope > div:not(.fixed):not(.absolute) > button')).map(button=>{const b=button.getBoundingClientRect();return{left:b.left,right:b.right,width:b.width,height:b.height,clientWidth:button.clientWidth,scrollWidth:button.scrollWidth,text:button.textContent.trim()}});return{id:item.dataset.toolbarItem,left:r.left,right:r.right,top:r.top,bottom:r.bottom,controls}})})),errors:window.testErrors};
+              const toolbar=document.querySelector('.pdm-toolbar'); return {width:innerWidth,buttonWidth:getComputedStyle(toolbar).getPropertyValue('--pdm-toolbar-button-width'),rows:rows.map(row=>({height:row.getBoundingClientRect().height,clientWidth:row.clientWidth,rectWidth:row.getBoundingClientRect().width,gap:parseFloat(getComputedStyle(row).columnGap),padding:parseFloat(getComputedStyle(row).paddingLeft),items:Array.from(row.querySelectorAll('[data-toolbar-item]:not([hidden])')).map(item=>{const r=item.getBoundingClientRect();const controls=Array.from(item.querySelectorAll(':scope > button, :scope > div:not(.fixed):not(.absolute) > button')).map(button=>{const b=button.getBoundingClientRect();return{left:b.left,right:b.right,width:b.width,height:b.height,clientWidth:button.clientWidth,scrollWidth:button.scrollWidth,text:button.textContent.trim()}});return{id:item.dataset.toolbarItem,left:r.left,right:r.right,top:r.top,bottom:r.bottom,controls}})})),errors:window.testErrors};
             })()`)
             assert.deepEqual(layout.errors,[])
             assert.equal(layout.rows.length,2)
@@ -59,7 +59,7 @@ app.whenReady().then(async()=>{
                 if(item.right>layout.width || item.left<0) {
                   writeFileSync(resolve('tmp/toolbar-ui/overflow.png'),(await win.webContents.capturePage()).toPNG())
                 }
-                assert.ok(item.right<=layout.width && item.left>=0,`${edition} ${theme} ${width} busy=${busy}: ${JSON.stringify(item)} overflows ${layout.width}`)
+                assert.ok(item.right<=layout.width && item.left>=0,`${edition} ${theme} ${width} busy=${busy}: ${JSON.stringify(item)} overflows ${layout.width}; buttonWidth=${layout.buttonWidth}; row=${row.clientWidth}/${row.rectWidth}; items=${JSON.stringify(row.items)}`)
                 if(i) assert.ok(Math.abs(item.left-row.items[i-1].right-expectedGap)<1 && expectedGap>=row.gap-1, 'Every toolbar gap must be equal, without spacer holes')
                 assert.ok(Math.abs(item.controls[0].left-item.left)<2, 'Control must fill the left edge of its slot')
                 assert.ok(Math.abs(item.controls.at(-1).right-item.right)<2, 'Control must fill the right edge, without an empty reserved area')

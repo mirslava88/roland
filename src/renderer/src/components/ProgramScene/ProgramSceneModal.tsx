@@ -530,6 +530,9 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   const outputDisplay = displays.find((display) => display.id === outputDisplayId)
   const outputWidth = Math.max(1, outputDisplay?.bounds?.width ?? 1920)
   const outputHeight = Math.max(1, outputDisplay?.bounds?.height ?? 1080)
+  const timerDpiScale = Math.max(0.5, displays.find((display) => display.isPrimary)?.scaleFactor || 1)
+  const timerOutputWidth = Math.max(1, outputWidth * (outputDisplay?.scaleFactor || 1))
+  const timerOutputHeight = Math.max(1, outputHeight * (outputDisplay?.scaleFactor || 1))
   const selectedCaptureMatchesContent = candidatePreviewFile?.type === 'capture' &&
     candidatePreviewFile.capture?.sourceId === selectedCapture?.sourceId
   const backgroundSource = resolveProgramSceneBackground(useAppStore.getState())
@@ -618,23 +621,10 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   }
 
   const closeModal = (): void => {
-    // PiP settings historically apply when the window closes. While live
-    // preview is off, the draft stays local during editing and is committed
-    // once at the end instead of exposing every intermediate movement.
+    // Closing the editor keeps all timer changes in the discarded local
+    // draft. A timer must never move on air merely because the Scene window
+    // was closed; only an explicit Scene publication may commit it.
     setProgramScene({ textOverlays: textOverlayDraft, mediaLayers: mediaLayerDraft })
-    const state = useAppStore.getState()
-    // With the combined Scene off, the timer is an independent toolbar layer.
-    // Match QR behaviour: keep editing local while the modal is open, then
-    // apply its layout to the already-visible timer when the modal closes.
-    // A live combined Scene still requires the explicit refresh transaction.
-    if (!state.programSnapshot && !state.programScene.enabled && timerDraftDirty) {
-      state.setTimerOverlayPosition({ ...timerOverlayDraft.position })
-      state.setTimerOverlayScale(timerOverlayDraft.scale)
-      state.setTimerTextColor(timerOverlayDraft.textColor)
-      state.setTimerWarningTextColor(timerOverlayDraft.warningTextColor)
-      state.setTimerOvertimeTextColor(timerOverlayDraft.overtimeTextColor)
-      state.setTimerTextOpacity(timerOverlayDraft.textOpacity)
-    }
     onClose()
   }
 
@@ -1442,8 +1432,9 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             warningTextColor={timerOverlayDraft.warningTextColor}
             overtimeTextColor={timerOverlayDraft.overtimeTextColor}
             textOpacity={timerOverlayDraft.textOpacity}
-            outputWidth={outputWidth}
-            outputHeight={outputHeight}
+            outputWidth={timerOutputWidth}
+            outputHeight={timerOutputHeight}
+            dpiScale={timerDpiScale}
             interactive={activePanel === 'picture'}
             selected={canvasSelection?.kind === 'timer'}
             onSelect={() => setCanvasSelection({ kind: 'timer' })}
@@ -1604,7 +1595,8 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
             onStop={() => updateTimerTimeDraft(() => ({ duration: 0, remaining: 0, running: false }))}
             onReset={() => updateTimerTimeDraft((draft) => ({ ...draft, remaining: draft.duration, running: false }))}
             onAddMinutes={(minutes) => updateTimerTimeDraft((draft) => {
-              if (draft.duration <= 0 && minutes > 0) {
+              if (draft.duration <= 0) {
+                if (minutes <= 0) return draft
                 const duration = minutes * 60
                 return { duration, remaining: duration, running: false }
               }

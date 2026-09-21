@@ -30,6 +30,7 @@ const INBOUND_CHANNELS = new Set([
   'content-zoom-update',
   'broadcast-titles-update',
   'speaker-state',
+  'speaker-timer-update',
   'event-timer-state',
   'information-state',
   'timer-update',

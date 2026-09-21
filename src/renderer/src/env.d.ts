@@ -136,6 +136,13 @@ interface TimerDisplayState {
   textOpacity: number
 }
 
+interface SpeakerTimerDisplayState extends TimerDisplayState {
+  visible: boolean
+  x: number
+  y: number
+  scale: number
+}
+
 interface EventTimerDisplayState {
   eventName: string
   headings: Record<'current' | 'timer' | 'to-start' | 'to-end', string>

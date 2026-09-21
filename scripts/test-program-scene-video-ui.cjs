@@ -10,8 +10,13 @@ app.whenReady().then(async () => {
   try {
     win = new BrowserWindow({ show: false, width: 1280, height: 800, useContentSize: true,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+    win.webContents.on('console-message', (event) => {
+      if (event.level === 'error') {
+        console.error(`[renderer] ${event.message} (${event.sourceId || 'unknown'}:${event.lineNumber || 0})`)
+      }
+    })
     if (process.env.PDM_SCENE_TIMER_CLOSE_ONLY) {
-      stage = 'independent timer layout applies when the Scene closes'
+      stage = 'independent timer layout is discarded when the Scene closes'
       await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
       await new Promise(done => setTimeout(done, 350))
       const before = await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`)
@@ -42,19 +47,17 @@ app.whenReady().then(async () => {
       })()`)
       await new Promise(done => setTimeout(done, 50))
       assert.deepEqual(await win.webContents.executeJavaScript(`({...window.testScene.timerOverlayPosition})`), before,
-        'Moving the independent timer in Scene preview must stay local until the Scene window closes')
+        'Moving the independent timer in Scene preview must stay local')
       await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-close]').click()`)
       await new Promise(done => setTimeout(done, 100))
       const after = await win.webContents.executeJavaScript(`({position:{...window.testScene.timerOverlayPosition},visible:window.testScene.timerOutputVisible,owner:window.testScene.timerOutputOwner,snapshot:window.testScene.programSnapshot,lastOverlay:window.lastTimerOverlay})`)
-      assert.notDeepEqual(after.position, before, 'Closing a disabled Scene must apply the drafted timer position')
-      assert.equal(after.visible, true, 'Applying the timer layout must not hide the independent timer')
-      assert.equal(after.owner, 'toolbar', 'Applying the timer layout must preserve independent timer ownership')
-      assert.equal(after.snapshot, null, 'Applying the independent timer layout must not enable the combined Scene')
-      assert.equal(after.lastOverlay?.posX, after.position.x, 'The live timer overlay must receive the applied horizontal position')
-      assert.equal(after.lastOverlay?.posY, after.position.y, 'The live timer overlay must receive the applied vertical position')
+      assert.deepEqual(after.position, before, 'Closing a disabled Scene must discard its local timer draft')
+      assert.equal(after.visible, true, 'Discarding the timer draft must not hide the independent timer')
+      assert.equal(after.owner, 'toolbar', 'Discarding the timer draft must preserve independent timer ownership')
+      assert.equal(after.snapshot, null, 'Discarding the timer draft must not enable the combined Scene')
       await win.webContents.executeJavaScript(`window.unmountTest()`)
       clearTimeout(deadline);win.destroy();app.quit()
-      console.log('PASS: disabled Scene applies timer layout on close without changing timer ownership or visibility')
+      console.log('PASS: disabled Scene discards timer layout on close without changing timer ownership or visibility')
       return
     }
     if (process.env.PDM_SCENE_DIRTY_ONLY) {
@@ -201,8 +204,12 @@ app.whenReady().then(async () => {
     assert.ok(replacedPdfPixels.center[2] > 180 && replacedPdfPixels.center[3] === 255, 'The new PDF page must be fully committed')
     console.log('PASS: transparent PDF page replacement clears the previous page atomically')
     await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
-    await new Promise(done => setTimeout(done, 350))
-    const startupRendered = await win.webContents.executeJavaScript(`document.body.innerText.includes('Сцена')`)
+    let startupRendered = false
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      startupRendered = await win.webContents.executeJavaScript(`document.body.innerText.includes('Сцена')`)
+      if (startupRendered) break
+      await new Promise(done => setTimeout(done, 50))
+    }
     if (!startupRendered) console.error(await win.webContents.executeJavaScript(`document.documentElement.outerHTML`))
     assert.equal(startupRendered, true)
     assert.deepEqual(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-scene-panel]')).map(button => button.textContent.trim())`),

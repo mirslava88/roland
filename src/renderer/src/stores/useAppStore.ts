@@ -767,6 +767,9 @@ interface AppState {
   timerRunning: boolean
   timerOutputVisible: boolean
   timerOutputOwner: 'toolbar' | 'scene' | null
+  timerSpeakerOutputEnabled: boolean
+  timerSpeakerPosition: { x: number; y: number }
+  timerSpeakerScale: number
   timerSoundEnd: string | null
   timerSoundWarning: string | null
   timerOverlayPosition: { x: number; y: number } // percent from top-left
@@ -779,6 +782,9 @@ interface AppState {
   setTimerRemaining: (seconds: number) => void
   setTimerRunning: (running: boolean) => void
   setTimerOutputState: (visible: boolean, owner: 'toolbar' | 'scene' | null) => void
+  setTimerSpeakerOutputEnabled: (enabled: boolean) => void
+  setTimerSpeakerPosition: (pos: { x: number; y: number }) => void
+  setTimerSpeakerScale: (scale: number) => void
   addTimerMinutes: (minutes: number) => void
   resetTimer: () => void
   setTimerSoundEnd: (path: string | null) => void
@@ -1606,6 +1612,9 @@ export const useAppStore = create<AppState>()(persist(
   timerRunning: false,
   timerOutputVisible: false,
   timerOutputOwner: null,
+  timerSpeakerOutputEnabled: false,
+  timerSpeakerPosition: { x: 50, y: 10 },
+  timerSpeakerScale: 1,
   timerSoundEnd: null,
   timerSoundWarning: null,
   timerOverlayPosition: { x: 90, y: 90 },
@@ -1621,11 +1630,25 @@ export const useAppStore = create<AppState>()(persist(
     timerOutputVisible: visible,
     timerOutputOwner: visible ? owner : null
   }),
+  setTimerSpeakerOutputEnabled: (enabled) => set({ timerSpeakerOutputEnabled: enabled }),
+  setTimerSpeakerPosition: (pos) => set({
+    timerSpeakerPosition: {
+      x: Math.max(8, Math.min(92, pos.x)),
+      y: Math.max(8, Math.min(92, pos.y))
+    }
+  }),
+  setTimerSpeakerScale: (scale) => set({
+    timerSpeakerScale: Math.max(0.5, Math.min(2, scale))
+  }),
   addTimerMinutes: (minutes) => {
     const { timerDuration, timerRemaining } = get()
+    const delta = minutes * 60
+    if (timerDuration <= 0 && delta <= 0) return
     set({
-      timerDuration: Math.max(0, timerDuration + minutes * 60),
-      timerRemaining: timerRemaining + minutes * 60
+      // Keep the Reset baseline stable while adjusting the live remainder.
+      // A positive adjustment may initialize an unset timer.
+      timerDuration: timerDuration > 0 ? timerDuration : delta,
+      timerRemaining: timerRemaining + delta
     })
   },
   resetTimer: () => {
@@ -1950,6 +1973,8 @@ export const useAppStore = create<AppState>()(persist(
       globalHookEnabled: state.globalHookEnabled,
       timerOverlayPosition: state.timerOverlayPosition,
       timerOverlayScale: state.timerOverlayScale,
+      timerSpeakerPosition: state.timerSpeakerPosition,
+      timerSpeakerScale: state.timerSpeakerScale,
       timerTextColor: state.timerTextColor,
       timerWarningTextColor: state.timerWarningTextColor,
       timerOvertimeTextColor: state.timerOvertimeTextColor,

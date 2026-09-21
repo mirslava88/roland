@@ -21,6 +21,24 @@ export interface TimerCommandModel {
   ended: boolean
 }
 
+export interface ProgramTimerRoute {
+  duration: number
+  outputVisible: boolean
+  outputOwner: 'toolbar' | 'scene' | null
+  hasDedicatedTimerDisplay: boolean
+}
+
+/**
+ * A toolbar timer uses a dedicated timer display when one is assigned. A
+ * Scene-owned timer is always part of Program as an overlay, even when the
+ * venue also has a separate timer display.
+ */
+export function shouldShowTimerOnProgram(route: ProgramTimerRoute): boolean {
+  return route.duration > 0 && route.outputVisible && (
+    !route.hasDedicatedTimerDisplay || route.outputOwner === 'scene'
+  )
+}
+
 /** Pure transition used by toolbar, Scene and Stream Deck timer commands. */
 export function reduceTimerCommand(model: TimerCommandModel, command: TimerCommand): TimerCommandModel {
   if (command.type === 'apply-state') {
@@ -70,10 +88,14 @@ export function reduceTimerCommand(model: TimerCommandModel, command: TimerComma
     return { ...model, remaining: model.duration, running: false, warned: false, ended: false }
   }
   const delta = command.minutes * 60
+  if (model.duration <= 0 && delta <= 0) return model
   const remaining = model.remaining + delta
   return {
     ...model,
-    duration: Math.max(0, model.duration + delta),
+    // +/- changes the running remainder, not the duration used by Reset.
+    // A positive adjustment is also allowed to create a previously unset
+    // timer, matching the Scene editor.
+    duration: model.duration > 0 ? model.duration : delta,
     remaining,
     outputVisible: true,
     outputOwner: model.outputVisible ? model.outputOwner : 'toolbar',

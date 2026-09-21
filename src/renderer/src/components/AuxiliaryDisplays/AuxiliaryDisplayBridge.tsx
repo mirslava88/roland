@@ -64,6 +64,19 @@ function currentTimerDisplayState(): TimerDisplayState {
   }
 }
 
+function currentSpeakerTimerDisplayState(): SpeakerTimerDisplayState {
+  const state = useAppStore.getState()
+  return {
+    ...currentTimerDisplayState(),
+    visible: state.timerSpeakerOutputEnabled &&
+      state.timerOutputVisible &&
+      state.timerDuration > 0,
+    x: state.timerSpeakerPosition.x,
+    y: state.timerSpeakerPosition.y,
+    scale: state.timerSpeakerScale
+  }
+}
+
 function currentSpeakerDisplayState(
   state: ReturnType<typeof useAppStore.getState>
 ): SpeakerDisplayState {
@@ -221,8 +234,11 @@ function useAuxiliaryWindows(
 ): void {
   const signature = ids.join(',')
   const previousIdsRef = useRef<number[]>([])
+  const reconcileChainRef = useRef<Promise<void>>(Promise.resolve())
+  const reconcileRevisionRef = useRef(0)
   useEffect(() => {
     let cancelled = false
+    const revision = ++reconcileRevisionRef.current
     const previousIds = previousIdsRef.current
     previousIdsRef.current = [...ids]
     const reconcile = async (): Promise<void> => {
@@ -256,7 +272,16 @@ function useAuxiliaryWindows(
         }
       }
     }
-    void reconcile()
+    // Windows publishes hotplug topology in bursts. Serialize reconciles for
+    // this role so a retry from an older revision cannot overlap the current
+    // remove/add decision.
+    const queued = reconcileChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (cancelled || revision !== reconcileRevisionRef.current) return
+        await reconcile()
+      })
+    reconcileChainRef.current = queued
     return () => { cancelled = true }
   }, [role, signature, topologyRevision])
 }
@@ -287,6 +312,9 @@ export function AuxiliaryDisplayBridge(): null {
     timerRunning,
     timerDuration,
     timerOutputVisible,
+    timerSpeakerOutputEnabled,
+    timerSpeakerPosition,
+    timerSpeakerScale,
     timerTextColor,
     timerWarningTextColor,
     timerOvertimeTextColor,
@@ -347,6 +375,8 @@ export function AuxiliaryDisplayBridge(): null {
     ? captureTitlesOutputs[informationSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
   const hasTimerOutput = timerOutputVisible && timerDuration > 0 && roleIds.timer.length > 0
+  const hasSpeakerTimerOutput = timerSpeakerOutputEnabled &&
+    timerOutputVisible && timerDuration > 0 && roleIds.speaker.length > 0
   const hasEventTimerOutput = eventTimerOutput?.live === true && roleIds.eventTimer.length > 0
   const taskbarSuppressionActive =
     externalDisplays.length > 0 && (
@@ -355,6 +385,7 @@ export function AuxiliaryDisplayBridge(): null {
       isPresentationWindowOpen ||
       hasInformationOutput ||
       hasTimerOutput ||
+      hasSpeakerTimerOutput ||
       hasEventTimerOutput
     )
   const taskbarOutputPhase = backdropImage && !activeFile
@@ -365,11 +396,13 @@ export function AuxiliaryDisplayBridge(): null {
         ? 'information'
         : hasTimerOutput
           ? 'timer'
-          : hasEventTimerOutput
-            ? 'event-timer'
-            : isPresentationWindowOpen
-              ? 'program-window'
-              : 'none'
+          : hasSpeakerTimerOutput
+            ? 'speaker-timer'
+            : hasEventTimerOutput
+              ? 'event-timer'
+              : isPresentationWindowOpen
+                ? 'program-window'
+                : 'none'
 
   useEffect(() => {
     const revision = ++taskbarSyncRevisionRef.current
@@ -464,6 +497,11 @@ export function AuxiliaryDisplayBridge(): null {
       'speaker',
       'speaker-state',
       currentSpeakerDisplayState(useAppStore.getState())
+    )
+    window.api.sendToAuxiliary(
+      'speaker',
+      'speaker-timer-update',
+      currentSpeakerTimerDisplayState()
     )
   }), [])
 
@@ -592,11 +630,17 @@ export function AuxiliaryDisplayBridge(): null {
 
   useEffect(() => {
     window.api.sendToAuxiliary('timer', 'timer-update', currentTimerDisplayState())
+    window.api.sendToAuxiliary('speaker', 'speaker-timer-update', currentSpeakerTimerDisplayState())
   }, [
     timerDuration,
     timerOvertimeTextColor,
     timerRemaining,
     timerRunning,
+    timerOutputVisible,
+    timerSpeakerOutputEnabled,
+    timerSpeakerPosition.x,
+    timerSpeakerPosition.y,
+    timerSpeakerScale,
     timerTextColor,
     timerTextOpacity,
     timerWarningTextColor
