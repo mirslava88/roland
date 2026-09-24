@@ -70,6 +70,7 @@ assert.equal(directStreamDeckSpeakerLabel('titles-speaker', 'Иванов Ива
 assert.equal(directStreamDeckSpeakerLabel('titles-all', ' Иванов Иван '), 'ТИТРЫ ВСЕ Иванов')
 
 const defaults = createDefaultDirectStreamDeckConfig()
+assert.equal(defaults.enabled, true, 'a fresh PDM profile must auto-connect an attached Stream Deck')
 assert.equal(Object.keys(defaults.mappings).length, 32)
 assert.deepEqual(defaults.mappings['0'], { kind: 'take-channel', channelId: '1' })
 assert.equal(defaults.mappings['31'].kind, 'timer-reset')

@@ -3,6 +3,7 @@ import { isRendererOnlyPresentationRouting, navigateSpeakerOnlyPdf, useAppStore 
 import { cachedPptxPrefix } from '../../pptx-cache-readiness'
 import { queueAbsoluteNavigationDuringTransition } from '../../navigation-transition'
 import { mediaUrl } from '../../media'
+import { canvasToDataUrl } from '../../canvas-export'
 import * as pdfjsLib from 'pdfjs-dist'
 import { releasePdfiumResources, renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
 
@@ -181,7 +182,7 @@ export function SlideNavigator(): JSX.Element {
           canvas = document.createElement('canvas')
           canvas.width = targetWidth
           canvas.height = targetHeight
-          const ctx = canvas.getContext('2d')
+          const ctx = canvas.getContext('2d', { willReadFrequently: true })
           if (!ctx) throw new Error('Canvas 2D context is unavailable')
           const renderTask = page.render({ canvas, canvasContext: ctx, viewport })
           pdfThumbnailRenderTaskRef.current = renderTask
@@ -195,7 +196,8 @@ export function SlideNavigator(): JSX.Element {
         }
         if (generation !== pdfThumbnailGenerationRef.current) return
 
-        const dataUrl = canvas.toDataURL('image/png')
+        const dataUrl = await canvasToDataUrl(canvas)
+        if (generation !== pdfThumbnailGenerationRef.current) return
         cacheEntry.thumbnails[pageNumber - 1] = { index: pageNumber, dataUrl }
         setThumbnails((previous) => {
           if (generation !== pdfThumbnailGenerationRef.current) return previous

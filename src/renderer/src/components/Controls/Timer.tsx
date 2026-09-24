@@ -50,7 +50,6 @@ export function Timer(): JSX.Element {
     displays,
     displayAssignments,
     selectedDisplayId,
-    internalProgramOutputActive,
     setTimerDuration,
     setTimerRemaining,
     setTimerRunning,
@@ -102,6 +101,12 @@ export function Timer(): JSX.Element {
   ))
   const programDisplayId = connectedProgramDisplayId({ displays, displayAssignments, selectedDisplayId })
   const programDisplay = displays.find((display) => display.id === programDisplayId)
+  const primaryDisplay = displays.find((display) => display.isPrimary)
+  // Without a physical Program monitor, Presentation Output is rendered at
+  // the primary display bounds. The timer preview must use that exact aspect
+  // ratio too (for example 16:10 on a 1920x1200 laptop), otherwise identical
+  // travel coordinates land at a visibly different point in the real output.
+  const programPreviewDisplay = programDisplay ?? primaryDisplay
   const hasSpeakerDisplay = speakerDisplay !== undefined
   const activePreviewTarget: TimerPreviewTarget = timerPreviewTarget === 'speaker' &&
     timerSpeakerOutputEnabled && hasSpeakerDisplay
@@ -113,7 +118,9 @@ export function Timer(): JSX.Element {
     outputOwner: timerOutputOwner,
     hasDedicatedTimerDisplay
   })
-  const timerUsesProgramOverlay = !internalProgramOutputActive && timerTargetsProgram
+  // HDMI can return while a running virtual camera keeps consuming the
+  // internal compositor. Both outputs then need the same timer at once.
+  const timerUsesProgramOverlay = programDisplayId !== null && timerTargetsProgram
   const programLayoutDirty =
     Math.abs(programDraftPosition.x - timerOverlayPosition.x) > 0.01 ||
     Math.abs(programDraftPosition.y - timerOverlayPosition.y) > 0.01 ||
@@ -126,11 +133,11 @@ export function Timer(): JSX.Element {
   const activeDraftScale = activePreviewTarget === 'speaker' ? speakerDraftScale : programDraftScale
   const programDisplayWidth = Math.max(
     1,
-    (programDisplay?.bounds.width || 1920) * (programDisplay?.scaleFactor || 1)
+    (programPreviewDisplay?.bounds.width || 1920) * (programPreviewDisplay?.scaleFactor || 1)
   )
   const programDisplayHeight = Math.max(
     1,
-    (programDisplay?.bounds.height || 1080) * (programDisplay?.scaleFactor || 1)
+    (programPreviewDisplay?.bounds.height || 1080) * (programPreviewDisplay?.scaleFactor || 1)
   )
   // The transparent WPF overlay is created by a PowerShell process whose
   // logical 48 DIP timer follows the operator display DPI. Account for that
@@ -278,7 +285,9 @@ export function Timer(): JSX.Element {
 
   useEffect(() => {
     if (!programScene.enabled && timerOutputOwner === 'scene') {
-      setTimerOutputState(false, null)
+      // Leaving Scene changes only the composition owner. A running timer is
+      // still expected in the following ordinary Program output.
+      setTimerOutputState(true, 'toolbar')
     }
   }, [programScene.enabled, setTimerOutputState, timerOutputOwner])
 
@@ -289,6 +298,16 @@ export function Timer(): JSX.Element {
     let cancelled = false
     void window.api.getTimerOverlayLayout().then((layout) => {
       if (cancelled) return
+      if (!layout.valid) {
+        // Keep the persisted operator layout when Windows has emergency-moved
+        // the native HWND after a monitor was unplugged. The normal update
+        // effect below will repair the native state from this authority.
+        const state = useAppStore.getState()
+        setProgramDraftPosition({ ...state.timerOverlayPosition })
+        setProgramDraftScale(state.timerOverlayScale)
+        setTimerLayoutReady(true)
+        return
+      }
       const restoredPosition = { x: layout.x * 100, y: layout.y * 100 }
       setTimerOverlayPosition(restoredPosition)
       setTimerOverlayScale(layout.scale)

@@ -96,6 +96,7 @@ const api = {
   openPresentationWindow: (displayId?: number, behindPowerPoint?: boolean) =>
     ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
   prepareInternalProgramOutput: () => ipcRenderer.invoke('prepare-internal-program-output'),
+  releaseInternalProgramOutput: () => ipcRenderer.invoke('release-internal-program-output'),
 
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
     ipcRenderer.invoke('place-presentation-window', displayId),
@@ -210,6 +211,9 @@ const api = {
   capturePresentationFrame: (): Promise<string | null> =>
     ipcRenderer.invoke('capture-presentation-frame'),
 
+  captureProgramPreviewFrame: (): Promise<{ dataUrl: string; width: number; height: number } | null> =>
+    ipcRenderer.invoke('capture-program-preview-frame'),
+
   getDesktopCaptureSources: (
     types?: Array<'window' | 'screen'>,
     excludedDisplayId?: number
@@ -288,7 +292,7 @@ const api = {
 
   hideTimerOverlay: () => ipcRenderer.invoke('hide-timer-overlay'),
 
-  getTimerOverlayLayout: (): Promise<{ x: number; y: number; scale: number }> =>
+  getTimerOverlayLayout: (): Promise<{ x: number; y: number; scale: number; valid: boolean }> =>
     ipcRenderer.invoke('get-timer-overlay-layout'),
 
   updateTimerOverlay: (data: {

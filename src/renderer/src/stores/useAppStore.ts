@@ -41,6 +41,7 @@ import { selectProgramSnapshotTimer } from '../program-snapshot-timer'
 type PptxResult = { success: boolean; output?: string; error?: string }
 let _pptxGotoInflight: Promise<PptxResult> | null = null
 let _pptxGotoPendingTarget: number | null = null
+let _pptxGotoGeneration = 0
 
 // Reset collapse state. Вызывается из handleTake перед launchPowerPoint
 // чтобы chain от навигации предыдущего файла не пересекался с новым PPTX.
@@ -48,6 +49,7 @@ let _pptxGotoPendingTarget: number | null = null
 // повлияет на новые клики (мы пере-стартуем chain как только pending
 // будет установлен следующим кликом).
 export function resetPptxNavState(): void {
+  _pptxGotoGeneration++
   _pptxGotoInflight = null
   _pptxGotoPendingTarget = null
 }
@@ -68,9 +70,11 @@ function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
   const wasInflight = !!_pptxGotoInflight
   window.api.dbgLog(`dispatchPptxGoto: target=${target} wasInflight=${wasInflight}`)
   if (_pptxGotoInflight) return _pptxGotoInflight
+  const generation = _pptxGotoGeneration
+  const filePath = useAppStore.getState().activeFile?.path
   const chain = (async (): Promise<PptxResult> => {
     let lastResult: PptxResult = { success: true }
-    while (_pptxGotoPendingTarget !== null) {
+    while (generation === _pptxGotoGeneration && _pptxGotoPendingTarget !== null) {
       const t = _pptxGotoPendingTarget
       _pptxGotoPendingTarget = null
       lastResult = await new Promise<PptxResult>((resolve) => {
@@ -83,7 +87,9 @@ function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
         )
       })
     }
+    if (generation !== _pptxGotoGeneration) return lastResult
     _pptxGotoInflight = null
+    if (filePath !== useAppStore.getState().activeFile?.path) return lastResult
     // Sync UI с РЕАЛЬНЫМ состоянием PP. daemon goto всегда возвращает
     // фактический slide (даже при out-of-bounds GotoSlide — PP остаётся
     // на предыдущем слайде). Если optimistic UI ушёл в N+1 а PP не
@@ -161,6 +167,12 @@ export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 
 export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer' | 'event-timer'
 export type AppTheme = 'classic' | 'broadcast-pro'
 export type DisplayAssignments = Record<string, DisplayOutputMode>
+export type InternalProgramOutputConsumer = 'headless' | 'stream' | 'virtualCamera'
+export type InternalProgramOutputConsumers = Record<InternalProgramOutputConsumer, boolean>
+
+function hasInternalProgramOutputConsumer(consumers: InternalProgramOutputConsumers): boolean {
+  return consumers.headless || consumers.stream || consumers.virtualCamera
+}
 
 type DisplayRoutingSnapshot = {
   displays: DisplayInfo[]
@@ -443,6 +455,12 @@ export interface BroadcastTitlesOutput {
   eventVisible: boolean
 }
 
+export function hasBroadcastEventContent(
+  titles: Pick<BroadcastTitlesDraft, 'eventLabel' | 'eventInfo'>
+): boolean {
+  return titles.eventLabel.trim().length > 0 || titles.eventInfo.trim().length > 0
+}
+
 export const DEFAULT_BROADCAST_TITLES: BroadcastTitlesDraft = {
   speakers: [],
   selectedSpeakerId: null,
@@ -648,7 +666,7 @@ interface AppState {
   programSnapshot: ProgramSnapshot | null
   programOutputStatus: ProgramOutputStatus
   internalProgramOutputActive: boolean
-  internalProgramOutputConsumers: { stream: boolean; virtualCamera: boolean }
+  internalProgramOutputConsumers: InternalProgramOutputConsumers
   qrOverlay: QrOverlayConfig
   contentZoom: ContentZoomState
   appTheme: AppTheme
@@ -725,7 +743,7 @@ interface AppState {
   failProgramSnapshot: (revision: number, error: string) => void
   clearProgramSnapshot: () => void
   setInternalProgramOutputActive: (active: boolean) => void
-  setInternalProgramOutputConsumer: (consumer: 'stream' | 'virtualCamera', active: boolean) => void
+  setInternalProgramOutputConsumer: (consumer: InternalProgramOutputConsumer, active: boolean) => void
   setQrOverlay: (update: Partial<QrOverlayConfig>) => void
   setContentZoom: (update: Partial<ContentZoomState>) => void
   setAppTheme: (theme: AppTheme) => void
@@ -847,8 +865,11 @@ export const useAppStore = create<AppState>()(persist(
     phase: 'idle',
     error: null
   },
-  internalProgramOutputActive: false,
-  internalProgramOutputConsumers: { stream: false, virtualCamera: false },
+  // Until the first stable display snapshot arrives, prepare a hidden Program
+  // surface. If a physical Program display exists, setDisplays disables this
+  // fallback without affecting an active stream or virtual-camera consumer.
+  internalProgramOutputActive: true,
+  internalProgramOutputConsumers: { headless: true, stream: false, virtualCamera: false },
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   appTheme: readStoredAppTheme() ?? 'broadcast-pro',
@@ -1204,10 +1225,16 @@ export const useAppStore = create<AppState>()(persist(
       ? state.selectedDisplayId
       : programIds[0] ?? null
 
+    const internalProgramOutputConsumers = {
+      ...state.internalProgramOutputConsumers,
+      headless: presentationId === null
+    }
     set({
       displays,
       displayAssignments: assignments,
-      selectedDisplayId: presentationId
+      selectedDisplayId: presentationId,
+      internalProgramOutputConsumers,
+      internalProgramOutputActive: hasInternalProgramOutputConsumer(internalProgramOutputConsumers)
     })
   },
 
@@ -1227,9 +1254,15 @@ export const useAppStore = create<AppState>()(persist(
       ? state.selectedDisplayId
       : programIds[0] ?? null
 
+    const internalProgramOutputConsumers = {
+      ...state.internalProgramOutputConsumers,
+      headless: selectedDisplayId === null
+    }
     set({
       displayAssignments: assignments,
-      selectedDisplayId
+      selectedDisplayId,
+      internalProgramOutputConsumers,
+      internalProgramOutputActive: hasInternalProgramOutputConsumer(internalProgramOutputConsumers)
     })
   },
 
@@ -1286,6 +1319,12 @@ export const useAppStore = create<AppState>()(persist(
     if (update.enabled === false) {
       return {
         programScene,
+        // Scene exit must not silently switch off an already published timer.
+        // Hand it back to the ordinary toolbar route so the next non-Scene
+        // TAKE keeps the same timer visible.
+        ...(state.timerDuration > 0 && state.timerOutputVisible && state.timerOutputOwner === 'scene'
+          ? { timerOutputOwner: 'toolbar' as const }
+          : {}),
         programSnapshot: null,
         programOutputStatus: {
           ...state.programOutputStatus,
@@ -1411,11 +1450,11 @@ export const useAppStore = create<AppState>()(persist(
   })),
   setInternalProgramOutputActive: (active) => set((state) => {
     const consumers = { ...state.internalProgramOutputConsumers, stream: active }
-    return { internalProgramOutputConsumers: consumers, internalProgramOutputActive: consumers.stream || consumers.virtualCamera }
+    return { internalProgramOutputConsumers: consumers, internalProgramOutputActive: hasInternalProgramOutputConsumer(consumers) }
   }),
   setInternalProgramOutputConsumer: (consumer, active) => set((state) => {
     const consumers = { ...state.internalProgramOutputConsumers, [consumer]: active }
-    return { internalProgramOutputConsumers: consumers, internalProgramOutputActive: consumers.stream || consumers.virtualCamera }
+    return { internalProgramOutputConsumers: consumers, internalProgramOutputActive: hasInternalProgramOutputConsumer(consumers) }
   }),
   setQrOverlay: (update) => set((state) => ({
     qrOverlay: normalizeQrOverlay({ ...state.qrOverlay, ...update })
@@ -1597,10 +1636,7 @@ export const useAppStore = create<AppState>()(persist(
     videoPlayback: {
       ...current.videoPlayback,
       [path]: {
-        currentTime: 0,
-        duration: 0,
-        playing: true,
-        ...current.videoPlayback[path],
+        ...(current.videoPlayback[path] ?? { currentTime: 0, duration: 0, playing: true }),
         ...state
       }
     }

@@ -67,12 +67,27 @@ export function DirectStreamDeckBridge(): null {
   )
 
   useEffect(() => {
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
     const handleConfig = (event: Event): void => {
       setConfig((event as CustomEvent<DirectStreamDeckConfig>).detail)
     }
+    const configure = (): void => {
+      const savedConfig = readDirectStreamDeckConfig()
+      void window.api.dbgLog(`Stream Deck bridge: configure enabled=${savedConfig.enabled}`)
+      void window.api.configureDirectStreamDeck(savedConfig).catch((error) => {
+        if (cancelled) return
+        void window.api.dbgLog(`Stream Deck: startup configure retry after ${String(error)}`)
+        retryTimer = setTimeout(configure, 750)
+      })
+    }
     window.addEventListener(DIRECT_STREAM_DECK_CONFIG_EVENT, handleConfig)
-    void window.api.configureDirectStreamDeck(readDirectStreamDeckConfig())
-    return () => window.removeEventListener(DIRECT_STREAM_DECK_CONFIG_EVENT, handleConfig)
+    configure()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+      window.removeEventListener(DIRECT_STREAM_DECK_CONFIG_EVENT, handleConfig)
+    }
   }, [])
 
   useEffect(() => {
@@ -152,7 +167,7 @@ export function DirectStreamDeckBridge(): null {
             ? directStreamDeckSpeakerLabel(
                 action.kind,
                 broadcastTitles.speakers.find((speaker) => speaker.id === action.speakerId)?.name || ''
-              ) || ACTION_KEY_LABELS[action.kind]
+              ) || ACTION_KEY_LABELS[action.kind] || DIRECT_STREAM_DECK_ACTION_LABELS[action.kind]
             : ACTION_KEY_LABELS[action.kind] || DIRECT_STREAM_DECK_ACTION_LABELS[action.kind],
         color: active ? '#c51d34' : action.kind.startsWith('music-') ? '#4c2b78'
           : action.kind.startsWith('timer-') ? '#805714'

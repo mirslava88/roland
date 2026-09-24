@@ -5,7 +5,7 @@ import { PreviewPanel } from './components/Preview/PreviewPanel'
 import { ControlBar } from './components/Controls/ControlBar'
 import { Toolbar } from './components/Controls/Toolbar'
 import { NowPlaying } from './components/Controls/NowPlaying'
-import { SlideNavigator } from './components/SlideNavigator/SlideNavigator'
+import { HeadlessProgramRail } from './components/ProgramMonitor/HeadlessProgramRail'
 import { OperatorCursorGuard } from './components/Capture/OperatorCursorGuard'
 import { queueNavigationDuringTransition } from './navigation-transition'
 import type { NavigationRequest } from './navigation-transition'
@@ -18,8 +18,9 @@ import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
 import { InternalProgramOutputBridge } from './components/ProgramScene/InternalProgramOutputBridge'
 import { Introduction } from './components/Onboarding/Introduction'
 import { isIntroductionOpen } from './components/Onboarding/training-model'
+import type { VirtualCameraStatus } from '../../shared/virtual-camera'
 
-export default function App({ training = false }: { training?: boolean } = {}): JSX.Element {
+export default function App({ training = false }: { training?: boolean }): JSX.Element {
   const {
     captureSources,
     appTheme,
@@ -27,7 +28,8 @@ export default function App({ training = false }: { training?: boolean } = {}): 
     setDisplays,
     setCurrentSlide,
     setTotalSlides,
-    setIsPlaying
+    setIsPlaying,
+    setInternalProgramOutputConsumer
   } = useAppStore()
 
   // Window-capture streams stay alive to feed operator thumbnails even while
@@ -126,6 +128,19 @@ export default function App({ training = false }: { training?: boolean } = {}): 
     const unsubClose = window.api.on('presentation-window-closed', () => {
       setPresentationWindowOpen(false)
     })
+
+    const syncVirtualCameraOutput = (value: unknown): void => {
+      const status = value as Partial<VirtualCameraStatus> | null
+      const active = (status?.phase === 'running' || status?.phase === 'starting') && status.source === 'internal'
+      setInternalProgramOutputConsumer('virtualCamera', active)
+      window.api.dbgLog(
+        `virtual camera output route source=${status?.source ?? '-'} phase=${status?.phase ?? '-'} internal=${active}`
+      )
+    }
+    const unsubVirtualCamera = window.api.on('virtual-camera-status-changed', syncVirtualCameraOutput)
+    void window.api.virtualCamera.status()
+      .then(syncVirtualCameraOutput)
+      .catch((error: unknown) => window.api.dbgLog(`virtual camera route sync failed error=${String(error)}`))
 
     let cancelled = false
     let displayPushRevision = 0
@@ -310,6 +325,7 @@ export default function App({ training = false }: { training?: boolean } = {}): 
     return () => {
       cancelled = true
       unsubClose()
+      unsubVirtualCamera()
       unsubDisplays()
       unsubSlideInfo()
       unsubVideoState()
@@ -338,7 +354,7 @@ export default function App({ training = false }: { training?: boolean } = {}): 
           <PreviewPanel />
           <ControlBar />
         </div>
-        <SlideNavigator />
+        <HeadlessProgramRail />
       </div>
     </div>
   )

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import type { BroadcastTitleEffect, BroadcastTitlesOutput } from '../../stores/useAppStore'
+import { hasBroadcastEventContent, type BroadcastTitleEffect, type BroadcastTitlesOutput } from '../../stores/useAppStore'
 
 interface BroadcastTitlesOverlayProps {
   titles: BroadcastTitlesOutput
@@ -64,7 +64,7 @@ export function BroadcastTitlesOverlay({
   const eventLabel = titles.eventLabel.trim()
   const eventInfo = titles.eventInfo.trim()
   const speakerVisible = titles.speakerVisible && speakerName.length > 0
-  const eventVisible = titles.eventVisible && eventInfo.length > 0
+  const eventVisible = titles.eventVisible && hasBroadcastEventContent(titles)
 
   const speaker = useAnimatedValue(
     speakerVisible,
@@ -120,7 +120,7 @@ export function BroadcastTitlesOverlay({
           } as CSSProperties}
         >
           {event.content.label && <div className="broadcast-event-title-label">{event.content.label}</div>}
-          <div className="broadcast-event-title-text">{event.content.info}</div>
+          {event.content.info && <div className="broadcast-event-title-text">{event.content.info}</div>}
         </div>
       )}
 

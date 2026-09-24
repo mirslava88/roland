@@ -43,7 +43,7 @@ assert.match(outputPreload, /OUTBOUND_CHANNELS/)
 assert.match(outputPreload, /ipcRenderer\.invoke\('read-output-file', filePath\)/)
 for (const channel of [
   'navigate-slide', 'navigate-pdf', 'play-pause', 'seek', 'set-volume', 'set-loop',
-  'capture-source-state-request', 'capture-source-register', 'capture-source-unregister',
+  'capture-source-state-request', 'capture-source-register', 'capture-source-reconnect', 'capture-source-unregister',
   'capture-devices-request', 'program-scene-audio-retry', 'program-scene-audio-update',
   'program-scene-audio-status-request'
 ]) {

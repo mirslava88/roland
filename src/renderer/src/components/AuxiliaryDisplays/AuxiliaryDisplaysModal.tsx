@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { mediaUrl } from '../../media'
+import { canvasToDataUrl } from '../../canvas-export'
 import { releasePdfiumResources, renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
 import { DesktopCapturePicker } from '../Capture/DesktopCapturePicker'
 import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
 import {
   captureSourceIdentity,
   DEFAULT_BROADCAST_TITLES_OUTPUT,
+  hasBroadcastEventContent,
   useAppStore,
   type BroadcastTitlesOutput,
   type DisplayOutputMode,
@@ -68,7 +70,9 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
           lane: 'background'
         })
         if (cancelled) return
-        setFrame({ filePath, page, src: rendered.canvas.toDataURL('image/png') })
+        const src = await canvasToDataUrl(rendered.canvas)
+        if (cancelled) return
+        setFrame({ filePath, page, src })
         setLoading(false)
       } catch (error) {
         if (cancelled) return
@@ -408,7 +412,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
   const publishInformationEvent = (): void => {
     if (!informationSourceIdentity) return
     const titles = useAppStore.getState().broadcastTitles
-    if (!titles.eventInfo.trim()) return
+    if (!hasBroadcastEventContent(titles)) return
     setCaptureTitlesOutput(informationSourceIdentity, {
       eventLabel: titles.eventLabel,
       eventInfo: titles.eventInfo,
@@ -1047,7 +1051,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
               </div>
               <button
                 type="button"
-                disabled={!broadcastTitles.eventInfo.trim()}
+                disabled={!hasBroadcastEventContent(broadcastTitles)}
                 onClick={publishInformationEvent}
                 className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
                   informationTitlesOutput.eventVisible ? 'bg-emerald-900/40' : 'hover:bg-gray-700/70'
@@ -1059,7 +1063,11 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
                     {broadcastTitles.eventLabel.trim() || 'Без заголовка'}
                   </span>
                   <span className="block truncate text-[10px] text-gray-500">
-                    {broadcastTitles.eventInfo.trim() || 'Заполните информацию через кнопку «▰ Титры»'}
+                    {broadcastTitles.eventInfo.trim() || (
+                      broadcastTitles.eventLabel.trim()
+                        ? 'Только заголовок'
+                        : 'Заполните информацию через кнопку «▰ Титры»'
+                    )}
                   </span>
                 </span>
                 {informationTitlesOutput.eventVisible && (

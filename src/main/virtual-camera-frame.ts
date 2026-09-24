@@ -44,7 +44,7 @@ export function fitNativeImageToVirtualCameraFrame(image: NativeImage): Buffer {
   const resized = source.width === rect.width && source.height === rect.height
     ? image
     : image.resize({ width: rect.width, height: rect.height, quality: 'best' })
-  const bitmap = resized.getBitmap()
+  const bitmap = resized.toBitmap()
   const expectedBytes = rect.width * rect.height * 4
   if (bitmap.length !== expectedBytes) {
     throw new Error(`Неожиданный размер кадра: ${bitmap.length} вместо ${expectedBytes}.`)

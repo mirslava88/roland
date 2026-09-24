@@ -497,6 +497,20 @@ public class TimerOverlay
         {
             RECT rect;
             if (!GetWindowRect(windowHwnd, out rect)) return;
+            // Windows can move a topmost window onto the primary display as
+            // soon as its monitor is unplugged, before PDM receives the
+            // display-removed event. Never interpret that emergency move as
+            // an operator drag relative to the now-missing target display.
+            // Otherwise a right-edge timer is persisted with a negative
+            // offset and returns at the left edge on the next hot-plug.
+            const int tolerance = 4;
+            if (rect.Left < targetDisplayX - tolerance ||
+                rect.Top < targetDisplayY - tolerance ||
+                rect.Right > targetDisplayX + targetDisplayWidth + tolerance ||
+                rect.Bottom > targetDisplayY + targetDisplayHeight + tolerance)
+            {
+                return;
+            }
             int windowWidth = Math.Max(1, rect.Right - rect.Left);
             int windowHeight = Math.Max(1, rect.Bottom - rect.Top);
             int travelX = Math.Max(0, targetDisplayWidth - windowWidth);

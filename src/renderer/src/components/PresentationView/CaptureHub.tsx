@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { ProgramSceneChromaKeyConfig } from '../../../../shared/program-scene'
 import { ChromaKeyRenderer } from '../Capture/chroma-key-renderer'
+import { canvasToDataUrl } from '../../canvas-export'
 
 export interface CaptureTakeRequest {
   sourceId: string
@@ -75,6 +76,52 @@ function stopStream(stream: MediaStream | null): void {
     track.onunmute = null
     track.stop()
   }
+}
+
+function getUserMediaWithTimeout(
+  constraints: MediaStreamConstraints,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<MediaStream> {
+  return new Promise<MediaStream>((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(timeoutMessage))
+    }, timeoutMs)
+
+    void navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+      if (settled) {
+        // getUserMedia cannot be aborted. If Windows eventually completes a
+        // request which PDM already timed out, release it instead of leaving a
+        // hidden camera stream alive and starving the next attempt.
+        stopStream(stream)
+        return
+      }
+      settled = true
+      clearTimeout(timer)
+      resolve(stream)
+    }, (error: unknown) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+}
+
+function configuredVideoDeviceAvailable(
+  config: CaptureSourceConfig,
+  devices: MediaDeviceInfo[]
+): boolean {
+  if (config.captureKind !== 'device') return true
+  const videoDevices = devices.filter((device) => device.kind === 'videoinput')
+  return videoDevices.some((device) => (
+    device.deviceId === config.videoDeviceId ||
+    (!!config.videoGroupId && !!device.groupId && device.groupId === config.videoGroupId) ||
+    (!!config.videoLabel && !!device.label && device.label === config.videoLabel)
+  ))
 }
 
 async function enumerateCaptureDevices(requestId: string, includeAudio = false): Promise<CaptureDevicesResponse> {
@@ -160,6 +207,7 @@ function CaptureSourceLayer({
   onAspectRatio,
   audioActive,
   deviceRevision,
+  onStateChange,
   takeRevision,
   onTakeReady,
   onTakeError
@@ -174,6 +222,7 @@ function CaptureSourceLayer({
   onAspectRatio?: (sourceId: string, aspectRatio: number) => void
   audioActive: boolean
   deviceRevision: number
+  onStateChange: (state: CaptureSourceState) => void
   takeRevision?: number
   onTakeReady: (sourceId: string, revision: number) => void
   onTakeError: (sourceId: string, revision: number, message: string) => void
@@ -192,6 +241,9 @@ function CaptureSourceLayer({
   const retryAttemptRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const muteWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const frameStallWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const lastDecodedFrameAtRef = useRef(0)
+  const lastVideoTimeRef = useRef(-1)
   const frameCallbackRef = useRef<number | null>(null)
   const fallbackFrameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const frameWaitersRef = useRef(new Set<FrameWaiter>())
@@ -278,8 +330,9 @@ function CaptureSourceLayer({
   const emitState = useCallback((state: Omit<CaptureSourceState, 'sourceId'>): void => {
     const nextState: CaptureSourceState = { sourceId: config.sourceId, ...state }
     latestStateRef.current = nextState
+    onStateChange(nextState)
     window.api.sendToControl('capture-source-state', nextState)
-  }, [config.sourceId])
+  }, [config.sourceId, onStateChange])
 
   const resolveFrameWaiters = useCallback((): void => {
     const waiters = [...frameWaitersRef.current]
@@ -323,6 +376,17 @@ function CaptureSourceLayer({
   useEffect(() => {
     let cancelled = false
     const generation = ++generationRef.current
+    let openAttempt = 0
+    let previewEncoding = false
+
+    const isStaleOpen = (attempt: number): boolean => (
+      cancelled || generation !== generationRef.current || attempt !== openAttempt
+    )
+
+    function beginOpen(isRetry = false): void {
+      const attempt = ++openAttempt
+      void openStream(isRetry, attempt).catch((error) => handleOpenError(error, attempt))
+    }
 
     const clearFramePump = (): void => {
       const video = videoRef.current
@@ -332,6 +396,8 @@ function CaptureSourceLayer({
       frameCallbackRef.current = null
       if (fallbackFrameTimerRef.current) clearTimeout(fallbackFrameTimerRef.current)
       fallbackFrameTimerRef.current = null
+      if (frameStallWatchdogRef.current) clearInterval(frameStallWatchdogRef.current)
+      frameStallWatchdogRef.current = null
     }
 
     const clearMuteWatchdog = (): void => {
@@ -354,7 +420,7 @@ function CaptureSourceLayer({
       if (holdImageRef.current) holdImageRef.current.style.opacity = '0'
       // Three preview frames per second are ample for the operator thumbnail
       // and avoid JPEG/IPC/GC spikes during presentation layer swaps.
-      if (now - lastPreviewAtRef.current < 330) return
+      if (previewEncoding || now - lastPreviewAtRef.current < 330) return
       lastPreviewAtRef.current = now
 
       const canvas = canvasRef.current || document.createElement('canvas')
@@ -372,24 +438,53 @@ function CaptureSourceLayer({
       context.fillStyle = '#000000'
       context.fillRect(0, 0, width, height)
       context.drawImage(video, 0, 0, width, height)
-      try {
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.72)
+      // Do not queue more frames while encoding is pending, and never publish
+      // a delayed frame after reconnecting the source or closing the renderer.
+      previewEncoding = true
+      const attempt = openAttempt
+      void canvasToDataUrl(canvas, 'image/jpeg', 0.72).then((dataUrl) => {
+        if (isStaleOpen(attempt)) return
         lastFrameDataUrlRef.current = dataUrl
         window.api.sendToControl('capture-preview-frame', {
           sourceId: config.sourceId,
           dataUrl,
           state: latestStateRef.current
         })
-      } catch { /* renderer may be closing */ }
+      }).catch(() => { /* renderer may be closing */ }).finally(() => {
+        previewEncoding = false
+      })
     }
 
     const startFramePump = (): void => {
       clearFramePump()
       const video = videoRef.current
       if (!video) return
+      lastDecodedFrameAtRef.current = performance.now()
+      lastVideoTimeRef.current = video.currentTime
+      if (!isDesktopCapture) {
+        frameStallWatchdogRef.current = setInterval(() => {
+          if (cancelled || generation !== generationRef.current) return
+          const status = latestStateRef.current.status
+          if (status !== 'ready' && status !== 'muted') return
+          const stalledForMs = performance.now() - lastDecodedFrameAtRef.current
+          if (stalledForMs < 4_500) return
+          showHeldFrame()
+          emitState({
+            status: 'reconnecting',
+            message: 'Камера перестала передавать изображение. Переподключение…'
+          })
+          window.api.dbgLog(
+            `Capture ${config.sourceId.slice(-8)}: frame stall ${Math.round(stalledForMs)}ms; reconnecting`
+          )
+          beginOpen(true)
+        }, 1_000)
+      }
       if (video.requestVideoFrameCallback) {
         const tick = (now: number): void => {
           if (cancelled || generation !== generationRef.current) return
+          // A decoder-owned frame really arrived. Keep this independent from
+          // the throttled JPEG preview cadence.
+          lastDecodedFrameAtRef.current = performance.now()
           drawPreview(now)
           frameCallbackRef.current = video.requestVideoFrameCallback!(tick)
         }
@@ -398,6 +493,10 @@ function CaptureSourceLayer({
       }
       const tick = (): void => {
         if (cancelled || generation !== generationRef.current) return
+        if (video.currentTime !== lastVideoTimeRef.current) {
+          lastVideoTimeRef.current = video.currentTime
+          lastDecodedFrameAtRef.current = performance.now()
+        }
         drawPreview(performance.now())
         fallbackFrameTimerRef.current = setTimeout(tick, 100)
       }
@@ -423,25 +522,30 @@ function CaptureSourceLayer({
             ? `Повторное подключение ${desktopTarget}…`
             : 'Повторное подключение устройства…'
         })
-        void openStream(true).catch(handleOpenError)
+        beginOpen(true)
       }, delayMs)
       window.api.dbgLog(
         `Capture ${config.sourceId.slice(-8)}: reconnect scheduled delay=${delayMs}ms reason=${message}`
       )
     }
 
-    async function openStream(isRetry = false): Promise<void> {
-      if (cancelled || generation !== generationRef.current) return
+    async function openStream(isRetry: boolean, attempt: number): Promise<void> {
+      if (isStaleOpen(attempt)) return
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
       clearMuteWatchdog()
       clearFramePump()
-      if (streamRef.current) showHeldFrame()
+      const replacingLiveStream = !!streamRef.current
+      if (replacingLiveStream) showHeldFrame()
       stopStream(streamRef.current)
       streamRef.current = null
       setHasAudio(false)
       const video = videoRef.current
-      if (video) video.srcObject = null
+      if (video) {
+        video.pause()
+        video.srcObject = null
+        video.load()
+      }
       emitState({
         status: isRetry ? 'reconnecting' : 'connecting',
         message: isRetry
@@ -450,11 +554,21 @@ function CaptureSourceLayer({
       })
       const startedAt = performance.now()
 
+      // Several UVC drivers do not release their Media Foundation buffers in
+      // the same task in which the old track is stopped. Reopening immediately
+      // can then hang forever in getUserMedia and leave the UI on
+      // "Подключение". Give Windows a short, bounded release interval.
+      if (!isDesktopCapture && (replacingLiveStream || isRetry)) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 650))
+        if (isStaleOpen(attempt)) return
+      }
+
       let resolvedVideoDeviceId = config.videoDeviceId
       let resolvedAudioDeviceId = config.audioDeviceId
       if (!isDesktopCapture) {
         try {
           const devices = await navigator.mediaDevices.enumerateDevices()
+          if (isStaleOpen(attempt)) return
           const videoDevices = devices.filter((device) => device.kind === 'videoinput')
           if (!videoDevices.some((device) => device.deviceId === resolvedVideoDeviceId)) {
             const replacement = (
@@ -536,16 +650,27 @@ function CaptureSourceLayer({
       let stream: MediaStream
       let audioWarning: string | undefined
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: audioConstraints })
+        window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: getUserMedia BEGIN attempt=${attempt}`)
+        stream = await getUserMediaWithTimeout(
+          { video: videoConstraints, audio: audioConstraints },
+          10_000,
+          'Камера не ответила за 10 секунд. Выполняется повторное подключение.'
+        )
+        window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: getUserMedia END attempt=${attempt}`)
       } catch (firstError) {
+        if (isStaleOpen(attempt)) throw firstError
         if (isDesktopCapture || !config.audioEnabled) throw firstError
         // A missing/blocked HDMI audio endpoint must not discard a healthy
         // video signal. Continue video-only and surface a clear warning.
         audioWarning = 'Видео подключено, но звук устройства недоступен.'
-        stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false })
+        stream = await getUserMediaWithTimeout(
+          { video: videoConstraints, audio: false },
+          10_000,
+          'Камера не ответила за 10 секунд. Выполняется повторное подключение.'
+        )
       }
 
-      if (cancelled || generation !== generationRef.current) {
+      if (isStaleOpen(attempt)) {
         stopStream(stream)
         return
       }
@@ -578,7 +703,7 @@ function CaptureSourceLayer({
           if (cancelled || generation !== generationRef.current) return
           emitState({ status: 'reconnecting', message: 'Сигнал не восстановился. Переподключение устройства…' })
           window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: mute watchdog reconnect`)
-          void openStream(true).catch(handleOpenError)
+          beginOpen(true)
         }, 6000)
       }
       videoTrack.onunmute = () => {
@@ -650,7 +775,7 @@ function CaptureSourceLayer({
       await outputVideo.play()
       startFramePump()
       await waitForNextFrame()
-      if (cancelled || generation !== generationRef.current) return
+      if (isStaleOpen(attempt)) return
       retryAttemptRef.current = 0
 
       const settings = videoTrack.getSettings()
@@ -676,7 +801,11 @@ function CaptureSourceLayer({
       )
     }
 
-    function handleOpenError(error: unknown): void {
+    function handleOpenError(error: unknown, attempt: number): void {
+      // Replacing a MediaStream rejects the old video.play() promise with
+      // AbortError ("interrupted by a new load"). That cancelled attempt must
+      // never overwrite the state of the replacement stream.
+      if (isStaleOpen(attempt)) return
       const message = describeMediaError(error, isDesktopCapture)
       showHeldFrame()
       clearFramePump()
@@ -693,10 +822,11 @@ function CaptureSourceLayer({
       }
     }
 
-    void openStream().catch(handleOpenError)
+    beginOpen()
 
     return () => {
       cancelled = true
+      openAttempt += 1
       generationRef.current += 1
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
       retryTimerRef.current = null
@@ -859,9 +989,23 @@ export function CaptureHub({
   onTakeError
 }: CaptureHubProps): JSX.Element {
   const [sources, setSources] = useState<CaptureSourceConfig[]>([])
-  const [deviceRevision, setDeviceRevision] = useState(0)
+  const [deviceRevisions, setDeviceRevisions] = useState<Record<string, number>>({})
+  const sourcesRef = useRef<CaptureSourceConfig[]>([])
+  const sourceStatesRef = useRef(new Map<string, CaptureSourceState>())
+  const deviceAvailableRef = useRef(new Map<string, boolean>())
 
   useEffect(() => {
+    sourcesRef.current = sources
+  }, [sources])
+
+  const rememberSourceState = useCallback((state: CaptureSourceState): void => {
+    sourceStatesRef.current.set(state.sourceId, state)
+    if (state.status === 'ready') deviceAvailableRef.current.set(state.sourceId, true)
+  }, [])
+
+  useEffect(() => {
+    let disposed = false
+    let deviceChangeTimer: ReturnType<typeof setTimeout> | null = null
     const unsubRegister = window.api.on('capture-source-register', (...args: unknown[]) => {
       const config = args[0] as CaptureSourceConfig
       const hasTarget = config?.captureKind === 'desktop'
@@ -881,7 +1025,27 @@ export function CaptureHub({
     const unsubUnregister = window.api.on('capture-source-unregister', (...args: unknown[]) => {
       const sourceId = args[0] as string
       setSources((current) => current.filter((item) => item.sourceId !== sourceId))
+      sourceStatesRef.current.delete(sourceId)
+      deviceAvailableRef.current.delete(sourceId)
+      setDeviceRevisions((current) => {
+        if (!(sourceId in current)) return current
+        const next = { ...current }
+        delete next[sourceId]
+        return next
+      })
       window.api.dbgLog(`CaptureHub: unregister source=${sourceId?.slice(-8) ?? '-'}`)
+    })
+
+    const unsubReconnect = window.api.on('capture-source-reconnect', (...args: unknown[]) => {
+      const sourceId = args[0] as string
+      if (!sourceId || !sourcesRef.current.some((source) => (
+        source.sourceId === sourceId && source.captureKind === 'device'
+      ))) return
+      setDeviceRevisions((current) => ({
+        ...current,
+        [sourceId]: (current[sourceId] ?? 0) + 1
+      }))
+      window.api.dbgLog(`CaptureHub: explicit reconnect source=${sourceId.slice(-8)}`)
     })
 
     const unsubDevices = window.api.on('capture-devices-request', (...args: unknown[]) => {
@@ -897,16 +1061,56 @@ export function CaptureHub({
     })
 
     const handleDeviceChange = (): void => {
-      window.api.sendToControl('capture-devices-changed')
-      setDeviceRevision((revision) => revision + 1)
-      window.api.dbgLog('CaptureHub: mediaDevices devicechange; reconnecting saved device sources now')
+      // Windows commonly emits a burst of devicechange events for one USB
+      // transition (and also for unrelated audio endpoints). Coalesce the
+      // burst, then restart only a source which actually returned or is
+      // already known to be broken. A healthy camera must stay untouched.
+      if (deviceChangeTimer) clearTimeout(deviceChangeTimer)
+      deviceChangeTimer = setTimeout(() => {
+        deviceChangeTimer = null
+        if (disposed) return
+        window.api.sendToControl('capture-devices-changed')
+        void navigator.mediaDevices.enumerateDevices().then((devices) => {
+          if (disposed) return
+          const reconnectSourceIds: string[] = []
+          for (const config of sourcesRef.current) {
+            if (config.captureKind !== 'device') continue
+            const available = configuredVideoDeviceAvailable(config, devices)
+            const wasAvailable = deviceAvailableRef.current.get(config.sourceId)
+            const status = sourceStatesRef.current.get(config.sourceId)?.status
+            deviceAvailableRef.current.set(config.sourceId, available)
+            const broken = status === 'error' || status === 'ended' ||
+              status === 'reconnecting' || status === 'muted'
+            if (available && (wasAvailable === false || broken)) {
+              reconnectSourceIds.push(config.sourceId)
+            }
+          }
+          if (reconnectSourceIds.length > 0) {
+            setDeviceRevisions((current) => {
+              const next = { ...current }
+              for (const sourceId of reconnectSourceIds) {
+                next[sourceId] = (next[sourceId] ?? 0) + 1
+              }
+              return next
+            })
+          }
+          window.api.dbgLog(
+            `CaptureHub: mediaDevices devicechange settled; reconnect=${reconnectSourceIds.length}`
+          )
+        }).catch((error) => {
+          if (!disposed) window.api.dbgLog(`CaptureHub: devicechange enumeration failed=${String(error)}`)
+        })
+      }, 750)
     }
     navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange)
     window.api.sendToControl('capture-hub-ready')
 
     return () => {
+      disposed = true
+      if (deviceChangeTimer) clearTimeout(deviceChangeTimer)
       unsubRegister()
       unsubUnregister()
+      unsubReconnect()
       unsubDevices()
       navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange)
     }
@@ -933,7 +1137,8 @@ export function CaptureHub({
             sceneChromaKey={sceneChromaKey}
             onAspectRatio={onActiveAspectRatio}
             audioActive={audioSourceId === config.sourceId}
-            deviceRevision={deviceRevision}
+            deviceRevision={deviceRevisions[config.sourceId] ?? 0}
+            onStateChange={rememberSourceState}
             takeRevision={takeRevision}
             onTakeReady={onTakeReady}
             onTakeError={onTakeError}

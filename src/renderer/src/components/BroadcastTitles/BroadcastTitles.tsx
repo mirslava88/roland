@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import {
   captureSourceIdentity,
   DEFAULT_BROADCAST_TITLES_OUTPUT,
+  hasBroadcastEventContent,
   useAppStore,
   type BroadcastSpeaker,
   type BroadcastTitleEffect,
@@ -236,7 +237,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
     eventAccentStart: broadcastTitles.eventAccentStart,
     eventAccentEnd: broadcastTitles.eventAccentEnd,
     speakerVisible: !!selectedSpeaker?.name.trim(),
-    eventVisible: broadcastTitles.eventInfo.trim().length > 0
+    eventVisible: hasBroadcastEventContent(broadcastTitles)
   }), [broadcastTitles, selectedSpeaker])
 
   const updateSpeaker = (id: string, update: Partial<BroadcastSpeaker>): void => {
@@ -283,7 +284,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
   }
 
   const publishEvent = (): void => {
-    if (!broadcastTitles.eventInfo.trim()) return
+    if (!hasBroadcastEventContent(broadcastTitles)) return
     setTargetTitlesOutput({
       eventLabel: broadcastTitles.eventLabel,
       eventInfo: broadcastTitles.eventInfo,
@@ -302,7 +303,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
   }
 
   const publishAllTitles = (): void => {
-    if (!sourceIdentity || !selectedSpeaker?.name.trim() || !broadcastTitles.eventInfo.trim()) return
+    if (!sourceIdentity || !selectedSpeaker?.name.trim() || !hasBroadcastEventContent(broadcastTitles)) return
     publishSpeaker()
     publishEvent()
   }
@@ -362,7 +363,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
           <button
             data-broadcast-titles-show-all
             type="button"
-            disabled={!sourceIdentity || !selectedSpeaker?.name.trim() || !broadcastTitles.eventInfo.trim()}
+            disabled={!sourceIdentity || !selectedSpeaker?.name.trim() || !hasBroadcastEventContent(broadcastTitles)}
             onClick={publishAllTitles}
             title="Показать титр выступающего и информацию о мероприятии"
             className="h-7 rounded-md border border-red-400 bg-red-600 px-3 text-[10px] font-semibold text-white shadow-[0_0_10px_rgba(220,38,38,.35)] transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:border-gray-800 disabled:bg-surface-100 disabled:text-gray-600 disabled:shadow-none"
@@ -386,7 +387,7 @@ export function BroadcastTitlesModal({ onClose, embedded = false }: BroadcastTit
             buttonProps={{ 'data-broadcast-titles-event-visible': true }}
             pressed={broadcastTitlesOutput.eventVisible}
             tone="air"
-            disabled={!broadcastTitlesOutput.eventVisible && (!sourceIdentity || !broadcastTitles.eventInfo.trim())}
+            disabled={!broadcastTitlesOutput.eventVisible && (!sourceIdentity || !hasBroadcastEventContent(broadcastTitles))}
             title="Показать или скрыть информацию о мероприятии"
             onPressedChange={(pressed) => {
               if (pressed) publishEvent()

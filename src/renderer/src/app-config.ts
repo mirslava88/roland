@@ -105,6 +105,7 @@ interface PdmConfigV1 {
     chromaKey: ProgramSceneChromaKeyConfig
     enabled: false
     captureSourceId: string | null
+    contentChannelId: ChannelId | null
     placement: ProgramScenePlacement
     participantSize: ProgramSceneParticipantSize
     participantScale: number
@@ -743,6 +744,10 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   if (backdropImage && !restoredBackdrop) warnMissing(warnings, 'Подложка', backdropImage)
 
   const rawProgramScene = isRecord(raw.programScene) ? raw.programScene : {}
+  const sceneContentChannelId = safeString(rawProgramScene.contentChannelId, 256)
+  const restoredSceneContentChannelId = sceneContentChannelId && channels[sceneContentChannelId]?.file
+    ? sceneContentChannelId
+    : null
   const sceneCaptureSourceId = safeString(rawProgramScene.captureSourceId, 256)
   const scenePlacement = [
     'right-top', 'right-center', 'right-bottom',
@@ -1101,6 +1106,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       background: restoredSceneBackground,
       chromaKey: normalizeProgramSceneChromaKey(rawProgramScene.chromaKey),
       captureSourceId: restoredSceneSourceId,
+      contentChannelId: restoredSceneContentChannelId,
       placement: scenePlacement,
       participantSize: sceneParticipantSize,
       participantScale: sceneParticipantScale,

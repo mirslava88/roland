@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import {
   captureSourceIdentity,
   DEFAULT_BROADCAST_TITLES_OUTPUT,
+  hasBroadcastEventContent,
   useAppStore,
   type BroadcastTitlesOutput
 } from '../../stores/useAppStore'
@@ -229,7 +230,7 @@ export function BroadcastTitlesBridge(): JSX.Element | null {
           speakerVisible: true
         })
       }
-      if (showEvent && draft.eventInfo.trim()) {
+      if (showEvent && hasBroadcastEventContent(draft)) {
         state.setCaptureTitlesOutput(sourceIdentity, {
           eventLabel: draft.eventLabel,
           eventInfo: draft.eventInfo,

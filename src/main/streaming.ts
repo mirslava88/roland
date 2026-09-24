@@ -213,19 +213,26 @@ export class StreamingManager {
       await this.command('start', { resolution: settings.resolution, fps: settings.fps, bitrateKbps: settings.bitrateKbps,
         audio: settings.audio, microphoneId: settings.microphoneId })
       if (token !== this.epoch) throw new Error(this.status.error || 'Запуск отменён.')
-      this.engine = new StreamingEngine(this.ffmpegPath, settings, (message) => this.fail(message))
+      const current = (): boolean => token === this.epoch
+      const engine = new StreamingEngine(this.ffmpegPath, settings, (message) => {
+        if (current()) this.fail(message)
+      })
+      this.engine = engine
       if (internalProgram && internalWindow) {
         const firstFrame = await internalWindow.webContents.capturePage()
+        if (!current()) throw new Error('Запуск отменён.')
         const size = firstFrame.getSize()
         if (size.width < 16 || size.height < 16) throw new Error('Внутренний программный выход не отрисовал кадр.')
         this.internalFrameSize = size
-        this.engine.start(encoder, rawVideoInputArguments(size.width, size.height, settings.fps), true)
+        engine.start(encoder, rawVideoInputArguments(size.width, size.height, settings.fps), true)
         // FFmpeg opens the raw-video and PCM inputs together. Do not await the
         // first video pipe before resuming PCM, otherwise both inputs can wait
         // on each other during startup.
-        void this.engine.writeVideo(firstFrame.getBitmap())
+        void engine.writeVideo(firstFrame.toBitmap()).catch(() => {
+          if (current()) this.fail('Не удалось передать первый кадр стрима.')
+        })
         const captureFrame = async (): Promise<void> => {
-          if (this.frameCaptureBusy || !this.engine || !this.internalProgram) return
+          if (!current() || this.frameCaptureBusy || this.engine !== engine || !this.internalProgram) return
           const win = this.programWindow()
           if (!win || win.isDestroyed()) {
             this.fail('Внутренний программный выход закрылся.')
@@ -234,16 +241,17 @@ export class StreamingManager {
           this.frameCaptureBusy = true
           try {
             const frame = await win.webContents.capturePage()
+            if (!current()) return
             const currentSize = frame.getSize()
             if (currentSize.width !== size.width || currentSize.height !== size.height) {
               this.fail('Изменился размер внутреннего программного выхода. Запустите стрим повторно.')
               return
             }
-            await this.engine?.writeVideo(frame.getBitmap())
+            await engine.writeVideo(frame.toBitmap())
           } catch {
-            this.fail('Не удалось получить кадр внутреннего программного выхода.')
+            if (current()) this.fail('Не удалось получить кадр внутреннего программного выхода.')
           } finally {
-            this.frameCaptureBusy = false
+            if (current()) this.frameCaptureBusy = false
           }
         }
         this.frameTimer = setInterval(() => { void captureFrame() }, Math.max(1, Math.round(1000 / settings.fps)))
@@ -253,11 +261,13 @@ export class StreamingManager {
         this.engine.start(encoder, desktopInputArguments(physical, settings.fps))
         diagnosticLog('stream', `start capture=native encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} display=${displayId} bounds=${JSON.stringify(physical)} destinations=${settings.destinations.filter(d => d.enabled).length}`)
       }
+      if (!current()) throw new Error('Запуск отменён.')
       await this.command('resume')
       if (token !== this.epoch) throw new Error(this.status.error || 'Запуск отменён.')
       this.status = { ...freshStatus(), phase: 'running', encoder, startedAt: Date.now(), source: internalProgram ? 'internal' : 'display' }
       let diagnosticTicks = 0
       this.routingTimer = setInterval(() => {
+        if (!current()) return
         if (++diagnosticTicks % 20 === 0 && this.engine) {
           const s = this.engine.snapshot()
           diagnosticLog('stream', `fps=${s.fps} encodedKbps=${s.bitrateKbps} encoderLagMs=${s.encoderLagMs} destinations=${JSON.stringify(s.destinations.map((d, i) => ({ index: i, phase: d.phase, retries: d.retries, bufferedMs: d.bufferedMs, kbps: d.bitrateKbps, droppedFrames: d.droppedFrames, error: d.error })))}`)
@@ -271,7 +281,7 @@ export class StreamingManager {
     } catch (error) {
       if (token === this.epoch) this.fail(error instanceof Error ? error.message : 'Не удалось запустить стрим.')
       throw error
-    } finally { this.busy = false }
+    } finally { if (token === this.epoch) this.busy = false }
   }
 
   private closeWorker(): void {
@@ -286,6 +296,8 @@ export class StreamingManager {
   stop(): void {
     if (this.engine) diagnosticLog('stream', 'stop')
     this.epoch++
+    this.busy = false
+    this.frameCaptureBusy = false
     clearInterval(this.routingTimer)
     clearInterval(this.frameTimer)
     this.frameTimer = undefined

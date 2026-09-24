@@ -459,7 +459,10 @@ export async function renderPdfiumPageToCanvas(options: {
         const canvas = document.createElement('canvas')
         canvas.width = result.width
         canvas.height = result.height
-        const context = canvas.getContext('2d')
+        // PDFium already produced CPU pixels. Avoid uploading this raster cache
+        // only to synchronously read it back for thumbnails when the GPU stalls.
+        // The visible output canvas retains accelerated composition.
+        const context = canvas.getContext('2d', { willReadFrequently: true })
         if (!context) throw new Error('Canvas 2D context is unavailable')
         const imageData = new ImageData(result.width, result.height)
         imageData.data.set(result.data)

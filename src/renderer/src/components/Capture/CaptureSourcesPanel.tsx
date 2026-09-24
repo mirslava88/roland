@@ -33,6 +33,7 @@ export function CaptureSourcesPanel(): JSX.Element {
   const [videoDeviceId, setVideoDeviceId] = useState('')
   const [audioEnabled, setAudioEnabled] = useState(false)
   const [audioDeviceId, setAudioDeviceId] = useState('')
+  const [sourceStates, setSourceStates] = useState<Record<string, CaptureSourceState>>({})
   const deviceRequestGenerationRef = useRef(0)
 
   const videoDevices = useMemo(
@@ -110,6 +111,29 @@ export function CaptureSourcesPanel(): JSX.Element {
   }, [pickerOpen, loadDevices])
 
   useEffect(() => {
+    const rememberState = (state: CaptureSourceState | undefined): void => {
+      if (!state?.sourceId) return
+      setSourceStates((current) => ({ ...current, [state.sourceId]: state }))
+    }
+    const unsubState = window.api.on('capture-source-state', (...args: unknown[]) => {
+      rememberState(args[0] as CaptureSourceState | undefined)
+    })
+    const unsubFrame = window.api.on('capture-preview-frame', (...args: unknown[]) => {
+      const payload = args[0] as { state?: CaptureSourceState } | undefined
+      rememberState(payload?.state)
+    })
+    for (const source of captureSources) {
+      if (source.capture?.sourceId) {
+        window.api.sendToPresentation('capture-source-state-request', source.capture.sourceId)
+      }
+    }
+    return () => {
+      unsubState()
+      unsubFrame()
+    }
+  }, [captureSources])
+
+  useEffect(() => {
     const video = videoDevices.find((device) => device.deviceId === videoDeviceId)
     if (!video) return
     const groupedAudio = video.groupId
@@ -136,8 +160,14 @@ export function CaptureSourcesPanel(): JSX.Element {
     )
     if (existing && !existing.sceneOnly) {
       selectFile(existing)
+      const state = sourceStates[existing.capture!.sourceId]
+      if (state?.status !== 'ready') {
+        window.api.sendToPresentation('capture-source-reconnect', existing.capture!.sourceId)
+      }
       setPickerOpen(false)
-      setPanelMessage('Это устройство уже добавлено.')
+      setPanelMessage(state?.status === 'ready'
+        ? 'Камера уже подключена.'
+        : 'Камера уже добавлена — переподключаем её.')
       setTimeout(() => setPanelMessage(null), 2500)
       return
     }
@@ -175,6 +205,11 @@ export function CaptureSourcesPanel(): JSX.Element {
     addCaptureSource(entry)
     selectFile(entry)
     window.api.sendToPresentation('capture-source-register', capture)
+    if (existing) {
+      setTimeout(() => {
+        window.api.sendToPresentation('capture-source-reconnect', sourceId)
+      }, 150)
+    }
     window.api.dbgLog(
       `Capture UI: source added id=${sourceId.slice(-8)} label=${video.label} audio=${audioEnabled}`
     )

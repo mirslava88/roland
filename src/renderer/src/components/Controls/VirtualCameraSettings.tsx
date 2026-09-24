@@ -18,6 +18,7 @@ export function VirtualCameraSettings(): JSX.Element {
   const programDisplayId = connectedProgramDisplayId({ displays, displayAssignments, selectedDisplayId })
   const display = displays.find((item) => item.id === programDisplayId)
   const active = status?.phase === 'running' || status?.phase === 'starting'
+  const recovering = status?.phase === 'running' && !!status.error
 
   useEffect(() => {
     mounted.current = true
@@ -29,9 +30,10 @@ export function VirtualCameraSettings(): JSX.Element {
         .then((value) => {
           if (!mounted.current) return
           setStatus(value)
-          if (value.phase !== 'running' && value.phase !== 'starting') {
-            setInternalProgramOutputConsumer('virtualCamera', false)
-          }
+          setInternalProgramOutputConsumer(
+            'virtualCamera',
+            (value.phase === 'running' || value.phase === 'starting') && value.source === 'internal'
+          )
         })
         .catch((error) => { if (mounted.current) setMessage(errorText(error)) })
         .finally(() => { pending = false })
@@ -85,6 +87,7 @@ export function VirtualCameraSettings(): JSX.Element {
           В Zoom, Teams, Telegram и других программах выберите камеру «PDM Virtual Camera».
           В некоторых программах Windows добавляет к названию слова «Windows Virtual Camera».
           Она показывает итоговый эфир PDM: презентацию, сцену, титры, QR-код и таймер.
+          Дополнительный монитор для этого не нужен — без него PDM автоматически использует скрытый внутренний эфир.
         </p>
       </div>
 
@@ -105,20 +108,20 @@ export function VirtualCameraSettings(): JSX.Element {
         </div>
       </div>
 
-      <div className={`rounded-lg border p-3 ${active ? 'border-emerald-500/60 bg-emerald-950/25' : 'border-gray-700 bg-surface-100'}`}>
+      <div className={`rounded-lg border p-3 ${recovering ? 'border-amber-500/60 bg-amber-950/25' : active ? 'border-emerald-500/60 bg-emerald-950/25' : 'border-gray-700 bg-surface-100'}`}>
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-xs font-medium text-white">
-              {status?.phase === 'running' ? 'Виртуальная камера включена' :
+              {recovering ? 'Восстановление изображения…' : status?.phase === 'running' ? 'Виртуальная камера включена' :
                 status?.phase === 'starting' ? 'Запуск виртуальной камеры…' :
                   status?.phase === 'installing' ? 'Установка компонента…' :
                     status?.phase === 'error' ? 'Виртуальная камера остановлена' : 'Виртуальная камера выключена'}
             </div>
             <div className="mt-1 text-[10px] text-gray-400">
-              {active ? 'Изображение доступно другим программам как обычная веб-камера.' : 'Включите её перед выбором камеры в программе для видеозвонка или записи.'}
+              {recovering ? 'Камера остаётся включённой. PDM повторяет подключение к изображению эфира.' : active ? 'Изображение доступно другим программам как обычная веб-камера.' : 'Включите её перед выбором камеры в программе для видеозвонка или записи.'}
             </div>
           </div>
-          <span className={`h-3 w-3 shrink-0 rounded-full ${status?.phase === 'running' ? 'bg-emerald-400 shadow-[0_0_10px_#34d399]' : status?.phase === 'error' ? 'bg-red-500' : 'bg-gray-600'}`} />
+          <span className={`h-3 w-3 shrink-0 rounded-full ${recovering ? 'bg-amber-400' : status?.phase === 'running' ? 'bg-emerald-400 shadow-[0_0_10px_#34d399]' : status?.phase === 'error' ? 'bg-red-500' : 'bg-gray-600'}`} />
         </div>
       </div>
 

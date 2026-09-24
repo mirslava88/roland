@@ -52,6 +52,10 @@ export function waitForNavigationTransitionEnd(): Promise<void> {
   return new Promise<void>((resolve) => transitionEndWaiters.add(resolve))
 }
 
+export function isNavigationTransitionActive(): boolean {
+  return transitionActive
+}
+
 export function drainNavigationTransition(): NavigationRequest[] {
   const queued = queuedRequests
   queuedRequests = []

@@ -633,6 +633,7 @@ $script:activeSlideShowHwnd = 0
 $script:activeSlideShowWindow = $null
 $script:activePresentation = $null
 $script:activePresentationPath = ''
+$script:idleHostHoldUntilUtc = [DateTime]::MinValue
 $script:mediaReturnForegroundHwnd = 0
 $script:pptApplication = $null
 $script:pptSessionInitialized = $false
@@ -1814,6 +1815,11 @@ function Restore-PowerPointSession {
 function Release-IdleOwnedPowerPointHost([string]$reason) {
     $script:lastIdleOwnedPowerPointHostReleaseOk = $true
     if (-not $script:pptSessionInitialized -or -not $script:pptOwnedByRoland) { return }
+    if ($reason -in @('close','sync-prepared','notes','export') -and
+        [DateTime]::UtcNow -lt $script:idleHostHoldUntilUtc) {
+        Log "PowerPoint empty host retained briefly reason='$reason'"
+        return
+    }
     if ($script:openTransaction) {
         Log "PowerPoint idle release deferred reason='$reason': open transaction"
         return
@@ -3306,19 +3312,33 @@ while ($true) {
                             # size. The exact final crop/radius is restored
                             # immediately after the last animation frame.
                             Set-SlideShowClip $hwnd $targetRect $null 0
-                            if ($relocateUnderlayHwnd -ne 0 -and $relocateUnderlayHwnd -ne $hwnd) {
-                                Lower-Window $relocateUnderlayHwnd
-                            }
                             Log "relocate: animate HWND=$hwnd durationMs=$transitionDurationMs from=$((Get-SlideShowWindowRect $hwnd) -join ',') to=$($targetRect -join ',')"
                             Move-SlideShowBoundsAnimated $hwnd $targetRect $transitionDurationMs
                         } else {
                             Set-SlideShowBounds $hwnd $targetRect
                         }
                         Set-SlideShowClip $hwnd $targetRect $clipRect $cornerRadius
+                        $atomicPromotion = $false
                         if ($relocateUnderlayHwnd -ne 0 -and $relocateUnderlayHwnd -ne $hwnd) {
-                            Lower-Window $relocateUnderlayHwnd
+                            # Swap both HWNDs in one DWM transaction. Lowering
+                            # Electron first briefly exposed the Scene backdrop;
+                            # raising PowerPoint first could still leave the
+                            # Chromium window above it on some GPU/Office pairs.
+                            # A single deferred batch establishes the intended
+                            # order without an intermediate presentation-less
+                            # frame and is also reliable when both rectangles
+                            # already match their target coordinates.
+                            $atomicPromotion = [PptDaemon.Native]::PromoteWarmedOutput(
+                                [System.IntPtr]$hwnd,
+                                [System.IntPtr]$relocateUnderlayHwnd)
+                            Log "relocate: atomic promotion=$atomicPromotion slideshow=$hwnd underlay=$relocateUnderlayHwnd"
+                            if (-not $atomicPromotion) {
+                                Raise-SlideShow $hwnd $targetRect
+                                Lower-Window $relocateUnderlayHwnd
+                            }
+                        } else {
+                            Raise-SlideShow $hwnd $targetRect
                         }
-                        Raise-SlideShow $hwnd $targetRect
                         try { [PptDaemon.Native]::DwmFlush() | Out-Null } catch {}
                         Start-Sleep -Milliseconds 40
                         $actualRect = Get-SlideShowWindowRect $hwnd
@@ -3341,6 +3361,12 @@ while ($true) {
                 }
             }
             'close' {
+                # Only a PPTX -> PDF TAKE requests this short lease. The deck
+                # itself is still closed below; normal STOP and shutdown use
+                # immediate release. A later explicit cleanup retires the host.
+                $script:idleHostHoldUntilUtc = if ($req.keepHostWarm -eq $true) {
+                    [DateTime]::UtcNow.AddSeconds(20)
+                } else { [DateTime]::MinValue }
                 # Establish the user-visible postcondition with Win32 before
                 # any COM cleanup. Once this exact slideshow HWND is hidden,
                 # STOP is authoritative and can be acknowledged immediately;
@@ -3519,6 +3545,11 @@ while ($true) {
                         error = if ($closeOk) { $null } else { 'PowerPoint did not release the managed presentation' }
                     }
                 }
+            }
+            'release-idle' {
+                $script:idleHostHoldUntilUtc = [DateTime]::MinValue
+                Release-IdleOwnedPowerPointHost 'scheduled'
+                Reply @{ id = $id; ok = $script:lastIdleOwnedPowerPointHostReleaseOk }
             }
             'next' {
                 $ppt = Get-PPT

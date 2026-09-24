@@ -227,6 +227,7 @@ interface Api {
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
   prepareInternalProgramOutput(): Promise<void>
+  releaseInternalProgramOutput(): Promise<void>
   placePresentationWindow(displayId?: number): Promise<boolean>
   raisePresentationWindow(): Promise<boolean>
   openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>
@@ -277,7 +278,7 @@ interface Api {
   }>
   powerpointCommand(
     command: string,
-    arg?: number | { stopAtBoundary?: boolean }
+    arg?: number | { stopAtBoundary?: boolean; keepHostWarm?: boolean }
   ): Promise<{ success: boolean; output?: string; error?: string }>
   relocatePowerPoint(
     displayId: number,
@@ -320,6 +321,7 @@ interface Api {
   captureAndSwapOverlay(): Promise<boolean>
   captureDisplay(displayId?: number): Promise<string | null>
   capturePresentationFrame(): Promise<string | null>
+  captureProgramPreviewFrame(): Promise<{ dataUrl: string; width: number; height: number } | null>
   getDesktopCaptureSources(
     types?: Array<'window' | 'screen'>,
     excludedDisplayId?: number
@@ -351,7 +353,7 @@ interface Api {
   moveItem(srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }>
   showTimerOverlay(displayId?: number): Promise<void>
   hideTimerOverlay(): Promise<void>
-  getTimerOverlayLayout(): Promise<{ x: number; y: number; scale: number }>
+  getTimerOverlayLayout(): Promise<{ x: number; y: number; scale: number; valid: boolean }>
   updateTimerOverlay(data: {
     remaining: number
     running: boolean

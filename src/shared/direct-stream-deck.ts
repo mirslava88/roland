@@ -156,7 +156,10 @@ export function createDefaultDirectStreamDeckConfig(): DirectStreamDeckConfig {
     'timer-minus-5', 'timer-start-pause', 'timer-plus-5', 'timer-reset'
   ]
   actions.forEach((kind, offset) => { mappings[String(16 + offset)] = { kind } })
-  return { enabled: false, serialNumber: null, brightness: 70, mappings }
+  // Direct USB is the primary PDM integration: on a fresh profile an attached
+  // Stream Deck should light up without requiring a hidden first-time toggle.
+  // An explicit user choice is still persisted and can disable it afterwards.
+  return { enabled: true, serialNumber: null, brightness: 70, mappings }
 }
 
 function isActionKind(value: unknown): value is DirectStreamDeckActionKind {

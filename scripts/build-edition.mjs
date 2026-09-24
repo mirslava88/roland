@@ -18,6 +18,7 @@ function run(script, args) {
   if (result.status !== 0) process.exit(result.status || 1)
 }
 console.log(`Building ${info.productName} ${info.displayVersion}`)
+run('scripts/typecheck.mjs', [])
 if (platform === 'win') run('scripts/build-native-virtual-camera.mjs', [])
 run('node_modules/electron-vite/bin/electron-vite.js', ['build'])
 run('scripts/verify-edition.mjs', [info.edition])

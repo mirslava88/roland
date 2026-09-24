@@ -61,6 +61,22 @@ public class WinMgr {
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    // Explorer owns these windows on another UI thread. Never block waiting
+    // for that thread inside synchronous ShowWindow during monitor hot-plug.
+    public static bool SetTaskbarVisible(IntPtr hWnd, bool visible) {
+        if (IsWindowVisible(hWnd) == visible) return true;
+        if (!ShowWindowAsync(hWnd, visible ? 5 : 0)) return false;
+        for (int attempt = 0; attempt < 25; attempt++) {
+            if (!IsWindow(hWnd)) return false;
+            if (IsWindowVisible(hWnd) == visible) return true;
+            System.Threading.Thread.Sleep(20);
+        }
+        return IsWindowVisible(hWnd) == visible;
+    }
+
+    [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     [DllImport("user32.dll")]
@@ -1141,7 +1157,7 @@ switch ($Action) {
             # display are operator UI. A transient topology snapshot must never
             # hide either of them. ShowWindow also repairs an earlier bad hide.
             if ($isMainTaskbar -or $intersectsProtectedDisplay) {
-                [WinMgr]::ShowWindow($tb, [WinMgr]::SW_SHOW) | Out-Null
+                if (-not [WinMgr]::SetTaskbarVisible($tb, $true)) { throw 'Protected taskbar restore was not confirmed' }
                 Log "taskbar protected class=$($className.ToString()) rect=$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
                 continue
             }
@@ -1152,7 +1168,7 @@ switch ($Action) {
                 $rect.Top -lt ($Y + $Height)
             )
             if ($intersectsDisplay) {
-                [WinMgr]::ShowWindow($tb, [WinMgr]::SW_HIDE) | Out-Null
+                if (-not [WinMgr]::SetTaskbarVisible($tb, $false)) { throw 'Taskbar hide was not confirmed' }
                 Log "taskbar hidden class=$($className.ToString()) rect=$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
             }
         }
@@ -1170,7 +1186,7 @@ switch ($Action) {
                 $rect.Top -lt ($Y + $Height)
             )
             if ($intersectsDisplay) {
-                [WinMgr]::ShowWindow($tb, [WinMgr]::SW_SHOW) | Out-Null
+                if (-not [WinMgr]::SetTaskbarVisible($tb, $true)) { throw 'Taskbar restore was not confirmed' }
                 Log "taskbar restored on display rect=$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
             }
         }
@@ -1179,7 +1195,7 @@ switch ($Action) {
     "show-taskbar" {
         $taskbars = [WinMgr]::FindTaskbars()
         foreach ($tb in $taskbars) {
-            [WinMgr]::ShowWindow($tb, [WinMgr]::SW_SHOW) | Out-Null
+            if (-not [WinMgr]::SetTaskbarVisible($tb, $true)) { throw 'Taskbar restore was not confirmed' }
         }
         Write-Output '{"success":true}'
     }

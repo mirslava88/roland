@@ -29,6 +29,7 @@ import {
 } from './program-scene-state'
 import { isTrustedWindowMainFrame } from './renderer-security'
 import { loadQrWifiPassword, saveQrWifiPassword } from './secure-secrets'
+import { PowerPointOutputWatchdog } from './powerpoint-output-watchdog'
 
 const execFileAsync = promisify(execFile)
 
@@ -753,8 +754,43 @@ export function registerIpcHandlers(
   controlWindow: BrowserWindow,
   getPresentationWindow: () => BrowserWindow | null,
   onPowerPointOutputCommitted: () => void = () => undefined,
-  isTrustedOutputEvent: (event: IpcMainInvokeEvent, channel: string, args: unknown[]) => boolean = () => false
+  isTrustedOutputEvent: (event: IpcMainInvokeEvent, channel: string, args: unknown[]) => boolean = () => false,
+  onProgramDisplaySelected: (displayId: number) => void = () => undefined,
+  getProgramDisplayId?: () => number | null
 ): void {
+  const outputWatchdog = new PowerPointOutputWatchdog((identity, retryAllowed) => {
+    if (controlWindow.isDestroyed()) return
+    diagnosticLog('pptx-lifecycle', `committed PowerPoint process exited; retryAllowed=${retryAllowed}`)
+    controlWindow.webContents.send('powerpoint-output-recovery-needed', {
+      ...identity, reason: 'native-process-exited', retryAllowed
+    })
+  })
+  let idlePowerPointReleaseTimer: ReturnType<typeof setTimeout> | null = null
+  let idlePowerPointReleaseGeneration = 0
+  const cancelIdlePowerPointRelease = (): void => {
+    idlePowerPointReleaseGeneration++
+    if (idlePowerPointReleaseTimer) clearTimeout(idlePowerPointReleaseTimer)
+    idlePowerPointReleaseTimer = null
+  }
+  const scheduleIdlePowerPointRelease = (): void => {
+    cancelIdlePowerPointRelease()
+    const generation = idlePowerPointReleaseGeneration
+    idlePowerPointReleaseTimer = setTimeout(() => {
+      idlePowerPointReleaseTimer = null
+      void pptDaemon.runExclusive(async (send) => {
+        if (generation !== idlePowerPointReleaseGeneration) return
+        const result = await send('release-idle', {}, 60_000)
+        diagnosticLog('pptx-lifecycle', `empty PowerPoint host release ok=${result.ok}`)
+      }).catch((error: unknown) => {
+        diagnosticLog('pptx-lifecycle', `empty PowerPoint host release failed ${formatDiagnosticError(error)}`)
+      })
+    }, 20_000)
+    idlePowerPointReleaseTimer.unref?.()
+  }
+  controlWindow.once('closed', () => {
+    outputWatchdog.clear()
+    cancelIdlePowerPointRelease()
+  })
   type Handler = (event: IpcMainInvokeEvent, ...args: any[]) => any
   const handleControl = (channel: string, handler: Handler, allowOutput = false): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -1042,6 +1078,7 @@ export function registerIpcHandlers(
       deferPromotion?: boolean
     ) => {
       if (process.platform === 'win32') {
+        cancelIdlePowerPointRelease()
         try {
           const args: Record<string, unknown> = { path: filePath }
           const displays = screen.getAllDisplays()
@@ -1061,6 +1098,11 @@ export function registerIpcHandlers(
             }
           }
           const targetDisplay = explicitlyRequestedDisplay
+          // Publish the desired native route before the asynchronous Office
+          // transaction starts. A display-metrics pass can run in parallel;
+          // without this handoff it relocates the newly opened slideshow back
+          // to the stale primary/headless display.
+          onProgramDisplaySelected(targetDisplay.id)
 
           // Electron bounds are DIP while SetWindowPos expects physical pixels.
           const placement = getPowerPointNativePlacement(targetDisplay, sceneLayout, {
@@ -1207,6 +1249,7 @@ export function registerIpcHandlers(
                 CurrentSlide: res.slide ?? 1
               })
               setActivePowerPointSceneLayout(sceneLayout?.enabled ? sceneLayout : null)
+              if (typeof res.pid === 'number') outputWatchdog.arm({ pid: res.pid, filePath, displayId: targetDisplay.id })
               // This is a main-process proof: OPEN + COMMIT checked the exact
               // live HWND under the daemon lock. A renderer cannot unlock an
               // uncertain output by merely asking to hide a safety cover.
@@ -1370,18 +1413,24 @@ export function registerIpcHandlers(
   handleControl('powerpoint-command', async (
     _event,
     command: string,
-    arg?: number | { stopAtBoundary?: boolean }
+    arg?: number | { stopAtBoundary?: boolean; keepHostWarm?: boolean }
   ) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     console.log(`[IPC ${Date.now()}] powerpoint-command: BEGIN command=${command} arg=${arg}`)
+    if (command === 'close') {
+      outputWatchdog.clear()
+      cancelIdlePowerPointRelease()
+    }
     try {
       const t0 = Date.now()
+      const closeArgs = command === 'close' && typeof arg === 'object' && arg?.keepHostWarm === true
+        ? { keepHostWarm: true } : {}
       let res = command === 'goto' && typeof arg === 'number'
         ? await pptDaemon.send('goto', { slide: arg })
         : await pptDaemon.send(
           command,
           typeof arg === 'object' && arg !== null
-            ? { stopAtBoundary: arg.stopAtBoundary === true }
+            ? { stopAtBoundary: arg.stopAtBoundary === true, ...closeArgs }
             : {},
           // CLOSE performs only an exact-HWND Win32 hide before its ACK; all
           // potentially slow COM retirement happens afterward under the
@@ -1397,10 +1446,11 @@ export function registerIpcHandlers(
             `close retry attempt=${attempt} previousError=${res.error ?? '-'}`
           )
           await new Promise((resolve) => setTimeout(resolve, attempt * 150))
-          res = await pptDaemon.send('close', {}, 0)
+          res = await pptDaemon.send('close', closeArgs, 0)
         }
       }
       if (command === 'close' && res.ok) {
+        if (closeArgs.keepHostWarm) scheduleIdlePowerPointRelease()
         setActivePowerPointSceneLayout(null)
         setActivePowerPointZoom(null)
       }
@@ -1460,46 +1510,58 @@ export function registerIpcHandlers(
   ) => {
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
-      const displays = screen.getAllDisplays()
-      const explicitlyRequestedDisplay = displays.find((display) => display.id === displayId)
-      if (!explicitlyRequestedDisplay) {
-        diagnosticLog('window', `PowerPoint output relocate refused: display=${displayId} is disconnected`)
+      if (!screen.getAllDisplays().some((display) => display.id === displayId)) {
         return { success: false, error: 'Target display is not connected' }
       }
-      const targetDisplay = explicitlyRequestedDisplay
-      if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
-      const effectiveSceneLayout = sceneLayout === undefined
-        ? getActivePowerPointSceneLayout() ?? undefined
-        : sceneLayout
-      const placement = getPowerPointNativePlacement(targetDisplay, effectiveSceneLayout)
-      const presentationWindow = getPresentationWindow()
-      let underlayHwnd = 0
-      if (
-        effectiveSceneLayout?.enabled &&
-        presentationWindow &&
-        !presentationWindow.isDestroyed()
-      ) {
-        const nativeHandle = presentationWindow.getNativeWindowHandle()
-        underlayHwnd = nativeHandle.length >= 8
-          ? Number(nativeHandle.readBigUInt64LE(0))
-          : nativeHandle.readUInt32LE(0)
-      }
-      const result = await pptDaemon.send('relocate', {
-        ...placement,
-        underlayHwnd,
-        transitionDurationMs: Math.max(
-          0,
-          Math.min(5000, Math.round(effectiveSceneLayout?.transitionDurationMs ?? 0))
+      onProgramDisplaySelected(displayId)
+      return await pptDaemon.runExclusive(async (send) => {
+        if (getProgramDisplayId && getProgramDisplayId() !== displayId) {
+          return { success: false, error: 'Program route changed before relocation' }
+        }
+        const displays = screen.getAllDisplays()
+        const explicitlyRequestedDisplay = displays.find((display) => display.id === displayId)
+        if (!explicitlyRequestedDisplay) {
+          diagnosticLog('window', `PowerPoint output relocate refused: display=${displayId} is disconnected`)
+          return { success: false, error: 'Target display is not connected' }
+        }
+        const targetDisplay = explicitlyRequestedDisplay
+        if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
+        const effectiveSceneLayout = sceneLayout === undefined
+          ? getActivePowerPointSceneLayout() ?? undefined
+          : sceneLayout
+        const placement = getPowerPointNativePlacement(targetDisplay, effectiveSceneLayout)
+        const presentationWindow = getPresentationWindow()
+        let underlayHwnd = 0
+        if (
+          effectiveSceneLayout?.enabled &&
+          presentationWindow &&
+          !presentationWindow.isDestroyed()
+        ) {
+          const nativeHandle = presentationWindow.getNativeWindowHandle()
+          underlayHwnd = nativeHandle.length >= 8
+            ? Number(nativeHandle.readBigUInt64LE(0))
+            : nativeHandle.readUInt32LE(0)
+        }
+        const result = await send('relocate', {
+          ...placement,
+          underlayHwnd,
+          transitionDurationMs: Math.max(
+            0,
+            Math.min(5000, Math.round(effectiveSceneLayout?.transitionDurationMs ?? 0))
+          )
+        }, Math.max(5000, Math.round(effectiveSceneLayout?.transitionDurationMs ?? 0) + 3000))
+        if (getProgramDisplayId && getProgramDisplayId() !== displayId) {
+          return { success: false, error: 'Program route changed during relocation' }
+        }
+        if (result.ok && sceneLayout !== undefined) {
+          setActivePowerPointSceneLayout(sceneLayout.enabled ? sceneLayout : null)
+        }
+        diagnosticLog(
+          'window',
+          `PowerPoint output relocate display=${targetDisplay.id} bounds=${JSON.stringify(placement.bounds)} ok=${result.ok}`
         )
-      }, Math.max(5000, Math.round(effectiveSceneLayout?.transitionDurationMs ?? 0) + 3000))
-      if (result.ok && sceneLayout !== undefined) {
-        setActivePowerPointSceneLayout(sceneLayout.enabled ? sceneLayout : null)
-      }
-      diagnosticLog(
-        'window',
-        `PowerPoint output relocate display=${targetDisplay.id} bounds=${JSON.stringify(placement.bounds)} ok=${result.ok}`
-      )
-      return { success: result.ok, error: result.error }
+        return { success: result.ok, error: result.error }
+      })
     } catch (error) {
       diagnosticLog('window', `PowerPoint output relocate failed: ${formatDiagnosticError(error)}`)
       return { success: false, error: String(error) }
@@ -1769,7 +1831,7 @@ export function registerIpcHandlers(
       if (!targetDisplay) return { success: false, error: 'Target display is not connected' }
       const normalized = setActivePowerPointZoom(zoom)
       const placement = getPowerPointNativePlacement(targetDisplay, undefined, normalized)
-      const result = await pptDaemon.send('relocate', placement, 5000)
+      const result = await pptDaemon.send('relocate', { ...placement }, 5000)
       diagnosticLog(
         'window',
         `PowerPoint magnifier scale=${normalized.scale.toFixed(2)} ` +

@@ -78,13 +78,15 @@ export function SceneLayerCheckbox({
   )
 }
 
+type DataAttributes = { [key: `data-${string}`]: string | number | boolean | undefined }
+
 interface SceneLayerToggleButtonProps {
   children: ReactNode
   pressed: boolean
   disabled?: boolean
   tone?: 'default' | 'air'
   title?: string
-  buttonProps?: Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'type' | 'disabled' | 'aria-pressed' | 'onClick' | 'className'>
+  buttonProps?: Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'type' | 'disabled' | 'aria-pressed' | 'onClick' | 'className'> & DataAttributes
   onPressedChange: (pressed: boolean) => void
 }
 

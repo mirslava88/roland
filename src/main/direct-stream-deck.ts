@@ -45,6 +45,7 @@ export class DirectStreamDeckManager {
   private reconnectTimer: NodeJS.Timeout | null = null
   private rendererWindow: BrowserWindow | null = null
   private closing = false
+  private connectionGeneration = 0
 
   constructor(
     private readonly onStatus: StatusListener,
@@ -69,7 +70,15 @@ export class DirectStreamDeckManager {
     const next = normalizeDirectStreamDeckConfig(value)
     const deviceChanged = next.serialNumber !== this.config.serialNumber
     const brightnessChanged = next.brightness !== this.config.brightness
+    diagnosticLog(
+      'stream-deck',
+      `configure enabled=${next.enabled} serial=${next.serialNumber || 'auto'} deviceChanged=${deviceChanged} connected=${Boolean(this.device)}`
+    )
     this.config = next
+    if (deviceChanged) {
+      this.connectionGeneration++
+      this.publishStatus({ connecting: false })
+    }
     this.publishStatus({ enabled: next.enabled, error: next.enabled ? this.status.error : null })
     if (!next.enabled) {
       void this.disconnect(false)
@@ -78,7 +87,8 @@ export class DirectStreamDeckManager {
     if (!this.device || deviceChanged) {
       void this.connect()
     } else {
-      if (brightnessChanged) void this.device.setBrightness(next.brightness).catch((error) => this.handleError(error))
+      const device = this.device
+      if (brightnessChanged) void device.setBrightness(next.brightness).catch((error) => this.handleError(error, device))
       void this.renderKeys(this.keyStates, true)
     }
     return this.getStatus()
@@ -87,8 +97,10 @@ export class DirectStreamDeckManager {
   async connect(): Promise<DirectStreamDeckStatus> {
     if (this.closing || !this.config.enabled) return this.getStatus()
     if (this.status.connecting) return this.getStatus()
+    diagnosticLog('stream-deck', `connect begin serial=${this.config.serialNumber || 'auto'}`)
     this.clearReconnectTimer()
-    await this.disconnectDevice(false)
+    const generation = ++this.connectionGeneration
+    const current = (): boolean => generation === this.connectionGeneration && !this.closing && this.config.enabled
     this.publishStatus({
       enabled: true,
       connecting: true,
@@ -96,28 +108,35 @@ export class DirectStreamDeckManager {
       error: null
     })
     try {
+      await this.disconnectDevice(false)
+      if (!current()) return this.getStatus()
       const devices = await listStreamDecks()
+      if (!current()) return this.getStatus()
+      diagnosticLog('stream-deck', `devices found=${devices.length}`)
       const selected = this.config.serialNumber
         ? devices.find((device) => device.serialNumber === this.config.serialNumber)
         : devices[0]
       if (!selected) throw new Error('Stream Deck не найден. Проверьте USB-подключение.')
       const device = await openStreamDeck(selected.path, { resetToLogoOnClose: true })
-      if (this.closing || !this.config.enabled) {
+      if (!current()) {
         await device.close()
         return this.getStatus()
       }
       this.device = device
       const buttons = device.CONTROLS.filter((control) => control.type === 'button')
       const serialNumber = selected.serialNumber ?? await device.getSerialNumber().catch(() => null)
+      if (!current() || device !== this.device) return this.getStatus()
       device.on('down', (control) => {
+        if (!current() || device !== this.device) return
         if (control.type !== 'button') return
         const action = this.config.mappings[String(control.index)]
         if (!action || action.kind === 'none') return
         diagnosticLog('stream-deck', `key down index=${control.index} action=${action.kind}`)
         this.onCommand({ keyIndex: control.index, action })
       })
-      device.on('error', (error) => this.handleError(error))
+      device.on('error', (error) => this.handleError(error, device))
       await device.setBrightness(this.config.brightness)
+      if (!current() || device !== this.device) return this.getStatus()
       this.keySignatures.clear()
       this.publishStatus({
         enabled: true,
@@ -133,6 +152,9 @@ export class DirectStreamDeckManager {
       diagnosticLog('stream-deck', `connected model=${device.PRODUCT_NAME} serial=${serialNumber || '-'} keys=${buttons.length}`)
       await this.renderKeys(this.keyStates, true)
     } catch (error) {
+      if (!current()) return this.getStatus()
+      await this.disconnectDevice(false)
+      if (!current()) return this.getStatus()
       const raw = formatDiagnosticError(error)
       const friendly = /not found|не найден/i.test(raw)
         ? 'Stream Deck не найден. Проверьте USB-подключение.'
@@ -155,6 +177,7 @@ export class DirectStreamDeckManager {
   }
 
   async disconnect(disable = true): Promise<DirectStreamDeckStatus> {
+    this.connectionGeneration++
     if (disable) this.config = { ...this.config, enabled: false }
     this.clearReconnectTimer()
     await this.disconnectDevice(true)
@@ -162,6 +185,7 @@ export class DirectStreamDeckManager {
   }
 
   async shutdown(): Promise<void> {
+    this.connectionGeneration++
     this.closing = true
     this.clearReconnectTimer()
     await this.disconnectDevice(false)
@@ -184,6 +208,7 @@ export class DirectStreamDeckManager {
     this.operation = this.operation.then(async () => {
       if (device !== this.device) return
       const panel = await this.renderPanel(lcdButtons, byIndex)
+      if (device !== this.device) return
       const panelSize = panel.getSize()
       const columns = Math.max(1, ...lcdButtons.map((button) => button.column + 1))
       const rows = Math.max(1, ...lcdButtons.map((button) => button.row + 1))
@@ -214,9 +239,10 @@ export class DirectStreamDeckManager {
           throw new Error(`Stream Deck key renderer produced ${bitmap.length} bytes; expected ${expectedLength}`)
         }
         await device.fillKeyBuffer(button.index, bitmap, { format: 'bgra' })
+        if (device !== this.device) return
         this.keySignatures.set(button.index, signature)
       }
-    }).catch((error) => this.handleError(error))
+    }).catch((error) => this.handleError(error, device))
     await this.operation
   }
 
@@ -245,8 +271,9 @@ export class DirectStreamDeckManager {
         }
       })
     } else {
-      this.rendererWindow.setContentSize(panelWidth, panelHeight)
+      this.rendererWindow!.setContentSize(panelWidth, panelHeight)
     }
+    const renderer = this.rendererWindow!
     const byPosition = new Map(buttons.map((button) => [`${button.row}:${button.column}`, button]))
     const cells: string[] = []
     for (let row = 0; row < rows; row++) {
@@ -267,18 +294,19 @@ export class DirectStreamDeckManager {
       .key{width:${cellWidth}px;height:${cellHeight}px;border-style:solid;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:6px;text-align:center;font-family:"Segoe UI",Arial,sans-serif;font-weight:700;line-height:1.18;overflow:hidden}
     </style></head><body>${cells.join('')}</body></html>`
     if (rendererCreated) {
-      await this.rendererWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      await renderer.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
     } else {
-      await this.rendererWindow.webContents.executeJavaScript(
+      await renderer.webContents.executeJavaScript(
         `document.open();document.write(${JSON.stringify(html)});document.close();`,
         true
       )
     }
-    await this.rendererWindow.webContents.executeJavaScript(
+    if (this.closing || renderer.isDestroyed()) throw new Error('Stream Deck renderer closed')
+    await renderer.webContents.executeJavaScript(
       'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
       true
     )
-    const image = await this.rendererWindow.webContents.capturePage()
+    const image = await renderer.webContents.capturePage()
     if (image.isEmpty()) throw new Error('Stream Deck panel renderer returned an empty image')
     return image
   }
@@ -287,21 +315,19 @@ export class DirectStreamDeckManager {
     const device = this.device
     this.device = null
     this.keySignatures.clear()
+    if (publish) {
+      this.publishStatus({ ...DISCONNECTED_STATUS, enabled: this.config.enabled })
+    }
     if (device) {
       try { await device.close() } catch (error) {
         diagnosticLog('stream-deck', `close failed ${formatDiagnosticError(error)}`)
       }
     }
-    if (publish) {
-      this.publishStatus({
-        ...DISCONNECTED_STATUS,
-        enabled: this.config.enabled
-      })
-    }
   }
 
-  private handleError(error: unknown): void {
-    if (this.closing) return
+  private handleError(error: unknown, device: StreamDeck): void {
+    if (this.closing || device !== this.device) return
+    this.connectionGeneration++
     diagnosticLog('stream-deck', `device error ${formatDiagnosticError(error)}`)
     const failedDevice = this.device
     this.device = null

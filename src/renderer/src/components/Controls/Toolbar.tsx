@@ -212,7 +212,7 @@ export function Toolbar(): JSX.Element {
     resizeToolbarButtonsRef.current()
   }, [appTheme, toolbarVisibility])
 
-  const setLiveChannelNull = (): void => useAppStore.setState({ liveChannel: null })
+  const setLiveChannelNull = (): void => { useAppStore.setState({ liveChannel: null }) }
 
   useEffect(() => {
     const handleOpenAuxiliaryDisplays = (): void => setAuxiliaryDisplaysOpen(true)

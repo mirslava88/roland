@@ -92,7 +92,7 @@ const [main, ipc, store, native] = await Promise.all([
   readFile('src/main/index.ts', 'utf8'), readFile('src/main/ipc-handlers.ts', 'utf8'),
   readFile('src/renderer/src/stores/useAppStore.ts', 'utf8'), readFile('scripts/powerpoint-daemon.ps1', 'utf8')
 ])
-assert.match(main, /registerIpcHandlers\(controlWindow, \(\) => presentationWindow, \(\) => \{[\s\S]*?overlaySafetyLocked = false/)
+assert.match(main, /registerIpcHandlers\(\s*controlWindow,\s*\(\) => presentationWindow,\s*\(\) => \{[\s\S]*?overlaySafetyLocked = false/)
 assert.match(main, /'hide-overlay', async \(\) => \{\s*if \(overlaySafetyLocked\)/)
 assert.match(ipc, /onPowerPointOutputCommitted\(\)\s*return \{ success: true, output \}/)
 assert.match(ipc, /error instanceof PowerPointPreOpenRecoveryError && res\.id === 0/)

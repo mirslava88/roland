@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
+import { canvasToDataUrl } from '../../canvas-export'
 import * as pdfjsLib from 'pdfjs-dist'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -55,10 +56,12 @@ export function FileItemGrid({
           canvas = document.createElement('canvas')
           canvas.width = viewport.width
           canvas.height = viewport.height
-          const ctx = canvas.getContext('2d')!
+          const ctx = canvas.getContext('2d', { willReadFrequently: true })!
           renderTask = page.render({ canvas, canvasContext: ctx, viewport })
           await renderTask.promise
-          if (!cancelled) setThumbnail(canvas.toDataURL())
+          if (cancelled) return
+          const dataUrl = await canvasToDataUrl(canvas)
+          if (!cancelled) setThumbnail(dataUrl)
         } catch { /* ignore */ }
         finally {
           renderTask = null

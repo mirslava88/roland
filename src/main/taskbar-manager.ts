@@ -7,9 +7,11 @@ import { scriptPath } from './paths'
 const execFileAsync = promisify(execFile)
 let taskbarOperationTail: Promise<void> = Promise.resolve()
 let finalRestoreRequested = false
+let topologyRevision = 0
 const hiddenTaskbarDisplays = new Map<number, string>()
 
 export function invalidateTaskbarVisibilityCache(reason: string): void {
+  topologyRevision++
   if (hiddenTaskbarDisplays.size === 0) return
   hiddenTaskbarDisplays.clear()
   diagnosticLog('display', `taskbar visibility cache invalidated reason=${reason}`)
@@ -30,6 +32,7 @@ export function hideTaskbarForDisplay(
     // A final restore requested while this operation was queued wins. This
     // prevents a late renderer IPC from hiding the shell after PDM has quit.
     if (finalRestoreRequested) return
+    const revision = topologyRevision
     try {
       const targetDisplay = screen.getDisplayMatching(displayBounds)
       const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
@@ -87,7 +90,9 @@ export function hideTaskbarForDisplay(
         '-ProtectedWidth', String(protectedPhysicalBounds.width),
         '-ProtectedHeight', String(protectedPhysicalBounds.height)
       ], { timeout: 5000 })
-      hiddenTaskbarDisplays.set(targetDisplay.id, physicalBoundsKey)
+      if (revision === topologyRevision && !finalRestoreRequested) {
+        hiddenTaskbarDisplays.set(targetDisplay.id, physicalBoundsKey)
+      }
     } catch (error) {
       diagnosticLog('display', `hide taskbar failed ${formatDiagnosticError(error)}`)
     }

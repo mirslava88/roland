@@ -15,7 +15,9 @@
 #include <iostream>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <mutex>
 
 #include "../source/PdmSharedFrame.h"
 
@@ -33,6 +35,21 @@ namespace
     constexpr wchar_t kSourceClsid[] = L"{BBEF2CB0-96F5-4C1E-86F6-6B7670CAB609}";
     constexpr wchar_t kFriendlyName[] = L"PDM Virtual Camera";
     constexpr wchar_t kRegistryPath[] = L"SOFTWARE\\Classes\\CLSID\\{BBEF2CB0-96F5-4C1E-86F6-6B7670CAB609}\\InProcServer32";
+    constexpr char kPipeControlMagic[] = "PDMVCR01";
+    constexpr std::uint32_t kPipeCommandUseDisplay = 1;
+
+    std::int32_t ReadPipeInt32(const std::uint8_t* packet, std::size_t offset)
+    {
+        std::int32_t value = 0;
+        CopyMemory(&value, packet + offset, sizeof(value));
+        return value;
+    }
+
+    bool IsPipeControlPacket(const std::vector<std::uint8_t>& packet)
+    {
+        return packet.size() >= 28 &&
+            memcmp(packet.data(), kPipeControlMagic, sizeof(kPipeControlMagic) - 1) == 0;
+    }
 
     std::wstring InstalledSourceDirectory()
     {
@@ -87,9 +104,12 @@ namespace
         }(result) + L")";
     }
 
-    void PrintStatus(const char* phase, const std::string& message = {})
+    void PrintStatus(const char* phase, const std::string& message = {}, std::uint32_t requestId = 0)
     {
-        std::cout << "{\"phase\":\"" << phase << "\",\"message\":\"" << JsonEscape(message) << "\"}" << std::endl;
+        static std::mutex statusMutex;
+        std::lock_guard<std::mutex> lock(statusMutex);
+        std::cout << "{\"phase\":\"" << phase << "\",\"message\":\"" << JsonEscape(message)
+            << "\",\"requestId\":" << requestId << "}" << std::endl;
     }
 
     bool SourceRegistered(std::wstring* dllPath = nullptr)
@@ -327,6 +347,25 @@ namespace
         UINT stagingWidth = 0;
         UINT stagingHeight = 0;
         bool hasFrame = false;
+        HRESULT captureError = S_OK;
+        ULONGLONG retryAfter = 0;
+        ULONGLONG initializedAt = 0;
+        std::uint64_t duplicationAttempts = 0;
+
+        void InvalidateDuplication(HRESULT error)
+        {
+            stagingTexture.Reset();
+            duplication.Reset();
+            context.Reset();
+            device.Reset();
+            stagingWidth = 0;
+            stagingHeight = 0;
+            // An old frame cannot confirm a newly selected physical route.
+            hasFrame = false;
+            initializedAt = 0;
+            captureError = error;
+            retryAfter = GetTickCount64() + 500;
+        }
 
         ~DisplayCapture()
         {
@@ -355,38 +394,45 @@ namespace
 
         bool InitializeDuplication(int x, int y, int width, int height)
         {
-            stagingTexture.Reset();
-            duplication.Reset();
-            context.Reset();
-            device.Reset();
-            stagingWidth = 0;
-            stagingHeight = 0;
+            InvalidateDuplication(DXGI_ERROR_NOT_FOUND);
+            ++duplicationAttempts;
+            if (width <= 0 || height <= 0) { captureError = E_INVALIDARG; return false; }
 
             ComPtr<IDXGIFactory1> factory;
-            if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
+            captureError = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+            if (FAILED(captureError)) return false;
             for (UINT adapterIndex = 0;; ++adapterIndex)
             {
                 ComPtr<IDXGIAdapter1> adapter;
-                if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+                captureError = factory->EnumAdapters1(adapterIndex, &adapter);
+                if (captureError == DXGI_ERROR_NOT_FOUND) break;
+                if (FAILED(captureError)) return false;
                 for (UINT outputIndex = 0;; ++outputIndex)
                 {
                     ComPtr<IDXGIOutput> output;
-                    if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+                    captureError = adapter->EnumOutputs(outputIndex, &output);
+                    if (captureError == DXGI_ERROR_NOT_FOUND) break;
+                    if (FAILED(captureError)) return false;
                     DXGI_OUTPUT_DESC description{};
                     if (FAILED(output->GetDesc(&description))) continue;
+                    if (!description.AttachedToDesktop) continue;
                     const RECT& bounds = description.DesktopCoordinates;
                     if (x < bounds.left || y < bounds.top || x + width > bounds.right || y + height > bounds.bottom) continue;
 
                     D3D_FEATURE_LEVEL featureLevel{};
-                    if (FAILED(D3D11CreateDevice(
+                    captureError = D3D11CreateDevice(
                         adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
                         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
-                        &device, &featureLevel, &context))) return false;
+                        &device, &featureLevel, &context);
+                    if (FAILED(captureError)) return false;
                     ComPtr<IDXGIOutput1> output1;
-                    if (FAILED(output.As(&output1))) return false;
-                    if (FAILED(output1->DuplicateOutput(device.Get(), &duplication))) return false;
+                    captureError = output.As(&output1);
+                    if (FAILED(captureError)) return false;
+                    captureError = output1->DuplicateOutput(device.Get(), &duplication);
+                    if (FAILED(captureError)) return false;
                     outputDescription = description;
                     sourcePixels.resize(static_cast<std::size_t>(width) * height * 4);
+                    initializedAt = GetTickCount64();
                     return true;
                 }
             }
@@ -408,7 +454,8 @@ namespace
             description.Usage = D3D11_USAGE_STAGING;
             description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             stagingTexture.Reset();
-            if (FAILED(device->CreateTexture2D(&description, nullptr, &stagingTexture))) return false;
+            captureError = device->CreateTexture2D(&description, nullptr, &stagingTexture);
+            if (FAILED(captureError)) return false;
             stagingWidth = description.Width;
             stagingHeight = description.Height;
             return true;
@@ -445,26 +492,41 @@ namespace
 
         bool Capture(int x, int y, int width, int height)
         {
-            if (!duplication || !context || width <= 0 || height <= 0) return false;
+            if (width <= 0 || height <= 0) return false;
+            // DWM may not be ready on the first retry after fullscreen/lock/
+            // topology changes. A failed rebuild must not strand this camera
+            // forever with a null duplication object and a 'running' status.
+            if (!duplication || !context)
+            {
+                if (GetTickCount64() < retryAfter) return false;
+                if (!InitializeDuplication(x, y, width, height)) return false;
+            }
             DXGI_OUTDUPL_FRAME_INFO frameInfo{};
             ComPtr<IDXGIResource> resource;
             HRESULT result = duplication->AcquireNextFrame(16, &frameInfo, &resource);
-            if (result == DXGI_ERROR_WAIT_TIMEOUT) return hasFrame;
-            if (result == DXGI_ERROR_ACCESS_LOST)
+            if (result == DXGI_ERROR_WAIT_TIMEOUT)
             {
-                hasFrame = false;
-                InitializeDuplication(x, y, width, height);
+                // An unchanged desktop is normal. Only a session which has
+                // never yielded its first frame needs a bounded restart.
+                if (!hasFrame && GetTickCount64() - initializedAt > 3000)
+                    InvalidateDuplication(DXGI_ERROR_WAIT_TIMEOUT);
+                return hasFrame;
+            }
+            if (FAILED(result))
+            {
+                InvalidateDuplication(result);
                 return false;
             }
-            if (FAILED(result)) return false;
 
             bool captured = false;
             ComPtr<ID3D11Texture2D> texture;
-            if (SUCCEEDED(resource.As(&texture)) && EnsureStagingTexture(texture.Get()))
+            captureError = resource.As(&texture);
+            if (SUCCEEDED(captureError) && EnsureStagingTexture(texture.Get()))
             {
                 context->CopyResource(stagingTexture.Get(), texture.Get());
                 D3D11_MAPPED_SUBRESOURCE mapped{};
-                if (SUCCEEDED(context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+                captureError = context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+                if (SUCCEEDED(captureError))
                 {
                     const int sourceX = x - outputDescription.DesktopCoordinates.left;
                     const int sourceY = y - outputDescription.DesktopCoordinates.top;
@@ -486,7 +548,13 @@ namespace
                     context->Unmap(stagingTexture.Get(), 0);
                 }
             }
-            duplication->ReleaseFrame();
+            const HRESULT released = duplication->ReleaseFrame();
+            if (!captured || FAILED(released))
+            {
+                InvalidateDuplication(FAILED(captureError) ? captureError : FAILED(released) ? released : E_FAIL);
+                return false;
+            }
+            captureError = S_OK;
             hasFrame = captured;
             return captured;
         }
@@ -502,6 +570,52 @@ namespace
     {
         for (int index = 1; index < argc; ++index) if (_wcsicmp(argv[index], name) == 0) return true;
         return false;
+    }
+
+    // Read-only capture regression: does not create a virtual camera or write
+    // its shared mapping. Faults exercise the actual DXGI recovery path.
+    int TestDisplayRecovery(int argc, wchar_t** argv)
+    {
+        const int x = ArgInt(argc, argv, L"--x", 0);
+        const int y = ArgInt(argc, argv, L"--y", 0);
+        const int width = ArgInt(argc, argv, L"--width", 1920);
+        const int height = ArgInt(argc, argv, L"--height", 1080);
+        DisplayCapture capture;
+        if (!capture.Initialize(x, y, width, height))
+        {
+            PrintStatus("error", Utf8(ErrorMessage(capture.captureError)));
+            return 31;
+        }
+        const auto waitForFrame = [&]() {
+            const auto deadline = GetTickCount64() + 6000;
+            while (GetTickCount64() < deadline)
+            {
+                if (capture.Capture(x, y, width, height)) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return false;
+        };
+        if (!waitForFrame()) return 32;
+        for (const HRESULT fault : { DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, E_ACCESSDENIED })
+        {
+            capture.InvalidateDuplication(fault);
+            if (capture.hasFrame) return 33;
+            // First rebuild fails while the old target is temporarily absent.
+            capture.retryAfter = 0;
+            if (capture.Capture(x + 100000, y, width, height)) return 34;
+            const auto attempts = capture.duplicationAttempts;
+            for (int index = 0; index < 10; ++index)
+                if (capture.Capture(x, y, width, height)) return 35;
+            if (capture.duplicationAttempts != attempts) return 36; // bounded retry
+            if (!waitForFrame()) return 37; // retry must survive the failed rebuild
+            if (capture.duplicationAttempts <= attempts) return 38;
+        }
+        // An unchanged desktop must keep a valid cached frame rather than
+        // interpreting every AcquireNextFrame timeout as a disconnected source.
+        for (int index = 0; index < 5; ++index)
+            if (!capture.Capture(x, y, width, height)) return 39;
+        PrintStatus("test-pass", "DXGI first frame, access lost/device removed/access denied, failed rebuild, bounded retry and static frame");
+        return 0;
     }
 
     int RunCamera(int argc, wchar_t** argv)
@@ -544,49 +658,106 @@ namespace
 
         const bool displayMode = HasArg(argc, argv, L"--display");
         std::atomic_bool stop{ false };
+        std::atomic_bool internalFramesActive{ !displayMode };
+        std::atomic_bool physicalCaptureActive{ displayMode };
+        std::atomic_bool physicalFramePending{ false };
+        std::uint32_t sourceRequestId = static_cast<std::uint32_t>(ArgInt(argc, argv, L"--request-id", 0)); // protected by writerMutex
         MappingWriter writer;
+        std::mutex writerMutex;
         std::thread captureThread;
-        std::unique_ptr<DisplayCapture> displayCapture;
-        if (displayMode)
+        auto displayCapture = std::make_unique<DisplayCapture>();
+        int captureX = ArgInt(argc, argv, L"--x", 0);
+        int captureY = ArgInt(argc, argv, L"--y", 0);
+        int captureWidth = ArgInt(argc, argv, L"--width", 1920);
+        int captureHeight = ArgInt(argc, argv, L"--height", 1080);
+        const bool captureInitialized = displayMode
+            ? displayCapture->Initialize(captureX, captureY, captureWidth, captureHeight)
+            : displayCapture->InitializeOutputBitmap();
+        if (!captureInitialized)
         {
-            const int x = ArgInt(argc, argv, L"--x", 0);
-            const int y = ArgInt(argc, argv, L"--y", 0);
-            const int width = ArgInt(argc, argv, L"--width", 1920);
-            const int height = ArgInt(argc, argv, L"--height", 1080);
-            displayCapture = std::make_unique<DisplayCapture>();
-            if (!displayCapture->Initialize(x, y, width, height))
-            {
-                PrintStatus("error", "Не удалось подготовить захват эфирного экрана.");
-                camera->Stop();
-                camera->Shutdown();
-                camera.Reset();
-                MFShutdown();
-                if (uninitialize) CoUninitialize();
-                return 25;
-            }
-            captureThread = std::thread([&, x, y, width, height] {
-                const auto frameInterval = std::chrono::milliseconds(33);
-                while (!stop.load())
-                {
-                    const auto started = std::chrono::steady_clock::now();
-                    if (displayCapture->Capture(x, y, width, height)) writer.Write(displayCapture->pixels);
-                    std::this_thread::sleep_until(started + frameInterval);
-                }
-            });
+            PrintStatus("error", "Не удалось подготовить захват эфирного экрана.");
+            camera->Stop();
+            camera->Shutdown();
+            camera.Reset();
+            MFShutdown();
+            if (uninitialize) CoUninitialize();
+            return 25;
         }
+        captureThread = std::thread([&] {
+            const auto frameInterval = std::chrono::milliseconds(33);
+            bool recovering = false;
+            ULONGLONG lastRecoveryNotice = 0;
+            while (!stop.load())
+            {
+                const auto started = std::chrono::steady_clock::now();
+                if (physicalCaptureActive.load() && !internalFramesActive.load())
+                {
+                    std::lock_guard<std::mutex> lock(writerMutex);
+                    if (physicalCaptureActive.load() && !internalFramesActive.load())
+                    {
+                        if (displayCapture->Capture(captureX, captureY, captureWidth, captureHeight))
+                        {
+                            writer.Write(displayCapture->pixels);
+                            if (recovering) PrintStatus("capture-recovered", "display", sourceRequestId);
+                            recovering = false;
+                            if (physicalFramePending.exchange(false)) PrintStatus("source", "display", sourceRequestId);
+                        }
+                        else if (FAILED(displayCapture->captureError) &&
+                            (!recovering || GetTickCount64() - lastRecoveryNotice >= 5000))
+                        {
+                            recovering = true;
+                            lastRecoveryNotice = GetTickCount64();
+                            PrintStatus("capture-retrying", Utf8(ErrorMessage(displayCapture->captureError)), sourceRequestId);
+                        }
+                    }
+                }
+                std::this_thread::sleep_until(started + frameInterval);
+            }
+        });
 
         PrintStatus("running", displayMode ? "display" : "internal");
         HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-        if (displayMode)
+        // Every pipe message has exactly one video-frame worth of bytes. A
+        // tiny magic header marks route-control messages; ordinary BGRA frames
+        // remain backwards-compatible with the existing high-throughput path.
+        // This lets a running camera return from the internal fallback to the
+        // reconnected physical Program display without removing the device
+        // from conferencing applications.
+        std::vector<std::uint8_t> frame(pdm::virtual_camera::kFrameBytes);
+        while (ReadExact(input, frame.data(), pdm::virtual_camera::kFrameBytes))
         {
-            std::uint8_t byte = 0;
-            DWORD read = 0;
-            while (ReadFile(input, &byte, 1, &read, nullptr) && read > 0) {}
-        }
-        else
-        {
-            std::vector<std::uint8_t> frame(pdm::virtual_camera::kFrameBytes);
-            while (ReadExact(input, frame.data(), pdm::virtual_camera::kFrameBytes)) writer.Write(frame.data());
+            if (IsPipeControlPacket(frame))
+            {
+                std::uint32_t command = 0;
+                CopyMemory(&command, frame.data() + 8, sizeof(command));
+                if (command != kPipeCommandUseDisplay) continue;
+                const int nextX = ReadPipeInt32(frame.data(), 12);
+                const int nextY = ReadPipeInt32(frame.data(), 16);
+                const int nextWidth = ReadPipeInt32(frame.data(), 20);
+                const int nextHeight = ReadPipeInt32(frame.data(), 24);
+                std::lock_guard<std::mutex> lock(writerMutex);
+                CopyMemory(&sourceRequestId, frame.data() + 28, sizeof(sourceRequestId));
+                const bool ready = nextWidth > 0 && nextHeight > 0 &&
+                    displayCapture->InitializeDuplication(nextX, nextY, nextWidth, nextHeight);
+                if (ready)
+                {
+                    captureX = nextX;
+                    captureY = nextY;
+                    captureWidth = nextWidth;
+                    captureHeight = nextHeight;
+                    physicalCaptureActive.store(true);
+                    internalFramesActive.store(false);
+                    physicalFramePending.store(true);
+                }
+                else
+                {
+                    PrintStatus("source-error", "Не удалось вернуться к захвату эфирного экрана.", sourceRequestId);
+                }
+                continue;
+            }
+            internalFramesActive.store(true);
+            std::lock_guard<std::mutex> lock(writerMutex);
+            writer.Write(frame.data());
         }
 
         stop.store(true);
@@ -616,6 +787,7 @@ int wmain(int argc, wchar_t** argv)
     if (HasArg(argc, argv, L"--elevate-install")) return argc >= 3 ? Elevate(L"--install-source", argv[2]) : ERROR_INVALID_PARAMETER;
     if (HasArg(argc, argv, L"--elevate-uninstall")) return Elevate(L"--uninstall-source");
     if (HasArg(argc, argv, L"--test-source")) return argc >= 3 ? TestMediaSource(argv[2]) : ERROR_INVALID_PARAMETER;
+    if (HasArg(argc, argv, L"--test-display-recovery")) return TestDisplayRecovery(argc, argv);
     if (HasArg(argc, argv, L"--self-test"))
     {
         const double wideScale = std::min(1920.0 / 1024.0, 1080.0 / 768.0);

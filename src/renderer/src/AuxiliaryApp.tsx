@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { mediaUrl } from './media'
+import { canvasToDataUrl } from './canvas-export'
 import { releasePdfiumResources, renderPdfiumPageToCanvas } from './pdfium-renderer'
 import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
@@ -182,7 +183,9 @@ function SpeakerPdfFrame({
           lane: 'background'
         })
         if (cancelled) return
-        setFrameUrl(frame.canvas.toDataURL('image/png'))
+        const dataUrl = await canvasToDataUrl(frame.canvas)
+        if (cancelled) return
+        setFrameUrl(dataUrl)
         setFailed(false)
       } catch (error) {
         if (!cancelled) {

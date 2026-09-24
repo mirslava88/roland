@@ -162,6 +162,7 @@ app.whenReady().then(async () => {
       return
     }
     if (!process.env.PDM_LAYER_ORDER_ONLY) {
+    if (!process.env.PDM_CORNERS_ONLY) {
     stage = 'reject a DPI-enlarged native PDF bitmap before it can shrink the page'
     await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'pdf-native-dpi' })
     for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -302,15 +303,8 @@ app.whenReady().then(async () => {
       scene:window.testScene.programScene.enabled,
       outputVisible:window.testScene.timerOutputVisible,
       outputOwner:window.testScene.timerOutputOwner
-    })`), {scene:false,outputVisible:false,outputOwner:null},
-      'Leaving the Scene output must hide a timer published by the Scene')
-    await win.webContents.executeJavaScript(`window.testScene.setTimerOutputState(true,'toolbar')`)
-    await new Promise(done => setTimeout(done, 40))
-    assert.deepEqual(await win.webContents.executeJavaScript(`({
-      outputVisible:window.testScene.timerOutputVisible,
-      outputOwner:window.testScene.timerOutputOwner
-    })`), {outputVisible:true,outputOwner:'toolbar'},
-      'A standalone toolbar timer must not be hidden merely because the Scene is off')
+    })`), {scene:false,outputVisible:true,outputOwner:'toolbar'},
+      'Leaving Scene must hand its visible timer to ordinary Program instead of hiding it')
     console.log('PASS: empty Scene timer defaults to 15 minutes')
     await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: 'preview&device' })
     await new Promise(done => setTimeout(done, 350))
@@ -863,6 +857,24 @@ app.whenReady().then(async () => {
     await new Promise(done => setTimeout(done, 50))
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-scene-editor="titles"] [data-scene-air-bar]')?.innerText.includes('Слой виден на информационном экране')`), true,
       'Visible information capture must win over a merely selected off-air channel')
+    stage = 'publish event title with heading only'
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-broadcast-titles-event-visible]')?.disabled`), false,
+      'Event title must be available when only its heading is filled')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-broadcast-titles-event-visible]').click()`)
+    await new Promise(done => setTimeout(done, 50))
+    assert.deepEqual(await win.webContents.executeJavaScript(`(() => { const output=window.testScene.captureTitlesOutputs['information-camera']; return {eventVisible:output.eventVisible,eventLabel:output.eventLabel,eventInfo:output.eventInfo}; })()`), {
+      eventVisible: true,
+      eventLabel: 'МЕРОПРИЯТИЕ',
+      eventInfo: ''
+    }, 'Heading-only event title must be published')
+    await win.webContents.executeJavaScript(`window.testEmit('information-titles-update', {titleSourceIdentity:'information-camera',titles:window.testScene.captureTitlesOutputs['information-camera']})`)
+    await new Promise(done => setTimeout(done, 80))
+    assert.deepEqual(await win.webContents.executeJavaScript(`(() => { const layer=document.querySelector('[data-information-titles-layer]'); return {label:layer?.querySelector('.broadcast-event-title-label')?.textContent,hasEmptyInfo:!!layer?.querySelector('.broadcast-event-title-text')}; })()`), {
+      label: 'МЕРОПРИЯТИЕ',
+      hasEmptyInfo: false
+    }, 'Heading-only event title must render without an empty description row')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-broadcast-titles-event-visible]').click()`)
+    await new Promise(done => setTimeout(done, 50))
     stage = 'fill title inputs'
     const titleInputsFound = await win.webContents.executeJavaScript(`(() => {
       const name = document.querySelector('input[placeholder="Имя выступающего"]');
@@ -1273,12 +1285,14 @@ app.whenReady().then(async () => {
     assert.equal(await win.webContents.executeJavaScript(`window.testScene.programScene.textOverlays.length`), 1,
       'Hidden program text must stay saved')
     console.log('PASS: PiP text draft gate, on-air visibility, multiple multiline blocks, drag, typography, width, color and output rendering')
+    }
     for (const kind of ['pptx', 'pdf']) {
       for (const aspect of ['wide', 'four-three', 'portrait']) {
         await win.loadFile(resolve('tmp/pip-video-ui/index.html'), { search: `corners&${kind}&${aspect}` })
         await new Promise(done => setTimeout(done, 350))
         let bounds
         for (const rounded of [false, true, false]) {
+          stage = `painted corners ${kind} ${aspect} rounded=${rounded}`
           await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button => button.textContent === ${JSON.stringify(rounded ? 'Скруглённые' : 'Острые')}).click()`)
           await new Promise(done => setTimeout(done, kind === 'pdf' ? 220 : 50))
           if (kind === 'pdf') {
@@ -1293,7 +1307,11 @@ app.whenReady().then(async () => {
               await new Promise(done => setTimeout(done, 50))
             }
           }
-          await win.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+          await win.webContents.executeJavaScript(`(async () => {
+            const image = document.querySelector('.pdm-pip-content-preview img');
+            if (image) await image.decode();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          })()`)
           const metrics = await win.webContents.executeJavaScript(`(() => {
             const media = document.querySelector('.pdm-pip-content-preview ${kind === 'pdf' ? 'canvas' : 'img'}');
             if (!media) throw new Error('Actual SlideRenderer must paint the test slide');
@@ -1316,16 +1334,31 @@ app.whenReady().then(async () => {
             assert.ok(Math.abs(metrics.bounds[field] - bounds[field]) <= 0.05,
               `Changing corners must not resize or move the slide (${field})`)
           }
-          const screenshot = await win.webContents.capturePage()
-          const picture = screenshot.resize(metrics.viewport)
-          const bytes = picture.toBitmap()
+          let screenshot = await win.webContents.capturePage()
+          let picture = screenshot.resize(metrics.viewport)
+          let bytes = picture.toBitmap()
           const isSlidePixel = (x, y) => {
             const index = (Math.round(y) * picture.getSize().width + Math.round(x)) * 4
             return bytes[index + 1] > 120 && bytes[index + 2] < 80 && bytes[index] < 130
           }
           const {x,y,width,height} = metrics.bounds
           const cornerInset = rounded ? 1 : 3
+          const corners = [[x+cornerInset,y+cornerInset],[x+width-1-cornerInset,y+cornerInset],[x+cornerInset,y+height-1-cornerInset],[x+width-1-cornerInset,y+height-1-cornerInset]]
+          // RAF/decode confirm layout and image readiness, not completion of
+          // the GPU copy used by capturePage on a hidden Windows surface.
+          // Await the actual pixels, with a bound; persistent clipping bugs
+          // still fail the same assertions and save a diagnostic screenshot.
+          for (let attempt = 0; attempt < 20 && !corners.every(([px,py]) => isSlidePixel(px,py) === !rounded); attempt++) {
+            await new Promise(done => setTimeout(done, 50))
+            screenshot = await win.webContents.capturePage()
+            picture = screenshot.resize(metrics.viewport)
+            bytes = picture.toBitmap()
+          }
           for (const [px, py] of [[x+cornerInset,y+cornerInset],[x+width-1-cornerInset,y+cornerInset],[x+cornerInset,y+height-1-cornerInset],[x+width-1-cornerInset,y+height-1-cornerInset]]) {
+            if (isSlidePixel(px, py) !== !rounded) {
+              writeFileSync(resolve('tmp/pip-video-ui/corner-failure.png'), screenshot.toPNG())
+              console.error(JSON.stringify({kind,aspect,rounded,px,py,metrics,screenshotSize:screenshot.getSize()}))
+            }
             assert.equal(isSlidePixel(px, py), !rounded, `${kind} ${aspect}: visible slide corners must match the selected style`)
           }
           assert.ok(isSlidePixel(x+width/2,y+height/2), 'Slide content must remain visible')

@@ -233,12 +233,23 @@
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library,
 .pdm-operator-shell.theme-broadcast-pro .pdm-stage,
-.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator {
+.pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator,
+.pdm-operator-shell.theme-broadcast-pro .pdm-headless-program-rail,
+.pdm-operator-shell.theme-broadcast-pro .pdm-program-monitor-collapsed {
   position: relative;
   border: 1px solid var(--pdm-console-border);
   border-radius: 5px;
   background: var(--pdm-console-panel);
   box-shadow: 0 15px 35px rgba(0, 0, 0, .38), inset 0 1px 0 rgba(255, 255, 255, .025);
+}
+
+.pdm-operator-shell .pdm-headless-program-slides > .pdm-slide-navigator {
+  width: 100% !important;
+  max-width: none;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none !important;
 }
 
 .pdm-operator-shell.theme-broadcast-pro .pdm-library {

@@ -193,6 +193,12 @@ assert.match(timerControl, /programPreviewFontCqw[\s\S]*transform: `translate\(-
   'program preview typography and travel coordinates must match the real program timer overlay')
 assert.match(timerControl, /programDisplayWidth[\s\S]*programOverlayDpiScale[\s\S]*boxSizing: 'content-box'/,
   'program preview must include the native WPF DPI scale and padding outside its reserved text width')
+assert.match(timerControl, /const primaryDisplay = displays\.find[\s\S]*const programPreviewDisplay = programDisplay \?\? primaryDisplay[\s\S]*programPreviewAspect = programDisplayWidth \/ programDisplayHeight/,
+  'headless timer preview must use the actual primary-display aspect ratio instead of an approximate 16:9 fallback')
+assert.match(timerControl, /!programScene\.enabled && timerOutputOwner === 'scene'[\s\S]*setTimerOutputState\(true, 'toolbar'\)/,
+  'leaving Scene must preserve a visible timer by returning it to the ordinary Program route')
+assert.match(appStore, /update\.enabled === false[\s\S]*state\.timerDuration > 0 && state\.timerOutputVisible && state\.timerOutputOwner === 'scene'[\s\S]*timerOutputOwner: 'toolbar'/,
+  'every Scene exit path must transfer timer ownership atomically in the store')
 assert.match(sceneTimerLayer, /const widthDip = \(wideTime \? 260 : 176\) \+ 8[\s\S]*const heightDip = 48 \+ 4/,
   'the Scene timer must use the exact compact WPF footprint instead of the old approximate rectangle')
 assert.doesNotMatch(sceneTimerLayer, /rgba\(60, 0, 0|rgba\(60, 20, 0|rgba\(0, 0, 0, 0\.5\)/,
@@ -243,6 +249,12 @@ assert.doesNotMatch(timerOverlayScript, /border\.Background = new SolidColorBrus
   'warning and overtime updates must change only timer text color, not restore a backing plate')
 assert.match(timerOverlayScript, /UpdateTextAlignment\(\)[\s\S]*positionX <= 0\.001[\s\S]*TextAlignment\.Left[\s\S]*positionX >= 0\.999[\s\S]*TextAlignment\.Right/,
   'the native timer must align visible digits toward an edge while keeping the stable minus-sign reserve')
+assert.match(timerOverlayScript, /Windows can move a topmost window onto the primary display[\s\S]*rect\.Left < targetDisplayX - tolerance[\s\S]*rect\.Right > targetDisplayX \+ targetDisplayWidth \+ tolerance[\s\S]*return;/,
+  'hot-unplug must not persist the emergency Windows relocation as an operator timer position')
+assert.match(mainProcess, /pixelMetadataValid[\s\S]*raw\.offsetX >= 0[\s\S]*raw\.offsetY >= 0[\s\S]*valid: false/,
+  'main must reject a native timer state containing an impossible negative display offset')
+assert.match(timerControl, /if \(!layout\.valid\)[\s\S]*useAppStore\.getState\(\)[\s\S]*setTimerLayoutReady\(true\)/,
+  'the operator timer layout must remain authoritative when native hot-plug state is invalid')
 const programTimerOverlaySource = auxiliaryApp.slice(
   auxiliaryApp.indexOf('function ProgramTimerOverlay('),
   auxiliaryApp.indexOf('function EventTimerDisplay(')

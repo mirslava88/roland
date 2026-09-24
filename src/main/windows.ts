@@ -52,8 +52,14 @@ export function createControlWindow(): BrowserWindow {
 export function createPresentationWindow(display: Display): BrowserWindow {
   const { x, y, width, height } = display.bounds
 
-  // show: false — создаём скрытым. Иначе Windows DWM при показе fullscreen
-  // окна может мгновенно promote его выше overlay screen-saver в z-order
+  // Keep the Program surface as an exact borderless display-sized window,
+  // not a native Windows fullscreen HWND. Moving a fullscreen Chromium HWND
+  // between monitors with different DPI can leave its client area offset and
+  // produce a black strip above the rendered camera. It is also unsafe while
+  // the owning monitor is physically disappearing. The caller still controls
+  // show/z-order under the transition overlay.
+  // show: false — создаём скрытым. Иначе Windows DWM при показе окна может
+  // мгновенно promote его выше overlay screen-saver в z-order
   // (WM_CREATE + SW_SHOW синхронно), и его #000 background вспыхивает
   // через → вспышка при переходе на новый контент. Caller должен:
   // 1. createPresentationWindow (скрытым)
@@ -65,8 +71,18 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     y,
     width,
     height,
-    fullscreen: true,
+    // On Windows a frameless BrowserWindow still has an invisible resize
+    // border. Treat the requested display rectangle as the Chromium client
+    // area so mixed-DPI moves do not shrink or offset the actual Program
+    // picture by that native border.
+    useContentSize: true,
+    fullscreen: false,
     frame: false,
+    // Electron enables WS_THICKFRAME for frameless Windows windows by
+    // default. During a display hot-plug Windows can briefly restore that
+    // invisible resize border and shrink the client surface by 1–2 pixels.
+    // Program output is never resized by the user, so remove the style.
+    thickFrame: false,
     show: false,
     backgroundColor: '#000000',
     title: 'Presentation',

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { waitForNavigationTransitionEnd } from '../../navigation-transition'
+import { acquireOutputTransition } from '../../output-transition-lock'
 import { PROGRAM_SCENE_TRANSITION_DURATION_MS } from '../../../../shared/program-scene'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
-import { hasQrData } from '../../../../shared/qr-overlay'
 import { shouldShowTimerOnProgram } from '../../timer-controls'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
@@ -65,6 +65,7 @@ export function ProgramSceneBridge(): null {
   const previousViewModeRef = useRef(programScene.viewMode)
   const rendererAppliedRevisionRef = useRef(0)
   const mediaOverlayAppliedRevisionRef = useRef(0)
+  const captureRegistrationSignatureRef = useRef('')
 
   const confirmPublishedRevision = useCallback((revision: number): void => {
     if (
@@ -106,14 +107,25 @@ export function ProgramSceneBridge(): null {
   // One media renderer for both native Office and renderer PDF output: switching
   // the content type must not remount unchanged image/video layers.
   const externalMediaOverlayActive = active && programScene.mediaLayersVisible &&
-    targetDisplayId !== null && !internalProgramOutputActive && upperMediaLayers.length > 0
+    targetDisplayId !== null && upperMediaLayers.length > 0
 
-  const sendState = useCallback((): void => {
-    if (selectedCapture) {
-      window.api.sendToPresentation('capture-source-register', selectedCapture)
-    }
-    if (selectedCapture && background?.type === 'capture') {
-      window.api.sendToPresentation('capture-source-register', background.capture)
+  const sendState = useCallback((forceCaptureRegistration = false): void => {
+    const capturesToRegister = [
+      selectedCapture,
+      background?.type === 'capture' ? background.capture : null
+    ].filter((capture): capture is CaptureSourceConfig => !!capture)
+      .filter((capture, index, captures) => (
+        captures.findIndex((candidate) => candidate.sourceId === capture.sourceId) === index
+      ))
+    const captureRegistrationSignature = JSON.stringify(capturesToRegister)
+    if (
+      forceCaptureRegistration ||
+      captureRegistrationSignatureRef.current !== captureRegistrationSignature
+    ) {
+      captureRegistrationSignatureRef.current = captureRegistrationSignature
+      for (const capture of capturesToRegister) {
+        window.api.sendToPresentation('capture-source-register', capture)
+      }
     }
     window.api.sendToPresentation('program-scene-update', {
       revision: programSnapshot?.revision ?? 0,
@@ -135,10 +147,10 @@ export function ProgramSceneBridge(): null {
       mediaLayersVisible: programScene.mediaLayersVisible,
       externalMediaOverlayActive,
       chromaKey: programScene.chromaKey,
-      qrOverlay: internalProgramOutputActive && programSnapshot && programSnapshot.qrOverlay.enabled &&
-        programSnapshot.qrOverlay.sceneVisible !== false && hasQrData(programSnapshot.qrOverlay)
-        ? { ...programSnapshot.qrOverlay, enabled: true }
-        : null,
+      // QR has its own output bridge just like the native physical overlay.
+      // Keeping it out of Scene state prevents unrelated Scene refreshes from
+      // clearing the QR on a headless stream/virtual-camera surface.
+      qrOverlay: null,
       // The live timer store is the single authority after a Scene snapshot
       // has been published. This keeps toolbar/Stream Deck updates and the
       // internal Program output in lockstep with the native WPF overlay.
@@ -188,7 +200,7 @@ export function ProgramSceneBridge(): null {
     sendState()
   }, [sendState])
 
-  useEffect(() => window.api.on('program-scene-ready', sendState), [sendState])
+  useEffect(() => window.api.on('program-scene-ready', () => sendState(true)), [sendState])
 
   useEffect(() => window.api.on('program-scene-applied', (...args: unknown[]) => {
     const revision = Number((args[0] as { revision?: unknown } | undefined)?.revision)
@@ -240,6 +252,7 @@ export function ProgramSceneBridge(): null {
       programScene.transitionEffect !== 'smooth' &&
       programScene.transitionEffect !== 'instant'
     let cancelled = false
+    const ownedRevision = useAppStore.getState().programSnapshot?.revision
     const updateLiveNativeContent = async (): Promise<void> => {
       // PreviewPanel owns the atomic PDF/video -> PowerPoint TAKE. Waiting here
       // prevents this reactive layout sync from queueing an extra Office move
@@ -247,111 +260,129 @@ export function ProgramSceneBridge(): null {
       // immediate because no navigation transition is active then.
       await waitForNavigationTransitionEnd()
       if (cancelled) return
-      if (leavingPowerPointParticipantFocus || nonSmoothPowerPointTransition) {
-        // The renderer reveals a frozen frame while the participant shrinks.
-        // Keep native PowerPoint underneath until that movement finishes, then
-        // swap the identical frame back to the live slideshow.
-        await new Promise((resolve) => setTimeout(resolve, transitionDurationMs))
+      const release = await acquireOutputTransition('scene-native-sync')
+      try {
         if (cancelled) return
-      }
-      const currentState = useAppStore.getState()
-      const targetDisplay = currentState.displays.find((display) => display.id === targetDisplayId)
-      if (active && programScene.viewMode === 'participant') {
-        if (enteringPowerPointParticipantFocus) {
-          // Toolbar has already raised the painted snapshot/participant scene
-          // before publishing this mode.  Reopening and moving the BrowserWindow
-          // here caused a second DWM z-order swap and a visible PowerPoint blink.
-          window.api.setActiveContentType('presentation')
+        if (leavingPowerPointParticipantFocus || nonSmoothPowerPointTransition) {
+          // The renderer reveals a frozen frame while the participant shrinks.
+          // Keep native PowerPoint underneath until that movement finishes, then
+          // swap the identical frame back to the live slideshow.
+          await new Promise((resolve) => setTimeout(resolve, transitionDurationMs))
+          if (cancelled) return
+        }
+        const currentState = useAppStore.getState()
+        const targetDisplay = currentState.displays.find((display) => display.id === targetDisplayId)
+        if (active && programScene.viewMode === 'participant') {
+          if (enteringPowerPointParticipantFocus) {
+            // Toolbar has already raised the painted snapshot/participant scene
+            // before publishing this mode.  Reopening and moving the BrowserWindow
+            // here caused a second DWM z-order swap and a visible PowerPoint blink.
+            window.api.setActiveContentType('presentation')
+            return
+          }
+          await window.api.openPresentationWindow(targetDisplayId, true)
+          if (cancelled) return
+          useAppStore.getState().setPresentationWindowOpen(true)
+          sendStateRef.current()
+          await window.api.raisePresentationWindow()
+          if (cancelled) return
+          window.api.setActiveContentType(livePowerPoint ? 'presentation' : 'other')
           return
         }
-        await window.api.openPresentationWindow(targetDisplayId, true)
-        if (cancelled) return
-        useAppStore.getState().setPresentationWindowOpen(true)
-        sendStateRef.current()
-        await window.api.raisePresentationWindow()
-        window.api.setActiveContentType(livePowerPoint ? 'presentation' : 'other')
-        return
-      }
-      if (liveOfficeDocument && activeFile) {
-        if (!targetDisplay) throw new Error('Целевой эфирный дисплей отключён.')
+        if (liveOfficeDocument && activeFile) {
+          if (!targetDisplay) throw new Error('Целевой эфирный дисплей отключён.')
+          if (active) {
+            await window.api.openPresentationWindow(targetDisplayId, true)
+            if (cancelled) return
+            useAppStore.getState().setPresentationWindowOpen(true)
+            sendStateRef.current()
+          }
+          const result = await window.api.restoreExternalFile(
+            activeFile.path,
+            targetDisplay.bounds,
+            {
+              enabled: active,
+              placement: programScene.placement,
+              participantSize: programScene.participantSize,
+              participantScale: programScene.participantScale,
+              cornerStyle: programScene.cornerStyle,
+              viewMode: programScene.viewMode,
+              transitionEffect: programScene.transitionEffect,
+              transitionDurationMs,
+              contentAspectRatio: null
+            }
+          )
+          if (!result.success) throw new Error(result.error || 'Word/Excel не применил раскладку эфира.')
+          if (cancelled) return
+          window.api.setActiveContentType('other')
+          return
+        }
         if (active) {
           await window.api.openPresentationWindow(targetDisplayId, true)
           if (cancelled) return
           useAppStore.getState().setPresentationWindowOpen(true)
           sendStateRef.current()
-        }
-        const result = await window.api.restoreExternalFile(
-          activeFile.path,
-          targetDisplay.bounds,
-          {
-            enabled: active,
+          await window.api.relocatePowerPoint(targetDisplayId, {
+            enabled: true,
             placement: programScene.placement,
             participantSize: programScene.participantSize,
             participantScale: programScene.participantScale,
             cornerStyle: programScene.cornerStyle,
             viewMode: programScene.viewMode,
             transitionEffect: programScene.transitionEffect,
-            transitionDurationMs,
-            contentAspectRatio: null
+            // The renderer has already animated the identical held frame. Move
+            // native PowerPoint underneath it in one step, then uncover it;
+            // animating the HWND again would make one button press take twice
+            // the configured duration.
+            transitionDurationMs: leavingPowerPointParticipantFocus || nonSmoothPowerPointTransition
+              ? 0
+              : transitionDurationMs,
+            contentAspectRatio
+          })
+          if (cancelled) return
+          if (leavingPowerPointParticipantFocus || nonSmoothPowerPointTransition) {
+            window.api.sendToPresentation('program-scene-powerpoint-hold-clear')
           }
-        )
-        if (!result.success) throw new Error(result.error || 'Word/Excel не применил раскладку эфира.')
-        window.api.setActiveContentType('other')
-        return
-      }
-      if (active) {
-        await window.api.openPresentationWindow(targetDisplayId, true)
-        if (cancelled) return
-        useAppStore.getState().setPresentationWindowOpen(true)
-        sendStateRef.current()
+          window.api.setActiveContentType('presentation')
+          return
+        }
+
         await window.api.relocatePowerPoint(targetDisplayId, {
-          enabled: true,
+          enabled: false,
           placement: programScene.placement,
           participantSize: programScene.participantSize,
           participantScale: programScene.participantScale,
           cornerStyle: programScene.cornerStyle,
           viewMode: programScene.viewMode,
           transitionEffect: programScene.transitionEffect,
-          // The renderer has already animated the identical held frame. Move
-          // native PowerPoint underneath it in one step, then uncover it;
-          // animating the HWND again would make one button press take twice
-          // the configured duration.
-          transitionDurationMs: leavingPowerPointParticipantFocus || nonSmoothPowerPointTransition
-            ? 0
-            : transitionDurationMs,
+          transitionDurationMs,
           contentAspectRatio
         })
         if (cancelled) return
-        if (leavingPowerPointParticipantFocus || nonSmoothPowerPointTransition) {
-          window.api.sendToPresentation('program-scene-powerpoint-hold-clear')
+        if (useAppStore.getState().isPresentationWindowOpen) {
+          // Native PowerPoint owns the physical Program display when Scene is
+          // disabled. A stream/virtual camera may still be capturing the same
+          // Chromium Program surface, where PreviewPanel has just painted the
+          // matching cached PPTX frame. Parking that surface here clears its
+          // first frame and leaves VKS black until the next slide navigation.
+          // Keep it warm and painted for the simultaneous internal consumer;
+          // the native slideshow remains above it on the physical display.
+          if (useAppStore.getState().internalProgramOutputActive) {
+            window.api.dbgLog('program scene native sync preserved internal PPTX frame for stream/virtual camera')
+            window.api.setActiveContentType('presentation')
+            return
+          }
+          await window.api.closePresentationWindow()
+          if (cancelled) return
+          useAppStore.getState().setPresentationWindowOpen(false)
+          window.api.setActiveContentType('presentation')
         }
-        window.api.setActiveContentType('presentation')
-        return
-      }
-
-      await window.api.relocatePowerPoint(targetDisplayId, {
-        enabled: false,
-        placement: programScene.placement,
-        participantSize: programScene.participantSize,
-        participantScale: programScene.participantScale,
-        cornerStyle: programScene.cornerStyle,
-        viewMode: programScene.viewMode,
-        transitionEffect: programScene.transitionEffect,
-        transitionDurationMs,
-        contentAspectRatio
-      })
-      if (cancelled) return
-      if (useAppStore.getState().isPresentationWindowOpen) {
-        await window.api.closePresentationWindow()
-        useAppStore.getState().setPresentationWindowOpen(false)
-        window.api.setActiveContentType('presentation')
-      }
+      } finally { release() }
     }
     void updateLiveNativeContent().catch((error) => {
       const message = String(error)
       window.api.dbgLog(`program scene native content update failed: ${message}`)
-      const revision = useAppStore.getState().programSnapshot?.revision
-      if (revision) useAppStore.getState().failProgramSnapshot(revision, message)
+      if (!cancelled && ownedRevision) useAppStore.getState().failProgramSnapshot(ownedRevision, message)
     })
     return () => { cancelled = true }
   }, [active, activeFile?.extension, activeFile?.path, activeFile?.type, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, targetDisplayId, transitionDurationMs])

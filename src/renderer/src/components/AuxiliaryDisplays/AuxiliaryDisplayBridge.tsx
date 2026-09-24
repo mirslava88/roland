@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   captureSourceIdentity,
   DEFAULT_BROADCAST_TITLES_OUTPUT,
-  useAppStore
+  useAppStore,
+  type DisplayOutputMode
 } from '../../stores/useAppStore'
 import { waitForNavigationTransitionEnd } from '../../navigation-transition'
 import { resolveProgramSceneBackground } from '../../program-scene-background'

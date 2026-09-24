@@ -141,7 +141,7 @@ export function moveProgramSceneMediaLayer(
   ;[stack[index], stack[nextIndex]] = [stack[nextIndex], stack[index]]
   const contentIndex = stack.indexOf(content)
   return stack.flatMap((entry, stackIndex) => (
-    entry === content ? [] : [{ ...entry, aboveContent: stackIndex > contentIndex }]
+    entry.kind === 'content' ? [] : [{ ...entry, aboveContent: stackIndex > contentIndex }]
   ))
 }
 

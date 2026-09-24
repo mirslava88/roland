@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { hasQrData } from '../../../../shared/qr-overlay'
 import { getProgramSceneRects } from '../../../../shared/program-scene'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
@@ -30,6 +30,7 @@ export function QrOverlayBridge(): null {
   const draftConfig = useAppStore((state) => state.qrOverlay)
   const programSnapshot = useAppStore((state) => state.programSnapshot)
   const config = programSnapshot?.qrOverlay ?? draftConfig
+  const internalProgramOutputActive = useAppStore((state) => state.internalProgramOutputActive)
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
   const displayAssignments = useAppStore((state) => state.displayAssignments)
   const displays = useAppStore((state) => state.displays)
@@ -74,6 +75,27 @@ export function QrOverlayBridge(): null {
     }, 250)
     return () => clearTimeout(timer)
   }, [draftConfig.wifiPassword])
+
+  const sendRendererQrOverlay = useCallback((): void => {
+    const visible = internalProgramOutputActive && config.enabled && hasQrData(config)
+    window.api.sendToPresentation(
+      'qr-overlay-renderer-update',
+      visible ? { ...config, enabled: true } : null
+    )
+    window.api.dbgLog(
+      `internal QR overlay active=${internalProgramOutputActive} visible=${visible} ` +
+      `snapshotRevision=${programSnapshot?.revision ?? 0}`
+    )
+  }, [config, internalProgramOutputActive, programSnapshot?.revision])
+
+  useEffect(sendRendererQrOverlay, [sendRendererQrOverlay])
+  // A hot-unplug replaces the hidden Presentation Output renderer. Replay QR
+  // after that renderer has installed its listeners instead of relying on the
+  // earlier message that belonged to the retired window.
+  useEffect(
+    () => window.api.on('program-scene-ready', sendRendererQrOverlay),
+    [sendRendererQrOverlay]
+  )
 
   useEffect(() => {
     let cancelled = false

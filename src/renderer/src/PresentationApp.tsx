@@ -48,7 +48,7 @@ import { ProgramSceneBackgroundLayer } from './components/ProgramScene/ProgramSc
 import type { ProgramSceneBackgroundPayload } from './program-scene-background'
 import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
 import { SceneTimerPreviewLayer } from './components/ProgramScene/SceneTimerPreviewLayer'
-import type { QrOverlayConfig } from '../../shared/qr-overlay'
+import { normalizeQrOverlay, type QrOverlayConfig } from '../../shared/qr-overlay'
 import type { ProgramSceneTimerSnapshot } from './stores/useAppStore'
 import {
   DEFAULT_CONTENT_ZOOM,
@@ -258,6 +258,7 @@ export function PresentationApp(): JSX.Element {
   const [captureTakeRequest, setCaptureTakeRequest] = useState<CaptureTakeRequest | null>(null)
   const [broadcastTitles, setBroadcastTitles] = useState<BroadcastTitlesOutput>(HIDDEN_BROADCAST_TITLES)
   const [programScene, setProgramScene] = useState<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
+  const [rendererQrOverlay, setRendererQrOverlay] = useState<QrOverlayConfig | null>(null)
   const programSceneRef = useRef<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
   const [sceneTransitionRevision, setSceneTransitionRevision] = useState(0)
   const [powerPointHold, setPowerPointHold] = useState<ProgramScenePowerPointHold | null>(null)
@@ -514,6 +515,23 @@ export function PresentationApp(): JSX.Element {
   }, [])
 
   const loadContent = useCallback((payload: ContentPayload): void => {
+    const pendingBeforeLoad = pendingRef.current
+    const sourceIdBeforeLoad = payload.capture?.sourceId
+    if (
+      payload.type === 'capture' &&
+      payload.takeId?.startsWith('internal-') &&
+      sourceIdBeforeLoad &&
+      pendingBeforeLoad?.kind === 'capture' &&
+      pendingBeforeLoad.sourceId === sourceIdBeforeLoad &&
+      pendingBeforeLoad.payload.takeId &&
+      !pendingBeforeLoad.payload.takeId.startsWith('internal-')
+    ) {
+      window.api.dbgLog(
+        `PresApp: ignored internal capture replay while transactional take is pending ` +
+        `source=${sourceIdBeforeLoad.slice(-8)} take=${pendingBeforeLoad.payload.takeId}`
+      )
+      return
+    }
     postCommitGenerationRef.current += 1
     // A PowerPoint transition frame is valid only while the native slideshow
     // remains the active program source.  Keeping it after a PDF/capture take
@@ -780,6 +798,16 @@ export function PresentationApp(): JSX.Element {
     const updateViewport = (): void => setViewport({ width: window.innerWidth, height: window.innerHeight })
     window.addEventListener('resize', updateViewport)
     return () => window.removeEventListener('resize', updateViewport)
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.api.on('qr-overlay-renderer-update', (...args: unknown[]) => {
+      const raw = args[0]
+      setRendererQrOverlay(raw && typeof raw === 'object'
+        ? normalizeQrOverlay(raw as Partial<QrOverlayConfig>)
+        : null)
+    })
+    return unsubscribe
   }, [])
 
   useEffect(() => {
@@ -1220,9 +1248,9 @@ export function PresentationApp(): JSX.Element {
       {sceneActive && programScene.textOverlaysVisible && (
         <ProgramSceneTextOverlayLayer overlays={programScene.textOverlays} />
       )}
-      {sceneActive && programScene.qrOverlay?.enabled && (
+      {rendererQrOverlay?.enabled && (
         <SceneQrPreviewLayer
-          config={programScene.qrOverlay}
+          config={rendererQrOverlay}
           outputWidth={viewport.width}
           outputHeight={viewport.height}
         />

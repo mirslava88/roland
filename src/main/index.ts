@@ -83,9 +83,11 @@ const directStreamDeckManager = new DirectStreamDeckManager(
 let streamingManager: StreamingManager | null = null
 let virtualCameraManager: VirtualCameraManager | null = null
 let presentationWindow: BrowserWindow | null = null
+let rendererInternalProgramOutputRequested = false
 
 function isInternalProgramOutputActive(): boolean {
-  return streamingManager?.isInternalProgramOutputActive() === true ||
+  return rendererInternalProgramOutputRequested ||
+    streamingManager?.isInternalProgramOutputActive() === true ||
     virtualCameraManager?.isInternalProgramOutputActive() === true
 }
 const outputReadablePaths = new Map<number, Set<string>>()
@@ -475,29 +477,48 @@ function getWpfTimerStateFile(): string {
   return join(app.getPath('userData'), 'timer-overlay-state.json')
 }
 
-let lastGoodWpfTimerLayout = { x: 0.976, y: 0.96, scale: 1 }
+type WpfTimerLayout = { x: number; y: number; scale: number; valid: boolean }
 
-function readWpfTimerLayout(): { x: number; y: number; scale: number } {
+let lastGoodWpfTimerLayout: WpfTimerLayout = { x: 0.976, y: 0.96, scale: 1, valid: false }
+
+function readWpfTimerLayout(): WpfTimerLayout {
   try {
     const raw = JSON.parse(readFileSync(getWpfTimerStateFile(), 'utf8')) as {
       x?: unknown
       y?: unknown
       scale?: unknown
+      offsetX?: unknown
+      offsetY?: unknown
+      displayWidth?: unknown
+      displayHeight?: unknown
     }
+    const hasPixelMetadata = raw.offsetX !== undefined || raw.offsetY !== undefined ||
+      raw.displayWidth !== undefined || raw.displayHeight !== undefined
+    const pixelMetadataValid = !hasPixelMetadata || (
+      typeof raw.offsetX === 'number' && Number.isFinite(raw.offsetX) &&
+      typeof raw.offsetY === 'number' && Number.isFinite(raw.offsetY) &&
+      typeof raw.displayWidth === 'number' && Number.isFinite(raw.displayWidth) && raw.displayWidth > 0 &&
+      typeof raw.displayHeight === 'number' && Number.isFinite(raw.displayHeight) && raw.displayHeight > 0 &&
+      raw.offsetX >= 0 && raw.offsetX < raw.displayWidth &&
+      raw.offsetY >= 0 && raw.offsetY < raw.displayHeight
+    )
+    if (!pixelMetadataValid) return { ...lastGoodWpfTimerLayout, valid: false }
     lastGoodWpfTimerLayout = {
       x: typeof raw.x === 'number' ? Math.max(0, Math.min(1, raw.x)) : 0.976,
       y: typeof raw.y === 'number' ? Math.max(0, Math.min(1, raw.y)) : 0.96,
-      scale: typeof raw.scale === 'number' ? Math.max(0.5, Math.min(8, raw.scale)) : 1
+      scale: typeof raw.scale === 'number' ? Math.max(0.5, Math.min(8, raw.scale)) : 1,
+      valid: true
     }
     return lastGoodWpfTimerLayout
   } catch {
     // WPF replaces this file while the mirror sync polls it. Keep the last
     // valid layout instead of flashing the timer at its defaults for one tick.
-    return lastGoodWpfTimerLayout
+    return { ...lastGoodWpfTimerLayout, valid: false }
   }
 }
 
 function broadcastWpfTimerToMirrors(force = false): void {
+  const { valid: _layoutValid, ...layout } = readWpfTimerLayout()
   const payload = {
     visible: timerActive && Number(lastWpfTimerData.duration || 0) > 0,
     remaining: Number(lastWpfTimerData.remaining || 0),
@@ -508,7 +529,7 @@ function broadcastWpfTimerToMirrors(force = false): void {
     overtimeTextColor: String(lastWpfTimerData.overtimeTextColor || '#ef4444'),
     textOpacity: Math.max(0.1, Math.min(1, Number(lastWpfTimerData.textOpacity || 1))),
     dpiScale: Math.max(0.5, screen.getPrimaryDisplay().scaleFactor || 1),
-    ...readWpfTimerLayout()
+    ...layout
   }
   const signature = JSON.stringify(payload)
   if (!force && signature === lastWpfTimerMirrorSignature) return
@@ -898,7 +919,7 @@ function prewarmPresentationWindow(): void {
       activeContentType === null
     ) {
       presentationDisplayId = externalDisplay.id
-      presentationWindow.setBounds(externalDisplay.bounds)
+      presentationWindow.setContentBounds(externalDisplay.bounds)
       presentationWindow.setIgnoreMouseEvents(true)
       presentationWindow.setOpacity(0)
       if (!presentationWindow.isVisible()) presentationWindow.showInactive()
@@ -987,7 +1008,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     '-DisplayHeight', String(displayBounds.height),
     '-DataFile', wpfTimerDataFile,
     '-StateFile', timerStateFile
-  ], { stdio: 'ignore' })
+  ], { stdio: 'ignore', windowsHide: true })
   wpfTimerProcess = timerProcess
   timerProcess.on('exit', () => {
     if (wpfTimerProcess === timerProcess) {
@@ -1187,13 +1208,24 @@ function createWindows(): void {
   }
   let allowControlWindowClose = false
   let closeConfirmationOpen = false
-  registerIpcHandlers(controlWindow, () => presentationWindow, () => {
-    if (!overlaySafetyLocked) return
-    overlaySafetyLocked = false
-    overlaySafetyReady = false
-    beginOverlayOperation()
-    diagnosticLog('window', 'PowerPoint safety cover unlocked after verified output commit; awaiting normal reveal')
-  }, isTrustedOutputInvoke)
+  registerIpcHandlers(
+    controlWindow,
+    () => presentationWindow,
+    () => {
+      if (!overlaySafetyLocked) return
+      overlaySafetyLocked = false
+      overlaySafetyReady = false
+      beginOverlayOperation()
+      diagnosticLog('window', 'PowerPoint safety cover unlocked after verified output commit; awaiting normal reveal')
+    },
+    isTrustedOutputInvoke,
+    (displayId) => {
+      presentationDisplayId = displayId
+      virtualCameraManager?.usePhysicalProgramDisplay(displayId)
+      diagnosticLog('display', `authoritative Program route selected display=${displayId}`)
+    },
+    () => presentationDisplayId
+  )
 
   const discardPreparedWorkspaceRecovery = async (): Promise<void> => {
     if (thisControlWindow.isDestroyed()) return
@@ -1618,15 +1650,41 @@ function createWindows(): void {
     if (!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) {
       throw new Error('Недопустимый источник команды.')
     }
+    rendererInternalProgramOutputRequested = true
     prewarmPresentationWindow()
     await waitForPresentationWindowReady()
     if (!presentationWindow || presentationWindow.isDestroyed()) {
       throw new Error('Внутренний программный выход не готов.')
     }
     presentationWindow.setIgnoreMouseEvents(true)
-    presentationWindow.setOpacity(0)
+    const physicalProgramRouteConnected = presentationWindowRequestedVisible &&
+      presentationDisplayId !== null &&
+      screen.getAllDisplays().some((display) => display.id === presentationDisplayId)
+    if (physicalProgramRouteConnected && presentationDisplayId !== null) {
+      virtualCameraManager?.usePhysicalProgramDisplay(presentationDisplayId)
+    }
+    // The same Chromium surface feeds both capturePage() and the physical
+    // Program output. When Stream/Virtual Camera stays on the internal route
+    // while a monitor is connected, preparing capture must not make a live
+    // PDF/video/camera transparent. In particular this callback resumes just
+    // after a transactional PPTX -> PDF TAKE, when the PDF is already painted
+    // and PowerPoint has just been closed.
+    if (!physicalProgramRouteConnected) presentationWindow.setOpacity(0)
     if (!presentationWindow.isVisible()) presentationWindow.showInactive()
-    diagnosticLog('window', 'internal program output prepared (transparent, capture-only)')
+    diagnosticLog(
+      'window',
+      physicalProgramRouteConnected
+        ? `internal program output prepared alongside physical Program display=${presentationDisplayId}; visibility preserved opacity=${presentationWindow.getOpacity()}`
+        : 'internal program output prepared (transparent, capture-only)'
+    )
+  })
+
+  handleControl('release-internal-program-output', (event) => {
+    if (!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) {
+      throw new Error('Недопустимый источник команды.')
+    }
+    rendererInternalProgramOutputRequested = false
+    diagnosticLog('window', 'standalone internal program output released')
   })
 
   handleControl('open-presentation-window', async (
@@ -1647,7 +1705,7 @@ function createWindows(): void {
     const targetDisplay = explicitlyRequestedDisplay || (
       internalProgramOutput
         ? presentationWindow && !presentationWindow.isDestroyed()
-          ? screen.getDisplayMatching(presentationWindow.getBounds())
+          ? screen.getDisplayMatching(presentationWindow.getContentBounds())
           : primaryDisplay
         : undefined
     )
@@ -1674,13 +1732,13 @@ function createWindows(): void {
       presentationWindow = createManagedPresentationWindow(targetDisplay)
     } else {
       console.log(`[MAIN ${Date.now()}] open-presentation-window: reusing warm window`)
-      const currentBounds = presentationWindow.getBounds()
+      const currentBounds = presentationWindow.getContentBounds()
       const nextBounds = targetDisplay.bounds
       if (
         currentBounds.x !== nextBounds.x || currentBounds.y !== nextBounds.y ||
         currentBounds.width !== nextBounds.width || currentBounds.height !== nextBounds.height
       ) {
-        presentationWindow.setBounds(nextBounds)
+        presentationWindow.setContentBounds(nextBounds)
       }
     }
     const targetWindow = presentationWindow
@@ -1696,7 +1754,7 @@ function createWindows(): void {
       throw new Error('Presentation output changed or closed while it was becoming ready')
     }
 
-    if (isInternalProgramOutputActive()) {
+    if (isInternalProgramOutputActive() && !explicitlyRequestedDisplay) {
       targetWindow.setIgnoreMouseEvents(true)
       targetWindow.setOpacity(0)
       if (!targetWindow.isVisible()) targetWindow.showInactive()
@@ -1747,125 +1805,83 @@ function createWindows(): void {
     }
     const targetDisplay = explicitlyRequestedDisplay || (
       isInternalProgramOutputActive()
-        ? displays.find((display) => display.bounds.x === win.getBounds().x && display.bounds.y === win.getBounds().y) || screen.getPrimaryDisplay()
+        ? displays.find((display) => {
+            const contentBounds = win.getContentBounds()
+            return display.bounds.x === contentBounds.x && display.bounds.y === contentBounds.y
+          }) || screen.getPrimaryDisplay()
         : undefined
     )
     if (!targetDisplay) {
       diagnosticLog('window', 'presentation output relocate refused: no assigned program display')
       return false
     }
-    const originalBounds = win.getBounds()
-    const originalFullScreen = win.isFullScreen()
+    const originalContentBounds = win.getContentBounds()
+    const originalPresentationDisplayId = presentationDisplayId
     const nextBounds = targetDisplay.bounds
     const changed =
-      originalBounds.x !== nextBounds.x || originalBounds.y !== nextBounds.y ||
-      originalBounds.width !== nextBounds.width || originalBounds.height !== nextBounds.height
+      originalContentBounds.x !== nextBounds.x || originalContentBounds.y !== nextBounds.y ||
+      originalContentBounds.width !== nextBounds.width || originalContentBounds.height !== nextBounds.height
 
     const sameBounds = (a: Electron.Rectangle, b: Electron.Rectangle): boolean => (
       a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
     )
-    const waitForFullScreenState = async (fullScreen: boolean): Promise<boolean> => {
-      if (win.isDestroyed()) return false
-      if (win.isFullScreen() === fullScreen) return true
-      const eventName = fullScreen ? 'enter-full-screen' : 'leave-full-screen'
-      return new Promise<boolean>((resolve) => {
-        let settled = false
-        const settle = (ready: boolean): void => {
-          if (settled) return
-          settled = true
-          clearTimeout(timeout)
-          clearInterval(poll)
-          if (eventName === 'enter-full-screen') {
-            win.removeListener('enter-full-screen', onFullScreenEvent)
-          } else {
-            win.removeListener('leave-full-screen', onFullScreenEvent)
-          }
-          resolve(ready)
-        }
-        const checkState = (): void => {
-          if (win.isDestroyed()) {
-            settle(false)
-            return
-          }
-          if (win.isFullScreen() === fullScreen) settle(true)
-        }
-        // Electron can emit enter/leave-full-screen just before
-        // BrowserWindow.isFullScreen() reflects the new native HWND state.
-        // The event is only a prompt to check again; polling is authoritative.
-        const onFullScreenEvent = (): void => {
-          setImmediate(checkState)
-        }
-        const timeout = setTimeout(() => {
-          settle(!win.isDestroyed() && win.isFullScreen() === fullScreen)
-        }, 2000)
-        const poll = setInterval(checkState, 25)
-        if (eventName === 'enter-full-screen') {
-          win.on('enter-full-screen', onFullScreenEvent)
-        } else {
-          win.on('leave-full-screen', onFullScreenEvent)
-        }
-        try {
-          win.setFullScreen(fullScreen)
-        } catch {
-          settle(false)
-        }
-      })
-    }
     const restoreOriginalPlacement = async (): Promise<boolean> => {
       if (win.isDestroyed()) return false
       try {
-        const boundsNeedRestore = !sameBounds(win.getBounds(), originalBounds)
-        if (boundsNeedRestore && win.isFullScreen() && !(await waitForFullScreenState(false))) {
-          return false
-        }
-        if (win.isDestroyed()) return false
-        if (boundsNeedRestore) win.setBounds(originalBounds)
-        if (originalFullScreen !== win.isFullScreen()) {
-          if (!(await waitForFullScreenState(originalFullScreen))) return false
-        }
+        const boundsNeedRestore = !sameBounds(win.getContentBounds(), originalContentBounds)
+        if (boundsNeedRestore) win.setContentBounds(originalContentBounds)
         return !win.isDestroyed() &&
-          sameBounds(win.getBounds(), originalBounds) &&
-          win.isFullScreen() === originalFullScreen
+          sameBounds(win.getContentBounds(), originalContentBounds)
       } catch {
         return false
       }
     }
 
     try {
-      if (changed) {
-        // Windows does not reliably honour setBounds() for a fullscreen HWND.
-        // Keep the existing transition overlay/live mirror above it, place the
-        // window while windowed, then return to fullscreen on the target.
-        if (win.isFullScreen() && !(await waitForFullScreenState(false))) {
-          throw new Error('Presentation output did not leave fullscreen for relocation')
-        }
+      // Make the requested route authoritative before the first move. Display
+      // metrics events can run concurrently while Windows is settling a newly
+      // attached monitor; they must not move this same surface back to the
+      // former primary display between placement attempts.
+      presentationDisplayId = targetDisplay.id
+
+      let actualContentBounds = win.getContentBounds()
+      let actualDisplay = screen.getDisplayMatching(actualContentBounds)
+      const maxPlacementAttempts = changed ? 8 : 1
+      for (let attempt = 1; attempt <= maxPlacementAttempts; attempt += 1) {
         if (win.isDestroyed()) throw new Error('Presentation output closed during relocation')
-        win.setBounds(nextBounds)
-        if (!(await waitForFullScreenState(true))) {
-          throw new Error('Presentation output did not return to fullscreen after relocation')
+        if (!screen.getAllDisplays().some((display) => display.id === targetDisplay.id)) {
+          throw new Error('Requested presentation display disconnected during relocation')
         }
-      } else if (!win.isFullScreen()) {
-        // Recover a partially failed previous relocation before reporting the
-        // already-correct monitor as ready.
-        if (!(await waitForFullScreenState(true))) {
-          throw new Error('Presentation output did not enter fullscreen')
+        if (attempt === 1 || !sameBounds(actualContentBounds, nextBounds)) {
+          // Borderless display-sized placement is visually fullscreen without
+          // entering Windows' monitor-bound fullscreen state. Repeat briefly:
+          // Windows can report transient mixed-DPI geometry immediately after
+          // HDMI hot-plug even though the monitor is already enumerated.
+          win.setContentBounds(nextBounds)
         }
+        if (attempt < maxPlacementAttempts) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 75))
+        }
+        actualContentBounds = win.getContentBounds()
+        actualDisplay = screen.getDisplayMatching(actualContentBounds)
+        if (actualDisplay.id === targetDisplay.id && sameBounds(actualContentBounds, nextBounds)) break
       }
 
       if (win.isDestroyed()) throw new Error('Presentation output closed during verification')
-      const actualBounds = win.getBounds()
-      const actualDisplay = screen.getDisplayMatching(actualBounds)
-      const placed = actualDisplay.id === targetDisplay.id && win.isFullScreen()
+      const placed = actualDisplay.id === targetDisplay.id && sameBounds(actualContentBounds, nextBounds)
       diagnosticLog(
         'window',
         `presentation output relocate requested=${targetDisplay.id} actual=${actualDisplay.id} ` +
-        `from=${JSON.stringify(originalBounds)} target=${JSON.stringify(nextBounds)} ` +
-        `actualBounds=${JSON.stringify(actualBounds)} fullscreen=${win.isFullScreen()} ok=${placed}`
+        `fromContent=${JSON.stringify(originalContentBounds)} target=${JSON.stringify(nextBounds)} ` +
+        `actualContent=${JSON.stringify(actualContentBounds)} outer=${JSON.stringify(win.getBounds())} ` +
+        `fullscreen=${win.isFullScreen()} ok=${placed}`
       )
-      if (!placed) throw new Error('Presentation output is not on the requested fullscreen display')
-      presentationDisplayId = targetDisplay.id
+      if (!placed) throw new Error('Presentation output is not on the requested display bounds')
       return true
     } catch (error) {
+      if (presentationDisplayId === targetDisplay.id) {
+        presentationDisplayId = originalPresentationDisplayId
+      }
       const restored = await restoreOriginalPlacement()
       diagnosticLog(
         'window',
@@ -2602,6 +2618,38 @@ function createWindows(): void {
     } catch { /* ignore */ }
   })
 
+  // Lightweight operator monitor for headless Program output. Returning a
+  // bounded JPEG instead of the full-size lossless frame keeps the control
+  // renderer responsive while video is playing and the virtual camera is
+  // capturing the same hidden Chromium surface at 30 fps.
+  handleControl('capture-program-preview-frame', async (): Promise<{
+    dataUrl: string
+    width: number
+    height: number
+  } | null> => {
+    if (!presentationWindow || presentationWindow.isDestroyed()) return null
+    try {
+      const image = await presentationWindow.webContents.capturePage()
+      if (image.isEmpty()) return null
+      const source = image.getSize()
+      if (source.width < 1 || source.height < 1) return null
+      const scale = Math.min(640 / source.width, 360 / source.height, 1)
+      const width = Math.max(1, Math.round(source.width * scale))
+      const height = Math.max(1, Math.round(source.height * scale))
+      const preview = scale < 1
+        ? image.resize({ width, height, quality: 'good' })
+        : image
+      return {
+        dataUrl: `data:image/jpeg;base64,${preview.toJPEG(78).toString('base64')}`,
+        width,
+        height
+      }
+    } catch (error) {
+      diagnosticLog('window', `program preview capture failed ${formatDiagnosticError(error)}`)
+      return null
+    }
+  })
+
   // A pinned target frame is the actual visible output between a cross-window
   // TAKE and the first navigation click. Stop the aggressive 4ms z-order
   // guard once the target bitmap is installed; the window remains TOPMOST,
@@ -2784,7 +2832,7 @@ function createWindows(): void {
     timerActive = true
     const displays = screen.getAllDisplays()
     const targetDisplay = typeof displayId === 'number'
-      ? displays.find((d) => !d.isPrimary && d.id === displayId)
+      ? displays.find((d) => d.id !== screen.getPrimaryDisplay().id && d.id === displayId)
       : undefined
     if (targetDisplay) {
       wpfTimerDisplayId = targetDisplay.id
@@ -3003,7 +3051,10 @@ function createWindows(): void {
     }
   }
 
+  let displayMetricsRevision = 0
+  let displayTopologyRevision = 0
   const syncWindowsAfterDisplayMetricsChange = async (reason: string): Promise<void> => {
+    const revision = displayMetricsRevision
     const displays = screen.getAllDisplays()
     const primary = screen.getPrimaryDisplay()
     const byId = new Map(displays.map((display) => [display.id, display]))
@@ -3027,7 +3078,8 @@ function createWindows(): void {
       label: string
     ): void => {
       if (!win || win.isDestroyed() || !target) return
-      const previous = win.getBounds()
+      const useExactContentBounds = label === 'presentation output'
+      const previous = useExactContentBounds ? win.getContentBounds() : win.getBounds()
       const next = target.bounds
       const changed = previous.x !== next.x || previous.y !== next.y ||
         previous.width !== next.width || previous.height !== next.height
@@ -3038,7 +3090,8 @@ function createWindows(): void {
         // flicker-sensitive z-order choreography and must not be toggled here.
         const restoreFullscreen = label.startsWith('auxiliary ') && win.isFullScreen()
         if (restoreFullscreen) win.setFullScreen(false)
-        win.setBounds(next)
+        if (useExactContentBounds) win.setContentBounds(next)
+        else win.setBounds(next)
         if (restoreFullscreen) win.setFullScreen(true)
         diagnosticLog(
           'display',
@@ -3052,7 +3105,7 @@ function createWindows(): void {
     let presentationTarget = byId.get(presentationDisplayId ?? -1)
     if (!presentationTarget && isInternalProgramOutputActive()) {
       presentationTarget = presentationWindow && !presentationWindow.isDestroyed()
-        ? screen.getDisplayMatching(presentationWindow.getBounds())
+        ? screen.getDisplayMatching(presentationWindow.getContentBounds())
         : primary
     }
     if (presentationTarget) {
@@ -3115,59 +3168,65 @@ function createWindows(): void {
     }
 
     if (activeContentType === 'presentation') {
-      // An explicit program-display handoff can finish while this metrics job
-      // is in flight. Re-read the authoritative target immediately before the
-      // native relocate so a stale topology snapshot cannot move PowerPoint
-      // back onto the former main display after a successful handoff.
-      const latestDisplays = screen.getAllDisplays()
-      const latestById = new Map(latestDisplays.map((display) => [display.id, display]))
-      const latestPresentationTarget = latestById.get(presentationDisplayId ?? -1)
-      if (!latestPresentationTarget) {
-        diagnosticLog('display', 'PowerPoint metrics relocation skipped: Program target unavailable')
-        return
-      }
-      if (latestPresentationTarget.id !== presentationTarget.id) {
-        diagnosticLog(
-          'display',
-          `PowerPoint metrics relocate retargeted stale=${presentationTarget.id} latest=${latestPresentationTarget.id}`
-        )
-      }
-      presentationDisplayId = latestPresentationTarget.id
-      const placement = getPowerPointNativePlacement(latestPresentationTarget)
-      try {
-        const result = await pptDaemon.send('relocate', placement, 5000)
-        diagnosticLog(
-          'display',
-          `PowerPoint metrics relocate display=${latestPresentationTarget.id} ` +
-          `physical=${JSON.stringify(placement.bounds)} ok=${result.ok}`
-        )
-        if (
-          !result.ok &&
-          reason === 'display-added-stable' &&
-          latestDisplays.length > 1 &&
-          latestPresentationTarget.id !== latestPrimary.id &&
-          controlWindow &&
-          !controlWindow.isDestroyed()
-        ) {
-          // Windows/PowerPoint may destroy a native slideshow HWND while the
-          // monitor is absent. Relocation cannot resurrect that surface, so
-          // ask the renderer (which owns the active channel and transactional
-          // TAKE choreography) to reopen the same deck on the returned output.
+      await pptDaemon.runExclusive(async (send) => {
+        if (revision !== displayMetricsRevision || activeContentType !== 'presentation') return
+        // An explicit program-display handoff can finish while this metrics job
+        // is in flight. Re-read the authoritative target immediately before the
+        // native relocate so a stale topology snapshot cannot move PowerPoint
+        // back onto the former main display after a successful handoff.
+        const latestDisplays = screen.getAllDisplays()
+        const latestPrimary = screen.getPrimaryDisplay()
+        const latestById = new Map(latestDisplays.map((display) => [display.id, display]))
+        const latestPresentationTarget = latestById.get(presentationDisplayId ?? -1)
+        if (!latestPresentationTarget || latestPresentationTarget.id === latestPrimary.id) {
+          diagnosticLog('display', 'PowerPoint metrics relocation skipped: Program target unavailable')
+          return
+        }
+        if (latestPresentationTarget.id !== presentationTarget?.id) {
           diagnosticLog(
             'display',
-            `PowerPoint output recovery requested display=${latestPresentationTarget.id}`
+            `PowerPoint metrics relocate retargeted stale=${presentationTarget?.id} latest=${latestPresentationTarget.id}`
           )
-          controlWindow.webContents.send('powerpoint-output-recovery-needed', {
-            displayId: latestPresentationTarget.id
-          })
         }
-      } catch (error) {
-        diagnosticLog('display', `PowerPoint metrics relocate failed ${formatDiagnosticError(error)}`)
-      }
+        presentationDisplayId = latestPresentationTarget.id
+        const placement = getPowerPointNativePlacement(latestPresentationTarget)
+        try {
+          const result = await send('relocate', { ...placement }, 5000)
+          if (revision !== displayMetricsRevision || presentationDisplayId !== latestPresentationTarget.id) return
+          diagnosticLog(
+            'display',
+            `PowerPoint metrics relocate display=${latestPresentationTarget.id} ` +
+            `physical=${JSON.stringify(placement.bounds)} ok=${result.ok}`
+          )
+          if (
+            !result.ok &&
+            reason === 'display-added-stable' &&
+            latestDisplays.length > 1 &&
+            latestPresentationTarget.id !== latestPrimary.id &&
+            controlWindow &&
+            !controlWindow.isDestroyed()
+          ) {
+            // Windows/PowerPoint may destroy a native slideshow HWND while the
+            // monitor is absent. Relocation cannot resurrect that surface, so
+            // ask the renderer (which owns the active channel and transactional
+            // TAKE choreography) to reopen the same deck on the returned output.
+            diagnosticLog(
+              'display',
+              `PowerPoint output recovery requested display=${latestPresentationTarget.id}`
+            )
+            controlWindow.webContents.send('powerpoint-output-recovery-needed', {
+              displayId: latestPresentationTarget.id
+            })
+          }
+        } catch (error) {
+          diagnosticLog('display', `PowerPoint metrics relocate failed ${formatDiagnosticError(error)}`)
+        }
+      }).catch((error) => diagnosticLog('display', `PowerPoint metrics queue failed ${formatDiagnosticError(error)}`))
     }
   }
 
   const scheduleDisplayMetricsSync = (reason: string): void => {
+    displayMetricsRevision++
     if (displayMetricsSyncTimer) clearTimeout(displayMetricsSyncTimer)
     displayMetricsSyncTimer = setTimeout(() => {
       displayMetricsSyncTimer = null
@@ -3188,6 +3247,7 @@ function createWindows(): void {
   })
 
   screen.on('display-added', () => {
+    const topologyRevision = ++displayTopologyRevision
     // Observe the topology selected in Windows without changing it. Running
     // DisplaySwitch automatically can make Windows migrate third-party windows
     // (notably Chromium browsers) to another monitor.
@@ -3196,12 +3256,14 @@ function createWindows(): void {
     scheduleDisplayMetricsSync('display-added')
     // Windows may need a moment to publish stable bounds for a new display.
     setTimeout(() => {
+      if (topologyRevision !== displayTopologyRevision) return
       sendDisplays()
       prewarmPresentationWindow()
       scheduleDisplayMetricsSync('display-added-stable')
     }, 1500)
   })
   screen.on('display-removed', () => {
+    displayTopologyRevision++
     invalidateTaskbarVisibilityCache('display-removed')
     sendDisplays()
     scheduleDisplayMetricsSync('display-removed')
@@ -3235,18 +3297,37 @@ function createWindows(): void {
         closeAuxiliaryWindow(entry.role, displayId)
       }
     }
-    if (
-      screen.getAllDisplays().length < 2 &&
-      presentationWindow &&
-      !presentationWindow.isDestroyed()
-    ) {
+    if (screen.getAllDisplays().length < 2 && presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindowRequestedVisible = false
-      presentationWindow.setIgnoreMouseEvents(true)
-      diagnosticLog('window', 'presentation window closed: external display removed')
-      presentationWindow.close()
-      // Recreate only the hidden renderer on the primary display. CaptureHub
-      // remains available for USB-camera enumeration without blocking input.
-      setTimeout(() => prewarmPresentationWindow(), 250)
+      const preservedPresentationWindow = presentationWindow
+      const primaryDisplay = screen.getPrimaryDisplay()
+      presentationDisplayId = primaryDisplay.id
+      // Keep the exact renderer and MediaStream alive. Destroying the physical
+      // Program BrowserWindow makes Chromium tear down and reopen the USB
+      // camera; on some UVC drivers a monitor hot-plug leaves Media Foundation
+      // with no reservable capture buffers. A transparent, click-through move
+      // to the primary display preserves both the frame and the camera session.
+      preservedPresentationWindow.setIgnoreMouseEvents(true)
+      preservedPresentationWindow.setOpacity(0)
+      preservedPresentationWindow.setAlwaysOnTop(false)
+      const moveToPrimary = (): void => {
+        if (
+          preservedPresentationWindow.isDestroyed() ||
+          presentationWindow !== preservedPresentationWindow ||
+          screen.getAllDisplays().length > 1
+        ) return
+        try {
+          preservedPresentationWindow.setContentBounds(primaryDisplay.bounds)
+          if (!preservedPresentationWindow.isVisible()) preservedPresentationWindow.showInactive()
+          diagnosticLog(
+            'window',
+            `presentation renderer preserved after external display removal display=${primaryDisplay.id}`
+          )
+        } catch (error) {
+          diagnosticLog('window', `presentation renderer preserve failed ${formatDiagnosticError(error)}`)
+        }
+      }
+      moveToPrimary()
     }
   })
 
@@ -3410,6 +3491,13 @@ function createWindows(): void {
     if (!trustedPresentation && !trustedAuxiliary) {
       diagnosticLog('security', `blocked IPC channel=send-to-control/${String(channel).slice(0, 80)} wc=${event.sender.id}`)
       return
+    }
+    if (trustedPresentation && (
+      channel === 'presentation-content-ready' ||
+      channel === 'presentation-content-committed' ||
+      channel === 'program-scene-applied'
+    )) {
+      virtualCameraManager?.notifyProgramOutputReady()
     }
     if (trustedAuxiliary && channel === 'program-mirror-state-ready') {
       // The mirror renderer installs its listeners after did-finish-load, so
@@ -3606,7 +3694,7 @@ app.whenReady().then(() => {
     }
 
     const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
-    if (!display || display.isPrimary) return
+    if (!display || display.id === screen.getPrimaryDisplay().id) return
     let win = qrOverlayWindow
     let freshlyCreated = false
     if (!win || win.isDestroyed()) {
@@ -3762,7 +3850,7 @@ app.whenReady().then(() => {
     }
 
     const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
-    if (!display || display.isPrimary) return { success: false, error: 'Эфирный дисплей недоступен.' }
+    if (!display || display.id === screen.getPrimaryDisplay().id) return { success: false, error: 'Эфирный дисплей недоступен.' }
     let win = programSceneMediaOverlayWindow
     if (!win || win.isDestroyed()) {
       win = createProgramSceneMediaOverlayWindow(display)
@@ -4021,10 +4109,8 @@ app.whenReady().then(() => {
   }
   virtualCameraManager = new VirtualCameraManager(
     () => controlWindow,
-    () => presentationDisplayId,
     () => presentationWindow
   )
-  createWindows()
   ipcMain.handle('direct-stream-deck-list', (event) => {
     if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return []
     return directStreamDeckManager.listDevices()
@@ -4049,6 +4135,11 @@ app.whenReady().then(() => {
     if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return
     if (Array.isArray(states)) directStreamDeckManager.updateKeys(states)
   })
+  // Register the direct-device IPC before loading the operator renderer. The
+  // bridge configures Stream Deck from localStorage in its first React effect;
+  // if the renderer wins this startup race, the one-shot configure request is
+  // otherwise rejected and hot-plug recovery never becomes armed.
+  createWindows()
   prewarmPresentationWindow()
   pptDaemon.warmup()
   nativeWindowDaemon.warmup()

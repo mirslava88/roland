@@ -58,6 +58,8 @@ export function FileLibrary(): JSX.Element {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; file?: FileEntry; folderPath?: string; folderName?: string } | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const folderLoadRevision = useRef(0)
+  useEffect(() => () => { folderLoadRevision.current++ }, [])
 
   // Load drives on mount and periodically
   useEffect(() => {
@@ -77,7 +79,9 @@ export function FileLibrary(): JSX.Element {
   useEffect(() => {
     const fp = useAppStore.getState().folderPath
     if (!fp) return
+    const revision = ++folderLoadRevision.current
     window.api.loadFolder(fp).then((result) => {
+      if (revision !== folderLoadRevision.current || useAppStore.getState().folderPath !== fp) return
       useAppStore.getState().setFiles(result.files)
       useAppStore.getState().setSubfolders(result.subfolders)
     }).catch(() => { /* ignore — folder may have been deleted */ })
@@ -94,7 +98,9 @@ export function FileLibrary(): JSX.Element {
       // Только если изменилась активно открытая папка
       const cur = useAppStore.getState().folderPath
       if (changedPath !== cur) return
+      const revision = ++folderLoadRevision.current
       window.api.loadFolder(cur).then((result) => {
+        if (revision !== folderLoadRevision.current || useAppStore.getState().folderPath !== cur) return
         useAppStore.getState().setFiles(result.files)
         useAppStore.getState().setSubfolders(result.subfolders)
       }).catch(() => { /* ignore */ })
@@ -108,7 +114,9 @@ export function FileLibrary(): JSX.Element {
     // Always read fresh folderPath from store (not from closure which can be stale)
     const currentPath = useAppStore.getState().folderPath
     if (!currentPath) return
+    const revision = ++folderLoadRevision.current
     const result = await window.api.loadFolder(currentPath)
+    if (revision !== folderLoadRevision.current || useAppStore.getState().folderPath !== currentPath) return
     useAppStore.getState().setFiles(result.files)
     useAppStore.getState().setSubfolders(result.subfolders)
   }
@@ -231,8 +239,10 @@ export function FileLibrary(): JSX.Element {
   }
 
   const navigateToPath = async (path: string): Promise<void> => {
+    const revision = ++folderLoadRevision.current
     setFolderPath(path)
     const result = await window.api.loadFolder(path)
+    if (revision !== folderLoadRevision.current || useAppStore.getState().folderPath !== path) return
     setFiles(result.files)
     setSubfolders(result.subfolders)
   }

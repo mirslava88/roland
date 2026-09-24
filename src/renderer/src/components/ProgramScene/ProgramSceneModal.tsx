@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { mediaUrl } from '../../media'
+import { acquireOutputTransition } from '../../output-transition-lock'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { CaptureThumbnail } from '../Capture/CaptureThumbnail'
 import { normalizeProgramSceneAudio, type ProgramSceneAudioStatus } from '../../../../shared/program-scene-audio'
@@ -50,6 +51,10 @@ interface Props {
   onClose: () => void
   initialEditor?: 'qr'
 }
+
+// Publication belongs to the output, not the lifetime of the settings dialog.
+// Closing/reopening the editor must not leave an enabled draft without a snapshot.
+let scenePublicationGeneration = 0
 
 type CanvasSelection =
   | { kind: 'text'; id: string }
@@ -883,89 +888,114 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   }
 
   const publishSceneDraft = async (enableScene = false): Promise<void> => {
-    const previousSnapshot = useAppStore.getState().programSnapshot
-    setProgramScene({
-      ...(enableScene ? { enabled: true, viewMode: 'both' as const } : {}),
-      contentChannelId: previewChannelId,
-      textOverlays: textOverlayDraft,
-      mediaLayers: mediaLayerDraft,
-      // The master publication owns every draft layer, including newly added
-      // objects on refresh. There are no separate output switches to enable.
-      textOverlaysVisible: textOverlayDraft.some((overlay) => overlay.visible !== false),
-      mediaLayersVisible: mediaLayerDraft.some((layer) => layer.visible)
+    const generation = ++scenePublicationGeneration
+    let cancelled = false
+    const cancel = (): void => { cancelled = true }
+    window.addEventListener('close-program-output', cancel)
+    const unsubscribe = useAppStore.subscribe((next, previous) => {
+      if (previous.programScene.enabled && !next.programScene.enabled) cancel()
     })
-    const currentQr = useAppStore.getState().qrOverlay
-    const nextQr = currentQr.sceneVisible !== false && hasQrData(currentQr)
-      ? normalizeQrOverlay({ ...currentQr, enabled: true })
-      : currentQr
-    const state = useAppStore.getState()
-    const channelToTake = previewChannelId || (
-      enableScene && !state.activeFile ? state.selectedChannel : null
-    )
-    const channelFile = channelToTake ? state.channels[channelToTake]?.file : null
-    if (channelToTake && channelFile && (
-      state.liveChannel !== channelToTake ||
-      state.activeFile?.path !== channelFile.path ||
-      state.currentSlide !== state.channels[channelToTake]?.slide
-    )) {
-      const takeCompleted = new Promise<void>((resolve) => {
-        let timeout: ReturnType<typeof setTimeout> | undefined
-        const listener = (event: Event): void => {
-          const detail = (event as CustomEvent<{ channelId?: string }>).detail
-          if (detail?.channelId !== channelToTake) return
-          window.removeEventListener('take-channel-completed', listener)
-          if (timeout) clearTimeout(timeout)
-          resolve()
-        }
-        window.addEventListener('take-channel-completed', listener)
-        timeout = setTimeout(() => {
-          window.removeEventListener('take-channel-completed', listener)
-          resolve()
-        }, 30_000)
+    const current = (): boolean => !cancelled && generation === scenePublicationGeneration && useAppStore.getState().programScene.enabled
+    try {
+      const previousSnapshot = useAppStore.getState().programSnapshot
+      setProgramScene({
+        ...(enableScene ? { enabled: true, viewMode: 'both' as const } : {}),
+        contentChannelId: previewChannelId,
+        textOverlays: textOverlayDraft,
+        mediaLayers: mediaLayerDraft,
+        // The master publication owns every draft layer, including newly added
+        // objects on refresh. There are no separate output switches to enable.
+        textOverlaysVisible: textOverlayDraft.some((overlay) => overlay.visible !== false),
+        mediaLayersVisible: mediaLayerDraft.some((layer) => layer.visible)
       })
-      window.dispatchEvent(new CustomEvent('take-channel', { detail: channelToTake }))
-      await takeCompleted
-      const committed = useAppStore.getState()
-      if (committed.liveChannel !== channelToTake || committed.activeFile?.path !== channelFile.path) {
-        if (!previousSnapshot) committed.setProgramScene({ enabled: false })
-        committed.failProgramSnapshot(
-          committed.programOutputStatus.desiredRevision,
-          'Выбранный канал не был подтверждён реальным выходом.'
-        )
-        window.alert('Канал не удалось вывести. Сцена не опубликована.')
-        return
+      const currentQr = useAppStore.getState().qrOverlay
+      const nextQr = currentQr.sceneVisible !== false && hasQrData(currentQr)
+        ? normalizeQrOverlay({ ...currentQr, enabled: true })
+        : currentQr
+      const state = useAppStore.getState()
+      const channelToTake = previewChannelId || (
+        enableScene && !state.activeFile ? state.selectedChannel : null
+      )
+      const channelFile = channelToTake ? state.channels[channelToTake]?.file : null
+      if (channelToTake && channelFile && (
+        state.liveChannel !== channelToTake ||
+        state.activeFile?.path !== channelFile.path ||
+        state.currentSlide !== state.channels[channelToTake]?.slide
+      )) {
+        const takeCompleted = new Promise<void>((resolve) => {
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          const listener = (event: Event): void => {
+            const detail = (event as CustomEvent<{ channelId?: string }>).detail
+            if (detail?.channelId !== channelToTake) return
+            window.removeEventListener('take-channel-completed', listener)
+            if (timeout) clearTimeout(timeout)
+            resolve()
+          }
+          window.addEventListener('take-channel-completed', listener)
+          timeout = setTimeout(() => {
+            window.removeEventListener('take-channel-completed', listener)
+            resolve()
+          }, 30_000)
+        })
+        window.dispatchEvent(new CustomEvent('take-channel', { detail: channelToTake }))
+        await takeCompleted
+        if (!current()) return
+        const committed = useAppStore.getState()
+        if (committed.liveChannel !== channelToTake || committed.activeFile?.path !== channelFile.path) {
+          if (!previousSnapshot) committed.setProgramScene({ enabled: false })
+          committed.failProgramSnapshot(
+            committed.programOutputStatus.desiredRevision,
+            'Выбранный канал не был подтверждён реальным выходом.'
+          )
+          window.alert('Канал не удалось вывести. Сцена не опубликована.')
+          return
+        }
       }
-    } else if (enableScene && !state.activeFile && !state.isPresentationWindowOpen) {
-      const programDisplayId = connectedProgramDisplayId(state)
-      if (programDisplayId !== null) {
-        await window.api.openPresentationWindow(programDisplayId)
-        state.setPresentationWindowOpen(true)
-        window.api.setActiveContentType('backdrop')
-      } else if (state.internalProgramOutputActive) {
-        await window.api.prepareInternalProgramOutput()
-        state.setPresentationWindowOpen(true)
-        window.api.setActiveContentType('backdrop')
-      }
+      const release = await acquireOutputTransition('scene-publication')
+      try {
+        if (!current()) return
+        const latest = useAppStore.getState()
+        if (channelToTake && channelFile && (latest.liveChannel !== channelToTake || latest.activeFile?.path !== channelFile.path)) return
+        if (enableScene && !latest.activeFile && !latest.isPresentationWindowOpen) {
+          const programDisplayId = connectedProgramDisplayId(state)
+          if (programDisplayId !== null) {
+            await window.api.openPresentationWindow(programDisplayId)
+            if (!current()) return
+            state.setPresentationWindowOpen(true)
+            window.api.setActiveContentType('backdrop')
+          } else if (state.internalProgramOutputActive) {
+            await window.api.prepareInternalProgramOutput()
+            if (!current()) return
+            state.setPresentationWindowOpen(true)
+            window.api.setActiveContentType('backdrop')
+          }
+        }
+        const revision = useAppStore.getState().publishProgramSnapshot(channelToTake, {
+          scene: state.programScene,
+          backdropImage: state.backdropImage,
+          qrOverlay: nextQr,
+          timer: {
+            duration: Math.max(0, timerTimeDraft.duration),
+            remaining: timerTimeDraft.remaining,
+            running: timerTimeDraft.running && timerTimeDraft.duration > 0,
+            visible: timerTimeDraft.duration > 0,
+            position: { ...timerOverlayDraft.position },
+            scale: timerOverlayDraft.scale,
+            textColor: timerOverlayDraft.textColor,
+            warningTextColor: timerOverlayDraft.warningTextColor,
+            overtimeTextColor: timerOverlayDraft.overtimeTextColor,
+            textOpacity: timerOverlayDraft.textOpacity
+          }
+        })
+        setTimerDraftDirty(false)
+        setTimerTimeDraftDirty(false)
+        await publishQrOverlay(nextQr, () => current() && isQrEditorOutputOwned())
+        window.api.dbgLog(`program snapshot published revision=${revision} channel=${channelToTake ?? 'none'}`)
+      } finally { release() }
+    } finally {
+      unsubscribe()
+      window.removeEventListener('close-program-output', cancel)
     }
-    const revision = useAppStore.getState().publishProgramSnapshot(channelToTake, {
-      qrOverlay: nextQr,
-      timer: {
-        duration: Math.max(0, timerTimeDraft.duration),
-        remaining: timerTimeDraft.remaining,
-        running: timerTimeDraft.running && timerTimeDraft.duration > 0,
-        visible: timerTimeDraft.duration > 0,
-        position: { ...timerOverlayDraft.position },
-        scale: timerOverlayDraft.scale,
-        textColor: timerOverlayDraft.textColor,
-        warningTextColor: timerOverlayDraft.warningTextColor,
-        overtimeTextColor: timerOverlayDraft.overtimeTextColor,
-        textOpacity: timerOverlayDraft.textOpacity
-      }
-    })
-    setTimerDraftDirty(false)
-    setTimerTimeDraftDirty(false)
-    await publishQrOverlay(nextQr, () => isQrEditorOutputOwned())
-    window.api.dbgLog(`program snapshot published revision=${revision} channel=${channelToTake ?? 'none'}`)
   }
 
   const setPictureVisible = async (pressed: boolean): Promise<void> => {
@@ -1930,9 +1960,10 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
                 <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Текст</div>
                 <button type="button" data-scene-object-action="hide"
                   onClick={() => {
-                    if (sceneContextMenu.target.kind === 'text') {
+                    const target = sceneContextMenu.target
+                    if (target.kind === 'text') {
                       updateTextOverlays(textOverlayDraft.map((overlay) => (
-                        overlay.id === sceneContextMenu.target.id ? { ...overlay, visible: false } : overlay
+                        overlay.id === target.id ? { ...overlay, visible: false } : overlay
                       )))
                     }
                     setCanvasSelection(null)

@@ -364,9 +364,13 @@ export async function setDisplayAssignmentWithProgramRouting(
       const state = useAppStore.getState()
       const liveChannelId = state.liveChannel
       const liveFile = liveChannelId ? state.channels[liveChannelId]?.file : null
-      if (!liveChannelId || (liveFile?.type !== 'presentation' && liveFile?.type !== 'pdf')) return
+      if (!liveChannelId || (
+        liveFile?.type !== 'presentation' &&
+        liveFile?.type !== 'pdf' &&
+        liveFile?.type !== 'capture'
+      )) return
       window.api.dbgLog(
-        `presentation route refresh requested channel=${liveChannelId} ` +
+        `program route refresh requested channel=${liveChannelId} type=${liveFile.type} ` +
         `speakerOnly=${isSpeakerOnlyDisplayRouting(state)} display=${displayId}`
       )
       window.dispatchEvent(new CustomEvent('presentation-route-refresh-needed', {

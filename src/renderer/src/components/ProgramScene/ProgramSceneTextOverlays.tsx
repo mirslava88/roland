@@ -149,7 +149,7 @@ export function ProgramSceneTextOverlayLayer({
       if (distance < 4) return
       drag.active = true
       const editor = event.currentTarget.querySelector<HTMLElement>('[data-program-scene-inline-text]')
-      if (document.activeElement === editor) editor.blur()
+      if (editor && document.activeElement === editor) editor.blur()
       window.getSelection()?.removeAllRanges()
       try {
         event.currentTarget.setPointerCapture(event.pointerId)

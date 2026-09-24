@@ -101,6 +101,27 @@ assert.match(captureHub, /displayMode === 'scene' \? 4/)
 assert.match(captureHub, /displayMode === 'background' \? 3/)
 assert.match(captureHub, /displayMode === 'background'[\s\S]*?backgroundSceneStyle/)
 assert.match(captureHub, /displayMode === 'background'[\s\S]*?object-cover/)
+assert.match(captureHub, /handleOpenError\(error, attempt\)/,
+  'camera open errors must retain the identity of their originating attempt')
+assert.match(captureHub, /function handleOpenError[\s\S]*?if \(isStaleOpen\(attempt\)\) return/,
+  'cancelled camera attempts must not overwrite a newer working stream')
+assert.match(captureHub, /deviceChangeTimer[\s\S]*?setTimeout\([\s\S]*?750\)/,
+  'bursts of Windows devicechange events must be coalesced')
+assert.match(captureHub, /const broken = status === 'error'[\s\S]*?wasAvailable === false \|\| broken/,
+  'devicechange must reconnect only a returned or already broken source')
+assert.match(captureHub, /deviceRevision=\{deviceRevisions\[config\.sourceId\] \?\? 0\}/,
+  'USB recovery revisions must be scoped to the affected source')
+assert.match(captureHub, /frameStallWatchdogRef[\s\S]*?stalledForMs < 4_500[\s\S]*?beginOpen\(true\)/,
+  'a camera which stays logically live but stops producing frames must reconnect itself')
+assert.match(captureHub, /capture-source-reconnect[\s\S]*?explicit reconnect source=/,
+  'the output must support an explicit operator-requested camera reconnect')
+assert.match(captureHub, /getUserMediaWithTimeout\([\s\S]*?10_000[\s\S]*?Камера не ответила за 10 секунд/,
+  'a camera driver which hangs inside getUserMedia must time out instead of connecting forever')
+assert.match(captureHub, /video\.pause\(\)[\s\S]*?video\.srcObject = null[\s\S]*?setTimeout\(resolve, 650\)/,
+  'camera reconnect must release the old Media Foundation stream before reopening it')
+const captureSourcesPanel = readFileSync('src/renderer/src/components/Capture/CaptureSourcesPanel.tsx', 'utf8')
+assert.match(captureSourcesPanel, /existing && !existing\.sceneOnly[\s\S]*?state\?\.status !== 'ready'[\s\S]*?capture-source-reconnect/,
+  'selecting a broken existing USB camera must reconnect it without tearing down a healthy stream')
 const backgroundLayer = readFileSync('src/renderer/src/components/ProgramScene/ProgramSceneBackgroundLayer.tsx', 'utf8')
 assert.match(backgroundLayer, /data-program-scene-key-fill/)
 assert.match(backgroundLayer, /style=\{\{ \.\.\.style, zIndex: 3 \}\}/)
@@ -231,6 +252,8 @@ assert.match(sceneBridge, /externalMediaOverlayActive = active && programScene.m
 assert.doesNotMatch(sceneBridge, /nativeContentActive && targetDisplayId/)
 assert.doesNotMatch(sceneBridge, /programScene\.enabled && !!selectedCapture/)
 assert.match(sceneBridge, /!!programSnapshot && programScene\.enabled/)
+assert.match(sceneBridge, /captureRegistrationSignatureRef[\s\S]*?forceCaptureRegistration[\s\S]*?program-scene-ready[\s\S]*?sendState\(true\)/,
+  'timer ticks must not repeatedly register an unchanged camera, while a recreated output can force registration')
 assert.doesNotMatch(sceneBridge, /programScene\.enabled && !!background/)
 assert.doesNotMatch(presentation, /active:\s*raw\?\.active === true && !!capture/)
 for (const path of [

@@ -10,6 +10,7 @@
   "description": "Cross-platform app for seamless switching between presentations, videos, and PDFs on a secondary display",
   "main": "./out/main/index.js",
   "scripts": {
+    "typecheck": "node scripts/typecheck.mjs",
     "test:critical": "node scripts/test-critical.mjs all",
     "test:critical:core": "node scripts/test-critical.mjs core",
     "test:critical:ui": "node scripts/test-critical.mjs ui",
@@ -32,7 +33,7 @@
     "build:virtual-camera": "node scripts/build-native-virtual-camera.mjs",
     "clean:out": "node scripts/clean-build-output.mjs",
     "clean:package": "node scripts/clean-build-output.mjs --package",
-    "prebuild": "npm run clean:out",
+    "prebuild": "npm run typecheck && npm run clean:out",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",

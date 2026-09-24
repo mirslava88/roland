@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   captureSourceIdentity,
   DEFAULT_BROADCAST_TITLES_OUTPUT,
+  hasBroadcastEventContent,
   useAppStore,
   ChannelState,
   ChannelId,
@@ -685,7 +686,7 @@ export function PreviewPanel(): JSX.Element {
 
   const handleTake = async (
     ch: ChannelId,
-    options: { videoAutoplay?: boolean } = {}
+    options: { videoAutoplay?: boolean; nativeRecovery?: boolean } = {}
   ): Promise<void> => {
     const freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
@@ -756,7 +757,7 @@ export function PreviewPanel(): JSX.Element {
       !isSameFilePptx &&
       !hasPowerPointStartedRef.current &&
       pptxCacheStatuses[file.path] !== 'ready'
-    const message = isUnpreparedPowerPointStart
+    const message = options.nativeRecovery ? 'Восстанавливаем презентацию после завершения PowerPoint…' : isUnpreparedPowerPointStart
       ? 'Ожидайте, презентация открывается...'
       : file.type === 'video'
         ? 'Ожидайте, видеоролик открывается...'
@@ -779,6 +780,17 @@ export function PreviewPanel(): JSX.Element {
     try {
       beginNavigationTransition()
       setTakeProgress({ channelId: ch, message })
+      if (options.nativeRecovery) {
+        const latest = useAppStore.getState()
+        const frame = latest.pptxSlidesMap[file.path]?.[Math.max(0, latest.currentSlide - 1)]
+        const displayId = connectedProgramDisplayId(latest)
+        if (frame && displayId !== null && !latest.programSnapshot) {
+          // Do not freeze Explorer after an Office crash. Hold the prepared
+          // current slide while the normal OPEN/COMMIT transaction recovers.
+          await window.api.showOverlay(displayId, undefined, frame, 'cover')
+          setOverlayState({ kind: 'pinned-pptx', pptxPath: file.path })
+        }
+      }
       await doTake(ch, takeId, takeGeneration, options.videoAutoplay ? {
         channel: freshState.channels[ch],
         liveChannel: ch,
@@ -848,8 +860,11 @@ export function PreviewPanel(): JSX.Element {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
     const programDisplayId = connectedProgramDisplayId(freshState)
-    let channel = adHoc?.channel ?? freshState.channels[ch]
-    if (!channel?.file) return
+    const requestedChannel = adHoc?.channel ?? freshState.channels[ch]
+    if (!requestedChannel?.file) return
+    // Keep the validated TAKE snapshot non-null, including after resolving a
+    // deferred capture source. Store replacements are checked separately below.
+    let channel: ChannelState & { file: FileEntry } = { ...requestedChannel, file: requestedChannel.file }
 
     // Save previous active file before overwriting
     const prevActiveFile = freshState.activeFile
@@ -1158,7 +1173,7 @@ export function PreviewPanel(): JSX.Element {
       let slideCount = cacheResult.slideCount || slideFrames.length || channel.totalSlides
       if (channel.file.type === 'pdf' && slideCount < 1) {
         try {
-          const loadingTask = pdfjsLib.getDocument(mediaUrl(channel.file.path))
+          const loadingTask = pdfjsLib.getDocument({ url: mediaUrl(channel.file.path) })
           const document = await loadingTask.promise
           slideCount = document.numPages
           await loadingTask.destroy()
@@ -1855,6 +1870,56 @@ export function PreviewPanel(): JSX.Element {
         }
       }
 
+      // A virtual camera/stream that fell back to the internal compositor can
+      // remain active after the physical Program display returns. Native
+      // PowerPoint is already ready above the physical output, but that native
+      // HWND is not part of capturePage(). Paint the matching cached slide into
+      // the preserved Chromium surface before releasing the outgoing PDF/video
+      // so simultaneous VKS output never sees an empty frame.
+      let internalPptxFramePainted = false
+      const internalOutputState = useAppStore.getState()
+      if (internalOutputState.internalProgramOutputActive) {
+        const frames = internalOutputState.pptxSlidesMap[channel.file.path] ||
+          internalOutputState.pptxThumbnailsMap[channel.file.path] || []
+        const targetSlide = Math.max(1, internalOutputState.currentSlide)
+        const framePath = frames[targetSlide - 1]
+        if (framePath) {
+          await window.api.prepareInternalProgramOutput()
+          const internalTakeId = `${takeId}-internal-pptx`
+          const painted = new Promise<boolean>((resolve) => {
+            let settled = false
+            let timeout: ReturnType<typeof setTimeout> | undefined
+            let unsubscribe = (): void => {}
+            const finish = (ready: boolean): void => {
+              if (settled) return
+              settled = true
+              if (timeout) clearTimeout(timeout)
+              unsubscribe()
+              resolve(ready)
+            }
+            unsubscribe = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+              const payload = args[0] as { takeId?: string } | undefined
+              if (payload?.takeId === internalTakeId) finish(true)
+            })
+            timeout = setTimeout(() => finish(false), 8_000)
+          })
+          window.api.sendToPresentation('load-content', {
+            type: 'other',
+            path: framePath,
+            name: channel.file.name,
+            isImage: true,
+            takeId: internalTakeId
+          })
+          internalPptxFramePainted = await painted
+          log(
+            `internal PPTX first frame ${internalPptxFramePainted ? 'painted' : 'timeout'} ` +
+            `before outgoing Electron content release slide=${targetSlide}`
+          )
+        } else {
+          log(`internal PPTX first frame unavailable before release slide=${targetSlide}`)
+        }
+      }
+
       // NOW close the Electron presentation window — PowerPoint slideshow is already visible
       // ВСЕГДА закрываем при переходе на PPTX (даже если флаг isPresentationWindowOpen
       // не синхрон с реальностью — например после PDF→PPTX без переоткрытия,
@@ -1870,7 +1935,9 @@ export function PreviewPanel(): JSX.Element {
         // PowerPoint is fully painted and still covered. Drop the old
         // PDF/video/capture layer now; keeping the empty renderer warm retains
         // fast window activation without retaining the old document/decoder.
-        if (programSceneActive) {
+        if (internalPptxFramePainted) {
+          log('internal PPTX frame retained for simultaneous stream/virtual-camera output')
+        } else if (programSceneActive) {
           const oldContentCleared = new Promise<boolean>((resolve) => {
             let settled = false
             let timeout: ReturnType<typeof setTimeout> | undefined
@@ -2580,7 +2647,7 @@ export function PreviewPanel(): JSX.Element {
     const revealWarmOutputAfterPaint =
       !outputWindowWasOpen && prevActiveFile?.type === 'presentation'
     if (!outputWindowWasOpen && !revealWarmOutputAfterPaint) {
-      await window.api.openPresentationWindow(programDisplayId)
+      await window.api.openPresentationWindow(programDisplayId ?? undefined)
       setPresentationWindowOpen(true)
     }
     if (isTakeCancelled()) {
@@ -2842,7 +2909,10 @@ export function PreviewPanel(): JSX.Element {
       return
     }
     if (deferPowerPointCloseUntilTargetReady) {
-      const closed = await window.api.powerpointCommand('close')
+      const closed = await window.api.powerpointCommand(
+        'close',
+        channel.file.type === 'pdf' ? { keepHostWarm: true } : undefined
+      )
       if (!closed.success) {
         log(`PowerPoint close failed; prepared target discarded: ${closed.error || 'unknown error'}`)
         window.api.sendToPresentation('clear-active-content')
@@ -2903,7 +2973,7 @@ export function PreviewPanel(): JSX.Element {
   }
 
   useEffect(() => window.api.on('powerpoint-output-recovery-needed', (...args: unknown[]) => {
-    const request = args[0] as { displayId?: number } | undefined
+    const request = args[0] as { displayId?: number; filePath?: string; reason?: string; retryAllowed?: boolean } | undefined
     const state = useAppStore.getState()
     const liveChannelId = state.liveChannel
     const liveFile = liveChannelId ? state.channels[liveChannelId]?.file : null
@@ -2912,6 +2982,12 @@ export function PreviewPanel(): JSX.Element {
       (request?.displayId === undefined || display.id === request.displayId)
     ))
     if (!targetConnected || !liveChannelId || liveFile?.type !== 'presentation') return
+    if (request?.filePath && state.activeFile?.path !== request.filePath) return
+    if (request?.filePath && liveFile.path !== request.filePath) return
+    if (request?.retryAllowed === false) {
+      setTakeProgress({ channelId: liveChannelId, message: 'PowerPoint повторно завершился. Повторите вывод презентации или используйте PDF.' })
+      return
+    }
     if (takeInFlightRef.current) {
       window.api.dbgLog(
         `PowerPoint display recovery skipped: TAKE already active channel=${takeInFlightRef.current}`
@@ -2925,7 +3001,7 @@ export function PreviewPanel(): JSX.Element {
     window.api.dbgLog(
       `PowerPoint display recovery BEGIN channel=${liveChannelId} display=${request?.displayId ?? '-'}`
     )
-    void handleTake(liveChannelId)
+    void handleTake(liveChannelId, { nativeRecovery: request?.reason === 'native-process-exited' })
   }), [])
 
   useEffect(() => {
@@ -2937,9 +3013,22 @@ export function PreviewPanel(): JSX.Element {
       const state = useAppStore.getState()
       const liveChannelId = state.liveChannel
       const liveFile = liveChannelId ? state.channels[liveChannelId]?.file : null
-      if (!liveChannelId || (liveFile?.type !== 'presentation' && liveFile?.type !== 'pdf')) return
+      if (!liveChannelId || (
+        liveFile?.type !== 'presentation' &&
+        liveFile?.type !== 'pdf' &&
+        liveFile?.type !== 'capture'
+      )) return
+      if (detail?.displayId !== undefined) {
+        // Main keeps the renderer alive but makes its HWND transparent when
+        // the physical Program monitor disappears. The Zustand flag still
+        // describes the previous visible route, so a reconnect TAKE would
+        // otherwise prepare the right frame without calling
+        // openPresentationWindow() to reveal it on the returned display.
+        useAppStore.setState({ isPresentationWindowOpen: false })
+        window.api.dbgLog(`physical Program output requires reveal display=${detail.displayId}`)
+      }
       window.api.dbgLog(
-        `presentation route refresh BEGIN channel=${liveChannelId} ` +
+        `program route refresh BEGIN channel=${liveChannelId} type=${liveFile.type} ` +
         `speakerOnly=${detail?.speakerOnly === true} display=${detail?.displayId ?? '-'}`
       )
       void handleTake(liveChannelId)
@@ -3472,7 +3561,7 @@ function ChannelPanel({
 
   const publishEventTitle = (sourceIdentity: string): void => {
     const titles = useAppStore.getState().broadcastTitles
-    if (!titles.eventInfo.trim()) return
+    if (!hasBroadcastEventContent(titles)) return
     setCaptureTitlesOutput(sourceIdentity, {
       eventLabel: titles.eventLabel,
       eventInfo: titles.eventInfo,
@@ -3521,7 +3610,7 @@ function ChannelPanel({
   const publishChannelEvent = (): void => {
     const sourceIdentity = titlesMenu?.sourceIdentity
     setTitlesMenu(null)
-    if (!broadcastTitles.eventInfo.trim()) return
+    if (!hasBroadcastEventContent(broadcastTitles)) return
     if (sourceIdentity) publishEventTitle(sourceIdentity)
   }
 
@@ -3530,7 +3619,7 @@ function ChannelPanel({
     const speaker = broadcastTitles.speakers.find((item) => item.id === speakerId)
     setTitlesMenu(null)
     setShowAllSpeakerPicker(false)
-    if (!sourceIdentity || !speaker?.name.trim() || !broadcastTitles.eventInfo.trim()) return
+    if (!sourceIdentity || !speaker?.name.trim() || !hasBroadcastEventContent(broadcastTitles)) return
     setBroadcastTitles({ selectedSpeakerId: speakerId })
     publishSpeaker(sourceIdentity, speakerId)
     publishEventTitle(sourceIdentity)
@@ -3980,7 +4069,7 @@ function ChannelPanel({
               <button
                 data-channel-show-all-titles
                 type="button"
-                disabled={!broadcastTitles.speakers.some((speaker) => speaker.name.trim()) || !broadcastTitles.eventInfo.trim()}
+                disabled={!broadcastTitles.speakers.some((speaker) => speaker.name.trim()) || !hasBroadcastEventContent(broadcastTitles)}
                 onClick={() => setShowAllSpeakerPicker((visible) => !visible)}
                 className="flex w-full items-center gap-2 rounded-lg bg-blue-700 px-2.5 py-2 text-left text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-gray-800 disabled:text-gray-600"
                 title="Выбрать выступающего и одновременно показать его титр с информацией о мероприятии"
@@ -4025,7 +4114,7 @@ function ChannelPanel({
               </div>
               <button
                 type="button"
-                disabled={!broadcastTitles.eventInfo.trim()}
+                disabled={!hasBroadcastEventContent(broadcastTitles)}
                 onClick={publishChannelEvent}
                 className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
                   titlesMenuOutput.eventVisible ? 'bg-emerald-900/40' : 'hover:bg-gray-700/70'
@@ -4037,7 +4126,11 @@ function ChannelPanel({
                     {broadcastTitles.eventLabel.trim() || 'Без заголовка'}
                   </span>
                   <span className="block truncate text-[10px] text-gray-500">
-                    {broadcastTitles.eventInfo.trim() || 'Заполните информацию через кнопку «▰ Титры»'}
+                    {broadcastTitles.eventInfo.trim() || (
+                      broadcastTitles.eventLabel.trim()
+                        ? 'Только заголовок'
+                        : 'Заполните информацию через кнопку «▰ Титры»'
+                    )}
                   </span>
                 </span>
                 {titlesMenuOutput.eventVisible && <span className="text-[8px] font-semibold text-red-300">ВКЛ</span>}
@@ -4048,7 +4141,7 @@ function ChannelPanel({
                   onClick={() => {
                     const sourceIdentity = titlesMenu.sourceIdentity
                     setTitlesMenu(null)
-                    setCaptureTitlesOutput(sourceIdentity, { eventVisible: false })
+                    if (sourceIdentity) setCaptureTitlesOutput(sourceIdentity, { eventVisible: false })
                   }}
                   className="mt-1 w-full rounded-md px-2.5 py-1.5 text-left text-[10px] font-medium text-red-300 hover:bg-red-950/40"
                 >
@@ -4101,7 +4194,7 @@ function ChannelPanel({
                 onClick={() => {
                   const sourceIdentity = titlesMenu.sourceIdentity
                   setTitlesMenu(null)
-                  setCaptureTitlesOutput(sourceIdentity, { speakerVisible: false })
+                  if (sourceIdentity) setCaptureTitlesOutput(sourceIdentity, { speakerVisible: false })
                 }}
                 className="w-full border-t border-gray-700 px-3 py-2.5 text-left text-[11px] font-medium text-red-300 hover:bg-red-950/40"
               >
