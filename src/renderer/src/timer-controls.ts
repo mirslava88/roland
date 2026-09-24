@@ -39,6 +39,15 @@ export function shouldShowTimerOnProgram(route: ProgramTimerRoute): boolean {
   )
 }
 
+/** A physical Program display already receives the native timer overlay. */
+export function shouldRenderTimerInProgramRenderer(
+  internalProgramOutputActive: boolean,
+  physicalProgramDisplayId: number | null,
+  timerTargetsProgram: boolean
+): boolean {
+  return internalProgramOutputActive && physicalProgramDisplayId === null && timerTargetsProgram
+}
+
 /** Pure transition used by toolbar, Scene and Stream Deck timer commands. */
 export function reduceTimerCommand(model: TimerCommandModel, command: TimerCommand): TimerCommandModel {
   if (command.type === 'apply-state') {

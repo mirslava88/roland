@@ -88,6 +88,22 @@ export function QrOverlayBridge(): null {
     )
   }, [config, internalProgramOutputActive, programSnapshot?.revision])
 
+  const sendMirrorQrOverlay = useCallback((): void => {
+    window.api.sendToAuxiliary(
+      'mirror',
+      'mirror-qr-overlay',
+      config.enabled && hasQrData(config) && (activeFile !== null || isPresentationWindowOpen)
+        ? { ...config, enabled: true }
+        : null
+    )
+  }, [activeFile, config, isPresentationWindowOpen])
+
+  useEffect(sendMirrorQrOverlay, [sendMirrorQrOverlay])
+  useEffect(
+    () => window.api.on('program-mirror-state-ready', sendMirrorQrOverlay),
+    [sendMirrorQrOverlay]
+  )
+
   useEffect(sendRendererQrOverlay, [sendRendererQrOverlay])
   // A hot-unplug replaces the hidden Presentation Output renderer. Replay QR
   // after that renderer has installed its listeners instead of relying on the

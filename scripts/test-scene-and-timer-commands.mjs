@@ -8,7 +8,7 @@ async function moduleFrom(path) {
 }
 
 const { resolveProgramSceneChannel } = await moduleFrom('src/renderer/src/program-scene-channel.ts')
-const { reduceTimerCommand, shouldShowTimerOnProgram } = await moduleFrom('src/renderer/src/timer-controls.ts')
+const { reduceTimerCommand, shouldRenderTimerInProgramRenderer, shouldShowTimerOnProgram } = await moduleFrom('src/renderer/src/timer-controls.ts')
 const { selectProgramSnapshotTimer } = await moduleFrom('src/renderer/src/program-snapshot-timer.ts')
 
 const channels = {
@@ -52,6 +52,15 @@ assert.equal(timer.duration, 300, '+/- minutes must not change the Reset baselin
 assert.equal(timer.remaining, -300)
 assert.equal(timer.outputVisible, true, 'overtime after subtraction must remain visible')
 assert.equal(timer.outputOwner, 'scene')
+
+assert.equal(shouldRenderTimerInProgramRenderer(true, null, true), true,
+  'without a physical Program display the internal output must draw the timer')
+assert.equal(shouldRenderTimerInProgramRenderer(true, 42, true), false,
+  'with a physical Program display the native timer must be the only visible timer')
+assert.equal(shouldRenderTimerInProgramRenderer(false, null, true), false,
+  'an inactive internal output must not draw a timer')
+assert.equal(shouldRenderTimerInProgramRenderer(true, null, false), false,
+  'a timer routed to its own display must not leak into Program')
 
 const unsetTimer = { ...base, duration: 0, remaining: 0 }
 assert.equal(
@@ -205,8 +214,8 @@ assert.doesNotMatch(sceneTimerLayer, /rgba\(60, 0, 0|rgba\(60, 20, 0|rgba\(0, 0,
   'the Scene and internal Program timer must not restore an obsolete backing plate')
 assert.match(sceneModal, /timerOutputWidth[\s\S]*timerOutputHeight[\s\S]*dpiScale=\{timerDpiScale\}/,
   'the Scene preview must account for physical Program dimensions and the native timer DPI')
-assert.match(sceneBridge, /shouldShowTimerOnProgram[\s\S]*internalProgramOutputActive && timerTargetsProgram[\s\S]*timerOverlayPosition[\s\S]*timerTextOpacity/,
-  'the internal Program output must follow the live timer store and the same routing rule as native Program')
+assert.match(sceneBridge, /shouldShowTimerOnProgram[\s\S]*shouldRenderTimerInProgramRenderer\(internalProgramOutputActive, targetDisplayId, timerTargetsProgram\)[\s\S]*timerOverlayPosition[\s\S]*timerTextOpacity/,
+  'the internal Program timer must follow the live store without duplicating the physical native overlay')
 assert.match(presentationApp, /\{programScene\.timer\?\.visible && \([\s\S]*<SceneTimerPreviewLayer[\s\S]*dpiScale=\{window\.devicePixelRatio \|\| 1\}/,
   'a standalone timer must render in the internal Program output even when Scene composition is disabled')
 assert.doesNotMatch(timerControl, />\s*Сбросить\s*</,

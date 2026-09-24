@@ -1548,6 +1548,39 @@ function createWindows(): void {
     return source?.id ?? null
   })
 
+  let sceneMirrorCaptureInFlight: Promise<string | null> | null = null
+  ipcMain.handle('capture-scene-mirror-frame', async (event): Promise<string | null> => {
+    const trustedMirror = [...auxiliaryWindows.values()].some((entry) => (
+      entry.role === 'mirror' &&
+      isTrustedWindowMainFrame(event, entry.window, 'auxiliary.html')
+    ))
+    if (!trustedMirror || !presentationWindow || presentationWindow.isDestroyed()) return null
+    if (!sceneMirrorCaptureInFlight) {
+      const sourceWindow = presentationWindow
+      sceneMirrorCaptureInFlight = (async () => {
+        try {
+          const image = await sourceWindow.webContents.capturePage()
+          if (sourceWindow.isDestroyed() || image.isEmpty()) return null
+          const { width, height } = image.getSize()
+          if (width < 1 || height < 1) return null
+          const scale = Math.min(1920 / width, 1080 / height, 1)
+          const frame = scale < 1
+            ? image.resize({
+                width: Math.max(1, Math.round(width * scale)),
+                height: Math.max(1, Math.round(height * scale)),
+                quality: 'good'
+              })
+            : image
+          return `data:image/jpeg;base64,${frame.toJPEG(86).toString('base64')}`
+        } catch (error) {
+          diagnosticLog('display', `scene mirror frame failed ${formatDiagnosticError(error)}`)
+          return null
+        }
+      })().finally(() => { sceneMirrorCaptureInFlight = null })
+    }
+    return sceneMirrorCaptureInFlight
+  })
+
   controlWindow.on('query-session-end', () => {
     shutdownTrigger = 'windows-session-end'
     allowControlWindowClose = true

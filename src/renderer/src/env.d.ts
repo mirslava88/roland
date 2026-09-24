@@ -237,6 +237,7 @@ interface Api {
   completeProgramMirrorTransition(transitionId: string): Promise<{ released: number; remaining: number }>
   releaseProgramMirrorHold(transitionId: string): Promise<boolean>
   getScreenCaptureSource(displayId: number): Promise<string | null>
+  captureSceneMirrorFrame(): Promise<string | null>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
   preparePowerPoint(filePath: string): Promise<{

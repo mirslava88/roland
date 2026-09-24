@@ -172,6 +172,7 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     ? state.captureTitlesOutputs[titleSourceIdentity] || DEFAULT_BROADCAST_TITLES_OUTPUT
     : DEFAULT_BROADCAST_TITLES_OUTPUT
   let directContent: ProgramDirectContent | null = null
+  const sceneRendererCapture = sceneActive && activeFile?.type === 'pdf'
   if (sceneActive) {
     // A composite spans the Electron underlay and, for PowerPoint, a native
     // window. Capture the final program display so mirror outputs are exact.
@@ -214,6 +215,11 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     contentType: activeFile?.type ?? null,
     contentAspectRatio: presentationAspectRatio,
     directContent,
+    sceneRendererCapture,
+    sceneRendererPath: sceneRendererCapture ? activeFile.path : null,
+    sceneUpperMediaLayers: sceneRendererCapture && programScene.mediaLayersVisible
+      ? programScene.mediaLayers.filter((layer) => layer.visible && layer.aboveContent)
+      : [],
     active: mirrorActive,
     backdropImage,
     titleSourceIdentity,
@@ -307,6 +313,7 @@ export function AuxiliaryDisplayBridge(): null {
     captureTitlesOutputs,
     backdropImage,
     programScene,
+    programSnapshot,
     videoLoopTrack,
     videoPlayback,
     timerRemaining,
@@ -551,6 +558,7 @@ export function AuxiliaryDisplayBridge(): null {
     isPresentationWindowOpen,
     pptxAspectRatios,
     programScene,
+    programSnapshot,
     selectedDisplayId,
     videoLoopTrack,
     videoPlayback

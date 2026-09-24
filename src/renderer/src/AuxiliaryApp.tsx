@@ -5,6 +5,10 @@ import { releasePdfiumResources, renderPdfiumPageToCanvas } from './pdfium-rende
 import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
 import { InformationTitlesLayer } from './components/AuxiliaryDisplays/InformationTitlesLayer'
+import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
+import { ProgramSceneMediaLayerSurface } from './components/ProgramScene/ProgramSceneMediaLayers'
+import { normalizeQrOverlay, type QrOverlayConfig } from '../../shared/qr-overlay'
+import type { ProgramSceneMediaLayer } from '../../shared/program-scene'
 
 const requestedRole = new URLSearchParams(window.location.search).get('role')
 const requestedDisplayId = Number(new URLSearchParams(window.location.search).get('displayId'))
@@ -1097,6 +1101,9 @@ function ProgramMirrorDisplay(): JSX.Element {
     contentType: string | null
     contentAspectRatio: number | null
     directContent: ProgramDirectContent | null
+    sceneRendererCapture: boolean
+    sceneRendererPath: string | null
+    sceneUpperMediaLayers: ProgramSceneMediaLayer[]
     active: boolean
     backdropImage: string | null
     titles: InformationDisplayState['titles']
@@ -1109,6 +1116,9 @@ function ProgramMirrorDisplay(): JSX.Element {
     contentType: null,
     contentAspectRatio: null,
     directContent: null,
+    sceneRendererCapture: false,
+    sceneRendererPath: null,
+    sceneUpperMediaLayers: [],
     active: false,
     backdropImage: null,
     titles: null,
@@ -1118,6 +1128,8 @@ function ProgramMirrorDisplay(): JSX.Element {
   const [reconnectRevision, setReconnectRevision] = useState(0)
   const [reconnectFrameUrl, setReconnectFrameUrl] = useState<string | null>(null)
   const [nativeReady, setNativeReady] = useState(false)
+  const [sceneFrameUrl, setSceneFrameUrl] = useState<string | null>(null)
+  const [mirrorQrOverlay, setMirrorQrOverlay] = useState<QrOverlayConfig | null>(null)
   const [programTimer, setProgramTimer] = useState<ProgramTimerOverlayState>(EMPTY_PROGRAM_TIMER)
   const [completedMirrorTransitionId, setCompletedMirrorTransitionId] = useState<string | null>(null)
 
@@ -1131,6 +1143,9 @@ function ProgramMirrorDisplay(): JSX.Element {
         contentType?: string | null
         contentAspectRatio?: number | null
         directContent?: ProgramDirectContent | null
+        sceneRendererCapture?: boolean
+        sceneRendererPath?: string | null
+        sceneUpperMediaLayers?: ProgramSceneMediaLayer[]
         active?: boolean
         backdropImage?: string | null
         titles?: InformationDisplayState['titles']
@@ -1145,7 +1160,9 @@ function ProgramMirrorDisplay(): JSX.Element {
         (data.directContent.type !== 'capture' || typeof data.directContent.capture?.sourceId === 'string')
         ? data.directContent
         : null
-      const nextDirectIdentity = nextDirectContent
+      const nextDirectIdentity = data?.sceneRendererCapture === true && data?.contentType === 'pdf'
+        ? `scene-pdf|${data.sceneRendererPath || ''}`
+        : nextDirectContent
         ? nextDirectContent.type === 'capture'
           ? `capture|${nextDirectContent.capture?.sourceId || nextDirectContent.path}`
           : `${nextDirectContent.type}|${nextDirectContent.path}`
@@ -1162,6 +1179,11 @@ function ProgramMirrorDisplay(): JSX.Element {
         contentType: typeof data?.contentType === 'string' ? data.contentType : null,
         contentAspectRatio: nextContentAspectRatio,
         directContent: nextDirectContent,
+        sceneRendererCapture: data?.sceneRendererCapture === true && data?.contentType === 'pdf',
+        sceneRendererPath: typeof data?.sceneRendererPath === 'string' ? data.sceneRendererPath : null,
+        sceneUpperMediaLayers: Array.isArray(data?.sceneUpperMediaLayers)
+          ? data.sceneUpperMediaLayers
+          : [],
         active: data?.active === true,
         backdropImage: data?.backdropImage || null,
         titles: data?.titles || null,
@@ -1172,6 +1194,7 @@ function ProgramMirrorDisplay(): JSX.Element {
       window.api.dbgLog(
         `program mirror state received display=${auxiliaryDisplayId ?? 'unknown'} ` +
         `active=${data?.active === true} direct=${nextDirectContent?.type || 'none'} ` +
+        `sceneFrame=${data?.sceneRendererCapture === true} ` +
         `backdrop=${data?.backdropImage ? 'yes' : 'no'}`
       )
       if (data?.contentType === 'presentation') {
@@ -1186,6 +1209,13 @@ function ProgramMirrorDisplay(): JSX.Element {
     window.api.sendToControl('program-mirror-state-ready', { displayId: auxiliaryDisplayId })
     return unsubscribe
   }, [])
+
+  useEffect(() => window.api.on('mirror-qr-overlay', (...args: unknown[]) => {
+    const raw = args[0]
+    setMirrorQrOverlay(raw && typeof raw === 'object'
+      ? normalizeQrOverlay(raw as Partial<QrOverlayConfig>)
+      : null)
+  }), [])
 
   useEffect(() => window.api.on('program-timer-overlay', (...args: unknown[]) => {
     const data = args[0] as Partial<ProgramTimerOverlayState> | undefined
@@ -1236,7 +1266,9 @@ function ProgramMirrorDisplay(): JSX.Element {
     }
   }, [])
 
-  const directIdentity = mirrorState.directContent
+  const directIdentity = mirrorState.sceneRendererCapture
+    ? `scene-pdf|${mirrorState.sceneRendererPath || ''}`
+    : mirrorState.directContent
     ? mirrorState.directContent.type === 'capture'
       ? `capture|${mirrorState.directContent.capture?.sourceId || mirrorState.directContent.path}`
       : `${mirrorState.directContent.type}|${mirrorState.directContent.path}`
@@ -1245,6 +1277,52 @@ function ProgramMirrorDisplay(): JSX.Element {
   const isDirectBackdrop = mirrorState.directContent?.type === 'backdrop'
   const isDirectCapture = mirrorState.directContent?.type === 'capture'
   const showBackdropBehindStatus = Boolean(mirrorState.backdropImage && status)
+
+  useEffect(() => {
+    if (!mirrorState.active || !mirrorState.sceneRendererCapture) {
+      setSceneFrameUrl(null)
+      return
+    }
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let firstFrame = true
+    const capture = async (): Promise<void> => {
+      let nextDelay = 100
+      try {
+        const frame = await window.api.captureSceneMirrorFrame()
+        if (cancelled) return
+        if (frame) {
+          if (firstFrame) {
+            const decoded = new Image()
+            decoded.src = frame
+            await decoded.decode()
+            if (cancelled) return
+            firstFrame = false
+            setNativeReady(true)
+            setStatus('')
+            window.api.sendToControl('program-mirror-ready', {
+              displayId: auxiliaryDisplayId,
+              sourceDisplayId: mirrorState.sourceDisplayId
+            })
+          }
+          setSceneFrameUrl(frame)
+        } else {
+          nextDelay = 300
+        }
+      } catch (error) {
+        nextDelay = 500
+        window.api.dbgLog(`program mirror scene frame failed: ${String(error)}`)
+      }
+      if (!cancelled) retryTimer = setTimeout(() => { void capture() }, nextDelay)
+    }
+    setSceneFrameUrl(null)
+    setStatus(PROGRAM_MIRROR_CONNECTING_STATUS)
+    void capture()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [mirrorState.active, mirrorState.sceneRendererCapture, mirrorState.sceneRendererPath, mirrorState.sourceDisplayId])
 
   useEffect(() => {
     let cancelled = false
@@ -1257,6 +1335,10 @@ function ProgramMirrorDisplay(): JSX.Element {
         setStatus('')
         setReconnectFrameUrl(null)
         reconnectFailuresRef.current = 0
+        return
+      }
+      if (mirrorState.sceneRendererCapture) {
+        setStatus(nativeReady ? '' : PROGRAM_MIRROR_CONNECTING_STATUS)
         return
       }
       // Chromium's desktop capture can return black when it captures another
@@ -1437,6 +1519,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     mirrorState.sourcePixelWidth,
     mirrorState.contentAspectRatio,
     mirrorState.contentType,
+    mirrorState.sceneRendererCapture,
     isDirectCapture,
     isDirectBackdrop,
     reconnectRevision
@@ -1487,7 +1570,7 @@ function ProgramMirrorDisplay(): JSX.Element {
       })
     }
 
-    if (mirrorState.directContent) {
+    if (mirrorState.directContent || mirrorState.sceneRendererCapture) {
       if (!nativeReady) return
       releaseAfterPaint()
     } else if (!mirrorState.active) {
@@ -1519,6 +1602,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     completedMirrorTransitionId,
     directIdentity,
     mirrorState.active,
+    mirrorState.sceneRendererCapture,
     nativeReady,
     reconnectRevision,
     status
@@ -1648,12 +1732,37 @@ function ProgramMirrorDisplay(): JSX.Element {
           />
         </div>
       )}
+      {mirrorState.sceneRendererCapture && sceneFrameUrl && (
+        <img
+          src={sceneFrameUrl}
+          className="absolute inset-0 z-10 h-full w-full object-contain bg-black"
+          draggable={false}
+        />
+      )}
+      {mirrorState.sceneRendererCapture && mirrorState.sceneUpperMediaLayers.length > 0 && (
+        <div className="pointer-events-none absolute inset-0 z-[11]">
+          <ProgramSceneMediaLayerSurface
+            layers={mirrorState.sceneUpperMediaLayers.map((layer) => ({ ...layer, muted: true }))}
+            placement="above"
+          />
+        </div>
+      )}
       {mirrorState.directContent?.type === 'capture' && mirrorState.titles && nativeReady && (
         <BroadcastTitlesOverlay
           key={mirrorState.titleSourceIdentity || 'no-program-mirror-title-source'}
           titles={mirrorState.titles}
         />
       )}
+      {mirrorState.active && (hasDirectContent || mirrorState.sceneRendererCapture) &&
+        mirrorQrOverlay?.enabled && (
+          <div className="pointer-events-none absolute inset-0 z-[12]">
+            <SceneQrPreviewLayer
+              config={mirrorQrOverlay}
+              outputWidth={window.innerWidth}
+              outputHeight={window.innerHeight}
+            />
+          </div>
+        )}
       {mirrorState.active && !isDirectBackdrop && status && !nativeReady && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black text-xl text-gray-400">
           {reconnectFrameUrl ? (
@@ -1678,7 +1787,7 @@ function ProgramMirrorDisplay(): JSX.Element {
           ) : status}
         </div>
       )}
-      {mirrorState.active && hasDirectContent && nativeReady && (
+      {mirrorState.active && (hasDirectContent || mirrorState.sceneRendererCapture) && nativeReady && (
         <ProgramTimerOverlay timer={programTimer} sourcePixelHeight={mirrorState.sourcePixelHeight} />
       )}
     </div>

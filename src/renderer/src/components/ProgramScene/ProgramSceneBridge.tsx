@@ -4,7 +4,7 @@ import { waitForNavigationTransitionEnd } from '../../navigation-transition'
 import { acquireOutputTransition } from '../../output-transition-lock'
 import { PROGRAM_SCENE_TRANSITION_DURATION_MS } from '../../../../shared/program-scene'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
-import { shouldShowTimerOnProgram } from '../../timer-controls'
+import { shouldRenderTimerInProgramRenderer, shouldShowTimerOnProgram } from '../../timer-controls'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -154,7 +154,7 @@ export function ProgramSceneBridge(): null {
       // The live timer store is the single authority after a Scene snapshot
       // has been published. This keeps toolbar/Stream Deck updates and the
       // internal Program output in lockstep with the native WPF overlay.
-      timer: internalProgramOutputActive && timerTargetsProgram
+      timer: shouldRenderTimerInProgramRenderer(internalProgramOutputActive, targetDisplayId, timerTargetsProgram)
         ? {
             duration: timerDuration,
             remaining: timerRemaining,

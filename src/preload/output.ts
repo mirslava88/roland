@@ -38,6 +38,7 @@ const INBOUND_CHANNELS = new Set([
   'timer-update',
   'backdrop-state',
   'mirror-state',
+  'mirror-qr-overlay',
   'program-timer-overlay',
   'program-mirror-transition-complete'
 ])
@@ -87,6 +88,8 @@ const api = {
     ipcRenderer.invoke('render-pdf-page', filePath, pageIndex, width),
   getScreenCaptureSource: (displayId: number): Promise<string | null> =>
     ipcRenderer.invoke('get-screen-capture-source', displayId),
+  captureSceneMirrorFrame: (): Promise<string | null> =>
+    ipcRenderer.invoke('capture-scene-mirror-frame'),
   prepareDesktopCaptureSource: (sourceId: string) =>
     ipcRenderer.invoke('prepare-desktop-capture-source', sourceId),
   releaseBrowserFullscreen: (keepSourceKey?: string) =>
