@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const nativeDir = resolve(root, 'native', 'virtual-camera', 'bin', 'x64', 'Release')
@@ -20,6 +21,37 @@ assert.deepEqual(selfTest, { ok: true, width: 1920, height: 1080, fps: 30 })
 const sourceTest = JSON.parse(execFileSync(host, ['--test-source', source], { encoding: 'utf8', windowsHide: true }))
 assert.deepEqual(sourceTest, { ok: true, streams: 1, hresult: 0 })
 
+// A previously loaded DLL cannot be overwritten on Windows. Registration
+// must stage immutable content-addressed copies instead of reusing that path.
+const stagingDirectory = mkdtempSync(join(tmpdir(), 'pdm-virtual-camera-stage-'))
+try {
+  const input = join(stagingDirectory, 'new-source.dll')
+  const legacy = join(stagingDirectory, 'PDMVirtualCameraSource.dll')
+  writeFileSync(legacy, 'loaded legacy source must remain untouched')
+  writeFileSync(input, 'new source version A')
+  const stage = () => JSON.parse(execFileSync(host,
+    ['--test-stage-source', input, stagingDirectory], { encoding: 'utf8', windowsHide: true }))
+  const first = stage()
+  assert.equal(first.ok, true)
+  assert.match(first.path, /PDMVirtualCameraSource-[a-f0-9]{64}\.dll$/)
+  assert.equal(readFileSync(legacy, 'utf8'), 'loaded legacy source must remain untouched')
+  assert.equal(readFileSync(first.path, 'utf8'), 'new source version A')
+  assert.equal(stage().path, first.path, 'reinstalling identical source must reuse its immutable copy')
+  writeFileSync(input, 'new source version B')
+  const second = stage()
+  assert.notEqual(second.path, first.path, 'a source update must not overwrite a loaded old DLL')
+  assert.equal(readFileSync(first.path, 'utf8'), 'new source version A')
+  assert.equal(readFileSync(second.path, 'utf8'), 'new source version B')
+} finally {
+  rmSync(stagingDirectory, { recursive: true, force: true })
+}
+
+const installerScript = readFileSync(resolve(root, 'build', 'virtual-camera-installer.nsh'), 'utf8')
+assert.match(installerScript, /--install-source[\s\S]*?Abort "PDM Virtual Camera registration failed/, 'installer must not silently continue after registration failure')
+assert.match(installerScript, /--source-registered[\s\S]*?Abort "PDM Virtual Camera registration verification failed/, 'installer must verify registration before finishing')
+assert.match(installerScript, /--install-source[^\n]*"\$\{APP_ID\}"/, 'installer must record which edition owns the shared camera source')
+assert.match(installerScript, /--uninstall-source[^\n]*"\$\{APP_ID\}"/, 'uninstalling one edition must identify its ownership')
+
 const frameSource = readFileSync(resolve(root, 'src', 'main', 'virtual-camera-frame.ts'), 'utf8')
 assert.match(frameSource, /Math\.min\(targetWidth \/ sourceWidth, targetHeight \/ sourceHeight\)/, 'fit must preserve aspect ratio')
 assert.match(frameSource, /quality: 'best'/, 'internal frames must use best-quality resize')
@@ -34,6 +66,7 @@ assert.match(nativeSource, /std::ptrdiff_t\>\(pitch\)/, 'negative Media Foundati
 assert.ok(!/ZeroMemory\(pBuf,/.test(nativeSource), 'negative stride must never zero memory as one forward block')
 
 const nativeHost = readFileSync(resolve(root, 'native', 'virtual-camera', 'host', 'host.cpp'), 'utf8')
+assert.match(nativeHost, /RemoveOwner\(owner, remaining\)[\s\S]*?if \(remaining > 0\) return ERROR_SUCCESS/, 'uninstalling one edition must preserve the shared registration for the other edition')
 assert.match(nativeHost, /;;;LS\)/, 'installed source ACL must grant LocalService read and execute access')
 assert.match(nativeHost, /PROTECTED_DACL_SECURITY_INFORMATION/, 'installed source ACL must not inherit a restrictive staging DACL')
 assert.match(nativeHost, /camera\.Reset\(\);\s*MFShutdown\(\)/, 'virtual camera COM object must be released before Media Foundation shutdown')

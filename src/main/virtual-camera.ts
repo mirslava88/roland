@@ -143,14 +143,24 @@ export class VirtualCameraManager {
     if (!this.binariesAvailable()) throw new Error('Компоненты виртуальной камеры не найдены. Пересоберите или переустановите PDM.')
     if (this.statusValue.phase === 'running' || this.statusValue.phase === 'starting') throw new Error('Сначала остановите виртуальную камеру.')
     this.statusValue = { ...this.statusValue, phase: 'installing', error: null }
-    const result = await this.runHost(['--elevate-install', this.sourcePath])
+    const owner = app.getName().endsWith('-stream')
+      ? 'com.roland.presentation-display-manager.stream'
+      : 'com.roland.presentation-display-manager'
+    const result = await this.runHost(['--elevate-install', this.sourcePath, owner])
     const installed = result.code === 0 && await this.isInstalled()
+    const installError = result.code === 1223
+      ? 'Установка виртуальной камеры отменена в запросе Windows.'
+      : result.code === 32
+        ? 'Файл виртуальной камеры занят другим приложением. Закройте программы видеосвязи и повторите установку PDM.'
+        : result.code !== 0
+          ? `Не удалось зарегистрировать виртуальную камеру в Windows (код ${result.code}). Повторите установку PDM с правами администратора.`
+          : 'Windows не подтвердила регистрацию виртуальной камеры. Повторите установку PDM.'
     this.statusValue = {
       ...freshStatus(),
       installed,
       available: installed,
       phase: installed ? 'idle' : 'error',
-      error: installed ? null : 'Установка отменена или Windows не разрешила зарегистрировать виртуальную камеру.'
+      error: installed ? null : installError
     }
     this.publishStatus()
     diagnosticLog('virtual-camera', `source install result=${result.code} installed=${installed}`)

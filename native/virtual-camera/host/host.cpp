@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <bcrypt.h>
 #include <mfapi.h>
 #include <mfvirtualcamera.h>
 #include <d3d11.h>
@@ -24,6 +25,7 @@
 #pragma comment(lib, "mfplat")
 #pragma comment(lib, "mfsensorgroup")
 #pragma comment(lib, "advapi32")
+#pragma comment(lib, "bcrypt")
 #pragma comment(lib, "shell32")
 #pragma comment(lib, "d3d11")
 #pragma comment(lib, "dxgi")
@@ -35,6 +37,9 @@ namespace
     constexpr wchar_t kSourceClsid[] = L"{BBEF2CB0-96F5-4C1E-86F6-6B7670CAB609}";
     constexpr wchar_t kFriendlyName[] = L"PDM Virtual Camera";
     constexpr wchar_t kRegistryPath[] = L"SOFTWARE\\Classes\\CLSID\\{BBEF2CB0-96F5-4C1E-86F6-6B7670CAB609}\\InProcServer32";
+    constexpr wchar_t kOwnersRegistryPath[] = L"SOFTWARE\\Presentation Display Manager\\VirtualCamera\\Owners";
+    constexpr wchar_t kStandardOwner[] = L"com.roland.presentation-display-manager";
+    constexpr wchar_t kStreamOwner[] = L"com.roland.presentation-display-manager.stream";
     constexpr char kPipeControlMagic[] = "PDMVCR01";
     constexpr std::uint32_t kPipeCommandUseDisplay = 1;
 
@@ -60,10 +65,62 @@ namespace
         return directory;
     }
 
-    std::wstring InstalledSourcePath()
+    std::wstring LegacyInstalledSourcePath()
     {
         const auto directory = InstalledSourceDirectory();
         return directory.empty() ? std::wstring{} : directory + L"\\PDMVirtualCameraSource.dll";
+    }
+
+    DWORD SourceFingerprint(const std::wstring& path, std::wstring& fingerprint)
+    {
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return GetLastError();
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 64 * 1024 * 1024)
+        {
+            CloseHandle(file);
+            return ERROR_FILE_TOO_LARGE;
+        }
+        std::vector<UCHAR> bytes(static_cast<std::size_t>(size.QuadPart));
+        DWORD read = 0;
+        const BOOL readOk = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+        const DWORD readError = readOk ? ERROR_SUCCESS : GetLastError();
+        CloseHandle(file);
+        if (readError != ERROR_SUCCESS) return readError;
+        if (read != bytes.size()) return ERROR_HANDLE_EOF;
+        BCRYPT_ALG_HANDLE algorithm = nullptr;
+        if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
+            return ERROR_GEN_FAILURE;
+        UCHAR digest[32]{};
+        const NTSTATUS hashResult = BCryptHash(algorithm, nullptr, 0, bytes.data(),
+            static_cast<ULONG>(bytes.size()), digest, sizeof(digest));
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        if (hashResult < 0) return ERROR_GEN_FAILURE;
+        wchar_t hex[3]{};
+        fingerprint.clear();
+        for (const UCHAR value : digest)
+        {
+            swprintf_s(hex, L"%02x", value);
+            fingerprint += hex;
+        }
+        return ERROR_SUCCESS;
+    }
+
+    DWORD StageSource(const std::wstring& source, const std::wstring& directory, std::wstring& installedPath)
+    {
+        std::wstring fingerprint;
+        const DWORD hashResult = SourceFingerprint(source, fingerprint);
+        if (hashResult != ERROR_SUCCESS) return hashResult;
+        installedPath = directory + L"\\PDMVirtualCameraSource-" + fingerprint + L".dll";
+        if (_wcsicmp(source.c_str(), installedPath.c_str()) == 0) return ERROR_SUCCESS;
+        if (CopyFileW(source.c_str(), installedPath.c_str(), TRUE)) return ERROR_SUCCESS;
+        const DWORD copyError = GetLastError();
+        if (copyError != ERROR_FILE_EXISTS && copyError != ERROR_ALREADY_EXISTS) return copyError;
+        std::wstring existingFingerprint;
+        const DWORD existingResult = SourceFingerprint(installedPath, existingFingerprint);
+        if (existingResult != ERROR_SUCCESS) return existingResult;
+        return existingFingerprint == fingerprint ? ERROR_SUCCESS : ERROR_FILE_EXISTS;
     }
 
     std::string JsonEscape(const std::string& input)
@@ -126,6 +183,41 @@ namespace
         return GetFileAttributesW(value) != INVALID_FILE_ATTRIBUTES;
     }
 
+    bool ValidOwner(const std::wstring& owner)
+    {
+        return owner == kStandardOwner || owner == kStreamOwner;
+    }
+
+    LSTATUS RecordOwner(const std::wstring& owner)
+    {
+        HKEY key = nullptr;
+        DWORD disposition = 0;
+        LSTATUS status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kOwnersRegistryPath, 0, nullptr, 0,
+            KEY_WRITE | KEY_WOW64_64KEY, nullptr, &key, &disposition);
+        if (status != ERROR_SUCCESS) return status;
+        const wchar_t present[] = L"1";
+        status = RegSetValueExW(key, owner.c_str(), 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(present), sizeof(present));
+        RegCloseKey(key);
+        return status;
+    }
+
+    LSTATUS RemoveOwner(const std::wstring& owner, DWORD& remaining)
+    {
+        remaining = 0;
+        HKEY key = nullptr;
+        LSTATUS status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kOwnersRegistryPath, 0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+        if (status == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+        if (status != ERROR_SUCCESS) return status;
+        status = RegDeleteValueW(key, owner.c_str());
+        if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
+        if (status == ERROR_SUCCESS) status = RegQueryInfoKeyW(key, nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr, &remaining, nullptr, nullptr, nullptr, nullptr);
+        RegCloseKey(key);
+        return status;
+    }
+
     DWORD ApplySourceAcl(const std::wstring& path, bool directory)
     {
         // FrameServer loads the COM source as LocalService. Keep the installed
@@ -155,23 +247,23 @@ namespace
         return result;
     }
 
-    int InstallSource(const std::wstring& dllPath)
+    int InstallSource(const std::wstring& dllPath, const std::wstring& owner)
     {
+        if (!ValidOwner(owner)) return ERROR_INVALID_PARAMETER;
         wchar_t absolutePath[32768]{};
         const DWORD resolvedLength = GetFullPathNameW(dllPath.c_str(), static_cast<DWORD>(std::size(absolutePath)), absolutePath, nullptr);
         if (!resolvedLength || resolvedLength >= std::size(absolutePath)) return ERROR_INVALID_NAME;
         const DWORD attrs = GetFileAttributesW(absolutePath);
         if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return ERROR_FILE_NOT_FOUND;
         const auto installedDirectory = InstalledSourceDirectory();
-        const auto installedPath = InstalledSourcePath();
-        if (installedDirectory.empty() || installedPath.empty()) return ERROR_PATH_NOT_FOUND;
+        if (installedDirectory.empty()) return ERROR_PATH_NOT_FOUND;
         const int createResult = SHCreateDirectoryExW(nullptr, installedDirectory.c_str(), nullptr);
         if (createResult != ERROR_SUCCESS && createResult != ERROR_ALREADY_EXISTS) return createResult;
         const DWORD directoryAclResult = ApplySourceAcl(installedDirectory, true);
         if (directoryAclResult != ERROR_SUCCESS) return static_cast<int>(directoryAclResult);
-        if (_wcsicmp(absolutePath, installedPath.c_str()) != 0 && !CopyFileW(absolutePath, installedPath.c_str(), FALSE)) {
-            return static_cast<int>(GetLastError());
-        }
+        std::wstring installedPath;
+        const DWORD stageResult = StageSource(absolutePath, installedDirectory, installedPath);
+        if (stageResult != ERROR_SUCCESS) return static_cast<int>(stageResult);
         const DWORD fileAclResult = ApplySourceAcl(installedPath, false);
         if (fileAclResult != ERROR_SUCCESS) return static_cast<int>(fileAclResult);
         HKEY key = nullptr;
@@ -187,25 +279,53 @@ namespace
             status = RegSetValueExW(key, L"ThreadingModel", 0, REG_SZ, reinterpret_cast<const BYTE*>(threading), sizeof(threading));
         }
         RegCloseKey(key);
+        if (status == ERROR_SUCCESS) status = RecordOwner(owner);
         return status;
     }
 
-    int UninstallSource()
+    int UninstallSource(const std::wstring& owner)
     {
+        if (!ValidOwner(owner)) return ERROR_INVALID_PARAMETER;
+        DWORD remaining = 0;
+        const LSTATUS ownerStatus = RemoveOwner(owner, remaining);
+        if (ownerStatus != ERROR_SUCCESS) return ownerStatus;
+        if (remaining > 0) return ERROR_SUCCESS;
+        std::wstring registeredPath;
+        SourceRegistered(&registeredPath);
         const LSTATUS status = RegDeleteTreeW(HKEY_LOCAL_MACHINE,
             L"SOFTWARE\\Classes\\CLSID\\{BBEF2CB0-96F5-4C1E-86F6-6B7670CAB609}");
-        const auto installedPath = InstalledSourcePath();
         const auto installedDirectory = InstalledSourceDirectory();
-        if (!installedPath.empty()) DeleteFileW(installedPath.c_str());
+        if (!registeredPath.empty() && !installedDirectory.empty() &&
+            _wcsnicmp(registeredPath.c_str(), (installedDirectory + L"\\").c_str(), installedDirectory.size() + 1) == 0)
+            DeleteFileW(registeredPath.c_str());
+        const auto legacyPath = LegacyInstalledSourcePath();
+        if (!legacyPath.empty()) DeleteFileW(legacyPath.c_str());
         if (!installedDirectory.empty()) RemoveDirectoryW(installedDirectory.c_str());
         return status == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : status;
     }
 
-    int Elevate(const std::wstring& verb, const std::wstring& dllPath = {})
+    int TestStageSource(const std::wstring& dllPath, const std::wstring& directory)
+    {
+        // Reproduce the previous sharing violation: the legacy destination is
+        // open without write/delete sharing while the replacement is staged.
+        const std::wstring legacyPath = directory + L"\\PDMVirtualCameraSource.dll";
+        HANDLE lockedLegacy = CreateFileW(legacyPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (lockedLegacy == INVALID_HANDLE_VALUE) return static_cast<int>(GetLastError());
+        std::wstring stagedPath;
+        const DWORD result = StageSource(dllPath, directory, stagedPath);
+        CloseHandle(lockedLegacy);
+        std::cout << "{\"ok\":" << (result == ERROR_SUCCESS ? "true" : "false")
+            << ",\"path\":\"" << JsonEscape(Utf8(stagedPath)) << "\",\"code\":" << result << "}" << std::endl;
+        return static_cast<int>(result);
+    }
+
+    int Elevate(const std::wstring& verb, const std::wstring& argument = {}, const std::wstring& owner = {})
     {
         wchar_t executable[MAX_PATH]{};
         if (!GetModuleFileNameW(nullptr, executable, MAX_PATH)) return static_cast<int>(GetLastError());
-        const std::wstring parameters = verb + (dllPath.empty() ? L"" : L" \"" + dllPath + L"\"");
+        const std::wstring parameters = verb + (argument.empty() ? L"" : L" \"" + argument + L"\"") +
+            (owner.empty() ? L"" : L" \"" + owner + L"\"");
         SHELLEXECUTEINFOW info{ sizeof(info) };
         info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
         info.lpVerb = L"runas";
@@ -782,11 +902,12 @@ int wmain(int argc, wchar_t** argv)
             << JsonEscape(Utf8(path)) << "\"}" << std::endl;
         return registered ? 0 : 1;
     }
-    if (HasArg(argc, argv, L"--install-source")) return argc >= 3 ? InstallSource(argv[2]) : ERROR_INVALID_PARAMETER;
-    if (HasArg(argc, argv, L"--uninstall-source")) return UninstallSource();
-    if (HasArg(argc, argv, L"--elevate-install")) return argc >= 3 ? Elevate(L"--install-source", argv[2]) : ERROR_INVALID_PARAMETER;
-    if (HasArg(argc, argv, L"--elevate-uninstall")) return Elevate(L"--uninstall-source");
+    if (HasArg(argc, argv, L"--install-source")) return argc >= 4 ? InstallSource(argv[2], argv[3]) : ERROR_INVALID_PARAMETER;
+    if (HasArg(argc, argv, L"--uninstall-source")) return argc >= 3 ? UninstallSource(argv[2]) : ERROR_INVALID_PARAMETER;
+    if (HasArg(argc, argv, L"--elevate-install")) return argc >= 4 ? Elevate(L"--install-source", argv[2], argv[3]) : ERROR_INVALID_PARAMETER;
+    if (HasArg(argc, argv, L"--elevate-uninstall")) return argc >= 3 ? Elevate(L"--uninstall-source", argv[2]) : ERROR_INVALID_PARAMETER;
     if (HasArg(argc, argv, L"--test-source")) return argc >= 3 ? TestMediaSource(argv[2]) : ERROR_INVALID_PARAMETER;
+    if (HasArg(argc, argv, L"--test-stage-source")) return argc >= 4 ? TestStageSource(argv[2], argv[3]) : ERROR_INVALID_PARAMETER;
     if (HasArg(argc, argv, L"--test-display-recovery")) return TestDisplayRecovery(argc, argv);
     if (HasArg(argc, argv, L"--self-test"))
     {

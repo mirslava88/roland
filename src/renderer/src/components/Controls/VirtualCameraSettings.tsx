@@ -132,10 +132,10 @@ export function VirtualCameraSettings(): JSX.Element {
       )}
       {status?.supported && !status.installed && (
         <div className="rounded-lg border border-blue-700/60 bg-blue-950/20 p-3">
-          <p className="text-xs text-blue-100">Один раз установите системный компонент. Windows покажет стандартное подтверждение.</p>
+          <p className="text-xs text-blue-100">Камера устанавливается вместе с PDM. Если компонент отсутствует, восстановите его здесь — Windows попросит подтверждение.</p>
           <button type="button" disabled={busy} onClick={() => void run(() => window.api.virtualCamera.install())}
             className={`${button} mt-3 border-blue-500 bg-blue-600 text-white hover:bg-blue-500`}>
-            Установить виртуальную камеру
+            Восстановить виртуальную камеру
           </button>
         </div>
       )}
