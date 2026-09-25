@@ -8,6 +8,8 @@ import { InformationTitlesLayer } from './components/AuxiliaryDisplays/Informati
 import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
 import { ProgramSceneMediaLayerSurface } from './components/ProgramScene/ProgramSceneMediaLayers'
 import { normalizeQrOverlay, type QrOverlayConfig } from '../../shared/qr-overlay'
+import { DEFAULT_CONTENT_ZOOM, normalizeContentZoom, type ContentZoomState } from '../../shared/content-zoom'
+import { pdfZoomRenderSize } from '../../shared/pdf-zoom-render'
 import type { ProgramSceneMediaLayer } from '../../shared/program-scene'
 
 const requestedRole = new URLSearchParams(window.location.search).get('role')
@@ -125,6 +127,7 @@ function SpeakerPdfFrame({
   compact = false,
   maxRenderWidth = 2560,
   maxRenderHeight = 1600,
+  zoomRenderScale = 1,
   adaptiveMirrorWidth = false,
   imageStyle,
   onReady
@@ -134,6 +137,7 @@ function SpeakerPdfFrame({
   compact?: boolean
   maxRenderWidth?: number
   maxRenderHeight?: number
+  zoomRenderScale?: number
   adaptiveMirrorWidth?: boolean
   imageStyle?: CSSProperties
   onReady?: () => void
@@ -169,10 +173,16 @@ function SpeakerPdfFrame({
     let cancelled = false
     const render = async (): Promise<void> => {
       const dpr = window.devicePixelRatio || 1
-      const targetWidth = Math.min(maxRenderWidth, Math.max(640, Math.round(size.width * dpr)))
-      const targetHeight = Math.min(maxRenderHeight, Math.max(360, Math.round(size.height * dpr)))
+      const { width: targetWidth, height: targetHeight } = zoomRenderScale > 1
+        ? pdfZoomRenderSize(size.width, size.height, dpr, zoomRenderScale, maxRenderWidth, maxRenderHeight)
+        : {
+            width: Math.min(maxRenderWidth, Math.max(640, Math.round(size.width * dpr))),
+            height: Math.min(maxRenderHeight, Math.max(360, Math.round(size.height * dpr)))
+          }
       try {
-        const nativePath = await window.api.renderPdfPage(filePath, page - 1, targetWidth)
+        const nativePath = zoomRenderScale > 1
+          ? null
+          : await window.api.renderPdfPage(filePath, page - 1, targetWidth)
         if (cancelled) return
         if (nativePath) {
           setFrameUrl(mediaUrl(nativePath))
@@ -198,9 +208,15 @@ function SpeakerPdfFrame({
         }
       }
     }
-    void render()
-    return () => { cancelled = true }
-  }, [filePath, maxRenderHeight, maxRenderWidth, page, size.width, size.height])
+    const timer = zoomRenderScale > 1
+      ? setTimeout(() => { void render() }, 100)
+      : null
+    if (!timer) void render()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [filePath, maxRenderHeight, maxRenderWidth, page, size.width, size.height, zoomRenderScale])
 
   return (
     <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-black flex items-center justify-center">
@@ -1031,10 +1047,12 @@ function ProgramNativeVideo({
 
 function ProgramDirectLayer({
   content,
+  contentZoom,
   onReady,
   onStatus
 }: {
   content: ProgramDirectContent
+  contentZoom: ContentZoomState
   onReady: () => void
   onStatus?: (status: string) => void
 }): JSX.Element {
@@ -1057,6 +1075,7 @@ function ProgramDirectLayer({
         page={content.currentSlide || 1}
         maxRenderWidth={8192}
         maxRenderHeight={4320}
+        zoomRenderScale={contentZoom.enabled ? contentZoom.scale : 1}
         adaptiveMirrorWidth
         onReady={onReady}
       />
@@ -1101,6 +1120,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     contentType: string | null
     contentAspectRatio: number | null
     directContent: ProgramDirectContent | null
+    contentZoom: ContentZoomState
     sceneRendererCapture: boolean
     sceneRendererPath: string | null
     sceneUpperMediaLayers: ProgramSceneMediaLayer[]
@@ -1116,6 +1136,7 @@ function ProgramMirrorDisplay(): JSX.Element {
     contentType: null,
     contentAspectRatio: null,
     directContent: null,
+    contentZoom: DEFAULT_CONTENT_ZOOM,
     sceneRendererCapture: false,
     sceneRendererPath: null,
     sceneUpperMediaLayers: [],
@@ -1143,6 +1164,7 @@ function ProgramMirrorDisplay(): JSX.Element {
         contentType?: string | null
         contentAspectRatio?: number | null
         directContent?: ProgramDirectContent | null
+        contentZoom?: Partial<ContentZoomState>
         sceneRendererCapture?: boolean
         sceneRendererPath?: string | null
         sceneUpperMediaLayers?: ProgramSceneMediaLayer[]
@@ -1179,6 +1201,7 @@ function ProgramMirrorDisplay(): JSX.Element {
         contentType: typeof data?.contentType === 'string' ? data.contentType : null,
         contentAspectRatio: nextContentAspectRatio,
         directContent: nextDirectContent,
+        contentZoom: normalizeContentZoom(data?.contentZoom),
         sceneRendererCapture: data?.sceneRendererCapture === true && data?.contentType === 'pdf',
         sceneRendererPath: typeof data?.sceneRendererPath === 'string' ? data.sceneRendererPath : null,
         sceneUpperMediaLayers: Array.isArray(data?.sceneUpperMediaLayers)
@@ -1716,20 +1739,31 @@ function ProgramMirrorDisplay(): JSX.Element {
         <div
           className={`absolute inset-0 z-10 overflow-hidden bg-black transition-none ${nativeReady ? 'opacity-100' : 'opacity-0'}`}
         >
-          <ProgramDirectLayer
-            key={directIdentity}
-            content={mirrorState.directContent}
-            onStatus={setStatus}
-            onReady={() => {
-              if (directIdentityRef.current !== directIdentity) return
-              setNativeReady(true)
-              window.api.dbgLog(`program mirror direct ready identity=${directIdentity}`)
-              window.api.sendToControl('program-mirror-ready', {
-                displayId: auxiliaryDisplayId,
-                sourceDisplayId: mirrorState.sourceDisplayId
-              })
-            }}
-          />
+          <div
+            className="h-full w-full"
+            style={mirrorState.directContent.type === 'pdf' && mirrorState.contentZoom.enabled
+              ? {
+                  transform: `scale(${mirrorState.contentZoom.scale})`,
+                  transformOrigin: `${mirrorState.contentZoom.originX * 100}% ${mirrorState.contentZoom.originY * 100}%`
+                }
+              : undefined}
+          >
+            <ProgramDirectLayer
+              key={directIdentity}
+              content={mirrorState.directContent}
+              contentZoom={mirrorState.contentZoom}
+              onStatus={setStatus}
+              onReady={() => {
+                if (directIdentityRef.current !== directIdentity) return
+                setNativeReady(true)
+                window.api.dbgLog(`program mirror direct ready identity=${directIdentity}`)
+                window.api.sendToControl('program-mirror-ready', {
+                  displayId: auxiliaryDisplayId,
+                  sourceDisplayId: mirrorState.sourceDisplayId
+                })
+              }}
+            />
+          </div>
         </div>
       )}
       {mirrorState.sceneRendererCapture && sceneFrameUrl && (

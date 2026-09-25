@@ -17,6 +17,7 @@ const suites = {
     ['Virtual camera frame conversion', process.execPath, ['scripts/test-virtual-camera-frame.mjs']],
     ['Race regressions', process.execPath, ['scripts/test-race-regressions.cjs']],
     ['Nonblocking preview encoding', process.execPath, ['scripts/test-canvas-export.cjs']],
+    ['PDF magnifier quality', process.execPath, ['scripts/test-pdf-zoom.mjs']],
     ['Security hardening', process.execPath, ['scripts/test-security-hardening.mjs']],
     ['Virtual camera', process.execPath, ['scripts/test-virtual-camera.mjs']],
     ['Stream Deck commands', process.execPath, ['scripts/test-direct-stream-deck.mjs']],

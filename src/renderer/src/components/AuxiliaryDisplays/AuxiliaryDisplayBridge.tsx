@@ -215,6 +215,7 @@ function sendProgramMirrorState(state: ReturnType<typeof useAppStore.getState>):
     contentType: activeFile?.type ?? null,
     contentAspectRatio: presentationAspectRatio,
     directContent,
+    contentZoom: state.contentZoom,
     sceneRendererCapture,
     sceneRendererPath: sceneRendererCapture ? activeFile.path : null,
     sceneUpperMediaLayers: sceneRendererCapture && programScene.mediaLayersVisible
@@ -302,6 +303,7 @@ export function AuxiliaryDisplayBridge(): null {
     isPlaying,
     isPresentationWindowOpen,
     currentSlide,
+    contentZoom,
     totalSlides,
     pptxSlidesMap,
     pptxAspectRatios,
@@ -553,6 +555,7 @@ export function AuxiliaryDisplayBridge(): null {
     backdropImage,
     captureTitlesOutputs,
     currentSlide,
+    contentZoom,
     displays,
     isPlaying,
     isPresentationWindowOpen,

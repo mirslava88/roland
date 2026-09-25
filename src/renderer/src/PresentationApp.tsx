@@ -951,7 +951,7 @@ export function PresentationApp(): JSX.Element {
     ))
   }, [])
 
-  const renderSlot = (slot: ContentSlot, index: SlotIndex): JSX.Element | null => {
+  const renderSlot = (slot: ContentSlot, index: SlotIndex, isActive: boolean): JSX.Element | null => {
     const content = slot.payload
     if (!content) return null
     const onReady = (): void => commitReadySlot(index, slot.revision)
@@ -965,6 +965,7 @@ export function PresentationApp(): JSX.Element {
           onReady={onReady}
           transparentBackground={programScene.active}
           roundedContent={programScene.active && programScene.cornerStyle === 'rounded'}
+          zoomRenderScale={isActive && contentZoom.enabled ? contentZoom.scale : 1}
           onAspectRatio={(value) => reportSlotAspectRatio(index, slot.revision, value)}
         />
       )
@@ -1141,7 +1142,7 @@ export function PresentationApp(): JSX.Element {
                 transformOrigin: zoomOrigin
               }}
             >
-              {renderSlot(slot, index as SlotIndex)}
+              {renderSlot(slot, index as SlotIndex, isActive)}
             </div>
           </div>
         )

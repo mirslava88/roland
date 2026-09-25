@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
 import { mediaUrl } from '../../media'
+import { pdfZoomRenderSize } from '../../../../shared/pdf-zoom-render'
 import {
   releasePdfiumResources,
   renderPdfiumPageToCanvas,
@@ -20,6 +21,7 @@ interface PdfViewerProps {
   onReady?: () => void
   transparentBackground?: boolean
   roundedContent?: boolean
+  zoomRenderScale?: number
   onAspectRatio?: (aspectRatio: number) => void
 }
 
@@ -37,6 +39,7 @@ export function PdfViewer({
   onReady,
   transparentBackground = false,
   roundedContent = false,
+  zoomRenderScale = 1,
   onAspectRatio
 }: PdfViewerProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -469,8 +472,9 @@ export function PdfViewer({
       const cssWidth = Math.round(pageMetrics.width * fitScale)
       const cssHeight = Math.round(pageMetrics.height * fitScale)
       onAspectRatioRef.current?.(pageMetrics.width / pageMetrics.height)
-      const targetBufW = Math.round(cssWidth * dpr)
-      const targetBufH = Math.round(cssHeight * dpr)
+      const { width: targetBufW, height: targetBufH } = pdfZoomRenderSize(
+        cssWidth, cssHeight, dpr, zoomRenderScale
+      )
 
       // КРИТИЧНО: pdf.js имеет баг с TilingPattern при scale > 1 — pattern
       // не покрывает всю область, контент обрезается справа. PDF от PowerPoint
@@ -626,14 +630,22 @@ export function PdfViewer({
         })
       })
     },
-    [pdf, filePath, getPdfjsFrame, notifyContentReady, startPdfPrewarm]
+    [pdf, filePath, getPdfjsFrame, notifyContentReady, startPdfPrewarm, zoomRenderScale]
   )
 
   useEffect(() => {
-    if (containerSize.w > 0 && containerSize.h > 0) {
-      renderPage(currentPage, containerSize.w, containerSize.h)
+    if (containerSize.w < 1 || containerSize.h < 1) return
+    // Wheel input may dispatch several scale changes in one gesture. Keep the
+    // old painted page visible and render only the final high-resolution size.
+    const timer = zoomRenderScale > 1
+      ? setTimeout(() => { void renderPage(currentPage, containerSize.w, containerSize.h) }, 100)
+      : null
+    if (!timer) void renderPage(currentPage, containerSize.w, containerSize.h)
+    return () => {
+      if (timer) clearTimeout(timer)
+      renderTokenRef.current += 1
     }
-  }, [currentPage, renderPage, containerSize])
+  }, [currentPage, renderPage, containerSize, zoomRenderScale])
 
   // Реагируем на изменение startSlide когда файл уже загружен (тот же PDF
   // активируется из другого канала с заранее выставленным слайдом).

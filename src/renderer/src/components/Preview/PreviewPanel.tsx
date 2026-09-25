@@ -24,6 +24,8 @@ import {
   finishNavigationTransition
 } from '../../navigation-transition'
 import * as pdfjsLib from 'pdfjs-dist'
+import { pdfZoomRenderSize } from '../../../../shared/pdf-zoom-render'
+import { renderPdfiumPageToCanvas } from '../../pdfium-renderer'
 import {
   getPdfLiveTargetSize,
   makePdfLiveCacheKey,
@@ -3835,6 +3837,7 @@ function ChannelPanel({
               slideNum={channel.slide}
               pptxThumbnails={pptxThumbnails}
               onTotalSlides={onSetTotalSlides}
+              pdfZoomScale={isLive && contentZoom.enabled ? contentZoom.scale : 1}
             />
           </div>
         ) : (
@@ -4248,14 +4251,15 @@ function ChannelPanel({
   )
 }
 
-export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides, onAspectRatio }: {
+export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides, onAspectRatio, pdfZoomScale = 1 }: {
   file: FileEntry
   slideNum: number
   pptxThumbnails: string[]
   onTotalSlides: (total: number) => void
   onAspectRatio?: (aspectRatio: number) => void
+  pdfZoomScale?: number
 }): JSX.Element {
-  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} onAspectRatio={onAspectRatio} />
+  if (file.type === 'pdf') return <PdfPreview file={file} currentSlide={slideNum} onTotalSlides={onTotalSlides} onAspectRatio={onAspectRatio} zoomRenderScale={pdfZoomScale} />
   if (file.type === 'presentation') return <PptxPreview file={file} currentSlide={slideNum} pptxThumbnails={pptxThumbnails} />
   if (file.type === 'video') return <VideoPreview key={file.path} file={file} />
   if (file.type === 'capture') {
@@ -4267,17 +4271,22 @@ export function SlideRenderer({ file, slideNum, pptxThumbnails, onTotalSlides, o
   return <div className="text-gray-500 text-xs">Unsupported</div>
 }
 
-function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio }: {
+function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio, zoomRenderScale }: {
   file: FileEntry
   currentSlide: number
   onTotalSlides: (t: number) => void
   onAspectRatio?: (aspectRatio: number) => void
+  zoomRenderScale: number
 }): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const loadingTaskRef = useRef<pdfjsLib.PDFDocumentLoadingTask | null>(null)
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null)
   const renderGenerationRef = useRef(0)
+  const [loadedDocument, setLoadedDocument] = useState<{
+    path: string
+    document: pdfjsLib.PDFDocumentProxy
+  } | null>(null)
   const onTotalSlidesRef = useRef(onTotalSlides)
   const onAspectRatioRef = useRef(onAspectRatio)
   onTotalSlidesRef.current = onTotalSlides
@@ -4285,28 +4294,42 @@ function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio }: {
 
   useEffect(() => {
     let cancelled = false
+    setLoadedDocument(null)
+    const load = async (): Promise<void> => {
+      try {
+        const data = await window.api.readFile(file.path)
+        if (cancelled) return
+        const task = pdfjsLib.getDocument({ data })
+        loadingTaskRef.current = task
+        const document = await task.promise
+        if (cancelled) return
+        onTotalSlidesRef.current(document.numPages)
+        setLoadedDocument({ path: file.path, document })
+      } catch (error) {
+        if (!cancelled) console.error('Preview: Failed to load PDF:', error)
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+      const task = loadingTaskRef.current
+      loadingTaskRef.current = null
+      if (task) void task.destroy().catch(() => undefined)
+    }
+  }, [file.path])
+
+  useEffect(() => {
+    if (!loadedDocument || loadedDocument.path !== file.path) return
+    let cancelled = false
     const generation = ++renderGenerationRef.current
     renderTaskRef.current?.cancel()
     renderTaskRef.current = null
-    if (loadingTaskRef.current) {
-      void loadingTaskRef.current.destroy().catch(() => undefined)
-      loadingTaskRef.current = null
-    }
-
     async function render(): Promise<void> {
-      let loadingTask: pdfjsLib.PDFDocumentLoadingTask | null = null
       let page: pdfjsLib.PDFPageProxy | null = null
       let renderTask: pdfjsLib.RenderTask | null = null
       try {
-        const data = await window.api.readFile(file.path)
-        if (cancelled || generation !== renderGenerationRef.current) return
-        loadingTask = pdfjsLib.getDocument({ data })
-        loadingTaskRef.current = loadingTask
-        const doc = await loadingTask.promise
-        if (cancelled || generation !== renderGenerationRef.current) return
-        onTotalSlidesRef.current(doc.numPages)
-        const pageNumber = Math.max(1, Math.min(doc.numPages, currentSlide))
-        page = await doc.getPage(pageNumber)
+        const pageNumber = Math.max(1, Math.min(loadedDocument!.document.numPages, currentSlide))
+        page = await loadedDocument!.document.getPage(pageNumber)
         if (
           cancelled ||
           generation !== renderGenerationRef.current ||
@@ -4314,9 +4337,6 @@ function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio }: {
           !containerRef.current
         ) return
 
-        const canvas = canvasRef.current
-        const ctx = canvas.getContext('2d')
-        if (!ctx) return
         const viewport = page.getViewport({ scale: 1 })
         const aspectRatio = viewport.width / Math.max(1, viewport.height)
         if (Number.isFinite(aspectRatio) && aspectRatio >= 0.2 && aspectRatio <= 5) {
@@ -4328,16 +4348,43 @@ function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio }: {
         const containerHeight = Math.max(1, containerRef.current.clientHeight)
         const displayScale = Math.min(containerWidth / viewport.width, containerHeight / viewport.height)
         const pixelRatio = Math.min(2, Math.max(1, window.devicePixelRatio || 1))
-        const scale = displayScale * pixelRatio
-        const scaledViewport = page.getViewport({ scale })
-        canvas.width = Math.max(1, Math.round(scaledViewport.width))
-        canvas.height = Math.max(1, Math.round(scaledViewport.height))
-        canvas.style.width = `${Math.max(1, Math.round(scaledViewport.width / pixelRatio))}px`
-        canvas.style.height = `${Math.max(1, Math.round(scaledViewport.height / pixelRatio))}px`
-
-        renderTask = page.render({ canvas, canvasContext: ctx, viewport: scaledViewport })
-        renderTaskRef.current = renderTask
-        await renderTask.promise
+        const cssWidth = Math.max(1, Math.round(viewport.width * displayScale))
+        const cssHeight = Math.max(1, Math.round(viewport.height * displayScale))
+        const { width, height } = pdfZoomRenderSize(cssWidth, cssHeight, pixelRatio, zoomRenderScale)
+        const renderedCanvas = document.createElement('canvas')
+        renderedCanvas.width = width
+        renderedCanvas.height = height
+        const renderContext = renderedCanvas.getContext('2d')
+        if (!renderContext) return
+        if (zoomRenderScale > 1) {
+          const frame = await renderPdfiumPageToCanvas({
+            filePath: file.path,
+            pageNumber,
+            targetWidth: width,
+            targetHeight: height,
+            lane: 'interactive'
+          })
+          if (cancelled || generation !== renderGenerationRef.current) return
+          renderContext.drawImage(frame.canvas, 0, 0)
+        } else {
+          renderTask = page.render({
+            canvas: renderedCanvas,
+            canvasContext: renderContext,
+            viewport,
+            transform: [width / viewport.width, 0, 0, height / viewport.height, 0, 0]
+          })
+          renderTaskRef.current = renderTask
+          await renderTask.promise
+        }
+        if (cancelled || generation !== renderGenerationRef.current || !canvasRef.current) return
+        const canvas = canvasRef.current
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return
+        canvas.width = width
+        canvas.height = height
+        canvas.style.width = `${cssWidth}px`
+        canvas.style.height = `${cssHeight}px`
+        ctx.drawImage(renderedCanvas, 0, 0)
       } catch (err) {
         if (!cancelled && generation === renderGenerationRef.current) {
           console.error('Preview: Failed to render PDF:', err)
@@ -4345,23 +4392,20 @@ function PdfPreview({ file, currentSlide, onTotalSlides, onAspectRatio }: {
       } finally {
         if (renderTaskRef.current === renderTask) renderTaskRef.current = null
         page?.cleanup()
-        if (loadingTask) {
-          if (loadingTaskRef.current === loadingTask) loadingTaskRef.current = null
-          await loadingTask.destroy().catch(() => undefined)
-        }
       }
     }
-    void render()
+    const timer = zoomRenderScale > 1
+      ? setTimeout(() => { void render() }, 100)
+      : null
+    if (!timer) void render()
     return () => {
       cancelled = true
+      if (timer) clearTimeout(timer)
       renderGenerationRef.current += 1
       renderTaskRef.current?.cancel()
       renderTaskRef.current = null
-      const loadingTask = loadingTaskRef.current
-      loadingTaskRef.current = null
-      if (loadingTask) void loadingTask.destroy().catch(() => undefined)
     }
-  }, [currentSlide, file.path])
+  }, [currentSlide, file.path, loadedDocument, zoomRenderScale])
 
   return (
     <div ref={containerRef} className="w-full h-full flex items-center justify-center">
