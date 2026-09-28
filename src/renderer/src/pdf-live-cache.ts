@@ -13,6 +13,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 export interface PdfLivePrewarmRequest {
   filePath: string
   cacheKey: string
+  requestId?: number
   targetWidth: number
   targetHeight: number
   anchorPage: number
@@ -212,12 +213,18 @@ export function ensurePdfLiveCache(
         await new Promise<void>((resolve) => setTimeout(resolve, 0))
       }
 
+      if (isCancelled()) {
+        return { success: false, totalPages, cachedPages, error: 'cancelled' }
+      }
       const success = totalPages > 0 && cachedPages > 0
       window.api.dbgLog(
         `PDF channel cache: END cached=${cachedPages}/${totalPages} success=${success}`
       )
       return { success, totalPages, cachedPages }
     } catch (error) {
+      if (isCancelled()) {
+        return { success: false, totalPages: 0, cachedPages: 0, error: 'cancelled' }
+      }
       window.api.dbgLog(`PDF channel cache: ERROR file=${request.filePath} error=${String(error)}`)
       return {
         success: false,

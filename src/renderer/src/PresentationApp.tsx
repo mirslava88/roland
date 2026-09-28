@@ -604,6 +604,7 @@ export function PresentationApp(): JSX.Element {
       const request: PdfLivePrewarmRequest = {
         filePath: raw.filePath,
         cacheKey: raw.cacheKey,
+        requestId: Number.isFinite(raw.requestId) ? raw.requestId : undefined,
         targetWidth: Math.max(64, Math.round(raw.targetWidth as number)),
         targetHeight: Math.max(64, Math.round(raw.targetHeight as number)),
         anchorPage: Number.isFinite(raw.anchorPage)
@@ -613,6 +614,7 @@ export function PresentationApp(): JSX.Element {
       window.api.sendToControl('pdf-channel-cache-status', {
         filePath: request.filePath,
         cacheKey: request.cacheKey,
+        requestId: request.requestId,
         status: 'loading'
       })
       let completionSent = false
@@ -625,13 +627,14 @@ export function PresentationApp(): JSX.Element {
         if (completionSent) return
         completionSent = true
         window.api.dbgLog(
-          `PDF channel cache: SEND status=${result.success ? 'ready' : 'error'} ` +
+          `PDF channel cache: SEND status=${result.success ? 'ready' : result.error === 'cancelled' ? 'cancelled' : 'error'} ` +
           `cached=${result.cachedPages}/${result.totalPages} file=${request.filePath}`
         )
         window.api.sendToControl('pdf-channel-cache-status', {
           filePath: request.filePath,
           cacheKey: request.cacheKey,
-          status: result.success ? 'ready' : 'error',
+          requestId: request.requestId,
+          status: result.success ? 'ready' : result.error === 'cancelled' ? 'cancelled' : 'error',
           totalPages: result.totalPages,
           cachedPages: result.cachedPages,
           error: result.error

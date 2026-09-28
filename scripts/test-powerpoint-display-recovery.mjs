@@ -204,5 +204,10 @@ assert.match(
   /detail\?\.displayId !== undefined[\s\S]*?isPresentationWindowOpen: false[\s\S]*?physical Program output requires reveal[\s\S]*?void handleTake\(liveChannelId\)/,
   'a returned physical Program display must force the preserved transparent renderer to be revealed again'
 )
+assert.match(
+  preview,
+  /const promoted = !physicalProgramOutput \|\| await window\.api\.raisePresentationWindow\(\)[\s\S]*?const closed = promoted[\s\S]*?window\.api\.powerpointCommand\([\s\S]*?'close'/,
+  'PPTX must keep its slideshow until the painted PDF/output has been promoted above it'
+)
 
 console.log('PowerPoint display reconnect recovery contracts: OK')

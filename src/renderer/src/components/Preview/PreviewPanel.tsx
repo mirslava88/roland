@@ -288,6 +288,10 @@ export function PreviewPanel(): JSX.Element {
   } | null>(null)
   const [pdfCacheStatuses, setPdfCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
   const pdfCacheRequestKeysRef = useRef<Record<string, string>>({})
+  const pdfCacheRequestIdsRef = useRef<Record<string, number>>({})
+  const pdfCacheRequestSequenceRef = useRef(0)
+  const cancelledPdfPathsRef = useRef<Set<string>>(new Set())
+  const [pdfRetryEpoch, setPdfRetryEpoch] = useState(0)
   const prewarmedPdfPathsRef = useRef<Set<string>>(new Set())
 
   const pptxChannelPaths = [...new Set(channelIds
@@ -308,6 +312,8 @@ export function PreviewPanel(): JSX.Element {
   const programDisplay = displays.find((display) => display.id === connectedOutputId)
   const pdfTargetSize = programDisplay ? getPdfLiveTargetSize(programDisplay) : null
   const pdfTargetKey = pdfTargetSize ? `${pdfTargetSize.width}x${pdfTargetSize.height}` : 'none'
+  const livePdfPath = liveChannel && channels[liveChannel]?.file?.type === 'pdf'
+    ? channels[liveChannel].file?.path : null
 
   useEffect(() => {
     window.api.sendToPresentation('content-zoom-update', contentZoom)
@@ -368,7 +374,8 @@ export function PreviewPanel(): JSX.Element {
     const update = args[0] as {
       filePath?: string
       cacheKey?: string
-      status?: ChannelCacheStatus
+      requestId?: number
+      status?: ChannelCacheStatus | 'cancelled'
       totalPages?: number
     }
     if (!update?.filePath || !update.cacheKey || !update.status) return
@@ -380,12 +387,22 @@ export function PreviewPanel(): JSX.Element {
     if (!pathIsStillInChannel) return
 
     const expectedKey = pdfCacheRequestKeysRef.current[update.filePath]
+    const expectedId = pdfCacheRequestIdsRef.current[update.filePath]
+    if (expectedKey !== update.cacheKey || expectedId !== update.requestId) return
     window.api.dbgLog(
       `PDF channel cache status: status=${update.status} keyMatch=${expectedKey === update.cacheKey} file=${update.filePath}`
     )
-    if (update.status === 'ready') {
-      // A display refresh can replace the expected key while an already-valid
-      // job is finishing. The frames are still cached by file/content/size;
+    if (update.status === 'cancelled') {
+      cancelledPdfPathsRef.current.add(update.filePath)
+      setPdfCacheStatuses((current) => {
+        const next = { ...current }
+        delete next[update.filePath as string]
+        return next
+      })
+      setPdfRetryEpoch((current) => current + 1)
+    } else if (update.status === 'ready') {
+      cancelledPdfPathsRef.current.delete(update.filePath)
+      // The matching request completed; clear the background-work badge.
       // never leave the current PDF displaying an endless "Кэширование…".
       setPdfCacheStatuses((current) => {
         const next = { ...current }
@@ -393,9 +410,8 @@ export function PreviewPanel(): JSX.Element {
         return next
       })
     } else {
-      // Loading/error from an older display size must not overwrite the state
-      // of a newer request. Only successful completion is safe across keys.
-      if (expectedKey !== update.cacheKey) return
+      // The request identity guard above rejects late statuses from an older
+      // render size or an earlier run with the same cache key.
       setPdfCacheStatuses((current) => ({
         ...current,
         [update.filePath as string]: update.status as ChannelCacheStatus
@@ -422,6 +438,12 @@ export function PreviewPanel(): JSX.Element {
     pdfCacheRequestKeysRef.current = Object.fromEntries(
       Object.entries(pdfCacheRequestKeysRef.current).filter(([path]) => activePaths.has(path))
     )
+    pdfCacheRequestIdsRef.current = Object.fromEntries(
+      Object.entries(pdfCacheRequestIdsRef.current).filter(([path]) => activePaths.has(path))
+    )
+    for (const filePath of cancelledPdfPathsRef.current) {
+      if (!activePaths.has(filePath)) cancelledPdfPathsRef.current.delete(filePath)
+    }
     setPdfCacheStatuses((current) => Object.fromEntries(
       Object.entries(current).filter(([path]) => activePaths.has(path))
     ))
@@ -434,6 +456,9 @@ export function PreviewPanel(): JSX.Element {
         pdfTargetSize.height
       )
       pdfCacheRequestKeysRef.current[file.filePath] = cacheKey
+      const requestId = ++pdfCacheRequestSequenceRef.current
+      pdfCacheRequestIdsRef.current[file.filePath] = requestId
+      cancelledPdfPathsRef.current.delete(file.filePath)
       setPdfCacheStatuses((current) => ({
         ...current,
         [file.filePath]: 'loading'
@@ -441,6 +466,7 @@ export function PreviewPanel(): JSX.Element {
       const request: PdfLivePrewarmRequest = {
         filePath: file.filePath,
         cacheKey,
+        requestId,
         targetWidth: pdfTargetSize.width,
         targetHeight: pdfTargetSize.height,
         anchorPage: file.anchorPage
@@ -448,6 +474,26 @@ export function PreviewPanel(): JSX.Element {
       window.api.sendToPresentation('prewarm-pdf', request)
     }
   }, [pdfChannelPathKey, pdfTargetKey])
+
+  useEffect(() => {
+    const activeChannel = liveChannel ? channels[liveChannel] : null
+    const file = activeChannel?.file
+    if (file?.type !== 'pdf' || !cancelledPdfPathsRef.current.has(file.path) || !pdfTargetSize) return
+    cancelledPdfPathsRef.current.delete(file.path)
+    const cacheKey = makePdfLiveCacheKey(file.path, pdfTargetSize.width, pdfTargetSize.height)
+    const requestId = ++pdfCacheRequestSequenceRef.current
+    pdfCacheRequestKeysRef.current[file.path] = cacheKey
+    pdfCacheRequestIdsRef.current[file.path] = requestId
+    setPdfCacheStatuses((current) => ({ ...current, [file.path]: 'loading' }))
+    window.api.sendToPresentation('prewarm-pdf', {
+      filePath: file.path,
+      cacheKey,
+      requestId,
+      targetWidth: pdfTargetSize.width,
+      targetHeight: pdfTargetSize.height,
+      anchorPage: Math.max(1, activeChannel?.slide || 1)
+    } satisfies PdfLivePrewarmRequest)
+  }, [livePdfPath, pdfRetryEpoch, pdfTargetKey])
 
   useEffect(() => () => {
     for (const filePath of prewarmedPdfPathsRef.current) {
@@ -2911,10 +2957,22 @@ export function PreviewPanel(): JSX.Element {
       return
     }
     if (deferPowerPointCloseUntilTargetReady) {
-      const closed = await window.api.powerpointCommand(
-        'close',
-        channel.file.type === 'pdf' ? { keepHostWarm: true } : undefined
-      )
+      // The prepared Electron frame must become the visible Program owner
+      // before Office destroys its slideshow HWND. If Office closes first,
+      // Windows can briefly promote Explorer's secondary taskbar/Start surface
+      // into the gap even though the PDF itself has already painted.
+      const physicalProgramOutput = programDisplayId !== null
+      const promoted = !physicalProgramOutput || await window.api.raisePresentationWindow()
+      if (promoted && isTakeCancelled()) {
+        await finishCancelledTake()
+        return
+      }
+      const closed = promoted
+        ? await window.api.powerpointCommand(
+            'close',
+            channel.file.type === 'pdf' ? { keepHostWarm: true } : undefined
+          )
+        : { success: false, error: 'Не удалось вывести подготовленный материал поверх PowerPoint.' }
       if (!closed.success) {
         log(`PowerPoint close failed; prepared target discarded: ${closed.error || 'unknown error'}`)
         window.api.sendToPresentation('clear-active-content')

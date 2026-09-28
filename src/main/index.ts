@@ -1932,7 +1932,7 @@ function createWindows(): void {
       presentationWindow.setOpacity(1)
       presentationWindow.setAlwaysOnTop(false)
       presentationWindow.moveTop()
-      diagnosticLog('window', 'presentation output raised above native content for participant focus')
+      diagnosticLog('window', 'presentation output raised above native content')
       return true
     } catch (error) {
       diagnosticLog('window', `presentation output raise failed ${formatDiagnosticError(error)}`)

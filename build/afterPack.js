@@ -27,7 +27,7 @@ module.exports = async function afterPack(context) {
     [FuseV1Options.EnableNodeCliInspectArguments]: false,
     // Encrypt cookies at rest.
     [FuseV1Options.EnableCookieEncryption]: true,
-    // Electron 44.1.0 + electron-builder 26.15.3 produce a valid embedded ASAR
+    // The current Electron 44 + electron-builder 26 produce a valid embedded ASAR
     // integrity hash. Keep both protections enabled; the packaged application is
     // smoke-tested with this exact state before release.
     [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
