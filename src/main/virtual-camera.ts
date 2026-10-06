@@ -122,6 +122,7 @@ export class VirtualCameraManager {
   }
 
   private async isInstalled(): Promise<boolean> {
+    if (!supported()) return false
     if (!this.binariesAvailable()) return false
     try { return (await this.runHost(['--source-registered'])).code === 0 }
     catch { return false }
