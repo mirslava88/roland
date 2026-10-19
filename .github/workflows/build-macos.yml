@@ -66,6 +66,7 @@ jobs:
           node scripts/test-macos-release.mjs
           node scripts/test-mac-keynote-launcher.cjs
           node scripts/test-mac-keynote-pool.cjs
+          node scripts/test-keynote-live-recovery.cjs
           xcrun clang -fobjc-arc scripts/test-mac-keynote-identity.m -framework AppKit -o "$RUNNER_TEMP/pdm-keynote-identity-test"
           "$RUNNER_TEMP/pdm-keynote-identity-test"
           npm run test:security
