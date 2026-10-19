@@ -5,11 +5,11 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const { editionInfo } = createRequire(import.meta.url)('../build/editions.cjs')
+const { editionInfo, macReleaseTag } = createRequire(import.meta.url)('../build/editions.cjs')
 
 export function prepareMacRelease(edition, directory) {
   const info = editionInfo(edition, 'darwin')
-  const tag = `macos-v${info.version}`
+  const tag = macReleaseTag(edition)
   const metadata = JSON.parse(readFileSync(new URL(`../docs/releases/macos-${info.version.replace(/-stream$/, '')}.json`, import.meta.url), 'utf8'))[edition]
   if (typeof metadata?.title !== 'string' || typeof metadata?.body !== 'string') throw new Error('Missing Mac release metadata')
   const files = ['x64', 'arm64'].map(arch => join(directory, `PDM${info.stream ? '-Stream' : ''}-${info.version}-mac-${arch}.dmg`))

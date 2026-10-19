@@ -12,8 +12,8 @@
 
 [![Скачать Stream для Windows](https://img.shields.io/badge/PDM_1.1.6_stream-Windows-ef4444?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/v1.1.6-stream)
 
-[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.8-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.8)
-[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.8-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.8-stream)
+[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.6-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.6-build.20261019)
+[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.6-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.6-build.20261019-stream)
 
 [![Latest release](https://img.shields.io/github/v/release/mirslava88/roland?label=версия&logo=github)](https://github.com/mirslava88/roland/releases/latest)
 [![Build Windows](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml)
@@ -36,8 +36,8 @@
 
 | Редакция | Для чего | Windows | macOS |
 |---|---|---|---|
-| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.6](https://github.com/mirslava88/roland/releases/tag/v1.1.6) | [1.1.8 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.8) |
-| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.6 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.6-stream) | [1.1.8 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.8-stream) |
+| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.6](https://github.com/mirslava88/roland/releases/tag/v1.1.6) | [1.1.6 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.6-build.20261019) |
+| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.6 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.6-stream) | [1.1.6 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.6-build.20261019-stream) |
 
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
@@ -48,11 +48,11 @@ Stream устанавливается отдельно: **Presentation Display M
 
 В Windows в настройках Stream отображается **«1.1.6 stream»**. В `package.json`, имени установщика и теге
 используется техническая запись `1.1.6-stream` / `v1.1.6-stream`.
-Версия следующих Mac-сборок закреплена на **1.1.6 / 1.1.6 stream** (`build/mac-runtime.json`) по указанию владельца проекта. Менять номер можно только по его прямому запросу. Ссылки ниже ведут на уже опубликованные выпуски; номера Windows не меняются.
+Версия следующих Mac-сборок закреплена на **1.1.6 / 1.1.6 stream** (`build/mac-runtime.json`) по указанию владельца проекта. Менять номер можно только по его прямому запросу. Этот обновлённый выпуск включает исправления прежних Mac-сборок 1.1.7 и 1.1.8; номера Windows не меняются.
 Обе редакции используют общую кодовую базу. Обновление Windows-сборок от 6 октября 2026 года
 использует номера `1.1.6` и `1.1.6-stream`; встроенный стриминг доступен только в Stream.
 
-## Выпуск для macOS 1.1.8 — 19 октября 2026
+## Обновлённый выпуск для macOS 1.1.6 — 19 октября 2026
 
 Отдельные предварительные релизы **PDM** и **PDM Stream** для Intel (`x64`) и Apple Silicon (`arm64`). Исходники Mac находятся в ветке [`macos`](https://github.com/mirslava88/roland/tree/macos); ветка `master` и прежние релизы сохраняют Windows-версию.
 
@@ -65,7 +65,7 @@ Stream устанавливается отдельно: **Presentation Display M
 - В Stream — отправка RTMP/RTMPS, в том числе в Telegram, и настраиваемая дополнительная задержка.
 - Electron **44.9.0**, усиленная проверка целостности и отдельные зависимости Mac-сборки. Полный `npm audit` этого набора зависимостей при выпуске: **0 уязвимостей**.
 
-Отчёт сбоя Keynote 15.3.1 на Apple Silicon подтвердил ошибку доступа к памяти в компоненте TSDrawables в момент потери эфира. Версия 1.1.8 исправляет восстановление PDM после такого события; устранение самого падения Keynote не подтверждено.
+Отчёт сбоя Keynote 15.3.1 на Apple Silicon подтвердил ошибку доступа к памяти в компоненте TSDrawables в момент потери эфира. Обновлённая сборка 1.1.6 исправляет восстановление PDM после такого события; устранение самого падения Keynote не подтверждено.
 
 **Статус:** запуск проверен на Intel Mac с macOS 15.8.1; сборки Apple Silicon прошли проверку упаковки и подписи, но не проверены на реальном ARM Mac. Нотариальная проверка Apple пока отсутствует. Собственная виртуальная камера macOS в этом выпуске не готова к обычной установке. Подробнее — в [разделе macOS](#macos-standard-и-stream-предварительный-релиз).
 
@@ -246,8 +246,8 @@ PDF, изображения, видео, музыка и таймер не тр�
 
 | Редакция | Intel Mac | Apple Silicon (M1/M2/M3/M4 и новее) |
 |---|---|---|
-| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.8/PDM-1.1.8-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.8/PDM-1.1.8-mac-arm64.dmg) |
-| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.8-stream/PDM-Stream-1.1.8-stream-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.8-stream/PDM-Stream-1.1.8-stream-mac-arm64.dmg) |
+| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.6-build.20261019/PDM-1.1.6-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.6-build.20261019/PDM-1.1.6-mac-arm64.dmg) |
+| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.6-build.20261019-stream/PDM-Stream-1.1.6-stream-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.6-build.20261019-stream/PDM-Stream-1.1.6-stream-mac-arm64.dmg) |
 
 В каждом релизе есть `SHA256SUMS.txt` для проверки загруженных DMG. Требуется **macOS 13 или новее**; фактическая проверка выполнена на macOS 15.8.1 / Intel.
 

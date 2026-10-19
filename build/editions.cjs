@@ -15,6 +15,14 @@ function editionInfo(edition = process.env.PDM_EDITION || (pkg.version.endsWith(
     appId: `com.roland.presentation-display-manager${stream ? '.stream' : ''}` }
 }
 
+function macReleaseTag(edition) {
+  const runtime = require('./mac-runtime.json')
+  const info = editionInfo(edition, 'darwin')
+  const revision = runtime.releaseRevision
+  if (revision !== undefined && !/^\d{8}(?:\.\d+)?$/.test(revision)) throw new Error('Invalid Mac release revision')
+  return `macos-v${info.version.replace(/-stream$/, '')}${revision ? `-build.${revision}` : ''}${info.stream ? '-stream' : ''}`
+}
+
 function builderConfig(edition, platform = process.platform) {
   const info = editionInfo(edition, platform)
   const windowsResource = new Set(['virtual-camera', 'pdm-launcher-v1.ico', 'licenses/Microsoft-Windows-Camera-LICENSE.txt'])
@@ -78,4 +86,4 @@ function builderConfig(edition, platform = process.platform) {
   }
 }
 
-module.exports = { editionInfo, builderConfig }
+module.exports = { editionInfo, builderConfig, macReleaseTag }

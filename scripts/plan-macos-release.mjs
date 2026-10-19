@@ -3,12 +3,12 @@ import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const { editionInfo } = createRequire(import.meta.url)('../build/editions.cjs')
+const { macReleaseTag } = createRequire(import.meta.url)('../build/editions.cjs')
 
 export function macReleasePlan(refType, refName, requested = 'all') {
   if (refType === 'tag') {
     const edition = refName.endsWith('-stream') ? 'stream' : 'standard'
-    const expected = `macos-v${editionInfo(edition, 'darwin').version}`
+    const expected = macReleaseTag(edition)
     if (refName !== expected) throw new Error(`Expected Mac tag ${expected}`)
     return { editions: [edition], tag: expected }
   }
