@@ -20,7 +20,15 @@ try {
     assert.ok(release.tag.startsWith('macos-v'))
     assert.equal(release.files.length, 3)
     assert.equal(readFileSync(join(directory, 'SHA256SUMS.txt'), 'utf8').trim().split('\n').length, 2)
-    assert.throws(() => publishMacRelease(edition, directory), /Publication requires/)
+    // The test also runs on real release tags. Always give the publication
+    // guard a non-tag context so fixtures can never reach GitHub operations.
+    const previous = process.env.GITHUB_REF_TYPE
+    process.env.GITHUB_REF_TYPE = 'branch'
+    try { assert.throws(() => publishMacRelease(edition, directory), /Publication requires/) }
+    finally {
+      if (previous === undefined) delete process.env.GITHUB_REF_TYPE
+      else process.env.GITHUB_REF_TYPE = previous
+    }
   }
 } finally { rmSync(directory, { recursive: true, force: true }) }
 console.log('PASS: Mac-only tags, edition selection, complete DMGs, checksums, publication guard')
