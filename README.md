@@ -17,7 +17,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/mirslava88/roland?label=версия&logo=github)](https://github.com/mirslava88/roland/releases/latest)
 [![Build Windows](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml)
-[![Build macOS](https://github.com/mirslava88/roland/actions/workflows/build-macos.yml/badge.svg?branch=macos)](https://github.com/mirslava88/roland/actions/workflows/build-macos.yml)
+[![Build macOS](https://github.com/mirslava88/roland/actions/workflows/build-macos.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-macos.yml)
 [![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?label=загрузки&logo=github)](https://github.com/mirslava88/roland/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
