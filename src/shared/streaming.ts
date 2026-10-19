@@ -1,5 +1,5 @@
 export type StreamAudio = 'system' | 'microphone' | 'both' | 'none'
-export type StreamEncoder = 'auto' | 'software' | 'h264_nvenc' | 'h264_qsv' | 'h264_amf'
+export type StreamEncoder = 'auto' | 'software' | 'h264_nvenc' | 'h264_qsv' | 'h264_amf' | 'h264_videotoolbox'
 export interface StreamDestination {
   id: string
   name: string
@@ -15,9 +15,11 @@ export interface StreamSettings {
   audio: StreamAudio
   microphoneId: string
   destinations: StreamDestination[]
+  delaySeconds?: number
+  drainOnStop?: boolean
 }
 export interface StreamStatus {
-  phase: 'idle' | 'starting' | 'running' | 'error'
+  phase: 'idle' | 'starting' | 'running' | 'draining' | 'error'
   error?: string
   startedAt: number | null
   encoder: string
@@ -26,6 +28,7 @@ export interface StreamStatus {
   droppedFrames: number
   encoderLagMs: number
   source?: 'display' | 'internal'
+  delay?: { seconds: number; remainingMs: number; storedBytes: number; buffering: boolean }
   destinations: Array<{ id: string; name: string; phase: 'connecting' | 'live' | 'reconnecting'; retries: number; error?: string;
     bitrateKbps: number; bufferedMs: number; droppedFrames: number }>
 }
@@ -42,20 +45,26 @@ export interface StreamingApi {
   devices(): Promise<Array<{ id: string; label: string }>>
   check(settings: StreamSettings): Promise<Array<{ name: string; reachable: boolean }>>
   start(settings: StreamSettings, displayId: number | null): Promise<void>
-  stop(): Promise<void>
+  stop(immediate?: boolean): Promise<void>
   status(): Promise<StreamStatus>
 }
 export const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   resolution: 1080, fps: 30, bitrateKbps: 6000, encoder: 'auto',
-  audio: 'system', microphoneId: '',
+  audio: 'system', microphoneId: '', delaySeconds: 0, drainOnStop: true,
   destinations: [{ id: 'telegram', name: 'Telegram', enabled: true, server: '', key: '' }]
 }
 
 // Runtime validation is also used in main; renderer input is never trusted.
 export function validateStreamSettings(value: StreamSettings, requireDestination = true): StreamSettings {
+  const delaySeconds = value?.delaySeconds === undefined ? 0 : value.delaySeconds
+  const drainOnStop = value?.drainOnStop === undefined ? true : value.drainOnStop
+  if (typeof drainOnStop !== 'boolean') throw new Error('Проверьте поведение при остановке стрима.')
+  if (!Number.isSafeInteger(delaySeconds) || delaySeconds < 0 || !Number.isSafeInteger(delaySeconds * 1000)) {
+    throw new Error('Задержка должна быть целым неотрицательным числом секунд.')
+  }
   if (!value || ![720, 1080].includes(value.resolution) || ![25, 30, 50, 60].includes(value.fps) ||
     !Number.isInteger(value.bitrateKbps) || value.bitrateKbps < 500 || value.bitrateKbps > 20000 ||
-    !['auto', 'software', 'h264_nvenc', 'h264_qsv', 'h264_amf'].includes(value.encoder) ||
+    !['auto', 'software', 'h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_videotoolbox'].includes(value.encoder) ||
     !['system', 'microphone', 'both', 'none'].includes(value.audio) ||
     typeof value.microphoneId !== 'string' || value.microphoneId.length > 1024 ||
     !Array.isArray(value.destinations) || value.destinations.length > 5) {
@@ -75,7 +84,16 @@ export function validateStreamSettings(value: StreamSettings, requireDestination
   })
   if (requireDestination && !destinations.some((d) => d.enabled)) throw new Error('Выберите хотя бы одну площадку.')
   return { resolution: value.resolution, fps: value.fps, bitrateKbps: value.bitrateKbps,
-    encoder: value.encoder, audio: value.audio, microphoneId: value.microphoneId, destinations }
+    encoder: value.encoder, audio: value.audio, microphoneId: value.microphoneId, destinations, delaySeconds, drainOnStop }
+}
+
+export function streamDelayStorageBytes(seconds: number, bitrateKbps: number): number {
+  return Math.ceil(seconds * ((bitrateKbps + 160) * 125 + 2400) * 1.15)
+}
+
+export function formatStreamDuration(seconds: number): string {
+  const value = Math.max(0, Math.ceil(seconds))
+  return `${Math.floor(value / 3600)}:${String(Math.floor(value / 60) % 60).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`
 }
 
 export function streamDestinationUrl(d: StreamDestination): string {

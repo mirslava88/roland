@@ -106,12 +106,16 @@ export function VideoPlayer(): JSX.Element {
   // два независимых слушателя друг другу не мешают.
   useEffect(() => {
     const unsubTime = window.api.on('video-time', (...args: unknown[]) => {
-      const data = args[0] as { currentTime: number; duration: number }
+      const data = args[0] as { path?: string; currentTime: number; duration: number }
+      const active = useAppStore.getState().activeFile
+      if (active?.type !== 'video' || (data.path && data.path !== active.path)) return
       setCurrentTime(data.currentTime)
       if (data.duration && !isNaN(data.duration)) setDuration(data.duration)
     })
     const unsubState = window.api.on('video-state', (...args: unknown[]) => {
-      const data = args[0] as { playing: boolean; duration: number; currentTime: number }
+      const data = args[0] as { path?: string; playing: boolean; duration: number; currentTime: number }
+      const active = useAppStore.getState().activeFile
+      if (active?.type !== 'video' || (data.path && data.path !== active.path)) return
       setCurrentTime(data.currentTime)
       if (data.duration && !isNaN(data.duration)) setDuration(data.duration)
       setIsPlayingStore(data.playing)
@@ -130,7 +134,7 @@ export function VideoPlayer(): JSX.Element {
 
   // Listen for video end — auto-advance playlist
   useEffect(() => {
-    const unsub = window.api.on('video-ended', () => {
+    const unsub = window.api.on('video-ended', (...args: unknown[]) => {
       const st = useAppStore.getState()
       // A video assigned to a channel has its own explicit end target. The
       // channel grid owns that transition; the independent playlist must not
@@ -138,6 +142,8 @@ export function VideoPlayer(): JSX.Element {
       if (st.liveChannel) return
       // Только если текущее активное видео — из нашего плейлиста
       if (!st.activeFile || st.activeFile.type !== 'video') return
+      const data = args[0] as { path?: string } | undefined
+      if (data?.path && data.path !== st.activeFile.path) return
       const idx = st.videoCurrentIndex
       if (idx < 0 || idx >= st.videoPlaylist.length) return
       if (st.activeFile.path !== st.videoPlaylist[idx]) return
@@ -241,8 +247,8 @@ export function VideoPlayer(): JSX.Element {
   const handleToggleLoopTrack = (): void => {
     const newVal = !loopTrack
     setLoopTrackStore(newVal)
-    // Немедленно применяем к текущему видео, если играет
-    if (activeFile?.type === 'video') {
+    // Playlist repeat must not change a separate video channel on air.
+    if (activeFile?.type === 'video' && useAppStore.getState().liveChannel === null) {
       window.api.sendToPresentation('set-loop', newVal)
     }
   }

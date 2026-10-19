@@ -1,14 +1,16 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, screen } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { readdir, stat, readFile, writeFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
+import { readdir, stat, statfs, readFile, writeFile, rename, copyFile, rm, cp, mkdir } from 'fs/promises'
 import { join, extname, basename } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync } from 'fs'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 import { createHash } from 'crypto'
 import { scriptPath as resolveScript } from './paths'
 import { pptDaemon, PowerPointPreOpenRecoveryError } from './powerpoint-daemon'
+import { macPowerPoint } from './mac-powerpoint'
+import { macOffice, type MacDocumentCrop } from './mac-office'
 import { createPptxCache, readPptxCacheImages, type PptxCacheProgress } from './pptx-cache'
 import { resizePptxThumbnail } from './pptx-thumbnail'
 import { exportPptxIncrementally } from './pptx-incremental-export'
@@ -125,10 +127,14 @@ const pptxDiskCache = createPptxDiskCache()
 const preparePptxCache = createPptxCache({
   directory: (path, size, mtime, width, height) => pptxDiskCache.claim(pptxExportDirectory('slides', path, size, mtime, width, height)),
   readCache: readPptxExportCache,
-  export: (path, outputDir, width, height, onEvent, signal) => exportPptxIncrementally(
-    pptDaemon.send.bind(pptDaemon), { path, outputDir, width, height }, onEvent, signal
-  ),
-  prepare: (path) => pptDaemon.send('prepare', { path }, 120_000),
+  export: (path, outputDir, width, height, onEvent, signal) => process.platform === 'darwin'
+    ? macPowerPoint.export(path, outputDir, width, height, onEvent, signal)
+    : exportPptxIncrementally(
+      pptDaemon.send.bind(pptDaemon), { path, outputDir, width, height }, onEvent, signal
+    ),
+  prepare: (path) => process.platform === 'darwin'
+    ? macPowerPoint.prepare(path)
+    : pptDaemon.send('prepare', { path }, 120_000),
   resize: resizePptxThumbnail,
   enqueue: enqueuePptxExport,
   release: (path) => syncPreparedPowerPointsInternal([], `single-pass-cache:${path}`),
@@ -168,7 +174,7 @@ async function ensureAudioPreferenceLoaded(): Promise<void> {
       diagnosticLog('audio', `preference loaded configured=${Boolean(preferredAudioDeviceId)}`)
     } catch {
       preferredAudioDeviceId = null
-      diagnosticLog('audio', 'preference not found; current Windows default will be adopted')
+      diagnosticLog('audio', 'preference not found; current system default will be adopted')
     } finally {
       audioPreferenceLoaded = true
       audioPreferenceLoadPromise = null
@@ -201,6 +207,10 @@ function enqueueAudioMutation<T>(label: string, work: () => Promise<T>): Promise
 }
 
 async function setDefaultAudioDevice(deviceId: string): Promise<void> {
+  if (process.platform === 'darwin') {
+    await execFileAsync(macAudioControlPath(), ['set', deviceId], { timeout: 15000, encoding: 'utf8' })
+    return
+  }
   const scriptPath = resolveScript('audio-control.ps1')
   await execFileAsync('powershell.exe', [
     '-ExecutionPolicy', 'Bypass',
@@ -211,7 +221,19 @@ async function setDefaultAudioDevice(deviceId: string): Promise<void> {
   ])
 }
 
+function macAudioControlPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'mac-audio-control')
+    : join(__dirname, '../../build/mac-audio-control')
+}
+
 async function runAudioControlJson<T>(action: 'list' | 'get-default'): Promise<T> {
+  if (process.platform === 'darwin') {
+    const { stdout } = await execFileAsync(macAudioControlPath(), [action], {
+      timeout: 15000, encoding: 'utf8', maxBuffer: 1024 * 1024
+    })
+    return JSON.parse(stdout.trim()) as T
+  }
   const audioScriptPath = resolveScript('audio-control.ps1')
   const { stdout } = await execFileAsync('powershell.exe', [
     '-ExecutionPolicy', 'Bypass',
@@ -251,6 +273,8 @@ export interface ExternalWindowActionResult {
   success: boolean
   error?: string
   windowGone?: boolean
+  captureSourceId?: string
+  captureCrop?: MacDocumentCrop
 }
 
 type ExternalDisplayBounds = { x: number; y: number; width: number; height: number }
@@ -596,6 +620,13 @@ async function rollbackPowerPointAfterCommitFailure(
 }
 
 async function manageExternalWindowUnlocked(action: 'minimize' | 'restore' | 'close', filePath?: string, placement?: ExternalWindowPlacement): Promise<ExternalWindowActionResult> {
+  if (process.platform === 'darwin') {
+    if (action === 'restore') {
+      if (!filePath || !placement) return { success: false, error: 'Не указан документ или эфирный дисплей.' }
+      return macOffice.prepare(filePath, placement.bounds)
+    }
+    return macOffice.release(filePath)
+  }
   const scriptPath = resolveScript('manage-window.ps1')
 
   if (filePath) {
@@ -756,8 +787,28 @@ export function registerIpcHandlers(
   onPowerPointOutputCommitted: () => void = () => undefined,
   isTrustedOutputEvent: (event: IpcMainInvokeEvent, channel: string, args: unknown[]) => boolean = () => false,
   onProgramDisplaySelected: (displayId: number) => void = () => undefined,
-  getProgramDisplayId?: () => number | null
+  getProgramDisplayId?: () => number | null,
+  isInternalProgramOutputActive: () => boolean = () => false
 ): void {
+  const restoreMacControlFocus = async (): Promise<void> => {
+    if (process.platform !== 'darwin' || controlWindow.isDestroyed()) return
+    if (controlWindow.isMinimized()) controlWindow.restore()
+    if (!controlWindow.isVisible()) controlWindow.show()
+    app.focus({ steal: true })
+    controlWindow.focus()
+    diagnosticLog('window', 'PDM control focus restored after native PPTX action')
+  }
+  const keepMacControlVisible = (): void => {
+    if (process.platform !== 'darwin' || controlWindow.isDestroyed()) return
+    // Keynote briefly creates its slideshow window on the operator display
+    // before the AppleScript can park it. Its window can rise above a floating
+    // PDM window, so hold the operator UI above the temporary player.
+    controlWindow.setAlwaysOnTop(true, 'screen-saver')
+  }
+  const releaseMacControlTopmost = (): void => {
+    if (process.platform !== 'darwin' || controlWindow.isDestroyed()) return
+    controlWindow.setAlwaysOnTop(false)
+  }
   const outputWatchdog = new PowerPointOutputWatchdog((identity, retryAllowed) => {
     if (controlWindow.isDestroyed()) return
     diagnosticLog('pptx-lifecycle', `committed PowerPoint process exited; retryAllowed=${retryAllowed}`)
@@ -1016,21 +1067,19 @@ export function registerIpcHandlers(
       }
     }
 
-    if (process.platform === 'darwin') {
-      try {
-        await execFileAsync('osascript', [
-          '-e', 'tell application "System Events" to (name of processes) contains "Microsoft PowerPoint"'
-        ])
-        return true
-      } catch {
-        return false
-      }
-    }
+    if (process.platform === 'darwin') return macPowerPoint.installed()
 
     return false
   })
 
   handleControl('prepare-powerpoint', async (_event, filePath: string) => {
+    if (process.platform === 'darwin') {
+      const result = await macPowerPoint.prepare(filePath)
+      return result.ok
+        ? { success: true, slideCount: result.slideCount ?? 0,
+            aspectRatio: (result.slideWidth ?? 0) / (result.slideHeight ?? 1) }
+        : { success: false, error: result.error || 'PowerPoint preparation failed' }
+    }
     if (process.platform !== 'win32') {
       return { success: false, error: 'Unsupported platform' }
     }
@@ -1064,6 +1113,10 @@ export function registerIpcHandlers(
     const paths = Array.isArray(filePaths)
       ? filePaths.filter((value): value is string => typeof value === 'string' && value.length > 0)
       : []
+    if (process.platform === 'darwin') {
+      macPowerPoint.retainPrepared(paths)
+      return { success: true }
+    }
     return syncPreparedPowerPointsInternal(paths, 'renderer-request')
   })
 
@@ -1292,13 +1345,27 @@ export function registerIpcHandlers(
       }
 
       if (process.platform === 'darwin') {
+        const internalOutput = displayId === undefined && isInternalProgramOutputActive()
+        const target = internalOutput ? screen.getPrimaryDisplay()
+          : screen.getAllDisplays().find((display) => display.id === displayId)
+        if (!target || (!internalOutput && target.id === screen.getPrimaryDisplay().id)) {
+          return { success: false, error: 'Для PPTX не назначен эфирный дисплей или внутренний программный выход.' }
+        }
+        if (!internalOutput) onProgramDisplaySelected(target.id)
+        const restoreControlFocus = controlWindow.isFocused()
+        if (restoreControlFocus) keepMacControlVisible()
         try {
-          const { stdout } = await execFileAsync('osascript', [
-            '-e', `tell application "Microsoft PowerPoint" to open "${filePath}"`
-          ])
-          return { success: true, output: stdout }
-        } catch (error: unknown) {
-          return { success: false, error: String(error) }
+          const result = await macPowerPoint.launch(filePath, startSlide ?? 1, target.bounds, target.id, internalOutput)
+          if (result.success) {
+            if (!event.sender.isDestroyed()) event.sender.send('powerpoint-slideshow-visible', filePath)
+            onPowerPointOutputCommitted()
+          }
+          return result
+        } finally {
+          if (restoreControlFocus) {
+            await restoreMacControlFocus()
+            releaseMacControlTopmost()
+          }
         }
       }
 
@@ -1415,6 +1482,23 @@ export function registerIpcHandlers(
     command: string,
     arg?: number | { stopAtBoundary?: boolean; keepHostWarm?: boolean }
   ) => {
+    if (process.platform === 'darwin') {
+      const restoreControlFocus = command !== 'current' && controlWindow.isFocused()
+      if (restoreControlFocus) keepMacControlVisible()
+      try {
+        return await macPowerPoint.command(command, arg)
+      } finally {
+        if (restoreControlFocus) {
+          await restoreMacControlFocus()
+          const programWindow = getPresentationWindow()
+          if (command !== 'close' && programWindow && !programWindow.isDestroyed() &&
+              programWindow.isVisible() && programWindow.getOpacity() > 0.9) {
+            programWindow.moveTop()
+          }
+          releaseMacControlTopmost()
+        }
+      }
+    }
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     console.log(`[IPC ${Date.now()}] powerpoint-command: BEGIN command=${command} arg=${arg}`)
     if (command === 'close') {
@@ -1481,7 +1565,7 @@ export function registerIpcHandlers(
   })
 
   handleControl('prepare-pptx-cache', async (event, filePath: string) => {
-    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return { success: false, error: 'Unsupported platform' }
     try {
       const result = await preparePptxCache(filePath, 1920, 1080, (progress: PptxCacheProgress) => {
         if (!event.sender.isDestroyed()) event.sender.send('pptx-cache-progress', progress)
@@ -1493,8 +1577,26 @@ export function registerIpcHandlers(
     }
   })
 
+  handleControl('prepare-mac-pptx-animation', async (_event, filePath: string) => {
+    if (process.platform !== 'darwin') return { success: false, error: 'Unsupported platform' }
+    try {
+      return { success: true, ...await macPowerPoint.prewarmAnimated(filePath) }
+    } catch (error) {
+      return { success: false, error: String(error) }
+    }
+  })
+
+  handleControl('prepare-mac-keynote', async (_event, filePath: string, displayId?: number, preferred?: boolean) => {
+    if (process.platform !== 'darwin' || typeof filePath !== 'string' || !/\.pptx$/i.test(filePath)) {
+      return { success: false, error: 'Unsupported presentation' }
+    }
+    if (displayId !== undefined && !screen.getAllDisplays().some(display => display.id === displayId)) return { success: false, error: 'Display disconnected' }
+    try { return { success: true, ...await macPowerPoint.prewarm(filePath, displayId, preferred === true) } }
+    catch (error) { return { success: false, error: String(error) } }
+  })
+
   handleControl('generate-pptx-thumbnails', async (_event, filePath: string) => {
-    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return { success: false, error: 'Unsupported platform' }
     try {
       const result = await preparePptxCache(filePath)
       return { success: true, thumbnails: result.thumbnails, slideCount: result.slideCount }
@@ -1508,6 +1610,12 @@ export function registerIpcHandlers(
     displayId: number,
     sceneLayout?: ProgramSceneLayoutConfig
   ) => {
+    if (process.platform === 'darwin') {
+      const target = screen.getAllDisplays().find((display) => display.id === displayId)
+      if (!target) return { success: false, error: 'Target display is not connected' }
+      onProgramDisplaySelected(target.id)
+      return macPowerPoint.relocate(target.bounds, target.id)
+    }
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       if (!screen.getAllDisplays().some((display) => display.id === displayId)) {
@@ -1569,6 +1677,7 @@ export function registerIpcHandlers(
   })
 
   handleControl('get-pptx-slide-notes', async (_event, filePath: string, slide: number) => {
+    if (process.platform === 'darwin') return macPowerPoint.notes(filePath, slide)
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const result = await pptDaemon.send('notes', { path: filePath, slide }, 20000)
@@ -1590,7 +1699,7 @@ export function registerIpcHandlers(
   })
 
   handleControl('generate-pptx-slides', async (_event, filePath: string, width?: number, height?: number) => {
-    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return { success: false, error: 'Unsupported platform' }
     const w = width && width > 0 ? width : 1920
     const h = height && height > 0 ? height : 1080
     try {
@@ -1660,19 +1769,20 @@ export function registerIpcHandlers(
   })
 
   handleControl('get-audio-devices', async () => {
-    if (process.platform !== 'win32') return []
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return []
     try {
       const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
       diagnosticLog('audio', `device list success count=${devices.length} names=${JSON.stringify(devices.map((d) => d.name))}`)
       return devices
     } catch (error) {
       diagnosticLog('audio', `device list failed ${formatDiagnosticError(error)}`)
+      if (process.platform === 'darwin') throw error
       return []
     }
   })
 
   handleControl('set-audio-device', async (_event, deviceId: string) => {
-    if (process.platform !== 'win32') return { success: false }
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return { success: false }
     try {
       await enqueueAudioMutation('set-preferred', async () => {
         await ensureAudioPreferenceLoaded()
@@ -1688,7 +1798,7 @@ export function registerIpcHandlers(
   })
 
   handleControl('switch-audio-to-external', async () => {
-    if (process.platform !== 'win32') return { success: false }
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return { success: false }
     try {
       return await enqueueAudioMutation('ensure-preferred', async () => {
         await ensureAudioPreferenceLoaded()
@@ -1696,14 +1806,14 @@ export function registerIpcHandlers(
 
         // First-run migration: never guess an "external" device by taking the
         // first non-default endpoint. That made two endpoints alternate on
-        // every channel switch. Adopt and persist the user's current Windows
+        // every channel switch. Adopt and persist the user's current system
         // default until they explicitly choose another output in Settings.
         if (!preferredAudioDeviceId) {
           preferredAudioDeviceId = current.id
           await saveAudioPreference()
           diagnosticLog(
             'audio',
-            `adopted current Windows default as preferred name=${JSON.stringify(current.name)}`
+            `adopted current system default as preferred name=${JSON.stringify(current.name)}`
           )
           return { success: true, device: current.name }
         }
@@ -1716,7 +1826,7 @@ export function registerIpcHandlers(
         const devices = await runAudioControlJson<Array<{ id: string; name: string; isDefault: boolean }>>('list')
         const preferred = devices.find((device) => device.id === preferredAudioDeviceId)
         if (!preferred) {
-          diagnosticLog('audio', 'saved preferred device is disconnected; leaving Windows default unchanged')
+          diagnosticLog('audio', 'saved preferred device is disconnected; leaving system default unchanged')
           return { success: false, error: 'Preferred audio device is unavailable' }
         }
 
@@ -1731,7 +1841,7 @@ export function registerIpcHandlers(
   })
 
   handleControl('restore-audio-device', async () => {
-    if (process.platform !== 'win32' || !originalAudioDeviceId) return
+    if ((process.platform !== 'win32' && process.platform !== 'darwin') || !originalAudioDeviceId) return
     try {
       await enqueueAudioMutation('restore-original', async () => {
         if (!originalAudioDeviceId) return
@@ -1749,6 +1859,15 @@ export function registerIpcHandlers(
     return enqueueExternalOperation(async () => {
       if (!isOpenable(filePath)) return { success: false, error: 'Недопустимый тип файла для внешнего открытия' }
       try {
+        if (displayBounds && process.platform === 'darwin') {
+          const focused = controlWindow.isFocused()
+          if (focused) keepMacControlVisible()
+          try { return await macOffice.prepare(filePath, displayBounds) }
+          finally {
+            if (focused) await restoreMacControlFocus()
+            releaseMacControlTopmost()
+          }
+        }
         if (displayBounds && process.platform === 'win32') {
           const nativeBounds = getNativeExternalDisplayBounds(displayBounds)!
           const scriptPath = resolveScript('manage-window.ps1')
@@ -1792,8 +1911,8 @@ export function registerIpcHandlers(
           }
           return { success: true }
         }
-        await shell.openPath(filePath)
-        return { success: true }
+        const error = await shell.openPath(filePath)
+        return error ? { success: false, error } : { success: true }
       } catch (error: unknown) {
         return { success: false, error: String(error) }
       }
@@ -1852,6 +1971,11 @@ export function registerIpcHandlers(
     if (externalShutdownStarted) {
       return { success: false, error: 'PDM is shutting down; Office zoom was cancelled.' }
     }
+    if (process.platform === 'darwin') {
+      // Mac documents are captured inside the program renderer; its content
+      // transform handles magnification without enlarging Office toolbars.
+      return { success: true, zoomPercent: Math.round(normalizeContentZoom(zoom).scale * 100) }
+    }
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     return enqueueExternalOperation(async () => {
       const entry = externalFiles.get(filePath)
@@ -1896,6 +2020,18 @@ export function registerIpcHandlers(
 
   handleControl('close-external-file', (_event, filePath?: string) => closeExternalFile(filePath))
 
+  handleControl('navigate-external-document', (_event, filePath: string, direction: 'next' | 'prev' | 'home') => {
+    if (process.platform !== 'darwin' || !['next', 'prev', 'home'].includes(direction)) return { success: false, error: 'Unsupported document action' }
+    return enqueueExternalOperation(() => macOffice.navigate(filePath, direction))
+  })
+
+  handleControl('get-external-document-sheets', (_event, filePath: string) =>
+    process.platform === 'darwin' ? enqueueExternalOperation(() => macOffice.sheets(filePath)) : { sheets: [], activeSheet: '' })
+  handleControl('select-external-document-sheet', (_event, filePath: string, name: string) =>
+    process.platform === 'darwin' && typeof name === 'string'
+      ? enqueueExternalOperation(() => macOffice.selectSheet(filePath, name))
+      : { success: false, error: 'Unsupported document action' })
+
   handleControl('minimize-external-file', (_event, filePath?: string) => manageExternalWindow('minimize', filePath))
 
   handleControl('restore-external-file', async (
@@ -1911,6 +2047,16 @@ export function registerIpcHandlers(
       const placement = getExternalWindowPlacement(displayBounds, sceneLayout)
       if (displayBounds && !placement) {
         return { success: false, error: 'Целевой дисплей для окна Word/Excel больше не найден.' }
+      }
+      if (process.platform === 'darwin') {
+        if (!filePath || !placement) return { success: false, error: 'Не указан документ или эфирный дисплей.' }
+        const focused = controlWindow.isFocused()
+        if (focused) keepMacControlVisible()
+        try { return await macOffice.prepare(filePath, displayBounds || placement.bounds) }
+        finally {
+          if (focused) await restoreMacControlFocus()
+          releaseMacControlTopmost()
+        }
       }
       // If not tracked yet, open instead of restore
       if (filePath && !externalFiles.has(filePath)) {
@@ -1994,6 +2140,24 @@ export function registerIpcHandlers(
   })
 
   handleControl('get-drives', async () => {
+    if (process.platform === 'darwin') {
+      const roots = [
+        { name: 'home', root: homedir(), label: 'Домашняя папка', isRemovable: false },
+        { name: 'mac', root: '/', label: 'Macintosh HD', isRemovable: false }
+      ]
+      const volumes = await readdir('/Volumes', { withFileTypes: true }).catch(() => [])
+      for (const volume of volumes) {
+        if (volume.name.startsWith('.') || (!volume.isDirectory() && !volume.isSymbolicLink())) continue
+        const root = join('/Volumes', volume.name)
+        if (root === '/' || root === homedir()) continue
+        roots.push({ name: volume.name, root, label: volume.name, isRemovable: true })
+      }
+      return Promise.all(roots.map(async (entry) => {
+        const disk = await statfs(entry.root).catch(() => null)
+        return { ...entry, totalSize: disk ? disk.blocks * disk.bsize : 0,
+          freeSize: disk ? disk.bavail * disk.bsize : 0 }
+      }))
+    }
     if (process.platform !== 'win32') return []
     try {
       const { stdout } = await execFileAsync('powershell.exe', [
@@ -2147,6 +2311,35 @@ export function registerIpcHandlers(
   })
 
   handleControl('generate-doc-preview', async (_event, filePath: string) => {
+    if (process.platform === 'darwin') {
+      const extension = extname(filePath).toLowerCase()
+      if (!['.doc', '.docx', '.rtf', '.odt', '.txt', '.xls', '.xlsx', '.ods'].includes(extension)) {
+        return { success: false, error: 'Предпросмотр этого типа файла не поддерживается.' }
+      }
+      const folder = join(tmpdir(), 'roland-doc-previews')
+      let temporary = ''
+      try {
+        const source = await stat(filePath)
+        if (!source.isFile()) throw new Error('Документ не найден.')
+        await mkdir(folder, { recursive: true })
+        const key = createHash('sha256').update(`${filePath}\0${source.size}\0${source.mtimeMs}`).digest('hex').slice(0, 24)
+        const pdfPath = join(folder, `${key}.pdf`)
+        try {
+          if ((await stat(pdfPath)).size > 0) return { success: true, pdfPath }
+        } catch { /* cache miss */ }
+        temporary = join(folder, `${key}.${process.pid}.${Date.now()}.pdf`)
+        const helper = app.isPackaged
+          ? join(process.resourcesPath, 'mac-doc-preview')
+          : join(__dirname, '../../build/mac-doc-preview')
+        await execFileAsync(helper, [filePath, temporary], { timeout: 35000, encoding: 'utf8' })
+        if ((await stat(temporary)).size === 0) throw new Error('Quick Look вернул пустой предпросмотр.')
+        await rename(temporary, pdfPath)
+        return { success: true, pdfPath }
+      } catch (error) {
+        if (temporary) await rm(temporary, { force: true }).catch(() => {})
+        return { success: false, error: String(error) }
+      }
+    }
     if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const scriptPath = resolveScript('document-preview.ps1')
     try {

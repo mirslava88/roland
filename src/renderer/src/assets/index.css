@@ -430,6 +430,14 @@
   box-shadow: inset 0 1px rgba(255, 255, 255, .04), 0 2px 4px rgba(0, 0, 0, .3);
 }
 
+.pdm-operator-shell .pdm-control-bar .btn-icon[data-pdm-video-loop="on"],
+.pdm-operator-shell.theme-broadcast-pro .pdm-control-bar .btn-icon[data-pdm-video-loop="on"] {
+  border-color: #60a5fa;
+  background: #2563eb;
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, .35);
+}
+
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-list {
   background:
     linear-gradient(180deg, rgba(139, 97, 31, .055), transparent 28%),

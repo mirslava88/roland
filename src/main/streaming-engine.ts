@@ -4,11 +4,12 @@ import type { Writable } from 'stream'
 import type { StreamSettings, StreamStatus } from '../shared/streaming'
 import { StreamPublisher } from './stream-publisher'
 import { FlvParser, type FlvPacket } from './stream-flv'
+import { StreamDelayBuffer } from './stream-delay'
 
 // Return only fixed messages, never FFmpeg text: errors can embed a secret URL.
 export function publisherErrorMessage(text: string): string | undefined {
   if (/sample rate not set|dimensions not set|could not find codec parameters/i.test(text)) return 'Не удалось определить параметры звука или видео при подключении.'
-  if (/certificate.*(?:verif|invalid|expired)|verify peer|certificate.s owner/i.test(text)) return 'Не удалось проверить сертификат сервера. Проверьте дату Windows и сетевые настройки.'
+  if (/certificate.*(?:verif|invalid|expired)|verify peer|certificate.s owner/i.test(text)) return 'Не удалось проверить сертификат сервера. Проверьте дату компьютера и сетевые настройки.'
   if (/already publishing|already connected|already in use|NetStream.Publish.BadName/i.test(text)) return 'Сервер отклонил имя потока: проверьте ключ и не используется ли он в другой программе.'
   if (/unauthorized|authentication|auth_key|invalid.*(?:key|token)|(?:key|token).*invalid|403|401|access denied/i.test(text)) return 'Сервер отклонил доступ. Проверьте ключ и состояние трансляции на площадке.'
   if (/resolve hostname|name or service not known|getaddrinfo|no such host/i.test(text)) return 'Не удалось найти сервер по указанному адресу.'
@@ -18,7 +19,7 @@ export function publisherErrorMessage(text: string): string | undefined {
   if (/TLS.*(?:fail|error)|SSL.*(?:fail|error)|cannot open connection tls/i.test(text)) return 'Не удалось установить защищённое подключение к серверу.'
   if (/non.monoton|invalid.*timestamp/i.test(text)) return 'Ошибка временных меток звука или видео.'
   if (/server error/i.test(text)) return 'Площадка отклонила поток. Проверьте ключ и запуск трансляции в её настройках.'
-  if (/connection reset|broken pipe|end of file|error in the pull function/i.test(text)) return 'Соединение с сервером прервано.'
+  if (/connection reset|broken pipe|end of file|error in the pull function|IO Error: -9806/i.test(text)) return 'Соединение с сервером прервано.'
   return undefined
 }
 
@@ -44,6 +45,7 @@ export const encoderArguments = (s: StreamSettings, encoder: string, videoInput:
   ...(encoder === 'h264_qsv' ? ['-preset', 'veryfast', '-async_depth', '1', '-look_ahead', '0', '-forced_idr', '1'] : []),
   ...(encoder === 'h264_nvenc' ? ['-preset', 'p3', '-tune', 'll', '-rc-lookahead', '0', '-zerolatency', '1'] : []),
   ...(encoder === 'h264_amf' ? ['-usage', 'ultralowlatency', '-quality', 'speed'] : []),
+  ...(encoder === 'h264_videotoolbox' ? ['-realtime', '1', '-allow_sw', '0'] : []),
   '-threads', '4', '-pix_fmt', 'yuv420p', '-fps_mode', 'vfr',
   '-vf', `setpts=PTS-STARTPTS,scale=${s.resolution === 1080 ? 1920 : 1280}:${s.resolution}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${s.resolution === 1080 ? 1920 : 1280}:${s.resolution}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
   '-g', String(s.fps * 2), '-bf', '0', '-b:v', `${s.bitrateKbps}k`,
@@ -85,6 +87,7 @@ export class StreamingEngine {
   private lastFrameAt = performance.now()
   private writePending = false
   private videoInput: Writable | null = null
+  private nativeCapture: ChildProcessWithoutNullStreams | null = null
   private videoWritePending = false
   private fps = 0
   private droppedFrames = 0
@@ -101,29 +104,52 @@ export class StreamingEngine {
   private firstAudioAt: number | null = null
   private audioFrames = 0
   private lastAudioAt = performance.now()
+  private delayBuffer: StreamDelayBuffer | null = null
+  private draining = false
+  private drainTimer?: NodeJS.Timeout
 
   constructor(private path: string, private settings: StreamSettings,
     private onError: (message: string) => void) {}
 
-  start(encoder: string, videoInput: string[], rawVideo = false): void {
+  start(encoder: string, videoInput: string[], rawVideo = false, nativeCapture?: { path: string; args: string[] }): void {
+    if ((this.settings.delaySeconds ?? 0) > 0) {
+      this.delayBuffer = new StreamDelayBuffer(this.settings.delaySeconds!, packet => this.publish(packet), message => this.fail(message))
+    }
     const process = spawn(this.path, encoderArguments(this.settings, encoder, videoInput), {
       windowsHide: true,
       stdio: rawVideo ? ['pipe', 'pipe', 'pipe', 'pipe'] : 'pipe'
     }) as ChildProcessWithoutNullStreams
     this.encoder = process
     this.videoInput = rawVideo ? process.stdio[3] as Writable : null
+    this.videoInput?.on('error', () => { if (!this.draining) this.fail('Кодер прекратил приём изображения.') })
+    if (nativeCapture && this.videoInput) {
+      const capture = spawn(nativeCapture.path, nativeCapture.args, { stdio: ['pipe', 'pipe', 'pipe'] })
+      this.nativeCapture = capture
+      capture.stdout.pipe(this.videoInput)
+      let remainder = ''
+      capture.stderr.on('data', (chunk: Buffer) => {
+        remainder = (remainder + chunk.toString()).slice(-4096)
+        const lines = remainder.split('\n'); remainder = lines.pop() || ''
+        for (const line of lines) {
+          try { const value = JSON.parse(line); if (typeof value.error === 'string') this.fail(value.error.slice(0, 300)) } catch { /* native diagnostics do not reach the UI */ }
+        }
+      })
+      capture.on('error', () => this.fail('Не удалось запустить захват эфирного экрана.'))
+      capture.on('exit', () => { if (!this.draining) this.fail('Захват эфирного экрана остановился.') })
+    }
     this.publishers = this.settings.destinations.filter((d) => d.enabled).map(d => new StreamPublisher(this.path, { ...d }))
-    process.stdin.on('error', () => this.fail('Кодер прекратил приём кадров.'))
+    process.stdin.on('error', () => { if (!this.draining) this.fail('Кодер прекратил приём кадров.') })
     process.on('error', () => this.fail('Не удалось запустить кодер.'))
-    process.on('exit', (code) => this.fail(`Кодер и отправка остановились (код ${code ?? '—'}). Проверьте настройки площадок или выберите другой кодер.`))
+    process.on('exit', (code) => { if (!this.draining) this.fail(`Кодер и отправка остановились (код ${code ?? '—'}). Проверьте настройки площадок или выберите другой кодер.`) })
     const parser = new FlvParser(packet => {
+      if (this.stopped) return
       this.encodedBytes += packet.bytes.length
-      if (packet.configuration || packet.type === 18) this.headers.set(packet.type, packet)
       if (packet.type === 9 && !packet.configuration) {
         this.lastFrameAt = performance.now(); this.lastVideoTime = packet.timestamp
         if (!this.firstVideoAt) { this.firstVideoAt = this.lastFrameAt; this.firstVideoTime = packet.timestamp }
       }
-      for (const publisher of this.publishers) publisher.accept(packet, [...this.headers.values()])
+      if (this.delayBuffer) this.delayBuffer.accept(packet)
+      else this.publish(packet)
     })
     process.stdout.on('data', (chunk: Buffer) => {
       if (this.stopped) return
@@ -146,19 +172,19 @@ export class StreamingEngine {
       this.bitrateKbps = Math.round((this.encodedBytes - this.lastStatsBytes) * 8 / Math.max(1, now - this.lastStatsAt))
       this.lastStatsAt = now; this.lastStatsBytes = this.encodedBytes
       this.encoderLagMs = this.firstVideoAt ? Math.max(0, Math.round(now - this.firstVideoAt - (this.lastVideoTime - this.firstVideoTime))) : 0
-      if (this.encoderLagMs > 3000) {
+      if (!this.draining && this.encoderLagMs > 3000) {
         if (!this.lagSince) this.lagSince = now
         if (now - this.lagSince > 3000) this.fail('Кодер не успевает за эфиром. Уменьшите разрешение или частоту кадров; старое видео не будет накапливаться.')
       } else this.lagSince = 0
-      if (now - this.lastFrameAt > 15000) this.fail('Кодер перестал получать изображение. Стрим остановлен.')
-      if (now - this.lastAudioAt > 5000) this.fail('Захват звука перестал передавать свежие данные. Стрим остановлен.')
+      if (!this.draining && now - this.lastFrameAt > 15000) this.fail('Кодер перестал получать изображение. Стрим остановлен.')
+      if (!this.draining && now - this.lastAudioAt > 5000) this.fail('Захват звука перестал передавать свежие данные. Стрим остановлен.')
       for (const p of this.publishers) p.tick()
     }, 500)
   }
 
   write(bytes: ArrayBuffer, capturedAt = Date.now()): Promise<boolean> {
     const input = this.encoder?.stdin
-    if (this.stopped || !input || input.destroyed || this.writePending ||
+    if (this.stopped || this.draining || !input || input.destroyed || this.writePending ||
       !(bytes instanceof ArrayBuffer) || bytes.byteLength > 38400 || bytes.byteLength % 8 !== 0) return Promise.resolve(false)
     if (!Number.isFinite(capturedAt) || Date.now() - capturedAt > 300) return Promise.resolve(true)
     const frames = bytes.byteLength / 8
@@ -187,7 +213,7 @@ export class StreamingEngine {
 
   writeVideo(bytes: Buffer): Promise<boolean> {
     const input = this.videoInput
-    if (this.stopped || !input || input.destroyed || this.videoWritePending || bytes.length === 0) {
+    if (this.stopped || this.draining || !input || input.destroyed || this.videoWritePending || bytes.length === 0) {
       return Promise.resolve(false)
     }
     this.videoWritePending = true
@@ -199,8 +225,39 @@ export class StreamingEngine {
     })
   }
 
-  snapshot(): Pick<StreamStatus, 'destinations' | 'fps' | 'bitrateKbps' | 'droppedFrames' | 'encoderLagMs'> {
+  private publish(packet: FlvPacket): void {
+    if (this.stopped) return
+    if (packet.configuration || packet.type === 18) this.headers.set(packet.type, packet)
+    for (const publisher of this.publishers) publisher.accept(packet, [...this.headers.values()])
+  }
+
+  drain(onComplete: () => void): void {
+    if (this.draining || this.stopped) return
+    this.draining = true
+    this.delayBuffer?.beginDrain()
+    const encoder = this.encoder
+    const end = encoder && !encoder.stdout.readableEnded
+      ? new Promise<void>(resolve => encoder.stdout.once('end', resolve)) : Promise.resolve()
+    this.nativeCapture?.stdout.unpipe(this.videoInput!)
+    this.nativeCapture?.kill(); this.nativeCapture = null
+    this.videoInput?.end(); encoder?.stdin.end()
+    // A desktop device input has no EOF; retain its completed packets when
+    // stopping capture. Pipe-based Mac/internal inputs can flush normally.
+    if (!this.videoInput) encoder?.kill('SIGINT')
+    this.drainTimer = setTimeout(() => encoder?.kill('SIGKILL'), 5000)
+    void end.then(async () => {
+      clearTimeout(this.drainTimer)
+      if (this.stopped) return
+      await this.delayBuffer?.finish()
+      if (this.stopped) return
+      await Promise.all(this.publishers.map(p => p.finish()))
+      if (!this.stopped) onComplete()
+    }).catch(() => { if (!this.stopped) this.fail('Не удалось дослать накопленный эфир. Проверьте соединение с площадкой.') })
+  }
+
+  snapshot(): Pick<StreamStatus, 'destinations' | 'fps' | 'bitrateKbps' | 'droppedFrames' | 'encoderLagMs' | 'delay'> {
     return { fps: this.fps, bitrateKbps: this.bitrateKbps, droppedFrames: this.droppedFrames, encoderLagMs: this.encoderLagMs,
+      ...(this.delayBuffer ? { delay: this.delayBuffer.snapshot() } : {}),
       destinations: this.publishers.map(p => p.snapshot()) }
   }
 
@@ -212,11 +269,14 @@ export class StreamingEngine {
 
   stop(): void {
     this.stopped = true
-    clearInterval(this.timer)
+    clearInterval(this.timer); clearTimeout(this.drainTimer)
+    void this.delayBuffer?.stop(); this.delayBuffer = null
     for (const p of this.publishers) p.stop()
     this.headers.clear()
     this.encoder?.stdin.destroy()
     this.videoInput?.destroy()
+    this.nativeCapture?.kill()
+    this.nativeCapture = null
     this.videoInput = null
     this.encoder?.kill()
     this.encoder = null

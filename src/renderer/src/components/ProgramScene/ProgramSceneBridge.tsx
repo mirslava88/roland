@@ -46,6 +46,8 @@ export function ProgramSceneBridge(): null {
     [channels, pptxSlidesMap, pptxThumbnailsMap, programScene]
   )
   const activeFile = useAppStore((state) => state.activeFile)
+  const macStaticPptxFallbackPath = useAppStore((state) => state.macStaticPptxFallbackPath)
+  const macKeynotePptxPath = useAppStore((state) => state.macKeynotePptxPath)
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
   const displays = useAppStore((state) => state.displays)
   const displayAssignments = useAppStore((state) => state.displayAssignments)
@@ -154,7 +156,8 @@ export function ProgramSceneBridge(): null {
       // The live timer store is the single authority after a Scene snapshot
       // has been published. This keeps toolbar/Stream Deck updates and the
       // internal Program output in lockstep with the native WPF overlay.
-      timer: shouldRenderTimerInProgramRenderer(internalProgramOutputActive, targetDisplayId, timerTargetsProgram)
+      timer: (window.api.platform === 'darwin' && timerTargetsProgram) ||
+        shouldRenderTimerInProgramRenderer(internalProgramOutputActive, targetDisplayId, timerTargetsProgram)
         ? {
             duration: timerDuration,
             remaining: timerRemaining,
@@ -231,7 +234,11 @@ export function ProgramSceneBridge(): null {
 
   useEffect(() => {
     const livePowerPoint = activeFile?.type === 'presentation'
+    if (livePowerPoint && macStaticPptxFallbackPath === activeFile.path) return
+    if (window.api.platform === 'darwin' && livePowerPoint && macKeynotePptxPath === activeFile.path) return
     const liveOfficeDocument = isOfficeProgramDocument(activeFile)
+    // Mac Office documents are live window captures composed by this renderer.
+    if (window.api.platform === 'darwin' && liveOfficeDocument) return
     const previousViewMode = previousViewModeRef.current
     previousViewModeRef.current = programScene.viewMode
     // Keep the transition history current even while PDF/video is live. This
@@ -260,6 +267,14 @@ export function ProgramSceneBridge(): null {
       // immediate because no navigation transition is active then.
       await waitForNavigationTransitionEnd()
       if (cancelled) return
+      const liveState = useAppStore.getState()
+      if (window.api.platform === 'darwin' && liveState.activeFile?.type === 'presentation' &&
+        liveState.macKeynotePptxPath === liveState.activeFile.path) return
+      if (liveState.activeFile?.type === 'presentation' &&
+        liveState.macStaticPptxFallbackPath === liveState.activeFile.path) {
+        window.api.dbgLog('program scene native sync skipped for macOS static PPTX output')
+        return
+      }
       const release = await acquireOutputTransition('scene-native-sync')
       try {
         if (cancelled) return
@@ -271,6 +286,11 @@ export function ProgramSceneBridge(): null {
           if (cancelled) return
         }
         const currentState = useAppStore.getState()
+        if (currentState.activeFile?.type === 'presentation' &&
+          currentState.macStaticPptxFallbackPath === currentState.activeFile.path) {
+          window.api.dbgLog('program scene native sync kept static PPTX output visible')
+          return
+        }
         const targetDisplay = currentState.displays.find((display) => display.id === targetDisplayId)
         if (active && programScene.viewMode === 'participant') {
           if (enteringPowerPointParticipantFocus) {
@@ -360,6 +380,12 @@ export function ProgramSceneBridge(): null {
         })
         if (cancelled) return
         if (useAppStore.getState().isPresentationWindowOpen) {
+          const beforePark = useAppStore.getState()
+          if (beforePark.activeFile?.type === 'presentation' &&
+            beforePark.macStaticPptxFallbackPath === beforePark.activeFile.path) {
+            window.api.dbgLog('program scene native sync refused to park static PPTX output')
+            return
+          }
           // Native PowerPoint owns the physical Program display when Scene is
           // disabled. A stream/virtual camera may still be capturing the same
           // Chromium Program surface, where PreviewPanel has just painted the
@@ -385,7 +411,7 @@ export function ProgramSceneBridge(): null {
       if (!cancelled && ownedRevision) useAppStore.getState().failProgramSnapshot(ownedRevision, message)
     })
     return () => { cancelled = true }
-  }, [active, activeFile?.extension, activeFile?.path, activeFile?.type, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, targetDisplayId, transitionDurationMs])
+  }, [active, activeFile?.extension, activeFile?.path, activeFile?.type, macKeynotePptxPath, macStaticPptxFallbackPath, contentAspectRatio, programScene.cornerStyle, programScene.participantScale, programScene.participantSize, programScene.placement, programScene.transitionEffect, programScene.viewMode, targetDisplayId, transitionDurationMs])
 
   return null
 }

@@ -87,7 +87,131 @@ async function run(name, fn) {
   await fn()
   console.log(`PASS ${name}`)
 }
+function takeSetup() {
+  const source = fs.readFileSync(path.join(root, 'src/renderer/src/components/Preview/PreviewPanel.tsx'), 'utf8')
+  const fragment = source.slice(source.indexOf('  const handleTake = async ('), source.indexOf('  const doTake = async ('))
+  const state = { channels: Object.fromEntries(['A','B','C'].map(id => [id, {file:{type:'presentation',path:id},totalSlides:4}])),
+    activeFile:null, liveChannel:null, contentZoom:{enabled:false}, overlayState:{kind:'hidden'} }
+  const refs = Object.fromEntries(['takeInFlightRef','queuedTakeRef','activeTakeCompletionRef','activeTakeIdRef','cancelTakeCleanupRef']
+    .map(k=>[k,{current:null}]))
+  refs.takeGenerationRef={current:0};refs.hasPowerPointStartedRef={current:false}
+  const gates = {A:deferred(),B:deferred(),C:deferred()}, starts=[]
+  const lock = load('src/renderer/src/output-transition-lock.ts', {}, {window:{api:{dbgLog(){}}}})
+  const api = load('take-pipeline.ts', {}, { ...refs, ...lock,
+    useAppStore:{getState:()=>state}, setTakeProgress(){}, setOverlayState(){},
+    isRendererOnlyPresentationRouting:()=>false, pptxCacheStatuses:{A:'ready',B:'ready',C:'ready'},
+    beginNavigationTransition(){},finishNavigationTransition:()=>[], crypto:require('node:crypto'),
+    window:{api:{platform:'darwin',dbgLog(){},completeProgramMirrorTransition:async()=>({}),hideOverlay:async()=>{}},dispatchEvent(){}},
+    doTake:async ch=>{starts.push(ch);const file=state.channels[ch].file;if(await gates[ch].promise===false)return false;state.liveChannel=ch;state.activeFile=file}
+  }, fragment+'\nexport {handleTake}')
+  return {...api,state,refs,gates,starts}
+}
+
 async function main() {
+  for(const cancelled of [false,true]) await run(`MAC PPTX: ${cancelled?'a new session cancels late reconciliation':'counter catches transitions longer than one poll'}`,async()=>{
+    const scheduled=[],applied=[];let current=true,reads=0
+    const {reconcileMacSlide}=load('src/renderer/src/mac-slide-reconcile.ts',{}, {
+      setTimeout:fn=>{scheduled.push(fn)},clearTimeout(){}
+    })
+    reconcileMacSlide(1,()=>current,async()=>({success:true,output:JSON.stringify({CurrentSlide:++reads<3?1:2})}),s=>applied.push(s))
+    scheduled.shift()();await flush();assert.equal(reads,1)
+    if(cancelled)current=false
+    while(scheduled.length){scheduled.shift()();await flush()}
+    assert.deepEqual(applied,cancelled?[]:[2]);assert.equal(reads,cancelled?1:3)
+  })
+  await run('MAC PPTX: click animation on the same slide has a bounded reconciliation budget',async()=>{
+    const scheduled=[];let reads=0
+    const {reconcileMacSlide}=load('src/renderer/src/mac-slide-reconcile.ts',{}, {setTimeout:fn=>scheduled.push(fn)})
+    reconcileMacSlide(1,()=>true,async()=>{reads++;return{success:true,output:'{"CurrentSlide":1}'}},()=>assert.fail('not a slide change'))
+    while(scheduled.length){scheduled.shift()();await flush()}
+    assert.equal(reads,4)
+  })
+
+  await run('PPTX UI: late clicker result cannot overwrite the slide counter of a new channel',async()=>{
+    const source=fs.readFileSync(path.join(root,'src/renderer/src/components/Controls/ControlBar.tsx'),'utf8')
+    const fragment=source.slice(source.indexOf('  const handlePptxNav ='),source.indexOf('  const handlePrev ='))
+    const pending=deferred(),changes=[]
+    const state={liveChannel:'old',activeFile:{path:'old'},channelBoundaryNavigationEnabled:false}
+    const api=load('pptx-ui.ts',{}, {useAppStore:{getState:()=>state},activeFile:{path:'old'},
+      window:{api:{platform:'win32'}},navigatePptx:()=>pending.promise,setCurrentSlide:s=>changes.push(s),takeAdjacentChannel:()=>changes.push('boundary')
+    },fragment+'\nexport {handlePptxNav}')
+    api.handlePptxNav('next');state.liveChannel='new';state.activeFile={path:'new'}
+    pending.resolve({success:true,output:JSON.stringify({CurrentSlide:8,Boundary:true})});await flush()
+    assert.deepEqual(changes,[])
+  })
+
+  for (const name of ['VideoPlayer','ControlBar']) await run(`VIDEO: late time/state from previous source cannot change ${name}`,async()=>{
+    const source=fs.readFileSync(path.join(root,`src/renderer/src/components/Controls/${name}.tsx`),'utf8')
+    const a=source.indexOf("    const unsubTime = window.api.on('video-time'")
+    const fragment=source.slice(a,source.indexOf('    return () =>',a))
+    const handlers={},changes=[];const state={activeFile:{type:'video',path:'new'}}
+    load('video-events.ts',{}, {useAppStore:{getState:()=>state},window:{api:{on:(k,fn)=>{handlers[k]=fn;return()=>{}}}},
+      setCurrentTime:v=>changes.push(v),setDuration:v=>changes.push(v),setVideoTime:v=>changes.push(v),
+      setVideoDuration:v=>changes.push(v),setIsPlaying:v=>changes.push(v),setIsPlayingStore:v=>changes.push(v)
+    },fragment)
+    handlers['video-time']({path:'old',currentTime:99,duration:100});handlers['video-state']({path:'old',currentTime:99,duration:100,playing:false})
+    assert.equal(changes.length,0)
+    handlers['video-state']({path:'new',currentTime:1,duration:100,playing:true});assert.equal(changes.length,3)
+  })
+  await run('VIDEO: delayed ended event cannot skip the new playlist video',async()=>{
+    const source=fs.readFileSync(path.join(root,'src/renderer/src/components/Controls/VideoPlayer.tsx'),'utf8')
+    const a=source.indexOf("    const unsub = window.api.on('video-ended'")
+    const fragment=source.slice(a,source.indexOf('    return unsub',a))
+    let ended;const played=[]
+    const state={liveChannel:null,activeFile:{type:'video',path:'new'},videoPlaylist:['new','next'],videoCurrentIndex:0}
+    load('video-ended.ts',{}, {useAppStore:{getState:()=>state},window:{api:{on:(_k,fn)=>{ended=fn}}},
+      playTrack:i=>played.push(i),setIsPlayingStore(){}},fragment)
+    ended({path:'old'});assert.equal(played.length,0)
+    ended({path:'new'});assert.deepEqual(played,[1])
+  })
+
+  await run('TAKE: queued completion waits for the real output; superseded request resolves false', async()=>{
+    const t=takeSetup()
+    const a=t.handleTake('A');await flush()
+    let bSettled=false,cSettled=false
+    const b=t.handleTake('B').then(v=>{bSettled=true;return v})
+    await flush();assert.equal(bSettled,false,'queueing is not completion')
+    const c=t.handleTake('C').then(v=>{cSettled=true;return v})
+    assert.equal(await b,false);assert.equal(cSettled,false)
+    t.gates.A.resolve();assert.equal(await a,true);await flush()
+    assert.deepEqual(t.starts,['A','C']);assert.equal(cSettled,false)
+    t.gates.C.resolve();assert.equal(await c,true);assert.equal(t.state.liveChannel,'C')
+  })
+  await run('TAKE: same-tick double TAKE joins the current transition without opening Office twice', async()=>{
+    const t=takeSetup(),a=t.handleTake('A'),duplicate=t.handleTake('A');await flush()
+    assert.deepEqual(t.starts,['A'])
+    t.gates.A.resolve();assert.equal(await a,true);assert.equal(await duplicate,true)
+  })
+  await run('TAKE: failed same-file reopen cannot report the preserved old state as a successful switch',async()=>{
+    const t=takeSetup();t.state.activeFile=t.state.channels.A.file;t.state.liveChannel='A'
+    const take=t.handleTake('A');await flush();t.gates.A.resolve(false)
+    assert.equal(await take,false)
+  })
+  await run('TAKE: replacing a queued file never puts its replacement on air without a new request', async()=>{
+    const t=takeSetup(),a=t.handleTake('A');await flush();const b=t.handleTake('B')
+    t.state.channels.B={file:{type:'pdf',path:'replacement'}}
+    t.gates.A.resolve();await a;assert.equal(await b,false);assert.deepEqual(t.starts,['A'])
+  })
+  await run('TAKE: cancellation while waiting for shared output ownership does not launch Office', async()=>{
+    const t=takeSetup(),a=t.handleTake('A');t.refs.takeGenerationRef.current++
+    assert.equal(await a,false);assert.equal(t.starts.length,0)
+  })
+  for(const remove of [false,true]) await run(`PPTX cache: ${remove?'removal':'STOP'} releases TAKE without waiting for Office`,async()=>{
+    const source=fs.readFileSync(path.join(root,'src/renderer/src/components/Preview/PreviewPanel.tsx'),'utf8')
+    const fragment=source.slice(source.indexOf('function waitForPptxChannelStart('),source.indexOf('export function PreviewPanel('))
+    const pending=deferred(),listeners=new Set(),events=new Map()
+    const state={channelIds:['A'],channels:{A:{file:{path:'A'},totalSlides:4}},pptxSlidesMap:{}}
+    const {waitForPptxChannelStart:wait}=load('cache-wait.ts',{}, {
+      ensurePptxChannelCache:()=>pending.promise,isPptxStillAssigned:()=>!!state.channels.A,
+      cachedPptxPrefix:a=>a.length,useAppStore:{getState:()=>state,subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn)}},
+      window:{addEventListener:(k,fn)=>events.set(k,fn),removeEventListener:(k,fn)=>{if(events.get(k)===fn)events.delete(k)}}
+    },fragment+'\nexport {waitForPptxChannelStart}')
+    const result=wait('A')
+    if(remove){delete state.channels.A;for(const fn of listeners)fn()}else events.get('cancel-active-take')()
+    assert.equal((await result).success,false);assert.equal(listeners.size,0);assert.equal(events.size,0)
+    pending.resolve({success:true,slideCount:4});await flush()
+  })
+
   await run('PPTX: real process-exit detection uses signal 0 without touching Office', async () => {
     const { spawn } = require('node:child_process')
     const { once } = require('node:events')
@@ -142,6 +266,7 @@ async function main() {
       const displays = [1, 2, 3].map(id => ({ id, bounds: { x: (id - 1) * 1920, y: 0, width: 1920, height: 1080 } }))
       const api = load(file, {}, { ...diagnostics, displayMetricsRevision: 0,
         screen: { getAllDisplays: () => displays, getPrimaryDisplay: () => displays[0] },
+        userDisplays: () => displays, isMacRenderDisplay: () => false,
         presentationDisplayId: 2, presentationWindow: null, presentationWindowRequestedVisible: false,
         overlayDisplayId: null, overlayWindow: null, auxiliaryWindows: new Map(), timerActive: false,
         activeContentType: 'presentation', isInternalProgramOutputActive: () => false,
@@ -314,6 +439,7 @@ async function main() {
         electron: { app: { isPackaged: false, getAppPath: () => '/fake' }, screen,
           ipcMain: { handle() {}, on() {} } }, fs: { existsSync: () => true }, 'fs/promises': {}, path,
         './renderer-security': {}, net: {}, tls: {},
+        './stream-delay': { cleanupAbandonedStreamDelays: async () => {}, assertStreamDelayCapacity: async () => {} },
         '../shared/streaming': { validateStreamSettings: x => x },
         './streaming-engine': { StreamingEngine: Engine, rawVideoInputArguments: () => [] },
         './diagnostic-log': diagnostics
@@ -395,6 +521,6 @@ async function main() {
     write.resolve(); await old; await cleared
     assert.equal(await api.loadQrWifiPassword(), '')
   })
-  console.log('21/21 race regressions passed; no real devices or live output used.')
+  console.log('35/35 race regressions passed; no real devices or live output used.')
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

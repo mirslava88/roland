@@ -21,7 +21,10 @@ import {
   beginNavigationTransition,
   drainNavigationTransition,
   pendingNavigationCount,
-  finishNavigationTransition
+  pendingNavigationSnapshot,
+  setNavigationTransitionPreview,
+  finishNavigationTransition,
+  type NavigationRequest
 } from '../../navigation-transition'
 import * as pdfjsLib from 'pdfjs-dist'
 import { pdfZoomRenderSize } from '../../../../shared/pdf-zoom-render'
@@ -62,7 +65,9 @@ interface AdHocTakeOptions {
 
 interface QueuedChannelTake {
   channelId: ChannelId
+  filePath: string
   videoAutoplay: boolean
+  resolve: (committed: boolean) => void
 }
 
 function supportsContentZoom(file?: FileEntry | null): boolean {
@@ -127,11 +132,50 @@ function nativeFileToEntry(filePath: string): FileEntry | null {
 
 type PptxCacheResult = { success: boolean; slideCount: number; error?: string }
 type ChannelCacheStatus = 'loading' | 'partial' | 'ready' | 'error'
+type KeynotePreparationStatus = { status: 'loading' | 'loaded' | 'ready' | 'error'; progress: number }
 
 // One background preparation job per physical PPTX. The main process also
 // serializes PowerPoint exports, while this renderer-side map prevents the
 // same deck from being requested by several channel cards at once.
 const pptxChannelCacheJobs = new Map<string, Promise<PptxCacheResult>>()
+type MacAnimationInfo = Awaited<ReturnType<typeof window.api.prepareMacPptxAnimation>>
+const macAnimationJobs = new Map<string, Promise<MacAnimationInfo>>()
+
+function ensureMacAnimationInfo(filePath: string): Promise<MacAnimationInfo> {
+  const existing = macAnimationJobs.get(filePath)
+  if (existing) return existing
+  const job = window.api.prepareMacPptxAnimation(filePath)
+  macAnimationJobs.set(filePath, job)
+  void job.then((result) => {
+    if (macAnimationJobs.get(filePath) === job) macAnimationJobs.delete(filePath)
+  }, () => {
+    if (macAnimationJobs.get(filePath) === job) macAnimationJobs.delete(filePath)
+  })
+  return job
+}
+
+async function blankAnimationFrame(framePath: string): Promise<string | null> {
+  try {
+    const image = await createImageBitmap(new Blob([await window.api.readFile(framePath)]))
+    const canvas = document.createElement('canvas')
+    canvas.width = image.width
+    canvas.height = image.height
+    const context = canvas.getContext('2d')
+    if (!context) return null
+    context.drawImage(image, 0, 0)
+    image.close()
+    const corners = [
+      [0, 0], [canvas.width - 1, 0],
+      [0, canvas.height - 1], [canvas.width - 1, canvas.height - 1]
+    ]
+    const pixels = corners.map(([x, y]) => context.getImageData(x, y, 1, 1).data)
+    if (pixels.some((pixel) => pixel.some((value, i) => Math.abs(value - pixels[0][i]) > 3))) return null
+    const [red, green, blue, alpha] = pixels[0]
+    context.fillStyle = `rgba(${red}, ${green}, ${blue}, ${alpha / 255})`
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/png')
+  } catch { return null }
+}
 let pptxChannelCacheTail: Promise<void> = Promise.resolve()
 
 function isPptxStillAssigned(filePath: string): boolean {
@@ -248,11 +292,25 @@ function waitForPptxChannelStart(filePath: string): Promise<PptxCacheResult> {
   const ready = current()
   if (ready) return Promise.resolve(ready)
   return new Promise((resolve) => {
+    let settled = false
+    const finish = (result: PptxCacheResult): void => {
+      if (settled) return
+      settled = true
+      unsubscribe()
+      window.removeEventListener('cancel-active-take', cancel)
+      resolve(result)
+    }
+    const cancel = (): void => finish({ success: false, slideCount: 0, error: 'TAKE cancelled' })
     const unsubscribe = useAppStore.subscribe(() => {
+      if (!isPptxStillAssigned(filePath)) {
+        finish({ success: false, slideCount: 0, error: 'Presentation was removed from channels' })
+        return
+      }
       const ready = current()
-      if (ready) { unsubscribe(); resolve(ready) }
+      if (ready) finish(ready)
     })
-    void job.then((result) => { unsubscribe(); resolve(result) })
+    window.addEventListener('cancel-active-take', cancel)
+    void job.then(finish, (error: unknown) => finish({ success: false, slideCount: 0, error: String(error) }))
   })
 }
 
@@ -267,12 +325,14 @@ export function PreviewPanel(): JSX.Element {
     clearSlidePosition,
     addChannelPage, removeChannelPage, setCurrentChannelPage, setChannelGridSize,
     pptxThumbnailsMap, pptxSlidesMap, pptxCacheStatuses, setPptxCacheStatuses,
+    macStaticPptxFallbackPath,
     displays, displayAssignments, selectedDisplayId, setOverlayState,
     contentZoom, setContentZoom
   } = useAppStore()
 
   const takeInFlightRef = useRef<ChannelId | null>(null)
   const queuedTakeRef = useRef<QueuedChannelTake | null>(null)
+  const activeTakeCompletionRef = useRef<Promise<boolean> | null>(null)
   const takeGenerationRef = useRef(0)
   const activeTakeIdRef = useRef<string | null>(null)
   const clearingChannelsRef = useRef<Set<ChannelId>>(new Set())
@@ -287,6 +347,7 @@ export function PreviewPanel(): JSX.Element {
     message: string | null
   } | null>(null)
   const [pdfCacheStatuses, setPdfCacheStatuses] = useState<Record<string, ChannelCacheStatus>>({})
+  const [keynoteStatuses, setKeynoteStatuses] = useState<Record<string, KeynotePreparationStatus>>({})
   const pdfCacheRequestKeysRef = useRef<Record<string, string>>({})
   const pdfCacheRequestIdsRef = useRef<Record<string, number>>({})
   const pdfCacheRequestSequenceRef = useRef(0)
@@ -333,6 +394,8 @@ export function PreviewPanel(): JSX.Element {
         return
       }
       if (currentFile?.type !== 'presentation') return
+      // On macOS the captured Keynote frame is zoomed by PresentationApp.
+      if (window.api.platform === 'darwin') return
       const targetId = connectedProgramDisplayId(state)
       const target = state.displays.find((display) => display.id === targetId)
       if (!target) return
@@ -347,6 +410,37 @@ export function PreviewPanel(): JSX.Element {
     window.api.sendToPresentation('content-zoom-update', useAppStore.getState().contentZoom)
   }), [])
 
+  useEffect(() => window.api.on('mac-keynote-status', (...args: unknown[]) => {
+    const update = args[0] as { path?: string; status?: KeynotePreparationStatus['status']; progress?: number }
+    if (!update?.path || !['loading', 'loaded', 'ready', 'error'].includes(update.status || '')) return
+    if (!isPptxStillAssigned(update.path)) return
+    const progress = update.status === 'ready' ? 100
+      : Math.max(0, Math.min(99, Math.round(Number(update.progress) || 0)))
+    setKeynoteStatuses((current) => ({ ...current, [update.path!]: { status: update.status!, progress } }))
+  }), [])
+
+  useEffect(() => {
+    if (window.api.platform !== 'darwin') return
+    const paths = pptxChannelPaths.filter((path) => /\.pptx$/i.test(path))
+    setKeynoteStatuses((current) => Object.fromEntries(paths.map((path) => [path, current[path] || { status: 'loading', progress: 0 }])))
+    void window.api.syncPreparedPowerPoints(paths)
+    const prepare = (): void => {
+      for (const path of paths) void window.api.prepareMacKeynote(path, connectedOutputId ?? undefined).catch((error: unknown) => {
+        window.api.dbgLog(`Keynote prewarm failed: ${String(error)}`)
+      })
+    }
+    prepare()
+    window.addEventListener('focus', prepare)
+    return () => window.removeEventListener('focus', prepare)
+  }, [pptxChannelPathKey, connectedOutputId])
+
+  const selectedPptxPath = selectedChannel == null ? undefined : channels[selectedChannel]?.file?.path
+  useEffect(() => {
+    if (window.api.platform !== 'darwin' || !selectedPptxPath || !/\.pptx$/i.test(selectedPptxPath)) return
+    void window.api.prepareMacKeynote(selectedPptxPath, connectedOutputId ?? undefined, true)
+      .catch((error: unknown) => window.api.dbgLog(`Selected Keynote prewarm failed: ${String(error)}`))
+  }, [selectedPptxPath, connectedOutputId])
+
   useEffect(() => {
     const activePaths = new Set(pptxChannelPaths)
     setPptxCacheStatuses((current) => {
@@ -356,6 +450,9 @@ export function PreviewPanel(): JSX.Element {
       return Object.keys(filtered).length === Object.keys(current).length ? current : filtered
     })
     for (const filePath of pptxChannelPaths) {
+      if (window.api.platform === 'darwin' && filePath.toLowerCase().endsWith('.pptx')) {
+        void ensureMacAnimationInfo(filePath).catch(() => undefined)
+      }
       if (useAppStore.getState().pptxCacheStatuses[filePath] !== undefined) continue
       setPptxCacheStatuses((current) => ({ ...current, [filePath]: 'loading' }))
       void ensurePptxChannelCache(filePath).then((result) => {
@@ -516,6 +613,7 @@ export function PreviewPanel(): JSX.Element {
         selectedDisplayId: connectedProgramDisplayId(state)
       }
       takeGenerationRef.current += 1
+      queuedTakeRef.current?.resolve(false)
       queuedTakeRef.current = null
       if (activeTakeIdRef.current) {
         window.api.sendToPresentation('cancel-content-load', { takeId: activeTakeIdRef.current })
@@ -735,11 +833,12 @@ export function PreviewPanel(): JSX.Element {
   const handleTake = async (
     ch: ChannelId,
     options: { videoAutoplay?: boolean; nativeRecovery?: boolean } = {}
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
-    if (!file) return
-    if (file.type === 'presentation' && !canStartPptx(
+    if (!file) return false
+    const nativeMacPptx = window.api.platform === 'darwin'
+    if (file.type === 'presentation' && !nativeMacPptx && !canStartPptx(
       freshState.pptxCacheStatuses[file.path], freshState.pptxSlidesMap[file.path] || [],
       freshState.channels[ch].totalSlides
     )) {
@@ -747,9 +846,9 @@ export function PreviewPanel(): JSX.Element {
       const ready = await waitForPptxChannelStart(file.path)
       setTakeProgress((current) => current?.channelId === ch ? null : current)
       if (ready.success && useAppStore.getState().channels[ch]?.file?.path === file.path) {
-        await handleTake(ch, options)
+        return handleTake(ch, options)
       }
-      return
+      return false
     }
     if (freshState.contentZoom.enabled) {
       freshState.setContentZoom(DEFAULT_CONTENT_ZOOM)
@@ -762,7 +861,7 @@ export function PreviewPanel(): JSX.Element {
       setTimeout(() => {
         setTakeProgress((current) => current?.channelId === ch ? null : current)
       }, 3500)
-      return
+      return false
     }
     if (
       file.type === 'capture' &&
@@ -782,15 +881,20 @@ export function PreviewPanel(): JSX.Element {
       setTimeout(() => {
         setTakeProgress((current) => current?.channelId === ch ? null : current)
       }, 3500)
-      return
+      return false
     }
     if (takeInFlightRef.current) {
       // Keep TAKE pipelines sequential (they share PowerPoint and the output
       // overlay), but never lose the operator's latest channel selection.
-      queuedTakeRef.current = takeInFlightRef.current === ch && !options.videoAutoplay
-        ? null
-        : { channelId: ch, videoAutoplay: options.videoAutoplay === true }
-      return
+      queuedTakeRef.current?.resolve(false)
+      queuedTakeRef.current = null
+      if (takeInFlightRef.current === ch && !options.videoAutoplay) {
+        return activeTakeCompletionRef.current ?? false
+      }
+      return new Promise<boolean>((resolve) => {
+        queuedTakeRef.current = { channelId: ch, filePath: file.path,
+          videoAutoplay: options.videoAutoplay === true, resolve }
+      })
     }
 
     const isSameFilePptx =
@@ -816,6 +920,10 @@ export function PreviewPanel(): JSX.Element {
     // Close the same-tick double-click gap before React renders disabled UI.
     // Concurrent TAKE pipelines race over PowerPoint, overlay and live state.
     takeInFlightRef.current = ch
+    let resolveCompletion: (committed: boolean) => void = () => {}
+    const completion = new Promise<boolean>((resolve) => { resolveCompletion = resolve })
+    activeTakeCompletionRef.current = completion
+    let committed = false
     const takeId = crypto.randomUUID()
     const takeGeneration = ++takeGenerationRef.current
     activeTakeIdRef.current = takeId
@@ -826,6 +934,8 @@ export function PreviewPanel(): JSX.Element {
     // opacity=1 чёрным НАВСЕГДА — юзер видит зависший чёрный экран без
     // способа recovery (audit F-205). Ловим, логируем, force-hide overlay.
     try {
+      if (takeGenerationRef.current !== takeGeneration ||
+          useAppStore.getState().channels[ch]?.file?.path !== file.path) return false
       beginNavigationTransition()
       setTakeProgress({ channelId: ch, message })
       if (options.nativeRecovery) {
@@ -839,12 +949,15 @@ export function PreviewPanel(): JSX.Element {
           setOverlayState({ kind: 'pinned-pptx', pptxPath: file.path })
         }
       }
-      await doTake(ch, takeId, takeGeneration, options.videoAutoplay ? {
+      const takeResult = await doTake(ch, takeId, takeGeneration, options.videoAutoplay ? {
         channel: freshState.channels[ch],
         liveChannel: ch,
         videoAutoplay: true,
         videoLoop: freshState.videoLoopTrack
       } : undefined)
+      const state = useAppStore.getState()
+      committed = takeResult !== false && takeGenerationRef.current === takeGeneration &&
+        state.liveChannel === ch && state.activeFile?.path === file.path
     } catch (err) {
       console.error('[TAKE] unhandled error, forcing overlay hide:', err)
       const cancelledCleanup = cancelTakeCleanupRef.current
@@ -889,14 +1002,21 @@ export function PreviewPanel(): JSX.Element {
 
       const queued = queuedTakeRef.current
       queuedTakeRef.current = null
-      if (queued && useAppStore.getState().channels[queued.channelId]?.file) {
+      resolveCompletion(committed)
+      if (activeTakeCompletionRef.current === completion) activeTakeCompletionRef.current = null
+      if (queued && useAppStore.getState().channels[queued.channelId]?.file?.path === queued.filePath) {
         void handleTake(queued.channelId, { videoAutoplay: queued.videoAutoplay })
-      } else if (queuedNavigation.length > 0) {
-        window.dispatchEvent(new CustomEvent('flush-take-navigation', {
-          detail: queuedNavigation
-        }))
+          .then(queued.resolve, () => queued.resolve(false))
+      } else {
+        queued?.resolve(false)
+        if (queuedNavigation.length > 0) {
+          window.dispatchEvent(new CustomEvent('flush-take-navigation', {
+            detail: queuedNavigation
+          }))
+        }
       }
     }
+    return committed
   }
 
   const doTake = async (
@@ -904,7 +1024,7 @@ export function PreviewPanel(): JSX.Element {
     takeId: string,
     takeGeneration: number,
     adHoc?: AdHocTakeOptions
-  ): Promise<void> => {
+  ): Promise<boolean | void> => {
     // Always read fresh state from the store (not stale closure values)
     const freshState = useAppStore.getState()
     const programDisplayId = connectedProgramDisplayId(freshState)
@@ -1180,7 +1300,7 @@ export function PreviewPanel(): JSX.Element {
     // window would cover the Speaker view. In this routing mode exported PPTX
     // frames/notes or SpeakerPdfFrame are the output themselves.
     if (
-      (channel.file.type === 'presentation' || channel.file.type === 'pdf') &&
+      (channel.file.type === 'pdf' || (channel.file.type === 'presentation' && window.api.platform !== 'darwin')) &&
       isRendererOnlyPresentationRouting(freshState)
     ) {
       log(`speaker-only ${channel.file.type} TAKE: regular output suppressed`)
@@ -1300,6 +1420,8 @@ export function PreviewPanel(): JSX.Element {
 
     const FINAL_NAVIGATION_QUIET_MS = 70
     const MAX_MATCHED_FRAME_PASSES = 6
+    let macPptxPreviewSlide: number | null = null
+    let macPptxSyncError: string | null = null
 
     const waitForLateNavigation = async (): Promise<boolean> => {
       // capturePage/PrintWindow resolves just before Windows delivers some
@@ -1346,6 +1468,24 @@ export function PreviewPanel(): JSX.Element {
           await painted
         }
       } else if (contentType === 'presentation') {
+        if (window.api.platform === 'darwin' && macPptxPreviewSlide !== null) {
+          // The cached frame has already followed every click. Jump the live
+          // Keynote show straight to that slide instead of replaying a long
+          // queue of individual AppleScript commands under the cover.
+          const target = macPptxPreviewSlide
+          const result = await window.api.powerpointCommand('goto', target)
+          macPptxSyncError = result.success ? null : result.error || 'Keynote не переключил слайд'
+          if (result.success && result.output) {
+            try {
+              const actual = JSON.parse(result.output).CurrentSlide
+              if (typeof actual === 'number' && actual > 0) {
+                useAppStore.getState().setCurrentSlide(actual)
+              }
+            } catch { /* malformed diagnostics */ }
+          }
+          log(`queued macOS PPTX navigation target=${target} count=${requests.length} success=${result.success}`)
+          return requests.length
+        }
         for (const request of requests) {
           const result = request.kind === 'relative'
             ? await useAppStore.getState().navigatePptx(request.direction === 'next' ? 'next' : 'prev')
@@ -1386,6 +1526,7 @@ export function PreviewPanel(): JSX.Element {
       channel.file.type === 'pdf' &&
       freshState.isPresentationWindowOpen
     const useLiveLayerSwitch =
+      window.api.platform !== 'darwin' &&
       !isSameFilePptx &&
       (
         (prevActiveFile?.type === 'presentation' &&
@@ -1422,6 +1563,7 @@ export function PreviewPanel(): JSX.Element {
     // document before promoting the already-painted native window. The scene
     // backdrop, camera and titles stay live and no bitmap cover is introduced.
     const stageProgramSceneElectronToPptx =
+      window.api.platform !== 'darwin' &&
       hasReadyProgramScene &&
       channel.file.type === 'presentation' &&
       (keepProgramSceneParticipantOnTop ||
@@ -1451,7 +1593,10 @@ export function PreviewPanel(): JSX.Element {
     let freezeImagePath: string | null = null
     if (!useSeamlessLayerSwitch && !isSameFilePptx && !canSwapPdfInPlace && !hadPinnedOverlay) {
       try {
-        if (freshState.isPresentationWindowOpen && prevActiveFile?.type !== 'presentation') {
+        if (freshState.isPresentationWindowOpen && (
+          prevActiveFile?.type !== 'presentation' ||
+          window.api.platform === 'darwin'
+        )) {
           // PDF/video/image/backdrop all live in the same Chromium output
           // window. capturePage gives an exact old frame without desktop
           // thumbnail scaling or cursor/timer duplication.
@@ -1530,8 +1675,11 @@ export function PreviewPanel(): JSX.Element {
     // learned the deck aspect (the ratio is intentionally session-only). Make
     // it available before activeFile changes, otherwise the mirror receives
     // its first PPTX state with `pptxAspect=missing` and keeps the whole
-    // ultrawide desktop letterboxed on a Full HD target.
+    // ultrawide desktop letterboxed on a Full HD target. On macOS the live
+    // Keynote frame is fitted by the output renderer, so waiting for a
+    // separate PowerPoint export here only delays the switch.
     if (
+      window.api.platform !== 'darwin' &&
       channel.file.type === 'presentation' &&
       !useAppStore.getState().pptxAspectRatios[channel.file.path]
     ) {
@@ -1618,6 +1766,10 @@ export function PreviewPanel(): JSX.Element {
       const powerPointTargetDisplay = freshState.displays.find(
         (display) => !display.isPrimary && display.id === programDisplayId
       )
+      const pptxOutputWidth = powerPointTargetDisplay
+        ? Math.ceil(powerPointTargetDisplay.bounds.width * powerPointTargetDisplay.scaleFactor) : 1920
+      const pptxOutputHeight = powerPointTargetDisplay
+        ? Math.ceil(powerPointTargetDisplay.bounds.height * powerPointTargetDisplay.scaleFactor) : 1080
       const taskbarHideStartedAt = Date.now()
       const taskbarHidePromise = powerPointTargetDisplay
         ? window.api.hideTaskbar(powerPointTargetDisplay.bounds).then(
@@ -1698,6 +1850,60 @@ export function PreviewPanel(): JSX.Element {
       // после Run → откат UI назад к 1 при PP уже на 2 = off-by-N рассинхрон).
       const slideBeforeLaunch = useAppStore.getState().currentSlide
       const pptxPath = channel.file.path
+      const macAnimation = window.api.platform === 'darwin' && pptxPath.toLowerCase().endsWith('.pptx')
+        ? await ensureMacAnimationInfo(pptxPath).catch(() => null)
+        : null
+      const hasMacAnimation = macAnimation?.success && macAnimation.hasAnimations === true
+
+      // Keynote can need several seconds to import or resume a deck. Show its
+      // already exported target slide on the program display immediately; the
+      // live capture replaces this cover once its first frame is ready.
+      if (window.api.platform === 'darwin' && typeof programDisplayId === 'number' &&
+          pptxOutputWidth <= 1920 && pptxOutputHeight <= 1080) {
+        const cached = useAppStore.getState()
+        const slides = cached.pptxSlidesMap[pptxPath] || []
+        const frames = slides.length > 0 ? slides : cached.pptxThumbnailsMap[pptxPath] || []
+        const targetFrame = frames[channel.slide - 1]
+        if (targetFrame && !isTakeCancelled()) {
+          const blankFrame = hasMacAnimation && macAnimation.blankBeforeBuildBySlide?.[channel.slide]
+            ? await blankAnimationFrame(targetFrame)
+            : null
+          const previewFrame = hasMacAnimation ? blankFrame : targetFrame
+          const shown = previewFrame
+            ? await window.api.showOverlay(programDisplayId,
+              blankFrame || undefined, blankFrame ? undefined : targetFrame, 'cover')
+            : false
+          if (shown) {
+            if (hasMacAnimation) {
+              log(`macOS animated PPTX initial frame shown slide=${channel.slide}`)
+            } else {
+            macPptxPreviewSlide = channel.slide
+            const previewRequest = (request: NavigationRequest): void => {
+              if (isTakeCancelled()) return
+              const current = macPptxPreviewSlide ?? channel.slide
+              const requested = request.kind === 'absolute'
+                ? request.slide
+                : current + (request.direction === 'next' ? 1 : -1)
+              const slideCount = Math.max(channel.totalSlides, frames.length)
+              const target = Math.max(1, Math.min(slideCount, requested))
+              if (target === current) return
+              macPptxPreviewSlide = target
+              useAppStore.getState().setCurrentSlide(target)
+              const frame = frames[target - 1]
+              if (frame) void window.api.swapOverlayImage(frame)
+              log(`macOS PPTX cached navigation ${current}→${target} frame=${!!frame}`)
+            }
+            // Calls queued while the first frame was being armed need the
+            // same immediate preview. Register and replay in one JS turn so
+            // no request can be missed or applied twice.
+            const pending = pendingNavigationSnapshot()
+            setNavigationTransitionPreview(previewRequest)
+            pending.forEach(previewRequest)
+            log(`macOS PPTX cached first frame shown slide=${channel.slide}`)
+            }
+          }
+        }
+      }
       const stopListeningForVisible = window.api.on(
         'powerpoint-slideshow-visible',
         (visiblePath) => {
@@ -1745,7 +1951,86 @@ export function PreviewPanel(): JSX.Element {
         await finishCancelledTake()
         return
       }
+      if (window.api.platform === 'darwin' && result.success && result.output) {
+        let native: { Backend?: string; CaptureSourceId?: string; SlideCount?: number; CurrentSlide?: number;
+          CaptureProfile?: import('../../../../shared/presentation-output').PresentationCaptureProfile } = {}
+        try { native = JSON.parse(result.output) } catch { /* invalid backend data uses the native route */ }
+        if (native.Backend === 'keynote' && native.CaptureSourceId) {
+          let keynoteQueuedNavCount = await applyQueuedNavigationUnderOverlay('presentation')
+          // A zero-opacity prewarmed macOS window does not deliver video frames
+          // to its renderer. Reveal it beneath the already armed transition
+          // cover before starting the Keynote capture stream.
+          await window.api.openPresentationWindow(programDisplayId ?? undefined)
+          const keynoteTakeId = `${takeId}-keynote-live`
+          const firstFrame = new Promise<{ ready: boolean; error?: string }>((resolve) => {
+            let settled = false
+            let timeout: ReturnType<typeof setTimeout> | undefined
+            let offReady = (): void => {}
+            let offError = (): void => {}
+            const finish = (ready: boolean, error?: string): void => {
+              if (settled) return
+              settled = true
+              if (timeout) clearTimeout(timeout)
+              offReady()
+              offError()
+              resolve({ ready, error })
+            }
+            offReady = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+              const payload = args[0] as { takeId?: string } | undefined
+              if (payload?.takeId === keynoteTakeId) finish(true)
+            })
+            offError = window.api.on('presentation-content-error', (...args: unknown[]) => {
+              const payload = args[0] as { takeId?: string; message?: string } | undefined
+              if (payload?.takeId === keynoteTakeId) finish(false, payload.message)
+            })
+            timeout = setTimeout(() => finish(false, 'Окно Keynote не передало первый кадр'), 10_000)
+          })
+          window.api.sendToPresentation('load-content', {
+            type: 'keynote', path: pptxPath, name: channel.file.name,
+            captureSourceId: native.CaptureSourceId, captureProfile: native.CaptureProfile, takeId: keynoteTakeId
+          })
+          const captured = await firstFrame
+          if (captured.ready && !isTakeCancelled()) {
+            for (let pass = 1; pass <= MAX_MATCHED_FRAME_PASSES; pass++) {
+              keynoteQueuedNavCount += await applyQueuedNavigationUnderOverlay('presentation')
+              if (!(await waitForLateNavigation())) break
+            }
+            const raised = macPptxSyncError
+              ? false
+              : await window.api.raisePresentationWindow()
+            if (raised) {
+              setPresentationWindowOpen(true)
+              window.api.setActiveContentType('keynote')
+              if (native.SlideCount) {
+                setTotalSlides(native.SlideCount)
+                setChannelTotalSlides(ch, native.SlideCount)
+              }
+              setCurrentSlide(keynoteQueuedNavCount > 0
+                ? useAppStore.getState().currentSlide
+                : native.CurrentSlide || channel.slide)
+              useAppStore.setState({ macKeynotePptxPath: pptxPath, macStaticPptxFallbackPath: null })
+              setNavigationTransitionPreview(null)
+              await window.api.hideOverlay()
+              setOverlayState({ kind: 'hidden' })
+              await releaseInactiveBrowserFullscreen()
+              log(`Keynote live capture committed source=${native.CaptureSourceId}`)
+              return
+            }
+          }
+          await window.api.powerpointCommand('close').catch(() => undefined)
+          result = {
+            success: false, safeToUncover: true,
+            error: `Не удалось вывести живое окно Keynote: ${macPptxSyncError || captured.error || 'эфирное окно не готово'}`
+          }
+        }
+      }
       if (result.success) {
+        if (window.api.platform === 'darwin' && result.output) {
+          try {
+            const backend = JSON.parse(result.output).Backend
+            useAppStore.setState({ macKeynotePptxPath: backend === 'keynote' ? pptxPath : null })
+          } catch { /* native backend marker is optional */ }
+        }
         hasPowerPointStartedRef.current = true
         setTakeProgress((current) => current?.channelId === ch ? null : current)
         if (prevActiveFile?.type === 'capture') {
@@ -1757,6 +2042,76 @@ export function PreviewPanel(): JSX.Element {
       // Never continue into close-presentation-window + pinned overlay in that
       // state: it replaces the existing backdrop with a permanent black screen.
       if (!result.success) {
+        if (window.api.platform === 'darwin' && !hasMacAnimation && result.safeToUncover !== false) {
+          // An older Office can return from Run() and immediately close its
+          // slide-show window. Keep the broadcast usable with exported frames.
+          const needsNativeFrames = pptxOutputWidth > 1920 || pptxOutputHeight > 1080
+          // A Full HD preview is not a broadcast master for a 4K/8K wall.
+          // Render the original PDF vectors at the output size before TAKE.
+          const cache = needsNativeFrames
+            ? await window.api.generatePptxSlides(channel.file.path, pptxOutputWidth, pptxOutputHeight)
+            : await waitForPptxChannelStart(channel.file.path)
+          if (isTakeCancelled()) {
+            await finishCancelledTake()
+            return
+          }
+          if (needsNativeFrames && cache.success && 'slides' in cache && cache.slides?.length) {
+            useAppStore.setState((state) => ({
+              pptxSlidesMap: { ...state.pptxSlidesMap, [channel.file!.path]: cache.slides! }
+            }))
+          }
+          const cached = useAppStore.getState()
+          const slides = cached.pptxSlidesMap[channel.file.path] || []
+          const frames = slides.length > 0 ? slides : cached.pptxThumbnailsMap[channel.file.path] || []
+          const fallbackSlide = Math.max(1, Math.min(
+            macPptxPreviewSlide ?? channel.slide, cachedPptxPrefix(frames)
+          ))
+          const frame = frames[fallbackSlide - 1]
+          if (cache.success && frame && !isTakeCancelled()) {
+            const fallbackTakeId = `${takeId}-mac-static`
+            const painted = new Promise<boolean>((resolve) => {
+              let settled = false
+              let timeout: ReturnType<typeof setTimeout> | undefined
+              let unsubscribe = (): void => {}
+              const finish = (ready: boolean): void => {
+                if (settled) return
+                settled = true
+                if (timeout) clearTimeout(timeout)
+                unsubscribe()
+                resolve(ready)
+              }
+              unsubscribe = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+                const payload = args[0] as { takeId?: string } | undefined
+                if (payload?.takeId === fallbackTakeId) finish(true)
+              })
+              timeout = setTimeout(() => finish(false), 8_000)
+            })
+            window.api.sendToPresentation('load-content', {
+              type: 'other', path: frame, name: channel.file.name,
+              isImage: true, fillOutput: false, takeId: fallbackTakeId
+            })
+            if (await painted && !isTakeCancelled()) {
+              await window.api.openPresentationWindow(programDisplayId ?? undefined)
+              const promoted = await window.api.raisePresentationWindow()
+              if (!promoted) log('macOS static PPTX output could not be raised above PowerPoint')
+              setPresentationWindowOpen(true)
+              setCurrentSlide(fallbackSlide)
+              const slideCount = cache.slideCount || frames.length || channel.totalSlides
+              setTotalSlides(slideCount)
+              setChannelTotalSlides(ch, slideCount)
+              useAppStore.setState({ macStaticPptxFallbackPath: channel.file.path })
+              window.api.setActiveContentType('other')
+              await window.api.hideOverlay()
+              setOverlayState({ kind: 'hidden' })
+              await releaseInactiveBrowserFullscreen()
+              log(`PowerPoint show failed; macOS static PPTX output ready slide=${fallbackSlide}/${slideCount}; reason=${result.error || '-'}`)
+              return
+            }
+            log('PowerPoint show failed; static PPTX output did not confirm its first frame')
+          } else {
+            log(`PowerPoint show failed; static PPTX frame unavailable: ${cache.error || result.error || '-'}`)
+          }
+        }
         const rollbackMessage = result.error ||
           'PowerPoint rollback was not verified. Restart PDM before continuing.'
         if (result.safeToUncover === false) {
@@ -1808,7 +2163,7 @@ export function PreviewPanel(): JSX.Element {
         if (result.safeToUncover === false) {
           await new Promise((resolve) => setTimeout(resolve, 3500))
         }
-        return
+        return false
       }
 
       // КРИТИЧНО: ждём пока goto-chain (от user-кликов кликером во время
@@ -2394,6 +2749,78 @@ export function PreviewPanel(): JSX.Element {
           message: 'Главный эфирный дисплей не подключён.'
         })
         await new Promise((resolve) => setTimeout(resolve, 3500))
+        return
+      }
+      if (window.api.platform === 'darwin') {
+        const outputWasOpen = useAppStore.getState().isPresentationWindowOpen
+        const documentPath = channel.file.path
+        const failDocumentTake = async (message: string): Promise<void> => {
+          window.api.sendToPresentation('cancel-content-load', { takeId })
+          if (prevActiveFile?.path !== documentPath) await window.api.closeExternalFile(documentPath)
+          useAppStore.setState({ activeFile: prevActiveFile, liveChannel: freshState.liveChannel })
+          if (prevActiveFile) window.api.setActiveContentType(prevActiveFile.type)
+          if (!outputWasOpen) {
+            await window.api.closePresentationWindow()
+            setPresentationWindowOpen(false)
+          }
+          await window.api.hideOverlay()
+          setOverlayState({ kind: 'hidden' })
+          setTakeProgress({ channelId: ch, message })
+          await new Promise((resolve) => setTimeout(resolve, 3500))
+        }
+        await window.api.openPresentationWindow(external.id)
+        const document = await window.api.restoreExternalFile(documentPath, external.bounds)
+        if (!document.success || !document.captureSourceId) {
+          await failDocumentTake(document.error || 'Окно Word/Excel не подготовилось для эфира.')
+          return
+        }
+        if (isTakeCancelled()) { await finishCancelledTake(); return }
+        const firstFrame = new Promise<{ ready: boolean; error?: string }>((resolve) => {
+          let settled = false
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          let offReady = (): void => {}
+          let offError = (): void => {}
+          const finish = (ready: boolean, error?: string): void => {
+            if (settled) return
+            settled = true
+            if (timeout) clearTimeout(timeout)
+            offReady(); offError()
+            resolve({ ready, error })
+          }
+          offReady = window.api.on('presentation-content-ready', (...args: unknown[]) => {
+            if ((args[0] as { takeId?: string })?.takeId === takeId) finish(true)
+          })
+          offError = window.api.on('presentation-content-error', (...args: unknown[]) => {
+            const payload = args[0] as { takeId?: string; message?: string }
+            if (payload?.takeId === takeId) finish(false, payload.message)
+          })
+          timeout = setTimeout(() => finish(false, 'Документ Office не передал первый кадр.'), 10000)
+        })
+        window.api.sendToPresentation('load-content', {
+          type: 'document', path: documentPath, name: channel.file.name,
+          captureSourceId: document.captureSourceId, captureCrop: document.captureCrop, takeId
+        })
+        const captured = await firstFrame
+        if (isTakeCancelled()) { await finishCancelledTake(); return }
+        if (!captured.ready) { await failDocumentTake(captured.error || 'Документ недоступен для захвата.'); return }
+        await window.api.raisePresentationWindow()
+        setPresentationWindowOpen(true)
+        window.dispatchEvent(new CustomEvent('pdm-office-document-ready', { detail: documentPath }))
+        if (prevActiveFile?.type === 'presentation') {
+          const closed = await window.api.powerpointCommand('close')
+          if (!closed.success) log(`Mac previous slideshow cleanup failed: ${closed.error || '-'}`)
+        }
+        if (prevActiveFile?.type === 'other' && !prevActiveFile.isImage && !prevActiveFile.isAudio && prevActiveFile.path !== documentPath) {
+          const released = await window.api.minimizeExternalFile(prevActiveFile.path)
+          if (!released.success) log(`Mac previous document cleanup failed: ${released.error || '-'}`)
+        }
+        useAppStore.setState({ macKeynotePptxPath: null, macStaticPptxFallbackPath: null })
+        window.api.setActiveContentType('document')
+        clearCommittedCaptureTitleSource('Mac Office document takeover')
+        await window.api.hideOverlay()
+        setOverlayState({ kind: 'hidden' })
+        await releaseInactiveBrowserFullscreen()
+        log(`Mac Office live document committed source=${document.captureSourceId}`)
         return
       }
       const selectedSceneCapture = outputState.captureSources.find(
@@ -3181,9 +3608,10 @@ export function PreviewPanel(): JSX.Element {
 
           const queued = queuedTakeRef.current
           queuedTakeRef.current = null
-          if (queued && useAppStore.getState().channels[queued.channelId]?.file) {
+          if (queued && useAppStore.getState().channels[queued.channelId]?.file?.path === queued.filePath) {
             void handleTake(queued.channelId, { videoAutoplay: queued.videoAutoplay })
-          }
+              .then(queued.resolve, () => queued.resolve(false))
+          } else queued?.resolve(false)
         }
       })()
     }
@@ -3196,9 +3624,9 @@ export function PreviewPanel(): JSX.Element {
   useEffect(() => {
     const handler = (e: Event): void => {
       const ch = (e as CustomEvent).detail as ChannelId
-      void handleTake(ch).finally(() => {
+      void handleTake(ch).then((success) => {
         window.dispatchEvent(new CustomEvent('take-channel-completed', {
-          detail: { channelId: ch }
+          detail: { channelId: ch, success }
         }))
       })
     }
@@ -3211,9 +3639,9 @@ export function PreviewPanel(): JSX.Element {
       const channelId = (event as CustomEvent<ChannelId>).detail
       const state = useAppStore.getState()
       if (!channelId || state.channels[channelId]?.file?.type !== 'video') return
-      void handleTake(channelId, { videoAutoplay: true }).finally(() => {
+      void handleTake(channelId, { videoAutoplay: true }).then((success) => {
         window.dispatchEvent(new CustomEvent('take-channel-completed', {
-          detail: { channelId }
+          detail: { channelId, success }
         }))
       })
     }
@@ -3328,6 +3756,9 @@ export function PreviewPanel(): JSX.Element {
                 : channel.file?.type === 'pdf'
                   ? pdfCacheStatuses[channel.file.path]
                   : undefined}
+              keynoteStatus={channel.file ? channel.file.path === macStaticPptxFallbackPath
+                ? { status: 'ready', progress: 100 }
+                : keynoteStatuses[channel.file.path] : undefined}
               videoEndChannelOptions={channelIds.filter((targetId) => (
                 targetId !== id && Boolean(channels[targetId]?.file)
               ))}
@@ -3450,6 +3881,7 @@ interface ChannelPanelProps {
   onClear: () => void
   pptxThumbnails: string[]
   cacheStatus?: ChannelCacheStatus
+  keynoteStatus?: KeynotePreparationStatus
   videoEndChannelOptions: ChannelId[]
   compact: boolean
 }
@@ -3457,7 +3889,7 @@ interface ChannelPanelProps {
 function ChannelPanel({
   label, channel, isLive, isSelected, isTaking, openingMessage,
   onDrop, onSlideChange, onSetTotalSlides, onVideoEndChannelChange, onCaptionChange,
-  onSelect, onTake, onClear, pptxThumbnails, cacheStatus, videoEndChannelOptions, compact
+  onSelect, onTake, onClear, pptxThumbnails, cacheStatus, keynoteStatus, videoEndChannelOptions, compact
 }: ChannelPanelProps): JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [slideInput, setSlideInput] = useState('')
@@ -3687,6 +4119,7 @@ function ChannelPanel({
   const isOutputActive = (isPresentationWindowOpen && storeActiveFile !== null) || storeActiveFile?.type === 'presentation' || (storeActiveFile?.type === 'other' && !storeActiveFile.isImage)
   const showSelected = isSelected && !isOutputActive
   const pptxIsPreparing = channel.file?.type === 'presentation' &&
+    window.api.platform !== 'darwin' &&
     !canStartPptx(cacheStatus, pptxThumbnails || [], channel.totalSlides)
   const zoomSupported = supportsContentZoom(channel.file)
 
@@ -3949,7 +4382,16 @@ function ChannelPanel({
             </span>
           </div>
         )}
-        {!isTaking &&
+        {!isTaking && keynoteStatus && (
+          <div
+            className={`absolute right-2 top-2 z-10 rounded-sm text-white shadow ${keynoteStatus.status === 'ready' ? 'bg-green-800/90' : keynoteStatus.status === 'error' ? 'bg-amber-800/90' : 'bg-blue-700/90'} ${compact ? 'px-1 py-0.5 text-[8px]' : 'px-2 py-1 text-[9px]'}`}
+            role="status"
+            title={keynoteStatus.status === 'ready' ? 'Подготовка завершена — 100%. Файл проверен и готов к запуску.' : keynoteStatus.status === 'error' ? 'При отправке в эфир PDM повторит открытие' : 'Автоматическая подготовка презентации. Выбирать канал не требуется.'}
+          >
+            {keynoteStatus.status === 'ready' ? 'Готов к эфиру' : keynoteStatus.status === 'error' ? 'Повторить при запуске' : `${keynoteStatus.progress}%`}
+          </div>
+        )}
+        {!isTaking && !keynoteStatus &&
           (channel.file?.type === 'presentation' || channel.file?.type === 'pdf') &&
           (cacheStatus === 'loading' || cacheStatus === 'partial') && (
           <div
@@ -3964,7 +4406,7 @@ function ChannelPanel({
               : 'Кэширование…'}
           </div>
         )}
-        {!isTaking &&
+        {!isTaking && !keynoteStatus &&
           (channel.file?.type === 'presentation' || channel.file?.type === 'pdf') &&
           cacheStatus === 'error' && (
           <div
@@ -4267,8 +4709,8 @@ function ChannelPanel({
         </>,
         document.body
       )}
-      {/* Take button for video/capture/other in non-live channel */}
-      {!isLive && channel.file && (channel.file.type === 'video' || channel.file.type === 'capture' || channel.file.type === 'other') && (
+      {/* Video end target remains editable while the video is on air. */}
+      {channel.file && (channel.file.type === 'video' || (!isLive && (channel.file.type === 'capture' || channel.file.type === 'other'))) && (
         <div
           className={`flex items-center ${channel.file.type === 'video' ? 'justify-between gap-1' : 'justify-end'} ${compact ? 'py-0.5 px-1' : 'py-1.5 px-2'} bg-surface-200 border-t border-gray-800`}
           onDoubleClick={(e) => e.stopPropagation()}
@@ -4280,8 +4722,9 @@ function ChannelPanel({
               onClick={(event) => event.stopPropagation()}
               onDoubleClick={(event) => event.stopPropagation()}
             >
-              {!compact && <span className="shrink-0 text-[9px]">После:</span>}
+              <span className={`shrink-0 ${compact ? 'text-[8px]' : 'text-[9px]'}`}>После:</span>
               <select
+                aria-label={`Канал после окончания видео на канале ${label}`}
                 value={channel.videoEndChannel || ''}
                 disabled={isTaking}
                 onChange={(event) => onVideoEndChannelChange(event.target.value || null)}
@@ -4294,7 +4737,7 @@ function ChannelPanel({
               </select>
             </label>
           )}
-          <button
+          {!isLive && <button
             data-pdm-channel-take={label}
             onClick={(e) => { e.stopPropagation(); onTake() }}
             onDoubleClick={(e) => e.stopPropagation()}
@@ -4302,7 +4745,7 @@ function ChannelPanel({
             className={`bg-red-600 hover:bg-red-500 text-white ${compact ? 'text-[8px] px-1.5 py-0.5' : 'text-[9px] px-2 py-1'} font-bold rounded-sm transition-colors disabled:opacity-40 disabled:hover:bg-red-600`}
           >
             В эфир
-          </button>
+          </button>}
         </div>
       )}
     </div>

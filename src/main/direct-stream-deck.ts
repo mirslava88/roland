@@ -1,4 +1,4 @@
-import { BrowserWindow, type NativeImage } from 'electron'
+import { app, BrowserWindow, type NativeImage } from 'electron'
 import {
   getStreamDeckModelName,
   listStreamDecks,
@@ -264,6 +264,7 @@ export class DirectStreamDeckManager {
         height: panelHeight,
         useContentSize: true,
         webPreferences: {
+          ...(process.platform === 'darwin' && app.isPackaged ? { devTools: false } : {}),
           offscreen: true,
           backgroundThrottling: false,
           contextIsolation: true,

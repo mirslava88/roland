@@ -53,3 +53,19 @@ build/certs/
 # Native build products (rebuilt before packaging)
 /native/virtual-camera/bin/
 /native/virtual-camera/obj/
+/build/mac-pdf-pages
+/build/mac-pdf-pages-*
+/build/.swift-module-cache/
+/build/mac-virtual-camera/
+/build/mac-camera-*
+/build/mac-ffmpeg*
+
+# macOS generated files
+.DS_Store
+/build/mac-audio-control*
+/build/mac-display-control*
+/build/mac-doc-preview*
+/build/mac-keynote-backdrop*
+/build/mac-office-accessibility.node
+/build/mac-render-display
+/build/mac-stream-capture*

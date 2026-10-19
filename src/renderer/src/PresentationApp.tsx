@@ -1,9 +1,11 @@
+import { installKeynoteCapturePool } from './keynote-capture-pool'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import { mediaUrl } from './media'
 import { ProgramSceneAudio } from './components/ProgramScene/ProgramSceneAudio'
 import { PdfViewer } from './components/PresentationView/PdfViewer'
 import { VideoViewer } from './components/PresentationView/VideoViewer'
+import { KeynoteLiveViewer } from './components/PresentationView/KeynoteLiveViewer'
 import {
   CaptureHub,
   type CaptureTakeRequest
@@ -57,14 +59,18 @@ import {
 } from '../../shared/content-zoom'
 
 interface ContentPayload {
-  type: 'presentation' | 'pdf' | 'video' | 'capture' | 'backdrop' | 'other'
+  type: 'presentation' | 'keynote' | 'document' | 'pdf' | 'video' | 'capture' | 'backdrop' | 'other'
   path: string
   name: string
   startSlide?: number
   startTime?: number
   autoplay?: boolean
   isImage?: boolean
+  fillOutput?: boolean
   capture?: CaptureSourceConfig
+  captureSourceId?: string
+  captureProfile?: import('../../shared/presentation-output').PresentationCaptureProfile
+  captureCrop?: { x: number; y: number; width: number; height: number }
   captureAudioOnCommit?: boolean
   takeId?: string
 }
@@ -249,6 +255,7 @@ function otherSlot(slot: SlotIndex): SlotIndex {
 }
 
 export function PresentationApp(): JSX.Element {
+  useEffect(installKeynoteCapturePool, [])
   const [slots, setSlots] = useState<[ContentSlot, ContentSlot]>([
     { payload: null, revision: 0 },
     { payload: null, revision: 0 }
@@ -803,6 +810,22 @@ export function PresentationApp(): JSX.Element {
     return () => window.removeEventListener('resize', updateViewport)
   }, [])
 
+  useEffect(() => window.api.on('document-capture-update', (...args: unknown[]) => {
+    const update = args[0] as { path?: string; captureSourceId?: string; captureCrop?: ContentPayload['captureCrop'] }
+    if (!update?.path || !update.captureSourceId) return
+    setSlots((previous) => previous.map((slot) => slot.payload?.type === 'document' && slot.payload.path === update.path
+      ? { ...slot, payload: { ...slot.payload, captureSourceId: update.captureSourceId, captureCrop: update.captureCrop } }
+      : slot) as [ContentSlot, ContentSlot])
+  }), [])
+
+  useEffect(() => window.api.on('keynote-capture-update', (...args: unknown[]) => {
+    const update = args[0] as { path?: string; captureSourceId?: string; captureProfile?: ContentPayload['captureProfile'] }
+    if (!update?.path || !update.captureSourceId || !update.captureProfile) return
+    setSlots((previous) => previous.map((slot) => slot.payload?.type === 'keynote' && slot.payload.path === update.path
+      ? { ...slot, payload: { ...slot.payload, captureSourceId: update.captureSourceId, captureProfile: update.captureProfile } }
+      : slot) as [ContentSlot, ContentSlot])
+  }), [])
+
   useEffect(() => {
     const unsubscribe = window.api.on('qr-overlay-renderer-update', (...args: unknown[]) => {
       const raw = args[0]
@@ -983,9 +1006,27 @@ export function PresentationApp(): JSX.Element {
           onReady={onReady}
           transparentBackground={programScene.active}
           roundedContent={programScene.active && programScene.cornerStyle === 'rounded'}
+          fillOutput={window.api.platform === 'darwin'}
           onAspectRatio={(value) => reportSlotAspectRatio(index, slot.revision, value)}
         />
       )
+    }
+    if (content.type === 'keynote' || content.type === 'document') {
+      return content.captureSourceId
+        ? <KeynoteLiveViewer
+            key={`keynote-${slot.revision}`}
+            sourceId={content.captureSourceId}
+            captureProfile={content.captureProfile}
+            filePath={content.path}
+            sourceLabel={content.type === 'document' ? 'Документ Office' : 'Keynote'}
+            crop={content.captureCrop}
+            onReady={onReady}
+            onError={(message) => window.api.sendToControl('presentation-content-error', {
+              type: content.type, takeId: content.takeId, message
+            })}
+            roundedContent={programScene.active && programScene.cornerStyle === 'rounded'}
+          />
+        : null
     }
     if (content.type === 'backdrop') {
       return (
@@ -1003,7 +1044,9 @@ export function PresentationApp(): JSX.Element {
         <img
           src={mediaUrl(content.path)}
           alt={content.name}
-          className="max-w-full max-h-full w-auto h-auto object-contain select-none"
+          className={content.fillOutput
+            ? 'w-full h-full object-cover select-none'
+            : 'max-w-full max-h-full w-auto h-auto object-contain select-none'}
           style={{ borderRadius: programScene.active && programScene.cornerStyle === 'rounded' ? '1.25rem' : 0 }}
           draggable={false}
           onLoad={(event) => {

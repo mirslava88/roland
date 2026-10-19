@@ -1,0 +1,115 @@
+name: Build macOS Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      edition:
+        description: PDM edition
+        required: true
+        default: all
+        type: choice
+        options: [all, standard, stream]
+  push:
+    tags:
+      - 'macos-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      editions: ${{ steps.plan.outputs.editions }}
+    steps:
+      - name: Checkout macOS source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'macos' || github.ref }}
+          persist-credentials: false
+      - name: Select and validate macOS editions
+        id: plan
+        env:
+          REQUESTED_EDITION: ${{ inputs.edition }}
+        run: node scripts/plan-macos-release.mjs
+
+  build-macos:
+    needs: plan
+    runs-on: macos-15-intel
+    strategy:
+      matrix:
+        edition: ${{ fromJSON(needs.plan.outputs.editions) }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+    steps:
+      - name: Checkout macOS source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'macos' || github.ref }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: build/macos/package-lock.json
+
+      - name: Install and audit isolated macOS dependencies
+        run: node scripts/build-macos.mjs prepare
+
+      - name: Check macOS release security
+        working-directory: tmp/macos-build
+        run: |
+          node scripts/test-mac-toolchain.mjs
+          node scripts/test-mac-release-security.cjs
+          node scripts/test-macos-release.mjs
+          npm run test:security
+
+      - name: Build Intel and Apple Silicon DMGs
+        run: node scripts/build-macos.mjs ${{ matrix.edition }} package
+
+      - name: Verify bundled macOS helpers
+        run: |
+          lipo -info tmp/macos-build/build/mac-pdf-pages | grep 'x86_64 arm64'
+          lipo -info tmp/macos-build/build/mac-virtual-camera/mac-camera-writer | grep 'x86_64 arm64'
+          test -f dist/macos/${{ matrix.edition }}/PDM-*-mac-x64.dmg
+          test -f dist/macos/${{ matrix.edition }}/PDM-*-mac-arm64.dmg
+
+      - name: Prepare release checksums
+        run: node scripts/publish-macos-release.mjs prepare ${{ matrix.edition }} dist/macos/${{ matrix.edition }}
+
+      - name: Upload macOS installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-installers-${{ matrix.edition }}
+          path: |
+            dist/macos/${{ matrix.edition }}/*.dmg
+            dist/macos/${{ matrix.edition }}/SHA256SUMS.txt
+          if-no-files-found: error
+
+  prepare-release:
+    if: startsWith(github.ref, 'refs/tags/macos-v')
+    needs: [plan, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PDM_EDITION: ${{ fromJSON(needs.plan.outputs.editions)[0] }}
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Download verified macOS installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: macos-installers-${{ env.PDM_EDITION }}
+          path: release-artifact
+      # Public Mac distribution still needs Developer ID / notarization.
+      # Keep new CI builds in drafts until installation has been checked.
+      # Existing manually verified releases and their signed assets are preserved.
+      - name: Prepare new macOS release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-macos-release.mjs publish "$PDM_EDITION" release-artifact

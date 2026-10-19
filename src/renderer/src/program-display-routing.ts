@@ -1,4 +1,5 @@
 import {
+  connectedProgramDisplayId,
   isSpeakerOnlyDisplayRouting,
   useAppStore,
   type DisplayOutputMode
@@ -205,6 +206,10 @@ async function switchPrimaryProgramDisplayUnlocked(
           activeOfficeSceneLayout
         )
         if (!result.success) throw new Error(result.error || 'Окно программы не перенеслось на выбранный дисплей')
+        if (window.api.platform === 'darwin' && result.captureSourceId) {
+          window.api.sendToPresentation('document-capture-update', { path: activeFile.path,
+            captureSourceId: result.captureSourceId, captureCrop: result.captureCrop })
+        }
       } else {
         if (presentationWindowIsProgramOutput) physicalOutputMoved = true
         const presentationPlaced = await window.api.placePresentationWindow(displayId)
@@ -273,6 +278,10 @@ async function switchPrimaryProgramDisplayUnlocked(
             activeOfficeSceneLayout
           )
           if (!rollback.success) throw new Error(rollback.error || 'окно программы не вернулось на прежний дисплей')
+          if (window.api.platform === 'darwin' && rollback.captureSourceId) {
+            window.api.sendToPresentation('document-capture-update', { path: activeFile.path,
+              captureSourceId: rollback.captureSourceId, captureCrop: rollback.captureCrop })
+          }
         } else {
           const presentationRolledBack = await window.api.placePresentationWindow(previousDisplayId)
           if (presentationWindowIsProgramOutput && !presentationRolledBack) {
@@ -359,6 +368,29 @@ export async function setDisplayAssignmentWithProgramRouting(
     const stateBeforeAssignment = useAppStore.getState()
     const primaryBeforeAssignment = stateBeforeAssignment.selectedDisplayId
     stateBeforeAssignment.setDisplayAssignment(displayId, mode)
+
+    if (window.api.platform === 'darwin') {
+      // Mac PPTX/Office are already captured inside PresentationApp. Move that
+      // same live surface to the render display when the last Program role is
+      // removed; do not restart Keynote or leave Program covering auxiliary UI.
+      const targetId = connectedProgramDisplayId(useAppStore.getState())
+      try {
+        if (targetId === null) {
+          await window.api.prepareInternalProgramOutput(true)
+        } else if (primaryBeforeAssignment === null && (
+          stateBeforeAssignment.activeFile !== null || stateBeforeAssignment.isPresentationWindowOpen
+        )) {
+          await window.api.openPresentationWindow(targetId)
+        }
+      } catch (error) {
+        useAppStore.getState().setDisplayAssignment(displayId, previousMode)
+        return { success: false, changed: false,
+          primaryDisplayId: useAppStore.getState().selectedDisplayId,
+          error: error instanceof Error ? error.message : String(error) }
+      }
+      return { success: true, changed: true,
+        primaryDisplayId: useAppStore.getState().selectedDisplayId }
+    }
 
     const requestPresentationRouteRefresh = (): void => {
       const state = useAppStore.getState()

@@ -93,5 +93,9 @@ async function check(encoder) {
 }
 
 await check('libx264')
+if (process.platform === 'darwin') {
+  if (await probeEncoder(ffmpeg, 'h264_videotoolbox')) await check('h264_videotoolbox')
+  else console.log('SKIP: VideoToolbox hardware unavailable; software recovery test passed')
+}
 if (await probeEncoder(ffmpeg, 'h264_qsv')) await check('h264_qsv')
 else console.log('SKIP: QSV hardware unavailable; software recovery test passed')

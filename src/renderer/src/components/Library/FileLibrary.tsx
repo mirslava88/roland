@@ -573,7 +573,7 @@ export function FileLibrary(): JSX.Element {
               <span className="text-lg shrink-0">{drive.isRemovable ? (<svg className="w-5 h-5 inline" viewBox="0 0 24 24" fill="currentColor"><path d="M8 2a2 2 0 0 0-2 2v1H5a2 2 0 0 0-2 2v12a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3V7a2 2 0 0 0-2-2h-1V4a2 2 0 0 0-2-2H8zm0 2h8v1H8V4zm-1 3h10a1 1 0 0 1 1 1v11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a1 1 0 0 1 1-1zm2 3a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1H9z"/></svg>) : (<svg className="w-5 h-5 inline" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="16" x2="21" y2="16" stroke="currentColor" strokeWidth="1.5" opacity="0.2"/><circle cx="18" cy="19" r="1" fill="#4ade80"/></svg>)}</span>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-200 truncate">
-                  {drive.label || `Диск ${drive.name}`} ({drive.name}:)
+                  {drive.label || `Диск ${drive.name}`}{drive.root.startsWith('/') ? '' : ` (${drive.name}:)`}
                 </p>
                 {drive.totalSize > 0 && (
                   <div className="mt-1">

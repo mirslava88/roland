@@ -58,7 +58,7 @@ export function VirtualCameraSettings(): JSX.Element {
 
   const start = async (): Promise<VirtualCameraStatus> => {
     if (status && !status.supported) {
-      throw new Error('Виртуальная камера PDM доступна только в Windows 11 и более новых версиях Windows.')
+      throw new Error(window.api.platform === 'darwin' ? 'Виртуальная камера PDM требует macOS 12.3 или новее.' : 'Виртуальная камера PDM доступна только в Windows 11 и более новых версиях Windows.')
     }
     const internal = programDisplayId === null
     setInternalProgramOutputConsumer('virtualCamera', internal)
@@ -85,7 +85,7 @@ export function VirtualCameraSettings(): JSX.Element {
         <h3 className="text-sm font-semibold text-gray-200">Виртуальная камера PDM</h3>
         <p className="mt-1 text-[11px] leading-5 text-gray-400">
           В Zoom, Teams, Telegram и других программах выберите камеру «PDM Virtual Camera».
-          В некоторых программах Windows добавляет к названию слова «Windows Virtual Camera».
+          {window.api.platform === 'win32' && 'В некоторых программах Windows добавляет к названию слова «Windows Virtual Camera». '}
           Она показывает итоговый эфир PDM: презентацию, сцену, титры, QR-код и таймер.
           Дополнительный монитор для этого не нужен — без него PDM автоматически использует скрытый внутренний эфир.
         </p>
@@ -127,15 +127,15 @@ export function VirtualCameraSettings(): JSX.Element {
 
       {status && !status.supported && (
         <p className="rounded-lg border border-amber-700/60 bg-amber-950/25 p-3 text-xs text-amber-200">
-          Виртуальная камера PDM доступна только в Windows 11 и более новых версиях Windows.
+          {window.api.platform === 'darwin' ? 'Виртуальная камера требует macOS 12.3 или новее.' : 'Виртуальная камера PDM доступна только в Windows 11 и более новых версиях Windows.'}
         </p>
       )}
       {status?.supported && !status.installed && (
         <div className="rounded-lg border border-blue-700/60 bg-blue-950/20 p-3">
-          <p className="text-xs text-blue-100">Камера устанавливается вместе с PDM. Если компонент отсутствует, восстановите его здесь — Windows попросит подтверждение.</p>
+          <p className="text-xs text-blue-100">{window.api.platform === 'darwin' ? 'Установите компонент камеры и разрешите его в системных настройках macOS. Обычная PDM и PDM Stream используют одну камеру.' : 'Камера устанавливается вместе с PDM. Если компонент отсутствует, восстановите его здесь — Windows попросит подтверждение.'}</p>
           <button type="button" disabled={busy} onClick={() => void run(() => window.api.virtualCamera.install())}
             className={`${button} mt-3 border-blue-500 bg-blue-600 text-white hover:bg-blue-500`}>
-            Восстановить виртуальную камеру
+            {window.api.platform === 'darwin' ? 'Установить виртуальную камеру' : 'Восстановить виртуальную камеру'}
           </button>
         </div>
       )}

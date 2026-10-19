@@ -126,6 +126,10 @@ export function InternalProgramOutputBridge(): null {
         }
 
         if (activeFile.type === 'presentation') {
+          // macOS captures the exact Keynote window on its internal render
+          // display, including animations. A delayed thumbnail job must never
+          // replace that live player, even when no physical Program is attached.
+          if (window.api.platform === 'darwin' && latest.macStaticPptxFallbackPath !== activeFile.path) return
           const frames = pptxSlidesMap[activeFile.path] || pptxThumbnailsMap[activeFile.path] || []
           const framePath = frames[Math.max(0, currentSlide - 1)]
           if (!framePath) return

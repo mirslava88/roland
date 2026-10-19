@@ -25,13 +25,16 @@ export class FlvParser {
       if (this.buffer.length < length) return
       const bytes = Buffer.from(this.buffer.subarray(0, length))
       this.buffer = this.buffer.subarray(length)
-      const type = bytes[0]
-      const configuration = size >= 2 && (type === 8 || type === 9) && bytes[12] === 0
-      this.receive({ bytes, type, configuration,
-        timestamp: bytes.readUIntBE(4, 3) + bytes[7] * 0x1000000,
-        keyframe: type === 9 && size >= 2 && bytes[11] >>> 4 === 1 && bytes[12] === 1 })
+      this.receive(flvPacketFromBytes(bytes))
     }
   }
+}
+export function flvPacketFromBytes(bytes: Buffer): FlvPacket {
+  if (bytes.length < 15 || bytes.readUIntBE(1, 3) + 15 !== bytes.length) throw Error('Invalid FLV packet')
+  const size = bytes.length - 15, type = bytes[0]
+  return { bytes, type, timestamp: bytes.readUIntBE(4, 3) + bytes[7] * 0x1000000,
+    configuration: size >= 2 && (type === 8 || type === 9) && bytes[12] === 0,
+    keyframe: type === 9 && size >= 2 && bytes[11] >>> 4 === 1 && bytes[12] === 1 }
 }
 export function rebaseFlvPacket(packet: FlvPacket, origin: number): Buffer {
   const bytes = Buffer.from(packet.bytes)

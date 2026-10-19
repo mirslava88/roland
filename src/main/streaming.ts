@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, screen, session } from 'electron'
+import { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, screen, session, systemPreferences } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { existsSync } from 'fs'
 import { readFile, writeFile, rename } from 'fs/promises'
@@ -6,10 +6,11 @@ import { join } from 'path'
 import { getTrustedRendererDevUrl } from './renderer-security'
 import { connect as tcpConnect } from 'net'
 import { connect as tlsConnect } from 'tls'
-import { DEFAULT_STREAM_SETTINGS, validateStreamSettings } from '../shared/streaming'
+import { DEFAULT_STREAM_SETTINGS, streamDelayStorageBytes, validateStreamSettings } from '../shared/streaming'
 import type { StreamSettings, StreamStatus } from '../shared/streaming'
 import { desktopInputArguments, probeEncoder, rawVideoInputArguments, StreamingEngine } from './streaming-engine'
 import { diagnosticLog } from './diagnostic-log'
+import { checkStreamDelaySpace, cleanupAbandonedStreamDelays } from './stream-delay'
 
 const freshStatus = (): StreamStatus => ({ phase: 'idle', startedAt: null, encoder: '', fps: 0, bitrateKbps: 0, droppedFrames: 0, encoderLagMs: 0, destinations: [] })
 
@@ -40,6 +41,7 @@ export class StreamingManager {
     private programDisplay: () => number | null,
     private programWindow: () => BrowserWindow | null
   ) {
+    void cleanupAbandonedStreamDelays().catch(() => diagnosticLog('stream', 'Could not remove abandoned delay buffers'))
     const handle = (channel: string, fn: (...args: any[]) => unknown): void => {
       ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
         if (event.sender !== this.control()?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error('Недоступно.')
@@ -50,7 +52,10 @@ export class StreamingManager {
     handle('stream-save', (value: StreamSettings) => this.save(value))
     handle('stream-status', () => ({ ...this.status, ...(this.engine?.snapshot() || {}) }))
     handle('stream-start', (value: StreamSettings, displayId: number | null) => this.start(value, displayId))
-    handle('stream-stop', () => this.stop())
+    handle('stream-stop', (immediate = false) => {
+      if (typeof immediate !== 'boolean') throw new Error('Некорректный запрос остановки.')
+      this.requestStop(immediate)
+    })
     handle('stream-devices', () => this.devices())
     handle('stream-check', (value: StreamSettings) => this.check(value))
     ipcMain.handle('stream-chunk', (event, bytes: ArrayBuffer, capturedAt: number) => {
@@ -70,10 +75,10 @@ export class StreamingManager {
       if (event.sender === this.worker?.webContents && event.senderFrame === event.sender.mainFrame) this.fail(String(message).slice(0, 300))
     })
     screen.on('display-removed', (_event, display) => {
-      if (!this.internalProgram && display.id === this.displayId) this.fail('Эфирный экран отключён. После подключения запустите стрим повторно.')
+      if (this.status.phase !== 'draining' && !this.internalProgram && display.id === this.displayId) this.fail('Эфирный экран отключён. После подключения запустите стрим повторно.')
     })
     screen.on('display-metrics-changed', (_event, display, metrics) => {
-      if (!this.internalProgram && display.id === this.displayId && metrics.some((m) => ['bounds', 'rotation', 'scaleFactor'].includes(m))) {
+      if (this.status.phase !== 'draining' && !this.internalProgram && display.id === this.displayId && metrics.some((m) => ['bounds', 'rotation', 'scaleFactor'].includes(m))) {
         this.fail('Изменились параметры эфирного экрана. Запустите стрим повторно.')
       }
     })
@@ -95,7 +100,7 @@ export class StreamingManager {
         catch { warning = 'Не удалось прочитать сохранённые настройки. Введите их заново; прежний файл изменится только после сохранения.' }
       }
     }
-    return { settings, canSave, available: process.platform === 'win32' && existsSync(this.ffmpegPath), warning }
+    return { settings, canSave, available: ['win32', 'darwin'].includes(process.platform) && existsSync(this.ffmpegPath), warning }
   }
 
   private async save(value: StreamSettings): Promise<void> {
@@ -143,7 +148,8 @@ export class StreamingManager {
       } catch { callback({}) }
     })
     const worker = new BrowserWindow({ show: false, width: 320, height: 180, skipTaskbar: true,
-      webPreferences: { preload: join(__dirname, '../preload/streaming.js'), session: captureSession,
+      webPreferences: { ...(process.platform === 'darwin' && app.isPackaged ? { devTools: false } : {}),
+        preload: join(__dirname, '../preload/streaming.js'), session: captureSession,
         sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false } })
     this.worker = worker
     worker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -175,17 +181,21 @@ export class StreamingManager {
   private async start(value: StreamSettings, displayId: number | null): Promise<void> {
     if (this.busy || this.engine || this.status.phase === 'starting') throw new Error('Стрим уже запущен или запускается.')
     const settings = validateStreamSettings(value)
-    if (process.platform !== 'win32' || !existsSync(this.ffmpegPath)) throw new Error('Модуль стриминга доступен в Windows-сборке с FFmpeg.')
+    if (!['win32', 'darwin'].includes(process.platform) || !existsSync(this.ffmpegPath)) throw new Error('Модуль FFmpeg не найден. Установите Stream-редакцию PDM для вашей системы.')
     const internalProgram = displayId === null
     const display = displayId === null ? null : screen.getAllDisplays().find((d) => d.id === displayId)
     if (!internalProgram && !display) throw new Error('Назначенный эфирный экран отключён.')
     if (!internalProgram && this.control() && screen.getDisplayMatching(this.control()!.getBounds()).id === displayId) throw new Error('Для стрима нужен отдельный эфирный экран, без панели управления PDM.')
     if (internalProgram && settings.fps > 30) throw new Error('Без дополнительного монитора выберите 25 или 30 кадров/с.')
-    const internalWindow = internalProgram ? this.programWindow() : null
-    if (internalProgram && (!internalWindow || internalWindow.isDestroyed())) {
+    const captureProgramWindow = internalProgram
+    const internalWindow = captureProgramWindow ? this.programWindow() : null
+    if (captureProgramWindow && (!internalWindow || internalWindow.isDestroyed())) {
       throw new Error('Внутренний программный выход ещё не готов. Повторите запуск стрима.')
     }
-    if (internalWindow) {
+    if (!internalProgram && process.platform === 'darwin' && systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+      throw new Error('Разрешите PDM Stream запись экрана в настройках конфиденциальности macOS, затем запустите стрим повторно.')
+    }
+    if (internalProgram && internalWindow) {
       internalWindow.setIgnoreMouseEvents(true)
       internalWindow.setOpacity(0)
       if (!internalWindow.isVisible()) internalWindow.showInactive()
@@ -198,9 +208,13 @@ export class StreamingManager {
     this.internalProgram = internalProgram
     this.settings = settings
     try {
+      if ((settings.delaySeconds ?? 0) > 0) await checkStreamDelaySpace(streamDelayStorageBytes(settings.delaySeconds!, settings.bitrateKbps))
+      if (token !== this.epoch) throw new Error('Запуск отменён.')
       let encoder = 'libx264'
       if (settings.encoder !== 'software') {
-        const candidates = settings.encoder === 'auto' ? ['h264_nvenc', 'h264_qsv', 'h264_amf'] : [settings.encoder]
+        const candidates = settings.encoder === 'auto'
+          ? process.platform === 'darwin' ? ['h264_videotoolbox'] : ['h264_nvenc', 'h264_qsv', 'h264_amf']
+          : [settings.encoder]
         const results = await Promise.all(candidates.map(async (name) => {
           let supported = this.encoderCache.get(name)
           if (supported === undefined) { supported = await probeEncoder(this.ffmpegPath, name); this.encoderCache.set(name, supported) }
@@ -218,8 +232,16 @@ export class StreamingManager {
         if (current()) this.fail(message)
       })
       this.engine = engine
-      if (internalProgram && internalWindow) {
-        const firstFrame = await internalWindow.webContents.capturePage()
+      if (captureProgramWindow && internalWindow) {
+        const resizeFrame = (image: Electron.NativeImage): Electron.NativeImage => {
+          if (process.platform !== 'darwin') return image
+          const size = image.getSize()
+          const width = settings.resolution === 1080 ? 1920 : 1280
+          const factor = Math.min(1, width / size.width, settings.resolution / size.height)
+          return factor < 1 ? image.resize({ width: Math.max(2, Math.floor(size.width * factor / 2) * 2),
+            height: Math.max(2, Math.floor(size.height * factor / 2) * 2), quality: 'good' }) : image
+        }
+        const firstFrame = resizeFrame(await internalWindow.webContents.capturePage())
         if (!current()) throw new Error('Запуск отменён.')
         const size = firstFrame.getSize()
         if (size.width < 16 || size.height < 16) throw new Error('Внутренний программный выход не отрисовал кадр.')
@@ -232,7 +254,7 @@ export class StreamingManager {
           if (current()) this.fail('Не удалось передать первый кадр стрима.')
         })
         const captureFrame = async (): Promise<void> => {
-          if (!current() || this.frameCaptureBusy || this.engine !== engine || !this.internalProgram) return
+          if (!current() || this.frameCaptureBusy || this.engine !== engine) return
           const win = this.programWindow()
           if (!win || win.isDestroyed()) {
             this.fail('Внутренний программный выход закрылся.')
@@ -240,7 +262,7 @@ export class StreamingManager {
           }
           this.frameCaptureBusy = true
           try {
-            const frame = await win.webContents.capturePage()
+            const frame = resizeFrame(await win.webContents.capturePage())
             if (!current()) return
             const currentSize = frame.getSize()
             if (currentSize.width !== size.width || currentSize.height !== size.height) {
@@ -255,11 +277,19 @@ export class StreamingManager {
           }
         }
         this.frameTimer = setInterval(() => { void captureFrame() }, Math.max(1, Math.round(1000 / settings.fps)))
-        diagnosticLog('stream', `start capture=internal encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} frame=${size.width}x${size.height} destinations=${settings.destinations.filter(d => d.enabled).length}`)
+        diagnosticLog('stream', `start capture=program-window source=${internalProgram ? 'internal' : 'display'} encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} frame=${size.width}x${size.height} destinations=${settings.destinations.filter(d => d.enabled).length}`)
       } else if (display) {
-        const physical = screen.dipToScreenRect(null, display.bounds)
-        this.engine.start(encoder, desktopInputArguments(physical, settings.fps))
-        diagnosticLog('stream', `start capture=native encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} display=${displayId} bounds=${JSON.stringify(physical)} destinations=${settings.destinations.filter(d => d.enabled).length}`)
+        if (process.platform === 'darwin') {
+          const width = settings.resolution === 1080 ? 1920 : 1280
+          const helper = app.isPackaged ? join(process.resourcesPath, 'mac-stream-capture') : join(app.getAppPath(), 'build/mac-stream-capture')
+          this.engine.start(encoder, rawVideoInputArguments(width, settings.resolution, settings.fps), true,
+            { path: helper, args: [String(display.id), String(width), String(settings.resolution), String(settings.fps)] })
+          diagnosticLog('stream', `start capture=ScreenCaptureKit encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} display=${displayId}`)
+        } else {
+          const physical = screen.dipToScreenRect(null, display.bounds)
+          this.engine.start(encoder, desktopInputArguments(physical, settings.fps))
+          diagnosticLog('stream', `start capture=native encoder=${encoder} resolution=${settings.resolution} fps=${settings.fps} display=${displayId} bounds=${JSON.stringify(physical)} destinations=${settings.destinations.filter(d => d.enabled).length}`)
+        }
       }
       if (!current()) throw new Error('Запуск отменён.')
       await this.command('resume')
@@ -272,6 +302,7 @@ export class StreamingManager {
           const s = this.engine.snapshot()
           diagnosticLog('stream', `fps=${s.fps} encodedKbps=${s.bitrateKbps} encoderLagMs=${s.encoderLagMs} destinations=${JSON.stringify(s.destinations.map((d, i) => ({ index: i, phase: d.phase, retries: d.retries, bufferedMs: d.bufferedMs, kbps: d.bitrateKbps, droppedFrames: d.droppedFrames, error: d.error })))}`)
         }
+        if (this.status.phase === 'draining') return
         if (!this.internalProgram && this.programDisplay() !== this.displayId) this.fail('Эфир перенесён на другой экран. Запустите стрим повторно.')
         else if (!this.control() || this.control()!.isDestroyed()) this.fail('Окно управления закрыто. Стрим остановлен.')
         else if (!this.internalProgram && screen.getDisplayMatching(this.control()!.getBounds()).id === this.displayId) {
@@ -291,6 +322,18 @@ export class StreamingManager {
     for (const request of this.requests.values()) { clearTimeout(request.timer); request.reject(new Error('Захват остановлен.')) }
     this.requests.clear()
     if (worker && !worker.isDestroyed()) worker.destroy()
+  }
+
+  private requestStop(immediate: boolean): void {
+    if (immediate || this.settings?.drainOnStop === false || !this.engine || !(this.settings?.delaySeconds ?? 0) || this.status.phase === 'starting') {
+      this.stop(); return
+    }
+    if (this.status.phase === 'draining') return
+    const token = this.epoch
+    this.status = { ...this.status, phase: 'draining' }
+    clearInterval(this.frameTimer); this.frameTimer = undefined
+    this.engine.drain(() => { if (token === this.epoch) this.stop() })
+    this.closeWorker()
   }
 
   stop(): void {

@@ -8,6 +8,7 @@ interface VideoViewerProps {
   onReady?: () => void
   transparentBackground?: boolean
   roundedContent?: boolean
+  fillOutput?: boolean
   onAspectRatio?: (aspectRatio: number) => void
 }
 
@@ -18,6 +19,7 @@ export function VideoViewer({
   onReady,
   transparentBackground = false,
   roundedContent = false,
+  fillOutput = false,
   onAspectRatio
 }: VideoViewerProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -354,7 +356,9 @@ export function VideoViewer({
     <div className={`w-full h-full flex items-center justify-center ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}>
       <video
         ref={videoRef}
-        className="max-w-full max-h-full w-auto h-auto object-contain bg-transparent"
+        className={fillOutput
+          ? 'w-full h-full object-cover bg-transparent'
+          : 'max-w-full max-h-full w-auto h-auto object-contain bg-transparent'}
         style={{ borderRadius: roundedContent ? '1.25rem' : 0 }}
         onEnded={handleVideoEnded}
         preload="auto"

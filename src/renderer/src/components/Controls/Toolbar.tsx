@@ -447,6 +447,10 @@ export function Toolbar(): JSX.Element {
         }
         closeCanFinalize = true
       }
+      if (window.api.platform === 'darwin' && !closingExternalDocument) {
+        const released = await window.api.minimizeExternalFile()
+        if (!released.success) throw new Error(released.error || 'Не удалось убрать окна Word/Excel с эфирного экрана.')
+      }
       const shouldCoverVisualClose = Boolean(closingFile) && !(
         closingFile?.type === 'other' && !closingFile.isImage
       )
@@ -510,6 +514,9 @@ export function Toolbar(): JSX.Element {
             setPresentationWindowOpen(false)
           }
           window.alert('Фон не удалось подготовить. Контент закрыт, память освобождена.')
+        } else if (window.api.platform === 'darwin') {
+          const raised = await window.api.raisePresentationWindow()
+          if (!raised) window.api.dbgLog('toolbar stop: macOS backdrop could not be raised')
         }
       } else {
         window.api.sendToPresentation('clear-active-content')
@@ -605,6 +612,9 @@ export function Toolbar(): JSX.Element {
           path,
           name: 'Backdrop'
         })
+        if (window.api.platform === 'darwin') {
+          await window.api.raisePresentationWindow()
+        }
       }
     }
   }

@@ -195,6 +195,7 @@ interface DriveInfo {
 }
 
 interface Api {
+  platform: NodeJS.Platform
   virtualCamera: import('../../shared/virtual-camera').VirtualCameraApi
   listDirectStreamDecks(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckDeviceInfo[]>
   getDirectStreamDeckStatus(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
@@ -226,7 +227,7 @@ interface Api {
   }>>
   setDisplayResolution(deviceName: string, width: number, height: number, frequency?: number): Promise<{ success: boolean; error?: string }>
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
-  prepareInternalProgramOutput(): Promise<void>
+  prepareInternalProgramOutput(detachPhysicalOutput?: boolean): Promise<void>
   releaseInternalProgramOutput(): Promise<void>
   placePresentationWindow(displayId?: number): Promise<boolean>
   raisePresentationWindow(): Promise<boolean>
@@ -237,6 +238,7 @@ interface Api {
   completeProgramMirrorTransition(transitionId: string): Promise<{ released: number; remaining: number }>
   releaseProgramMirrorHold(transitionId: string): Promise<boolean>
   getScreenCaptureSource(displayId: number): Promise<string | null>
+  ensureCameraAccess(): Promise<string>
   captureSceneMirrorFrame(): Promise<string | null>
   closePresentationWindow(): Promise<void>
   checkPowerPoint(): Promise<boolean>
@@ -254,6 +256,14 @@ interface Api {
     aspectRatio?: number
     error?: string
   }>
+  prepareMacPptxAnimation(filePath: string): Promise<{
+    success: boolean
+    hasAnimations?: boolean
+    clickBuildsBySlide?: Record<number, number>
+    blankBeforeBuildBySlide?: Record<number, boolean>
+    error?: string
+  }>
+  prepareMacKeynote(filePath: string, displayId?: number, preferred?: boolean): Promise<{ success: boolean; slideCount?: number; deferred?: boolean; error?: string }>
   syncPreparedPowerPoints(filePaths: string[]): Promise<{ success: boolean; error?: string }>
   launchPowerPoint(
     filePath: string,
@@ -341,6 +351,8 @@ interface Api {
   switchAudioToExternal(): Promise<{ success: boolean; device?: string; error?: string }>
   restoreAudioDevice(): Promise<void>
   toggleGlobalHook(enable: boolean): Promise<boolean>
+  toggleControlFullscreen(): Promise<boolean>
+  getControlFullscreen(): Promise<boolean>
   selectSoundFile(): Promise<string | null>
   moveFile(srcPath: string, destFolder: string): Promise<{ success: boolean; newPath?: string; error?: string }>
   generateDocPreview(filePath: string): Promise<{ success: boolean; pdfPath?: string; error?: string }>
@@ -402,9 +414,12 @@ interface Api {
       transitionDurationMs?: number
       contentAspectRatio?: number | null
     }
-  ): Promise<{ success: boolean; error?: string }>
+  ): Promise<{ success: boolean; error?: string; captureSourceId?: string; captureCrop?: { x: number; y: number; width: number; height: number } }>
   getPathForFile(file: File): string
   setActiveContentType(type: string): void
+  navigateExternalDocument(filePath: string, direction: 'next' | 'prev' | 'home'): Promise<{ success: boolean; error?: string }>
+  getExternalDocumentSheets(filePath: string): Promise<{ sheets: string[]; activeSheet: string }>
+  selectExternalDocumentSheet(filePath: string, name: string): Promise<{ success: boolean; error?: string }>
   sendToPresentation(channel: string, ...args: unknown[]): void
   sendToControl(channel: string, ...args: unknown[]): void
   signalReady(): void

@@ -41,6 +41,7 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
+  const isMac = window.api.platform === 'darwin'
   const {
     displays: connectedDisplays,
     displayAssignments,
@@ -53,6 +54,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   const [tab, setTab] = useState<'appearance' | 'audio' | 'display' | 'virtual-camera' | 'stream-deck' | 'config' | 'diagnostics' | 'help'>('audio')
   const [devices, setDevices] = useState<AudioDevice[]>([])
   const [loading, setLoading] = useState(false)
+  const [audioError, setAudioError] = useState('')
   const [displayModes, setDisplayModes] = useState<DisplayInfoFull[]>([])
   const [displaysLoading, setDisplaysLoading] = useState(false)
   const [applyingMode, setApplyingMode] = useState<DisplayMultiMode | null>(null)
@@ -138,7 +140,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
 
   const applyMode = async (mode: DisplayMultiMode): Promise<void> => {
     setApplyingMode(mode)
-    await window.api.setDisplayMode(mode)
+    const result = await window.api.setDisplayMode(mode)
+    if (!result.success) alert(`Не удалось изменить режим экранов: ${result.error || 'ошибка'}`)
     // Windows needs a moment to apply
     setTimeout(() => {
       loadDisplays()
@@ -180,9 +183,16 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
 
   const loadDevices = async (): Promise<void> => {
     setLoading(true)
-    const d = await window.api.getAudioDevices()
-    setDevices(d)
-    setLoading(false)
+    try {
+      const d = await window.api.getAudioDevices()
+      setDevices(d)
+      setAudioError('')
+    } catch (error) {
+      setDevices([])
+      setAudioError(`Не удалось получить аудиоустройства: ${String(error)}`)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -190,7 +200,13 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   }, [])
 
   const handleSetDevice = async (deviceId: string): Promise<void> => {
-    await window.api.setAudioDevice(deviceId)
+    const result = await window.api.setAudioDevice(deviceId).catch((error: unknown) => ({
+      success: false, error: String(error)
+    }))
+    if (!result.success) {
+      setAudioError(`Не удалось выбрать аудиовыход: ${result.error || 'неизвестная ошибка'}`)
+      return
+    }
     await loadDevices()
   }
 
@@ -229,7 +245,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
             >
               Дисплеи
             </button>
-            <button
+            {!isMac && <button
               data-pdm-settings-tab="virtual-camera"
               onClick={() => setTab('virtual-camera')}
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
@@ -237,7 +253,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               }`}
             >
               Виртуальная камера
-            </button>
+            </button>}
             <button
               onClick={() => setTab('config')}
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${
@@ -378,6 +394,8 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <h3 className="text-sm font-semibold text-gray-200 mb-3">Выберите аудиоустройство вывода</h3>
               {loading ? (
                 <p className="text-xs text-gray-500">Загрузка устройств...</p>
+              ) : audioError ? (
+                <p className="text-xs text-red-300">{audioError}</p>
               ) : devices.length === 0 ? (
                 <p className="text-xs text-gray-500">Устройства не найдены</p>
               ) : (
@@ -478,7 +496,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
               <section>
                 <h3 className="text-sm font-semibold text-gray-200 mb-2">Режим нескольких экранов</h3>
                 <div className="grid grid-cols-2 gap-2">
-                  {(['extend', 'clone', 'internal', 'external'] as DisplayMultiMode[]).map((mode) => (
+                  {(isMac ? ['extend', 'clone'] as DisplayMultiMode[] : ['extend', 'clone', 'internal', 'external'] as DisplayMultiMode[]).map((mode) => (
                     <button
                       key={mode}
                       onClick={() => applyMode(mode)}
@@ -551,7 +569,7 @@ export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
                   onClick={() => window.api.openDisplaySettings()}
                   className="text-[10px] text-gray-500 hover:text-white transition-colors"
                 >
-                  Открыть системные настройки Windows →
+                  Открыть системные настройки {isMac ? 'macOS' : 'Windows'} →
                 </button>
               </section>
             </div>

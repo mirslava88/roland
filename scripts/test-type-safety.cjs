@@ -28,12 +28,25 @@ async function checkDisplayGuards() {
   let showCount = 0
   const handlers = {}
   const globals = {
-    screen, timerActive: false, wpfTimerDisplayId: null,
+    screen, userDisplays: () => [primary, external], timerActive: false, wpfTimerDisplayId: null,
+    syncMacOverlayTimer: async () => {}, process: { platform: 'win32' },
     showWpfTimer: () => { showCount++ }, startWpfTimerMirrorSync() {},
     handleControl: (name, fn) => { handlers[name] = fn },
     ipcMain: { on: (name, fn) => { handlers[name] = fn }, handle: (name, fn) => { handlers[name] = fn } },
     isTrustedWindowMainFrame: () => true, controlWindow: {}, qrOverlayRevision: 0, programSceneMediaOverlayRevision: 0
   }
+  const macHandlers = {}
+  let macSyncs = 0
+  evaluate(fragment(main, "handleControl('show-timer-overlay'", "handleControl('hide-timer-overlay'"), {
+    ...globals, process: { platform: 'darwin' },
+    screen: { getPrimaryDisplay: () => primary },
+    handleControl: (name, fn) => { macHandlers[name] = fn },
+    syncMacOverlayTimer: async () => { macSyncs++ },
+    showWpfTimer: () => assert.fail('macOS must not start WPF'),
+    startWpfTimerMirrorSync: () => assert.fail('macOS must not start a Windows timer mirror')
+  })
+  await macHandlers['show-timer-overlay']({}, external.id)
+  assert.equal(macSyncs, 1, 'Mac timer must work without Windows-only screen.dipToScreenRect')
   evaluate(fragment(main, "handleControl('show-timer-overlay'", "handleControl('hide-timer-overlay'"), globals)
   // Execute each real handler up to window creation. Returning the target here
   // avoids constructing native windows; all validation above it stays real.

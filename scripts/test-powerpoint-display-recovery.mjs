@@ -101,9 +101,13 @@ assert.match(
 )
 assert.match(
   main,
-  /const preservedPresentationWindow = presentationWindow[\s\S]*?setOpacity\(0\)[\s\S]*?setContentBounds\(primaryDisplay\.bounds\)[\s\S]*?presentation renderer preserved after external display removal/,
+  /const preservedPresentationWindow = presentationWindow[\s\S]*?setOpacity\(0\)[\s\S]*?positionPresentationWindow\(preservedPresentationWindow, primaryDisplay\)[\s\S]*?presentation renderer preserved after external display removal/,
   'disconnect must preserve and relocate the Program renderer instead of reopening its USB camera'
 )
+assert.match(main, /function positionPresentationWindow[\s\S]*?const bounds = display\.bounds[\s\S]*?win\.setContentBounds\(bounds\)/,
+  'the shared placement helper must retain the exact display bounds')
+assert.match(main, /function userDisplays[\s\S]*?screen\.getAllDisplays\(\)\.filter\(\(display\) => !isMacRenderDisplay\(display\)\)/,
+  'an internal rendering surface must not keep a removed physical Program display logically connected')
 assert.doesNotMatch(
   main.slice(main.indexOf("handleControl('place-presentation-window'"), main.indexOf("handleControl('raise-presentation-window'")),
   /setFullScreen/,
@@ -116,7 +120,7 @@ assert.match(
 )
 assert.match(
   main.slice(main.indexOf("handleControl('place-presentation-window'"), main.indexOf("handleControl('raise-presentation-window'")),
-  /presentationDisplayId = targetDisplay\.id[\s\S]*?maxPlacementAttempts = changed \? 8 : 1[\s\S]*?setContentBounds\(nextBounds\)[\s\S]*?actualContentBounds = win\.getContentBounds\(\)[\s\S]*?sameBounds\(actualContentBounds, nextBounds\)/,
+  /presentationDisplayId = targetDisplay\.id[\s\S]*?maxPlacementAttempts = changed \? 8 : 1[\s\S]*?positionPresentationWindow\(win, targetDisplay\)[\s\S]*?actualContentBounds = win\.getContentBounds\(\)[\s\S]*?sameBounds\(actualContentBounds, nextBounds\)/,
   'Program hot-plug placement must own the route and retry the exact client surface while Windows settles the new monitor'
 )
 assert.doesNotMatch(
@@ -161,8 +165,8 @@ assert.match(
 )
 assert.match(
   preview,
-  /channel\.file\.type === 'presentation' \|\| channel\.file\.type === 'pdf'[\s\S]*?isRendererOnlyPresentationRouting\(freshState\)[\s\S]*?powerpointCommand\('close'\)[\s\S]*?waitForPptxChannelStart[\s\S]*?speaker-only \$\{channel\.file\.type\} TAKE ready/,
-  'Speaker/internal TAKE must close regular output and publish PDM-rendered PPTX/PDF frames instead'
+  /channel\.file\.type === 'pdf' \|\| \(channel\.file\.type === 'presentation' && window\.api\.platform !== 'darwin'\)[\s\S]*?isRendererOnlyPresentationRouting\(freshState\)[\s\S]*?powerpointCommand\('close'\)[\s\S]*?waitForPptxChannelStart[\s\S]*?speaker-only \$\{channel\.file\.type\} TAKE ready/,
+  'Speaker/internal PDF and Windows PPTX use rendered frames; Mac PPTX retains its live Keynote capture'
 )
 assert.match(
   store,

@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, crashReporter } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, crashReporter, systemPreferences } from 'electron'
 import type { DesktopCapturerSource, Display } from 'electron'
 import {
   createAuxiliaryWindow,
   createControlWindow,
+  setControlFullscreen,
   createPresentationWindow,
   createOverlayWindow,
   createQrOverlayWindow,
@@ -20,8 +21,13 @@ import { invalidateTaskbarVisibilityCache, showAllTaskbars } from './taskbar-man
 import { isAbsolute, join, resolve } from 'path'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
+import { macPowerPoint } from './mac-powerpoint'
+import { isMacRenderDisplay, macRenderDisplay } from './mac-render-display'
+import { setMacSimpleFullscreen } from './mac-desktop-ui'
+import { hardenMacReleaseRuntime } from './mac-release-security'
 import { StreamingManager } from './streaming'
 import { VirtualCameraManager } from './virtual-camera'
+import { MacVirtualCameraManager } from './mac-virtual-camera'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
 import { getPowerPointNativePlacement } from './program-scene-state'
 import {
@@ -38,8 +44,9 @@ import {
 
 // Separate profiles let both editions be installed without overwriting settings.
 // Do this before Chromium sessions, diagnostics or streaming settings are opened.
+hardenMacReleaseRuntime()
 if (__PDM_STREAM_ENABLED__) {
-  app.setPath('userData', join(app.getPath('appData'), 'presentation-display-manager-stream'))
+  app.setPath('userData', app.commandLine.getSwitchValue('user-data-dir') || join(app.getPath('appData'), 'presentation-display-manager-stream'))
   app.setName('presentation-display-manager-stream')
   if (process.platform === 'win32') app.setAppUserModelId('com.roland.presentation-display-manager.stream')
 }
@@ -68,6 +75,10 @@ interface NativeDesktopSourceRegistryEntry {
 }
 
 let controlWindow: BrowserWindow | null = null
+function userDisplays(): Display[] {
+  return screen.getAllDisplays().filter((display) => !isMacRenderDisplay(display))
+}
+
 const directStreamDeckManager = new DirectStreamDeckManager(
   (status) => {
     if (controlWindow && !controlWindow.isDestroyed()) {
@@ -81,9 +92,30 @@ const directStreamDeckManager = new DirectStreamDeckManager(
   }
 )
 let streamingManager: StreamingManager | null = null
-let virtualCameraManager: VirtualCameraManager | null = null
+let virtualCameraManager: VirtualCameraManager | MacVirtualCameraManager | null = null
 let presentationWindow: BrowserWindow | null = null
 let rendererInternalProgramOutputRequested = false
+
+function runMacDisplayControl<T>(args: string[]): Promise<T> {
+  const helper = app.isPackaged
+    ? join(process.resourcesPath, 'mac-display-control')
+    : join(__dirname, '../../build/mac-display-control')
+  return new Promise((resolve, reject) => {
+    const child = spawn(helper, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    const timeout = setTimeout(() => child.kill(), 15000)
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString() })
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
+    child.on('error', (error) => { clearTimeout(timeout); reject(error) })
+    child.on('close', (code) => {
+      clearTimeout(timeout)
+      if (code !== 0) { reject(new Error(stderr.trim() || `Display control exited with code ${code}`)); return }
+      try { resolve(JSON.parse(stdout) as T) }
+      catch (error) { reject(error) }
+    })
+  })
+}
 
 function isInternalProgramOutputActive(): boolean {
   return rendererInternalProgramOutputRequested ||
@@ -310,7 +342,10 @@ function sendToAuxiliaryRole(
 }
 
 function normalizedOutputPath(filePath: string): string {
-  return resolve(filePath).toLowerCase()
+  const absolute = resolve(filePath)
+  // APFS can be case sensitive. Do not authorize a different Mac file merely
+  // because its spelling differs only in case from a selected output file.
+  return process.platform === 'darwin' ? absolute : absolute.toLowerCase()
 }
 
 function authorizeOutputFilePaths(contentsId: number, payload: unknown): void {
@@ -535,6 +570,30 @@ function broadcastWpfTimerToMirrors(force = false): void {
   if (!force && signature === lastWpfTimerMirrorSignature) return
   lastWpfTimerMirrorSignature = signature
   sendToAuxiliaryRole('mirror', 'program-timer-overlay', payload)
+}
+
+async function syncMacOverlayTimer(): Promise<void> {
+  if (process.platform !== 'darwin' || !overlayWindow || overlayWindow.isDestroyed()) return
+  const payload = {
+    visible: timerActive && Number(lastWpfTimerData.duration || 0) > 0,
+    remaining: Number(lastWpfTimerData.remaining || 0),
+    running: lastWpfTimerData.running === true,
+    duration: Number(lastWpfTimerData.duration || 0),
+    posX: Number(lastWpfTimerData.posX ?? 100),
+    posY: Number(lastWpfTimerData.posY ?? 100),
+    scale: Number(lastWpfTimerData.scale || 1),
+    textColor: String(lastWpfTimerData.textColor || '#ffffff'),
+    warningTextColor: String(lastWpfTimerData.warningTextColor || '#facc15'),
+    overtimeTextColor: String(lastWpfTimerData.overtimeTextColor || '#ef4444'),
+    textOpacity: Number(lastWpfTimerData.textOpacity ?? 1)
+  }
+  try {
+    await overlayWindow.webContents.executeJavaScript(
+      `window._updatePinnedTimer(${JSON.stringify(payload)})`
+    )
+  } catch (error) {
+    diagnosticLog('window', `mac overlay timer update failed ${formatDiagnosticError(error)}`)
+  }
 }
 
 function startWpfTimerMirrorSync(): void {
@@ -902,8 +961,54 @@ function createManagedPresentationWindow(display: Display): BrowserWindow {
   return win
 }
 
+async function prepareMacInternalPresentationWindow(win: BrowserWindow): Promise<void> {
+  const profile = macPowerPoint.captureProfile() ?? { width: 1920, height: 1080 }
+  const placement = await macRenderDisplay.compositorWindow(profile, win)
+  if (!placement) throw new Error('Не удалось создать внутренний живой выход macOS.')
+  const { display } = placement
+  if (win.isDestroyed()) throw new Error('Внутренний выход закрыт.')
+  if (win.isSimpleFullScreen()) setMacSimpleFullscreen(win, false)
+  win.setContentBounds({ x: placement.x, y: placement.y,
+    width: profile.width, height: profile.height })
+  presentationDisplayId = display.id
+  win.setAlwaysOnTop(false)
+  win.setIgnoreMouseEvents(true)
+  if (!win.isVisible()) win.showInactive()
+  // A transparent macOS window can acknowledge its first video frame, then
+  // stop presenting updates. Keep the compositor visible on the render-only
+  // display so animations/media continue without covering the operator.
+  win.setOpacity(1)
+}
+
+function positionPresentationWindow(win: BrowserWindow, display: Display): void {
+  const bounds = display.bounds
+  if (process.platform !== 'darwin') {
+    win.setContentBounds(bounds)
+    return
+  }
+
+  const current = win.getContentBounds()
+  const exact = current.x === bounds.x && current.y === bounds.y &&
+    current.width === bounds.width && current.height === bounds.height
+  const physicalOutput = display.id !== screen.getPrimaryDisplay().id
+  if (physicalOutput && win.isSimpleFullScreen() && exact) return
+
+  if (win.isSimpleFullScreen()) setMacSimpleFullscreen(win, false)
+  win.setContentBounds(bounds)
+  if (physicalOutput) {
+    // macOS clamps a normal borderless window to the work area (menu bar).
+    // Simple fullscreen fills the actual display without creating a Space.
+    if (!win.isVisible()) {
+      win.setIgnoreMouseEvents(true)
+      win.setOpacity(0)
+      win.showInactive()
+    }
+    setMacSimpleFullscreen(win, true)
+  }
+}
+
 function prewarmPresentationWindow(): void {
-  const displays = screen.getAllDisplays()
+  const displays = userDisplays()
   const primaryDisplay = screen.getPrimaryDisplay()
   const externalDisplay = displays.find((display) => display.id !== primaryDisplay.id)
   const targetDisplay = externalDisplay || primaryDisplay
@@ -919,7 +1024,7 @@ function prewarmPresentationWindow(): void {
       activeContentType === null
     ) {
       presentationDisplayId = externalDisplay.id
-      presentationWindow.setContentBounds(externalDisplay.bounds)
+      positionPresentationWindow(presentationWindow, externalDisplay)
       presentationWindow.setIgnoreMouseEvents(true)
       presentationWindow.setOpacity(0)
       if (!presentationWindow.isVisible()) presentationWindow.showInactive()
@@ -942,7 +1047,7 @@ function prewarmPresentationWindow(): void {
       warmWindow.setOpacity(0)
       // With one monitor the renderer must exist for camera enumeration, but
       // its native HWND must stay hidden so it cannot cover the control UI.
-      if (externalDisplay) warmWindow.showInactive()
+      if (externalDisplay) positionPresentationWindow(warmWindow, externalDisplay)
     }
     console.log(`[MAIN ${Date.now()}] presentation-window: prewarm END ready=${presentationWindowReady}`)
     diagnosticLog(
@@ -953,6 +1058,7 @@ function prewarmPresentationWindow(): void {
 }
 
 function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
+  if (process.platform !== 'win32') return
   const displayKey = `${displayBounds.x},${displayBounds.y},${displayBounds.width},${displayBounds.height}`
   const timerProcessAlive = !!wpfTimerProcess &&
     !wpfTimerProcess.killed &&
@@ -1183,6 +1289,17 @@ function createWindows(): void {
       return handler(event, ...args)
     })
   }
+  handleControl('toggle-control-fullscreen', (): boolean => {
+    if (process.platform !== 'darwin' || !controlWindow || controlWindow.isDestroyed()) return false
+    setControlFullscreen(controlWindow, !controlWindow.isSimpleFullScreen())
+    const fullscreen = controlWindow.isSimpleFullScreen()
+    controlWindow.webContents.send('control-fullscreen-changed', fullscreen)
+    return fullscreen
+  })
+  handleControl('get-control-fullscreen', (): boolean =>
+    process.platform === 'darwin' && !!controlWindow &&
+    !controlWindow.isDestroyed() && controlWindow.isSimpleFullScreen()
+  )
   const onControl = (channel: string, handler: EventHandler): void => {
     ipcMain.on(channel, (event, ...args) => {
       if (!trustedControlEvent(event)) {
@@ -1224,7 +1341,8 @@ function createWindows(): void {
       virtualCameraManager?.usePhysicalProgramDisplay(displayId)
       diagnosticLog('display', `authoritative Program route selected display=${displayId}`)
     },
-    () => presentationDisplayId
+    () => presentationDisplayId,
+    isInternalProgramOutputActive
   )
 
   const discardPreparedWorkspaceRecovery = async (): Promise<void> => {
@@ -1273,7 +1391,7 @@ function createWindows(): void {
     return enqueueAuxiliaryWindowOperation(displayId, async (epoch) => {
       const resolveTarget = (): Display | undefined => {
         const primary = screen.getPrimaryDisplay()
-        return screen.getAllDisplays().find((display) => (
+        return userDisplays().find((display) => (
           display.id === displayId && display.id !== primary.id
         ))
       }
@@ -1359,15 +1477,16 @@ function createWindows(): void {
 
       const placementKey = auxiliaryWindowPlacementKey(target)
       try {
-        // Auxiliary outputs are borderless windows sized to the full display,
-        // not native fullscreen windows. Chromium's Windows fullscreen HWND
-        // can crash if its monitor vanishes while that state is being closed.
+        // Keep Windows outputs borderless without monitor-bound fullscreen.
+        // Mac simple fullscreen is needed to cover the menu bar and Dock.
         if (entry.placementKey !== placementKey) {
-          win.setBounds(target.bounds)
+          if (process.platform === 'darwin') positionPresentationWindow(win, target)
+          else win.setBounds(target.bounds)
           entry.placementKey = placementKey
         }
         if (!win.isVisible()) win.showInactive()
-        win.setAlwaysOnTop(false)
+        win.setOpacity(1)
+        win.setAlwaysOnTop(process.platform === 'darwin', 'screen-saver')
         diagnosticLog(
           'display',
           `auxiliary open role=${role} display=${target.id} requested=${JSON.stringify(target.bounds)} ` +
@@ -1528,7 +1647,7 @@ function createWindows(): void {
       diagnosticLog('display', `mirror source denied wc=${event.sender.id}`)
       return null
     }
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const target = displays.find((display) => display.id === displayId)
     if (!target) return null
     const sources = await desktopCapturer.getSources({
@@ -1541,7 +1660,7 @@ function createWindows(): void {
       `program mirror source target=${target.id} source=${source?.id ?? 'none'} ` +
       `mapping=${sources.map((item) => `${item.id}:${item.display_id || 'none'}`).join(',')}`
     )
-    // Never fall back by array index: screen.getAllDisplays() and
+    // Never fall back by array index: userDisplays() and
     // desktopCapturer use different ordering on Windows (for example
     // primary, Screen 3, Screen 2 versus Screen 1, Screen 2, Screen 3).
     // A mismatched fallback makes the mirror capture its own black window.
@@ -1679,11 +1798,34 @@ function createWindows(): void {
     diagnosticLog('renderer', safeMessage)
   })
 
-  handleControl('prepare-internal-program-output', async (event) => {
+  ipcMain.handle('ensure-presentation-camera-access', async (event): Promise<string> => {
+    if (!isTrustedWindowMainFrame(event, presentationWindow, 'presentation.html')) {
+      diagnosticLog('capture', `camera access denied for untrusted wc=${event.sender.id}`)
+      return 'denied'
+    }
+    if (process.platform !== 'darwin') return 'granted'
+    try {
+      const before = systemPreferences.getMediaAccessStatus('camera')
+      diagnosticLog('capture', `macOS camera access before=${before}`)
+      if (before !== 'not-determined') return before
+      const granted = await systemPreferences.askForMediaAccess('camera')
+      const after = systemPreferences.getMediaAccessStatus('camera')
+      diagnosticLog('capture', `macOS camera access requested granted=${granted} after=${after}`)
+      return granted ? 'granted' : after === 'not-determined' ? 'denied' : after
+    } catch (error) {
+      diagnosticLog('capture', `macOS camera access check failed ${formatDiagnosticError(error)}`)
+      return 'unknown'
+    }
+  })
+
+  handleControl('prepare-internal-program-output', async (event, detachPhysicalOutput = false) => {
     if (!controlWindow || controlWindow.isDestroyed() || event.sender.id !== controlWindow.webContents.id) {
       throw new Error('Недопустимый источник команды.')
     }
     rendererInternalProgramOutputRequested = true
+    // A role change can release a still-connected Program monitor. Connectivity
+    // alone must not keep the previous live surface above Speaker/Info/Off.
+    if (detachPhysicalOutput === true) presentationWindowRequestedVisible = false
     prewarmPresentationWindow()
     await waitForPresentationWindowReady()
     if (!presentationWindow || presentationWindow.isDestroyed()) {
@@ -1692,7 +1834,7 @@ function createWindows(): void {
     presentationWindow.setIgnoreMouseEvents(true)
     const physicalProgramRouteConnected = presentationWindowRequestedVisible &&
       presentationDisplayId !== null &&
-      screen.getAllDisplays().some((display) => display.id === presentationDisplayId)
+      userDisplays().some((display) => display.id === presentationDisplayId)
     if (physicalProgramRouteConnected && presentationDisplayId !== null) {
       virtualCameraManager?.usePhysicalProgramDisplay(presentationDisplayId)
     }
@@ -1702,13 +1844,16 @@ function createWindows(): void {
     // PDF/video/camera transparent. In particular this callback resumes just
     // after a transactional PPTX -> PDF TAKE, when the PDF is already painted
     // and PowerPoint has just been closed.
-    if (!physicalProgramRouteConnected) presentationWindow.setOpacity(0)
+    if (!physicalProgramRouteConnected) {
+      if (process.platform === 'darwin') await prepareMacInternalPresentationWindow(presentationWindow)
+      else presentationWindow.setOpacity(0)
+    }
     if (!presentationWindow.isVisible()) presentationWindow.showInactive()
     diagnosticLog(
       'window',
       physicalProgramRouteConnected
         ? `internal program output prepared alongside physical Program display=${presentationDisplayId}; visibility preserved opacity=${presentationWindow.getOpacity()}`
-        : 'internal program output prepared (transparent, capture-only)'
+        : 'internal program output prepared (capture-only)'
     )
   })
 
@@ -1725,8 +1870,7 @@ function createWindows(): void {
     displayId?: number,
     behindPowerPoint = false
   ) => {
-    presentationWindowRequestedVisible = true
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const explicitlyRequestedDisplay = displayId === undefined
       ? undefined
@@ -1745,6 +1889,8 @@ function createWindows(): void {
     if (!targetDisplay) {
       throw new Error('Эфирный дисплей не выбран. Для работы без него запустите внутренний стрим.')
     }
+    presentationWindowRequestedVisible = !!explicitlyRequestedDisplay
+    if (explicitlyRequestedDisplay && process.platform === 'darwin') macRenderDisplay.releaseCompositor()
     presentationDisplayId = targetDisplay.id
 
     const raiseOverlay = (reason: string): void => {
@@ -1771,7 +1917,7 @@ function createWindows(): void {
         currentBounds.x !== nextBounds.x || currentBounds.y !== nextBounds.y ||
         currentBounds.width !== nextBounds.width || currentBounds.height !== nextBounds.height
       ) {
-        presentationWindow.setContentBounds(nextBounds)
+        positionPresentationWindow(presentationWindow, targetDisplay)
       }
     }
     const targetWindow = presentationWindow
@@ -1788,6 +1934,11 @@ function createWindows(): void {
     }
 
     if (isInternalProgramOutputActive() && !explicitlyRequestedDisplay) {
+      if (process.platform === 'darwin') {
+        await prepareMacInternalPresentationWindow(targetWindow)
+        diagnosticLog('window', 'internal presentation output placed on render display')
+        return
+      }
       targetWindow.setIgnoreMouseEvents(true)
       targetWindow.setOpacity(0)
       if (!targetWindow.isVisible()) targetWindow.showInactive()
@@ -1801,7 +1952,12 @@ function createWindows(): void {
     // момент. После show() ещё раз re-assert на всякий случай.
     if (!behindPowerPoint) raiseOverlay('before-show')
     if (!targetWindow.isVisible()) targetWindow.showInactive()
-    targetWindow.setAlwaysOnTop(false)
+    // The macOS menu bar is a separate system surface. Keep the physical
+    // Program window above it so no desktop chrome reaches the audience.
+    targetWindow.setAlwaysOnTop(
+      process.platform === 'darwin' && targetDisplay.id !== primaryDisplay.id,
+      'screen-saver'
+    )
     targetWindow.setOpacity(1)
     targetWindow.setIgnoreMouseEvents(false)
     if (behindPowerPoint) {
@@ -1828,7 +1984,7 @@ function createWindows(): void {
     if (!presentationWindow || presentationWindow.isDestroyed()) return false
     const win = presentationWindow
 
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const explicitlyRequestedDisplay = displayId === undefined
       ? undefined
       : displays.find((display) => display.id === displayId)
@@ -1849,6 +2005,7 @@ function createWindows(): void {
       return false
     }
     const originalContentBounds = win.getContentBounds()
+    const originalSimpleFullscreen = process.platform === 'darwin' && win.isSimpleFullScreen()
     const originalPresentationDisplayId = presentationDisplayId
     const nextBounds = targetDisplay.bounds
     const changed =
@@ -1862,7 +2019,9 @@ function createWindows(): void {
       if (win.isDestroyed()) return false
       try {
         const boundsNeedRestore = !sameBounds(win.getContentBounds(), originalContentBounds)
+        if (process.platform === 'darwin' && win.isSimpleFullScreen()) setMacSimpleFullscreen(win, false)
         if (boundsNeedRestore) win.setContentBounds(originalContentBounds)
+        if (originalSimpleFullscreen) setMacSimpleFullscreen(win, true)
         return !win.isDestroyed() &&
           sameBounds(win.getContentBounds(), originalContentBounds)
       } catch {
@@ -1882,7 +2041,7 @@ function createWindows(): void {
       const maxPlacementAttempts = changed ? 8 : 1
       for (let attempt = 1; attempt <= maxPlacementAttempts; attempt += 1) {
         if (win.isDestroyed()) throw new Error('Presentation output closed during relocation')
-        if (!screen.getAllDisplays().some((display) => display.id === targetDisplay.id)) {
+        if (!userDisplays().some((display) => display.id === targetDisplay.id)) {
           throw new Error('Requested presentation display disconnected during relocation')
         }
         if (attempt === 1 || !sameBounds(actualContentBounds, nextBounds)) {
@@ -1890,7 +2049,7 @@ function createWindows(): void {
           // entering Windows' monitor-bound fullscreen state. Repeat briefly:
           // Windows can report transient mixed-DPI geometry immediately after
           // HDMI hot-plug even though the monitor is already enumerated.
-          win.setContentBounds(nextBounds)
+          positionPresentationWindow(win, targetDisplay)
         }
         if (attempt < maxPlacementAttempts) {
           await new Promise<void>((resolve) => setTimeout(resolve, 75))
@@ -1928,9 +2087,20 @@ function createWindows(): void {
   handleControl('raise-presentation-window', (): boolean => {
     if (!presentationWindow || presentationWindow.isDestroyed()) return false
     try {
+      if (isInternalProgramOutputActive() && !presentationWindowRequestedVisible) {
+        presentationWindow.setIgnoreMouseEvents(true)
+        presentationWindow.setOpacity(process.platform === 'darwin' &&
+          isMacRenderDisplay(screen.getDisplayMatching(presentationWindow.getContentBounds())) ? 1 : 0)
+        if (!presentationWindow.isVisible()) presentationWindow.showInactive()
+        diagnosticLog('window', 'internal presentation output committed without raising over operator')
+        return true
+      }
       if (!presentationWindow.isVisible()) presentationWindow.showInactive()
       presentationWindow.setOpacity(1)
-      presentationWindow.setAlwaysOnTop(false)
+      const physicalMacOutput = process.platform === 'darwin' &&
+        presentationDisplayId !== null &&
+        presentationDisplayId !== screen.getPrimaryDisplay().id
+      presentationWindow.setAlwaysOnTop(physicalMacOutput, 'screen-saver')
       presentationWindow.moveTop()
       diagnosticLog('window', 'presentation output raised above native content')
       return true
@@ -1996,7 +2166,7 @@ function createWindows(): void {
     if (safetyLock) stopOverlayZOrderGuard()
     overlayPlacement = placement
     console.log(`[MAIN ${Date.now()}] show-overlay: ENTER placement=${placement} hasDataUrl=${!!freezeImageDataUrl} hasPath=${!!imagePath}`)
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const targetDisplay = typeof displayId === 'number'
       ? displays.find((d) => d.id === displayId)
       : undefined
@@ -2123,6 +2293,7 @@ function createWindows(): void {
       targetOverlay.setAlwaysOnTop(true, 'screen-saver')
       targetOverlay.moveTop()
     }
+    await syncMacOverlayTimer()
     if (!keepOpaque) {
       targetOverlay.setOpacity(1)
       console.log(`[MAIN ${Date.now()}] overlay opacity=1 (image=${overlayImage ? 'yes' : 'no'} path=${imagePath ?? '-'})`)
@@ -2153,7 +2324,7 @@ function createWindows(): void {
         const frame = await presentationWindow.webContents.capturePage()
         return frame.isEmpty() ? null : frame.toDataURL()
       }
-      const displays = screen.getAllDisplays()
+      const displays = userDisplays()
       const targetDisplay = typeof displayId === 'number'
         ? displays.find((d) => d.id === displayId)
         : isInternalProgramOutputActive()
@@ -2201,7 +2372,23 @@ function createWindows(): void {
     if (types.length === 0) return []
 
     try {
-      const displays = screen.getAllDisplays()
+      if (process.platform === 'darwin') {
+        const sources = await desktopCapturer.getSources({
+          types, thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: types.includes('window')
+        })
+        const ownIds = new Set(BrowserWindow.getAllWindows().flatMap((win) => {
+          try { return win.isDestroyed() ? [] : [win.getMediaSourceId()] } catch { return [] }
+        }))
+        const protectedDisplayId = String(excludedDisplayId ?? presentationDisplayId ?? '')
+        const visibleDisplayIds = new Set(userDisplays().map((display) => String(display.id)))
+        return sources.filter((source) => !ownIds.has(source.id) &&
+          (source.id.startsWith('window:') || (source.display_id !== protectedDisplayId && visibleDisplayIds.has(source.display_id))))
+          .map((source) => electronDesktopSourceInfo(
+            source, source.id.startsWith('window:') ? 'window' : 'screen'
+          ))
+      }
+      const displays = userDisplays()
       const primaryDisplay = screen.getPrimaryDisplay()
       const defaultOutputDisplay = displays.find((display) => display.id !== primaryDisplay.id) || primaryDisplay
       const requestedOutputDisplay = Number.isFinite(excludedDisplayId)
@@ -2354,6 +2541,24 @@ function createWindows(): void {
     ) {
       diagnosticLog('capture', `desktop source prepare denied wc=${event.sender.id}`)
       return { success: false, error: 'Источник окна недоступен.' }
+    }
+
+    if (process.platform === 'darwin') {
+      try {
+        const ownIds = new Set(BrowserWindow.getAllWindows().flatMap((win) => {
+          try { return win.isDestroyed() ? [] : [win.getMediaSourceId()] } catch { return [] }
+        }))
+        if (ownIds.has(sourceKey)) return { success: false, error: 'Это окно нельзя использовать как источник.' }
+        const sources = await desktopCapturer.getSources({
+          types: ['window'], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true
+        })
+        const source = sources.find((candidate) => candidate.id === sourceKey)
+        return source
+          ? { success: true, source: electronDesktopSourceInfo(source, 'window') }
+          : { success: false, error: 'Окно уже закрыто или недоступно для захвата.' }
+      } catch (error) {
+        return { success: false, error: formatDiagnosticError(error) }
+      }
     }
 
     let browserFullscreenHwnd: string | null = null
@@ -2711,6 +2916,7 @@ function createWindows(): void {
     targetOverlay.setAlwaysOnTop(true, 'screen-saver')
     targetOverlay.moveTop()
     stopOverlayZOrderGuard()
+    await syncMacOverlayTimer()
     diagnosticLog('window', `overlay pinned opacity=${targetOverlay.getOpacity()}`)
   })
 
@@ -2857,13 +3063,15 @@ function createWindows(): void {
       layoutRevision: wpfTimerLayoutRevision
     })
     broadcastWpfTimerToMirrors()
+    void syncMacOverlayTimer()
   })
 
   handleControl('get-timer-overlay-layout', () => readWpfTimerLayout())
 
   handleControl('show-timer-overlay', async (_event, displayId?: number) => {
     timerActive = true
-    const displays = screen.getAllDisplays()
+    await syncMacOverlayTimer()
+    const displays = userDisplays()
     const targetDisplay = typeof displayId === 'number'
       ? displays.find((d) => d.id !== screen.getPrimaryDisplay().id && d.id === displayId)
       : undefined
@@ -2872,14 +3080,17 @@ function createWindows(): void {
       // WPF/SetWindowPos consume physical pixels. Electron display bounds are
       // DIP coordinates, so passing them directly moves the timer to the
       // wrong monitor in mixed 100%/150% layouts.
-      const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
-      showWpfTimer(physicalBounds)
-      startWpfTimerMirrorSync()
+      if (process.platform === 'win32') {
+        const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
+        showWpfTimer(physicalBounds)
+        startWpfTimerMirrorSync()
+      }
     }
   })
 
   handleControl('hide-timer-overlay', () => {
     timerActive = false
+    void syncMacOverlayTimer()
     stopWpfTimerMirrorSync()
     hideWpfTimer()
   })
@@ -2896,7 +3107,7 @@ function createWindows(): void {
   // --- Music Player ---
   function ensureMusicWindow(): BrowserWindow {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) return musicPlayerWindow
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
     const externalDisplay = displays.find((d) => d.id !== primaryDisplay.id)
     musicPlayerWindow = createMusicPlayerWindow(externalDisplay || primaryDisplay)
@@ -3038,7 +3249,7 @@ function createWindows(): void {
   })
 
   handleControl('get-displays', () => {
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const primary = screen.getPrimaryDisplay()
     return displays.map((d) => ({
       id: d.id,
@@ -3072,7 +3283,7 @@ function createWindows(): void {
 
   const sendDisplays = (): void => {
     if (controlWindow && !controlWindow.isDestroyed()) {
-      const displays = screen.getAllDisplays()
+      const displays = userDisplays()
       const primary = screen.getPrimaryDisplay()
       controlWindow.webContents.send('displays-changed', displays.map((d) => ({
         id: d.id,
@@ -3088,7 +3299,7 @@ function createWindows(): void {
   let displayTopologyRevision = 0
   const syncWindowsAfterDisplayMetricsChange = async (reason: string): Promise<void> => {
     const revision = displayMetricsRevision
-    const displays = screen.getAllDisplays()
+    const displays = userDisplays()
     const primary = screen.getPrimaryDisplay()
     const byId = new Map(displays.map((display) => [display.id, display]))
     diagnosticLog(
@@ -3123,7 +3334,7 @@ function createWindows(): void {
         // flicker-sensitive z-order choreography and must not be toggled here.
         const restoreFullscreen = label.startsWith('auxiliary ') && win.isFullScreen()
         if (restoreFullscreen) win.setFullScreen(false)
-        if (useExactContentBounds) win.setContentBounds(next)
+        if (useExactContentBounds) positionPresentationWindow(win, target)
         else win.setBounds(next)
         if (restoreFullscreen) win.setFullScreen(true)
         diagnosticLog(
@@ -3141,7 +3352,7 @@ function createWindows(): void {
         ? screen.getDisplayMatching(presentationWindow.getContentBounds())
         : primary
     }
-    if (presentationTarget) {
+    if (presentationTarget && !isMacRenderDisplay(presentationTarget)) {
       presentationDisplayId = presentationTarget.id
       placeWindow(presentationWindow, presentationTarget, 'presentation output')
     } else if (presentationWindowRequestedVisible && presentationWindow && !presentationWindow.isDestroyed()) {
@@ -3162,14 +3373,15 @@ function createWindows(): void {
     const auxiliaryPlacements = [...auxiliaryWindows.entries()].map(([displayId, queuedEntry]) => (
       enqueueAuxiliaryWindowOperation(displayId, (epoch) => {
         if (!isAuxiliaryWindowOperationCurrent(displayId, epoch)) return
-        const target = screen.getAllDisplays().find((display) => display.id === displayId)
+        const target = userDisplays().find((display) => display.id === displayId)
         const entry = auxiliaryWindows.get(displayId)
         if (!target || entry !== queuedEntry || entry.window.isDestroyed()) return
         const placementKey = auxiliaryWindowPlacementKey(target)
         if (entry.placementKey === placementKey) return
         try {
           const previous = entry.window.getBounds()
-          entry.window.setBounds(target.bounds)
+          if (process.platform === 'darwin') positionPresentationWindow(entry.window, target)
+          else entry.window.setBounds(target.bounds)
           if (!entry.window.isVisible()) entry.window.showInactive()
           entry.placementKey = placementKey
           diagnosticLog(
@@ -3196,18 +3408,24 @@ function createWindows(): void {
         return
       }
       wpfTimerDisplayId = timerTarget.id
-      const physicalBounds = screen.dipToScreenRect(null, timerTarget.bounds)
-      showWpfTimer(physicalBounds)
+      if (process.platform === 'win32') {
+        const physicalBounds = screen.dipToScreenRect(null, timerTarget.bounds)
+        showWpfTimer(physicalBounds)
+      }
     }
 
-    if (activeContentType === 'presentation') {
+    if ((activeContentType === 'presentation' || activeContentType === 'keynote') && process.platform === 'darwin') {
+      const target = userDisplays().find((display) => display.id === presentationDisplayId)
+      if (target) await macPowerPoint.relocate(target.bounds, target.id)
+    }
+    if (activeContentType === 'presentation' && process.platform === 'win32') {
       await pptDaemon.runExclusive(async (send) => {
         if (revision !== displayMetricsRevision || activeContentType !== 'presentation') return
         // An explicit program-display handoff can finish while this metrics job
         // is in flight. Re-read the authoritative target immediately before the
         // native relocate so a stale topology snapshot cannot move PowerPoint
         // back onto the former main display after a successful handoff.
-        const latestDisplays = screen.getAllDisplays()
+        const latestDisplays = userDisplays()
         const latestPrimary = screen.getPrimaryDisplay()
         const latestById = new Map(latestDisplays.map((display) => [display.id, display]))
         const latestPresentationTarget = latestById.get(presentationDisplayId ?? -1)
@@ -3268,6 +3486,8 @@ function createWindows(): void {
   }
 
   screen.on('display-metrics-changed', (_event, display, changedMetrics) => {
+    macRenderDisplay.refreshCursorGuard()
+    if (isMacRenderDisplay(display)) return
     diagnosticLog(
       'display',
       `metrics changed display=${display.id} metrics=${changedMetrics.join(',')} ` +
@@ -3279,7 +3499,9 @@ function createWindows(): void {
     scheduleDisplayMetricsSync(`display=${display.id} metrics=${changedMetrics.join(',')}`)
   })
 
-  screen.on('display-added', () => {
+  screen.on('display-added', (_event, added) => {
+    macRenderDisplay.refreshCursorGuard()
+    if (isMacRenderDisplay(added)) return
     const topologyRevision = ++displayTopologyRevision
     // Observe the topology selected in Windows without changing it. Running
     // DisplaySwitch automatically can make Windows migrate third-party windows
@@ -3295,12 +3517,14 @@ function createWindows(): void {
       scheduleDisplayMetricsSync('display-added-stable')
     }, 1500)
   })
-  screen.on('display-removed', () => {
+  screen.on('display-removed', (_event, removed) => {
+    macRenderDisplay.refreshCursorGuard()
+    if (isMacRenderDisplay(removed)) return
     displayTopologyRevision++
     invalidateTaskbarVisibilityCache('display-removed')
     sendDisplays()
     scheduleDisplayMetricsSync('display-removed')
-    const connectedIds = new Set(screen.getAllDisplays().map((display) => display.id))
+    const connectedIds = new Set(userDisplays().map((display) => display.id))
     for (const displayId of auxiliaryWindowOperationChains.keys()) {
       if (!connectedIds.has(displayId) && !auxiliaryWindows.has(displayId)) {
         invalidateAuxiliaryWindowOperations(displayId)
@@ -3330,7 +3554,7 @@ function createWindows(): void {
         closeAuxiliaryWindow(entry.role, displayId)
       }
     }
-    if (screen.getAllDisplays().length < 2 && presentationWindow && !presentationWindow.isDestroyed()) {
+    if (userDisplays().length < 2 && presentationWindow && !presentationWindow.isDestroyed()) {
       presentationWindowRequestedVisible = false
       const preservedPresentationWindow = presentationWindow
       const primaryDisplay = screen.getPrimaryDisplay()
@@ -3347,10 +3571,10 @@ function createWindows(): void {
         if (
           preservedPresentationWindow.isDestroyed() ||
           presentationWindow !== preservedPresentationWindow ||
-          screen.getAllDisplays().length > 1
+          userDisplays().length > 1
         ) return
         try {
-          preservedPresentationWindow.setContentBounds(primaryDisplay.bounds)
+          positionPresentationWindow(preservedPresentationWindow, primaryDisplay)
           if (!preservedPresentationWindow.isVisible()) preservedPresentationWindow.showInactive()
           diagnosticLog(
             'window',
@@ -3367,11 +3591,18 @@ function createWindows(): void {
   handleControl('open-display-settings', () => {
     if (process.platform === 'win32') {
       shell.openExternal('ms-settings:display')
+    } else if (process.platform === 'darwin') {
+      void shell.openExternal('x-apple.systempreferences:com.apple.Displays-Settings.extension')
     }
   })
 
-  handleControl('set-display-mode', (_event, mode: 'internal' | 'clone' | 'extend' | 'external') => {
-    if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
+  handleControl('set-display-mode', async (_event, mode: 'internal' | 'clone' | 'extend' | 'external') => {
+    if (process.platform === 'darwin') {
+      if (mode !== 'clone' && mode !== 'extend') return { success: false, error: 'Выберите режим в системных настройках дисплеев macOS.' }
+      try { return await runMacDisplayControl<{ success: boolean }>([mode]) }
+      catch (error) { return { success: false, error: String(error) } }
+    }
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     const flag = { internal: '/internal', clone: '/clone', extend: '/extend', external: '/external' }[mode]
     if (!flag) return { success: false, error: 'Invalid mode' }
     try {
@@ -3383,7 +3614,11 @@ function createWindows(): void {
   })
 
   handleControl('set-display-resolution', async (_event, deviceName: string, width: number, height: number, frequency?: number) => {
-    if (process.platform !== 'win32') return { success: false, error: 'Windows only' }
+    if (process.platform === 'darwin') {
+      try { return await runMacDisplayControl<{ success: boolean }>(['set', deviceName, String(width), String(height), String(frequency || 60)]) }
+      catch (error) { return { success: false, error: String(error) } }
+    }
+    if (process.platform !== 'win32') return { success: false, error: 'Unsupported platform' }
     try {
       const srScript = scriptPath('set-resolution.ps1')
       return await new Promise<{ success: boolean; error?: string }>((resolve) => {
@@ -3410,6 +3645,10 @@ function createWindows(): void {
   })
 
   handleControl('get-display-modes', async () => {
+    if (process.platform === 'darwin') {
+      try { return await runMacDisplayControl<Array<{ deviceName: string; friendlyName: string; isPrimary: boolean; current: { width: number; height: number; frequency: number }; modes: Array<{ width: number; height: number; frequency: number }> }>>(['list']) }
+      catch (error) { diagnosticLog('display', `Mac display modes unavailable: ${formatDiagnosticError(error)}`); return [] }
+    }
     if (process.platform !== 'win32') return []
     try {
       const gdmScript = scriptPath('get-display-modes.ps1')
@@ -3496,7 +3735,7 @@ function createWindows(): void {
 
   ipcMain.on('send-to-control', (event, channel: string, ...args: unknown[]) => {
     const presentationChannels = new Set([
-      'presentation-content-ready', 'presentation-content-committed',
+      'presentation-content-ready', 'presentation-content-committed', 'keynote-capture-quality', 'keynote-capture-started',
       'presentation-content-prepared', 'presentation-content-error',
       'pdf-channel-cache-status', 'presentation-content-suspended',
       'presentation-content-cleared', 'program-scene-applied',
@@ -3525,6 +3764,12 @@ function createWindows(): void {
       diagnosticLog('security', `blocked IPC channel=send-to-control/${String(channel).slice(0, 80)} wc=${event.sender.id}`)
       return
     }
+    if (trustedPresentation && channel === 'keynote-capture-started') {
+      const sourceId = (args[0] as { sourceId?: string } | undefined)?.sourceId
+      if (sourceId?.startsWith('window:')) void macPowerPoint.refreshCapture(sourceId)
+      return
+    }
+
     if (trustedPresentation && (
       channel === 'presentation-content-ready' ||
       channel === 'presentation-content-committed' ||
@@ -3726,7 +3971,7 @@ app.whenReady().then(() => {
       return
     }
 
-    const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
+    const display = userDisplays().find((entry) => entry.id === displayId)
     if (!display || display.id === screen.getPrimaryDisplay().id) return
     let win = qrOverlayWindow
     let freshlyCreated = false
@@ -3882,7 +4127,7 @@ app.whenReady().then(() => {
       return { success: true }
     }
 
-    const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
+    const display = userDisplays().find((entry) => entry.id === displayId)
     if (!display || display.id === screen.getPrimaryDisplay().id) return { success: false, error: 'Эфирный дисплей недоступен.' }
     let win = programSceneMediaOverlayWindow
     if (!win || win.isDestroyed()) {
@@ -3973,7 +4218,7 @@ app.whenReady().then(() => {
       return { success: false, error: String(error) }
     }
   })
-  diagnosticLog('display', JSON.stringify(screen.getAllDisplays().map((d) => ({
+  diagnosticLog('display', JSON.stringify(userDisplays().map((d) => ({
     id: d.id,
     bounds: d.bounds,
     size: d.size,
@@ -4140,7 +4385,7 @@ app.whenReady().then(() => {
       () => presentationWindow
     )
   }
-  virtualCameraManager = new VirtualCameraManager(
+  virtualCameraManager = new (process.platform === 'darwin' ? MacVirtualCameraManager : VirtualCameraManager)(
     () => controlWindow,
     () => presentationWindow
   )
@@ -4174,8 +4419,10 @@ app.whenReady().then(() => {
   // otherwise rejected and hot-plug recovery never becomes armed.
   createWindows()
   prewarmPresentationWindow()
-  pptDaemon.warmup()
-  nativeWindowDaemon.warmup()
+  if (process.platform === 'win32') {
+    pptDaemon.warmup()
+    nativeWindowDaemon.warmup()
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -4216,7 +4463,8 @@ app.on('before-quit', (event) => {
       // Cache cleanup may still issue sync-prepared. Drain it before shutting
       // down the COM daemon, then purge only after all writers have stopped.
       await stopPptxCacheJobs()
-      await pptDaemon.shutdown()
+      if (process.platform === 'darwin') await macPowerPoint.shutdown()
+      else await pptDaemon.shutdown()
       await clearPptxDiskCaches()
     })(),
     (async () => {

@@ -1441,7 +1441,12 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`(()=>{const e=document.querySelector('[data-program-scene-preview]');const r=e.getBoundingClientRect();e.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+2,clientY:r.top+2}));})()`);
     await new Promise(done=>setTimeout(done,30));
     await win.webContents.executeJavaScript(`document.querySelector('[data-scene-manage="qr"]').click()`);
-    await new Promise(done=>setTimeout(done,250));
+    // QR generation and logo decoding are asynchronous. Wait for the actual
+    // image instead of assuming a loaded machine can finish within 250 ms.
+    for (let attempt = 0; attempt < 60; attempt++) {
+      if (await win.webContents.executeJavaScript(`document.querySelector('[data-scene-qr-object] img')?.naturalWidth === 1024`)) break;
+      await new Promise(done=>setTimeout(done,50));
+    }
     assert.deepEqual(await win.webContents.executeJavaScript(`(()=>{const img=document.querySelector('[data-scene-qr-object] img');return {shown:!!img,width:img?.naturalWidth,enabled:window.testScene.qrOverlay.enabled,sceneVisible:window.testScene.qrOverlay.sceneVisible};})()`),
       {shown:true,width:1024,enabled:false,sceneVisible:true}, 'Opening QR settings must restore scene membership without publishing it');
     await win.webContents.executeJavaScript(`document.querySelector('[data-scene-panel="picture"]').click()`);

@@ -654,6 +654,8 @@ interface AppState {
   pptxThumbnails: string[]
   pptxThumbnailsMap: Record<string, string[]>
   pptxSlidesMap: Record<string, string[]>
+  macStaticPptxFallbackPath: string | null
+  macKeynotePptxPath: string | null
   pptxAspectRatios: Record<string, number>
   pptxCacheStatuses: Record<string, ChannelCacheStatus>
   displays: DisplayInfo[]
@@ -835,6 +837,8 @@ export const useAppStore = create<AppState>()(persist(
   pptxThumbnails: [],
   pptxThumbnailsMap: {},
   pptxSlidesMap: {},
+  macStaticPptxFallbackPath: null,
+  macKeynotePptxPath: null,
   pptxAspectRatios: {},
   pptxCacheStatuses: {},
   displays: [],
@@ -1154,6 +1158,8 @@ export const useAppStore = create<AppState>()(persist(
     const savedSlide = file ? slidePositions[file.path] || 1 : 1
     set({
       activeFile: file,
+      macStaticPptxFallbackPath: null,
+      macKeynotePptxPath: null,
       slidePositions: { ...slidePositions },
       currentSlide: savedSlide,
       totalSlides: 0,
@@ -1571,7 +1577,36 @@ export const useAppStore = create<AppState>()(persist(
     const state = get()
     const { overlayState } = state
     if (
+      window.api.platform === 'darwin' &&
       state.activeFile?.type === 'presentation' &&
+      state.macStaticPptxFallbackPath === state.activeFile.path
+    ) {
+      const current = Math.max(1, state.currentSlide)
+      const total = Math.max(0, state.totalSlides)
+      const requested = command === 'goto' && typeof arg === 'number'
+        ? arg : command === 'next' ? current + 1 : command === 'prev' ? current - 1 : current
+      const target = Math.max(1, total > 0 ? Math.min(total, requested) : requested)
+      const slides = state.pptxSlidesMap[state.activeFile.path] || []
+      const frames = slides.length > 0 ? slides : state.pptxThumbnailsMap[state.activeFile.path] || []
+      const frame = frames[target - 1]
+      if (!frame) return { success: false, error: 'Этот слайд ещё кэшируется' }
+      const boundary = stopAtBoundary && (
+        (command === 'next' && total > 0 && current >= total) ||
+        (command === 'prev' && current <= 1)
+      )
+      state.setCurrentSlide(target)
+      window.api.sendToPresentation('load-content', {
+        type: 'other', path: frame, name: state.activeFile.name,
+        isImage: true, fillOutput: false
+      })
+      return {
+        success: true,
+        output: JSON.stringify({ Status: 'ok', CurrentSlide: target, Boundary: boundary })
+      }
+    }
+    if (
+      state.activeFile?.type === 'presentation' &&
+      window.api.platform !== 'darwin' &&
       isRendererOnlyPresentationRouting(state)
     ) {
       const current = Math.max(1, state.currentSlide)

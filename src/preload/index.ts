@@ -30,6 +30,7 @@ interface MusicState {
 }
 
 const api = {
+  platform: process.platform,
   ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   virtualCamera: {
@@ -76,6 +77,10 @@ const api = {
   watchFolder: (folderPath: string | null) => ipcRenderer.invoke('watch-folder', folderPath),
 
   getDisplays: () => ipcRenderer.invoke('get-displays'),
+  toggleControlFullscreen: (): Promise<boolean> =>
+    ipcRenderer.invoke('toggle-control-fullscreen'),
+  getControlFullscreen: (): Promise<boolean> =>
+    ipcRenderer.invoke('get-control-fullscreen'),
 
   getWindowDisplayScaleFactor: (): Promise<number> =>
     ipcRenderer.invoke('get-window-display-scale-factor'),
@@ -95,7 +100,8 @@ const api = {
 
   openPresentationWindow: (displayId?: number, behindPowerPoint?: boolean) =>
     ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
-  prepareInternalProgramOutput: () => ipcRenderer.invoke('prepare-internal-program-output'),
+  prepareInternalProgramOutput: (detachPhysicalOutput = false) =>
+    ipcRenderer.invoke('prepare-internal-program-output', detachPhysicalOutput),
   releaseInternalProgramOutput: () => ipcRenderer.invoke('release-internal-program-output'),
 
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
@@ -137,6 +143,10 @@ const api = {
 
   preparePptxCache: (filePath: string) =>
     ipcRenderer.invoke('prepare-pptx-cache', filePath),
+
+  prepareMacPptxAnimation: (filePath: string) =>
+    ipcRenderer.invoke('prepare-mac-pptx-animation', filePath),
+  prepareMacKeynote: (filePath: string, displayId?: number, preferred?: boolean) => ipcRenderer.invoke('prepare-mac-keynote', filePath, displayId, preferred),
 
   syncPreparedPowerPoints: (filePaths: string[]) =>
     ipcRenderer.invoke('sync-prepared-powerpoints', filePaths),
@@ -361,12 +371,19 @@ const api = {
   minimizeExternalFile: (filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }> =>
     ipcRenderer.invoke('minimize-external-file', filePath),
 
-  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }, sceneLayout?: unknown): Promise<{ success: boolean; error?: string }> =>
+  restoreExternalFile: (filePath?: string, displayBounds?: { x: number; y: number; width: number; height: number }, sceneLayout?: unknown): Promise<{ success: boolean; error?: string; captureSourceId?: string; captureCrop?: { x: number; y: number; width: number; height: number } }> =>
     ipcRenderer.invoke('restore-external-file', filePath, displayBounds, sceneLayout),
 
   setActiveContentType: (type: string): void => {
     ipcRenderer.send('set-active-content-type', type)
   },
+
+  navigateExternalDocument: (filePath: string, direction: 'next' | 'prev' | 'home'): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('navigate-external-document', filePath, direction),
+  getExternalDocumentSheets: (filePath: string): Promise<{ sheets: string[]; activeSheet: string }> =>
+    ipcRenderer.invoke('get-external-document-sheets', filePath),
+  selectExternalDocumentSheet: (filePath: string, name: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('select-external-document-sheet', filePath, name),
 
   sendToPresentation: (channel: string, ...args: unknown[]): void => {
     ipcRenderer.send('send-to-presentation', channel, ...args)

@@ -7,6 +7,6 @@ export const streamingApi: StreamingApi = {
   devices: () => ipcRenderer.invoke('stream-devices'),
   check: (settings) => ipcRenderer.invoke('stream-check', settings),
   start: (settings, displayId) => ipcRenderer.invoke('stream-start', settings, displayId),
-  stop: () => ipcRenderer.invoke('stream-stop'),
+  stop: (immediate = false) => ipcRenderer.invoke('stream-stop', immediate),
   status: () => ipcRenderer.invoke('stream-status')
 }

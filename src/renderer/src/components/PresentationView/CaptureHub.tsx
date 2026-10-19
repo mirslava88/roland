@@ -51,7 +51,9 @@ function describeMediaError(error: unknown, desktop = false): string {
   if (name === 'NotAllowedError' || name === 'SecurityError') {
     return desktop
       ? 'Захват окна или экрана запрещён системой.'
-      : 'Доступ к камере запрещён. Разрешите доступ для настольных приложений в настройках Windows.'
+      : navigator.platform.startsWith('Mac')
+        ? 'Доступ к камере запрещён. Разрешите Presentation Display Manager доступ к камере в настройках macOS.'
+        : 'Доступ к камере запрещён. Разрешите доступ для настольных приложений в настройках Windows.'
   }
   if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
     return desktop
@@ -111,6 +113,26 @@ function getUserMediaWithTimeout(
   })
 }
 
+function isUnsupportedCaptureMode(error: unknown): boolean {
+  return error instanceof DOMException && (
+    error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError'
+  )
+}
+
+async function playVideoWithTimeout(video: HTMLVideoElement): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      video.play(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Камера не начала передавать изображение за 8 секунд.')), 8000)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function configuredVideoDeviceAvailable(
   config: CaptureSourceConfig,
   devices: MediaDeviceInfo[]
@@ -143,6 +165,12 @@ async function enumerateCaptureDevices(requestId: string, includeAudio = false):
     if (!labelsAvailable) {
       // A short video-only probe unlocks stable labels/deviceIds in the same
       // renderer that will later own the long-lived stream.
+      if (window.api.platform === 'darwin') {
+        const access = await window.api.ensureCameraAccess()
+        if (access === 'denied' || access === 'restricted') {
+          throw new Error('Доступ к камере запрещён macOS. Разрешите PDM использовать камеру в настройках системы.')
+        }
+      }
       probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
     }
   } catch (error) {
@@ -239,6 +267,7 @@ function CaptureSourceLayer({
   const chromaReadyRef = useRef(false)
   const generationRef = useRef(0)
   const retryAttemptRef = useRef(0)
+  const useDefaultVideoModeRef = useRef(false)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const muteWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const frameStallWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -620,6 +649,14 @@ function CaptureSourceLayer({
         throw new Error('Устройство видеозахвата не выбрано.')
       }
 
+      if (!isDesktopCapture && window.api.platform === 'darwin') {
+        const access = await window.api.ensureCameraAccess()
+        if (isStaleOpen(attempt)) return
+        if (access === 'denied' || access === 'restricted') {
+          throw new DOMException('Доступ к камере запрещён macOS.', 'NotAllowedError')
+        }
+      }
+
       const videoConstraints: MediaTrackConstraints = isDesktopCapture
         ? ({
             mandatory: {
@@ -632,12 +669,14 @@ function CaptureSourceLayer({
               maxFrameRate: 30
             }
           } as unknown as MediaTrackConstraints)
-        : {
-            deviceId: { exact: resolvedVideoDeviceId! },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 30 }
-          }
+        : useDefaultVideoModeRef.current
+          ? { deviceId: { exact: resolvedVideoDeviceId! } }
+          : {
+              deviceId: { exact: resolvedVideoDeviceId! },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+              frameRate: { ideal: 30 }
+            }
       const audioConstraints: MediaTrackConstraints | false = !isDesktopCapture && config.audioEnabled && resolvedAudioDeviceId
         ? {
             deviceId: { exact: resolvedAudioDeviceId },
@@ -647,8 +686,9 @@ function CaptureSourceLayer({
           }
         : false
 
-      let stream: MediaStream
+      let stream: MediaStream | null = null
       let audioWarning: string | undefined
+      let captureError: unknown
       try {
         window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: getUserMedia BEGIN attempt=${attempt}`)
         stream = await getUserMediaWithTimeout(
@@ -656,19 +696,42 @@ function CaptureSourceLayer({
           10_000,
           'Камера не ответила за 10 секунд. Выполняется повторное подключение.'
         )
-        window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: getUserMedia END attempt=${attempt}`)
       } catch (firstError) {
         if (isStaleOpen(attempt)) throw firstError
-        if (isDesktopCapture || !config.audioEnabled) throw firstError
-        // A missing/blocked HDMI audio endpoint must not discard a healthy
-        // video signal. Continue video-only and surface a clear warning.
-        audioWarning = 'Видео подключено, но звук устройства недоступен.'
+        captureError = firstError
+        if (!isDesktopCapture && config.audioEnabled) {
+          // A missing/blocked HDMI audio endpoint must not discard a healthy
+          // video signal. Continue video-only and surface a clear warning.
+          try {
+            stream = await getUserMediaWithTimeout(
+              { video: videoConstraints, audio: false },
+              10_000,
+              'Камера не ответила за 10 секунд. Выполняется повторное подключение.'
+            )
+            audioWarning = 'Видео подключено, но звук устройства недоступен.'
+          } catch (videoOnlyError) {
+            captureError = videoOnlyError
+          }
+        }
+      }
+
+      if (!stream && !isDesktopCapture && isUnsupportedCaptureMode(captureError)) {
+        // Some UVC cameras reject even "ideal" 1080p/30 in Chromium. Keep the
+        // exact device selection while letting the driver choose its own mode.
+        window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: retry with default camera mode`)
+        useDefaultVideoModeRef.current = true
         stream = await getUserMediaWithTimeout(
-          { video: videoConstraints, audio: false },
+          { video: { deviceId: { exact: resolvedVideoDeviceId! } }, audio: false },
           10_000,
           'Камера не ответила за 10 секунд. Выполняется повторное подключение.'
         )
+        if (config.audioEnabled) audioWarning = 'Видео подключено, но звук устройства недоступен.'
       }
+      if (!stream) throw captureError
+      window.api.dbgLog(
+        `Capture ${config.sourceId.slice(-8)}: getUserMedia END attempt=${attempt} ` +
+        `track=${stream.getVideoTracks()[0]?.readyState ?? 'missing'}`
+      )
 
       if (isStaleOpen(attempt)) {
         stopStream(stream)
@@ -772,9 +835,17 @@ function CaptureSourceLayer({
       // Start muted so Chromium can begin decoding without a gesture. The
       // separate active/hasAudio effect unmutes only the on-air layer.
       outputVideo.muted = true
-      await outputVideo.play()
-      startFramePump()
-      await waitForNextFrame()
+      try {
+        await playVideoWithTimeout(outputVideo)
+        startFramePump()
+        await waitForNextFrame()
+      } catch (error) {
+        if (!isDesktopCapture && !isStaleOpen(attempt)) {
+          useDefaultVideoModeRef.current = true
+          window.api.dbgLog(`Capture ${config.sourceId.slice(-8)}: first frame failed; next attempt uses default camera mode`)
+        }
+        throw error
+      }
       if (isStaleOpen(attempt)) return
       retryAttemptRef.current = 0
 

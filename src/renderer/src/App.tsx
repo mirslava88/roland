@@ -1,9 +1,11 @@
 import { useEffect } from 'react'
+import { reconcileMacSlide } from './mac-slide-reconcile'
 import { navigateSpeakerOnlyPdf, useAppStore } from './stores/useAppStore'
 import { FileLibrary } from './components/Library/FileLibrary'
 import { PreviewPanel } from './components/Preview/PreviewPanel'
 import { ControlBar } from './components/Controls/ControlBar'
 import { Toolbar } from './components/Controls/Toolbar'
+import { FullscreenExitControl } from './components/Controls/FullscreenExitControl'
 import { NowPlaying } from './components/Controls/NowPlaying'
 import { HeadlessProgramRail } from './components/ProgramMonitor/HeadlessProgramRail'
 import { OperatorCursorGuard } from './components/Capture/OperatorCursorGuard'
@@ -21,6 +23,7 @@ import { isIntroductionOpen } from './components/Onboarding/training-model'
 import type { VirtualCameraStatus } from '../../shared/virtual-camera'
 
 export default function App({ training = false }: { training?: boolean }): JSX.Element {
+  useEffect(() => { if (!training) document.title = __PDM_PRODUCT_NAME__ }, [training])
   const {
     captureSources,
     appTheme,
@@ -176,7 +179,10 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
 
     const unsubVideoState = window.api.on('video-state', (...args: unknown[]) => {
       const data = args[0] as { path?: string; playing: boolean; currentTime?: number; duration?: number; ended?: boolean }
-      setIsPlaying(data.playing)
+      const current = useAppStore.getState().activeFile
+      if (current?.type === 'video' && (!data.path || data.path === current.path)) {
+        setIsPlaying(data.playing)
+      }
       if (data.path) {
         useAppStore.getState().setVideoPlayback(data.path, {
           currentTime: data.ended ? 0 : (data.currentTime ?? 0),
@@ -196,6 +202,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       }
     })
 
+    let macSlideReconcileRevision = 0
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
       if (isIntroductionOpen()) return
       if (queueNavigationDuringTransition(direction)) return
@@ -210,6 +217,8 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       if (!activeFile) return
 
       if (activeFile.type === 'presentation') {
+        const navigationRevision = window.api.platform === 'darwin'
+          ? ++macSlideReconcileRevision : 0
         // НЕ блокируем next/prev по slide index. На слайдах с pending
         // click-анимациями slide index не меняется при Next()/Previous() —
         // старые guard'ы ловили эти случаи и не пускали анимацию в daemon.
@@ -229,11 +238,23 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
           undefined,
           channelBoundaryNavigationEnabled
         )
+        const current = useAppStore.getState()
+        if (current.activeFile?.path !== activeFile.path || current.liveChannel !== liveChannel) return
         if (result?.success && result.output) {
           try {
             const data = JSON.parse(result.output)
-            if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0) {
+            if (typeof data.CurrentSlide === 'number' && data.CurrentSlide > 0 &&
+                (window.api.platform !== 'darwin' || navigationRevision === macSlideReconcileRevision)) {
               useAppStore.getState().setCurrentSlide(data.CurrentSlide)
+            }
+            if (window.api.platform === 'darwin' && totalSlides > 1 &&
+                data.CurrentSlide === currentSlide) {
+              reconcileMacSlide(currentSlide, () => {
+                const latest = useAppStore.getState()
+                return !cancelled && navigationRevision === macSlideReconcileRevision &&
+                  latest.liveChannel === liveChannel && latest.activeFile?.path === activeFile.path
+              }, () => window.api.powerpointCommand('current'),
+              (slide) => useAppStore.getState().setCurrentSlide(slide))
             }
             if (data.Boundary === true) {
               const latest = useAppStore.getState()
@@ -246,6 +267,10 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
             }
           } catch { /* ignore */ }
         }
+      } else if (window.api.platform === 'darwin' && activeFile.type === 'other' &&
+        ['.doc', '.docx', '.rtf', '.odt', '.txt', '.xls', '.xlsx', '.ods'].includes(activeFile.extension.toLowerCase())) {
+        const result = await window.api.navigateExternalDocument(activeFile.path, direction)
+        if (!result.success) window.api.dbgLog(`Mac document navigation failed: ${result.error || '-'}`)
       } else if (activeFile.type === 'pdf') {
         const atBoundary = totalSlides > 0 && (
           (direction === 'next' && currentSlide >= totalSlides) ||
@@ -339,6 +364,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
 
   const workspace = (
     <div className={`pdm-operator-shell h-screen flex flex-col overflow-hidden dark ${appTheme === 'broadcast-pro' ? 'theme-broadcast-pro' : 'theme-classic'}`}>
+      <FullscreenExitControl />
       <Toolbar />
       <NowPlaying />
       <AuxiliaryDisplayBridge />

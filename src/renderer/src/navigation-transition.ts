@@ -5,6 +5,7 @@ export type NavigationRequest =
 
 let transitionActive = false
 let queuedRequests: NavigationRequest[] = []
+let previewRequest: ((request: NavigationRequest) => void) | null = null
 const transitionEndWaiters = new Set<() => void>()
 
 function describeRequest(request: NavigationRequest): string {
@@ -14,12 +15,15 @@ function describeRequest(request: NavigationRequest): string {
 export function beginNavigationTransition(): void {
   transitionActive = true
   queuedRequests = []
+  previewRequest = null
   window.api.dbgLog('NavigationTransition: BEGIN')
 }
 
 export function queueNavigationDuringTransition(direction: NavigationDirection): boolean {
   if (!transitionActive) return false
-  queuedRequests.push({ kind: 'relative', direction })
+  const request: NavigationRequest = { kind: 'relative', direction }
+  queuedRequests.push(request)
+  previewRequest?.(request)
   window.api.dbgLog(
     `NavigationTransition: queued ${direction}, count=${queuedRequests.length}`
   )
@@ -28,7 +32,9 @@ export function queueNavigationDuringTransition(direction: NavigationDirection):
 
 export function queueAbsoluteNavigationDuringTransition(slide: number): boolean {
   if (!transitionActive) return false
-  queuedRequests.push({ kind: 'absolute', slide })
+  const request: NavigationRequest = { kind: 'absolute', slide }
+  queuedRequests.push(request)
+  previewRequest?.(request)
   window.api.dbgLog(
     `NavigationTransition: queued goto:${slide}, count=${queuedRequests.length}`
   )
@@ -39,6 +45,7 @@ export function finishNavigationTransition(): NavigationRequest[] {
   const queued = queuedRequests
   transitionActive = false
   queuedRequests = []
+  previewRequest = null
   window.api.dbgLog(
     `NavigationTransition: END queued=${queued.map(describeRequest).join(',') || 'none'}`
   )
@@ -54,6 +61,16 @@ export function waitForNavigationTransitionEnd(): Promise<void> {
 
 export function isNavigationTransitionActive(): boolean {
   return transitionActive
+}
+
+export function pendingNavigationSnapshot(): NavigationRequest[] {
+  return [...queuedRequests]
+}
+
+export function setNavigationTransitionPreview(
+  handler: ((request: NavigationRequest) => void) | null
+): void {
+  previewRequest = transitionActive ? handler : null
 }
 
 export function drainNavigationTransition(): NavigationRequest[] {

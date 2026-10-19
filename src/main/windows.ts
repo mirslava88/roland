@@ -1,8 +1,37 @@
 import { BrowserWindow, Display, shell, screen } from 'electron'
+import type { Rectangle } from 'electron'
 import { join } from 'path'
 import { getTrustedRendererDevUrl } from './renderer-security'
+import { restoreMacDesktopUI, setMacSimpleFullscreen } from './mac-desktop-ui'
+import { macReleaseWebPreferences } from './mac-release-security'
 
 export type AuxiliaryWindowRole = 'mirror' | 'speaker' | 'info' | 'timer' | 'event-timer' | 'backdrop'
+const controlRestoreBounds = new WeakMap<BrowserWindow, Rectangle>()
+
+function fitControlToMacWorkArea(win: BrowserWindow): void {
+  if (process.platform !== 'darwin' || win.isDestroyed() || !win.isSimpleFullScreen()) return
+  const current = win.getBounds()
+  const work = screen.getDisplayMatching(current).workArea
+  if (current.x !== work.x || current.y !== work.y || current.width !== work.width || current.height !== work.height) {
+    win.setBounds(work)
+  }
+}
+
+export function setControlFullscreen(win: BrowserWindow, fullscreen: boolean, normalBounds?: Rectangle): void {
+  if (fullscreen && !win.isSimpleFullScreen()) controlRestoreBounds.set(win, normalBounds ?? win.getBounds())
+  setMacSimpleFullscreen(win, fullscreen)
+  if (fullscreen) {
+    fitControlToMacWorkArea(win)
+    // AppKit updates the visible screen frame after changing presentation
+    // options. Recheck on the next turn, once Dock/menu space is restored.
+    setImmediate(() => fitControlToMacWorkArea(win))
+  }
+  else {
+    const previous = controlRestoreBounds.get(win)
+    if (previous) win.setBounds(previous)
+    controlRestoreBounds.delete(win)
+  }
+}
 
 export function createControlWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -14,6 +43,7 @@ export function createControlWindow(): BrowserWindow {
     title: __PDM_PRODUCT_NAME__,
     autoHideMenuBar: true,
     webPreferences: {
+      ...macReleaseWebPreferences(),
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
       contextIsolation: true,
@@ -24,6 +54,63 @@ export function createControlWindow(): BrowserWindow {
   })
 
   win.removeMenu()
+  if (process.platform === 'darwin') {
+    // Native macOS fullscreen moves the operator window to its own Space.
+    // Keep the control window in the same Space, filling the work area so
+    // Dock/menu remain usable and never cover the bottom of the operator UI.
+    let convertingFullscreen = false
+    const publishFullscreenState = (): void => {
+      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send('control-fullscreen-changed', win.isSimpleFullScreen())
+      }
+    }
+    win.on('enter-full-screen', () => {
+      if (convertingFullscreen || win.isDestroyed()) return
+      if (win.isSimpleFullScreen()) {
+        publishFullscreenState()
+        return
+      }
+      convertingFullscreen = true
+      const normalBounds = win.getNormalBounds()
+      win.once('leave-full-screen', () => {
+        if (!win.isDestroyed()) {
+          setControlFullscreen(win, true, normalBounds)
+          publishFullscreenState()
+        }
+        convertingFullscreen = false
+      })
+      win.setFullScreen(false)
+    })
+    win.on('leave-full-screen', () => {
+      // The native-to-simple conversion publishes its final state above.
+      if (!convertingFullscreen) publishFullscreenState()
+    })
+    win.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown' || !input.meta || !input.control ||
+          input.key.toLowerCase() !== 'f') return
+      event.preventDefault()
+      setControlFullscreen(win, !win.isSimpleFullScreen())
+      publishFullscreenState()
+    })
+    const fitWorkArea = (): void => fitControlToMacWorkArea(win)
+    // AppKit can finish the native Space animation after leave-full-screen
+    // and apply one final full-display frame. Keep that resize above Dock too.
+    let workAreaFitQueued = false
+    win.on('resize', () => {
+      if (workAreaFitQueued) return
+      workAreaFitQueued = true
+      setImmediate(() => {
+        workAreaFitQueued = false
+        fitWorkArea()
+      })
+    })
+    screen.on('display-metrics-changed', fitWorkArea)
+    win.on('closed', () => screen.removeListener('display-metrics-changed', fitWorkArea))
+    win.on('focus', () => {
+      restoreMacDesktopUI()
+      fitControlToMacWorkArea(win)
+    })
+  }
   // Keep the edition visible even when index.html supplies its generic title.
   win.on('page-title-updated', (event) => event.preventDefault())
 
@@ -87,6 +174,7 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     backgroundColor: '#000000',
     title: 'Presentation',
     webPreferences: {
+      ...macReleaseWebPreferences(),
       preload: join(__dirname, '../preload/output.js'),
       sandbox: true,
       contextIsolation: true,
@@ -145,6 +233,7 @@ export function createAuxiliaryWindow(
     skipTaskbar: true,
     focusable: false,
     webPreferences: {
+      ...macReleaseWebPreferences(),
       preload: join(__dirname, '../preload/output.js'),
       sandbox: true,
       contextIsolation: true,
@@ -186,6 +275,7 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
     focusable: false,
     show: false,
     webPreferences: {
+      ...macReleaseWebPreferences(),
       contextIsolation: true,
       nodeIntegration: false,
       // Критично: при setOpacity(0) Chromium считает окно "скрытым" и троттлит
@@ -214,8 +304,49 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
     .overlay.hide { opacity:0; transition: opacity 0.15s ease-out; }
     #f { position:absolute; inset:0; width:100%; height:100%; object-fit:contain;
          display:none; user-select:none; -webkit-user-drag:none; }
+    #pdm-live-timer { position:absolute; display:none; z-index:1; box-sizing:border-box;
+      align-items:center; overflow:hidden; background:#000; color:#fff;
+      font-family:monospace; font-weight:900; font-variant-numeric:tabular-nums;
+      line-height:1; white-space:nowrap; pointer-events:none;
+      text-shadow:0 2px 8px rgba(0,0,0,.8); }
   </style></head><body>
-    <div class="overlay" id="o"><img id="f" /></div>
+    <div class="overlay" id="o"><img id="f" /><div id="pdm-live-timer"></div></div>
+    <script>
+      window._updatePinnedTimer = function(data) {
+        var timer = document.getElementById('pdm-live-timer');
+        if (!timer) return;
+        if (!data || !data.visible || !(data.duration > 0)) {
+          timer.style.display = 'none';
+          return;
+        }
+        var remaining = Math.trunc(Number(data.remaining) || 0);
+        var scale = Math.max(.5, Math.min(8, Number(data.scale) || 1));
+        var posX = Math.max(0, Math.min(100, Number(data.posX) || 0));
+        var posY = Math.max(0, Math.min(100, Number(data.posY) || 0));
+        var wide = data.duration >= 3600 || remaining >= 3600 || remaining <= -3600;
+        var width = (wide ? 268 : 184) * scale;
+        var height = 52 * scale;
+        var absolute = Math.abs(remaining);
+        var pad = function(value) { return String(value).padStart(2, '0'); };
+        var hours = Math.floor(absolute / 3600);
+        var minutes = Math.floor(absolute % 3600 / 60);
+        var seconds = absolute % 60;
+        timer.textContent = (remaining < 0 ? '-' : '') +
+          (hours > 0 ? pad(hours) + ':' : '') + pad(minutes) + ':' + pad(seconds);
+        timer.style.display = 'flex';
+        timer.style.left = Math.max(0, window.innerWidth - width) * posX / 100 + 'px';
+        timer.style.top = Math.max(0, window.innerHeight - height) * posY / 100 + 'px';
+        timer.style.width = width + 'px';
+        timer.style.height = height + 'px';
+        timer.style.fontSize = 48 * scale + 'px';
+        timer.style.padding = 2 * scale + 'px ' + 4 * scale + 'px';
+        timer.style.justifyContent = posX <= .001 ? 'flex-start' :
+          posX >= 99.999 ? 'flex-end' : 'center';
+        timer.style.color = remaining < 0 ? data.overtimeTextColor :
+          remaining <= 60 && data.running ? data.warningTextColor : data.textColor;
+        timer.style.opacity = Math.max(.1, Math.min(1, Number(data.textOpacity) || 1));
+      };
+    </script>
   </body></html>`
 
   win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
@@ -242,6 +373,7 @@ export function createQrOverlayWindow(display?: Display): BrowserWindow {
     hasShadow: false,
     title: 'PDM QR Overlay',
     webPreferences: {
+      ...macReleaseWebPreferences(),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
@@ -282,6 +414,7 @@ export function createProgramSceneMediaOverlayWindow(display?: Display): Browser
     hasShadow: false,
     title: 'PDM Scene Media Overlay',
     webPreferences: {
+      ...macReleaseWebPreferences(),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
@@ -321,6 +454,7 @@ export function createTimerOverlayWindow(display?: Display): BrowserWindow {
     hasShadow: false,
     title: '',
     webPreferences: {
+      ...macReleaseWebPreferences(),
       preload: join(__dirname, '../preload/timer.js'),
       sandbox: true,
       contextIsolation: true,
@@ -479,6 +613,7 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
     thickFrame: false,
     title: '',
     webPreferences: {
+      ...macReleaseWebPreferences(),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,

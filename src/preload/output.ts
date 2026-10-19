@@ -4,6 +4,10 @@ const INBOUND_CHANNELS = new Set([
   'prewarm-pdf',
   'release-prewarmed-pdf',
   'load-content',
+  'keynote-capture-update',
+  'keynote-source-prewarm',
+  'keynote-source-retire',
+  'document-capture-update',
   'stop',
   'capture-audio-live',
   'commit-content-load',
@@ -45,6 +49,8 @@ const INBOUND_CHANNELS = new Set([
 
 const OUTBOUND_CHANNELS = new Set([
   'presentation-content-ready',
+  'keynote-capture-quality',
+  'keynote-capture-started',
   'presentation-content-committed',
   'presentation-content-prepared',
   'presentation-content-error',
@@ -80,6 +86,7 @@ const OUTBOUND_CHANNELS = new Set([
 ])
 
 const api = {
+  platform: process.platform,
   readFile: (filePath: string): Promise<ArrayBuffer> =>
     ipcRenderer.invoke('read-output-file', filePath),
   getWindowDisplayScaleFactor: (): Promise<number> =>
@@ -88,6 +95,8 @@ const api = {
     ipcRenderer.invoke('render-pdf-page', filePath, pageIndex, width),
   getScreenCaptureSource: (displayId: number): Promise<string | null> =>
     ipcRenderer.invoke('get-screen-capture-source', displayId),
+  ensureCameraAccess: (): Promise<string> =>
+    ipcRenderer.invoke('ensure-presentation-camera-access'),
   captureSceneMirrorFrame: (): Promise<string | null> =>
     ipcRenderer.invoke('capture-scene-mirror-frame'),
   prepareDesktopCaptureSource: (sourceId: string) =>

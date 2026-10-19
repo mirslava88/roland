@@ -10,7 +10,7 @@ const [edition, action = 'build', platform = 'win'] = process.argv.slice(2)
 const info = editionInfo(edition)
 if (!['build', 'package', 'dir'].includes(action)) throw new Error(`Unknown action: ${action}`)
 if (!['win', 'mac', 'linux'].includes(platform)) throw new Error(`Unknown platform: ${platform}`)
-if (info.stream && platform !== 'win') throw new Error('Stream edition currently supports Windows only.')
+if (info.stream && !['win', 'mac'].includes(platform)) throw new Error('Stream edition supports Windows and macOS.')
 const env = { ...process.env, PDM_EDITION: info.edition, PDM_EDITION_BUILD: '1' }
 function run(script, args) {
   const result = spawnSync(process.execPath, [resolve(root, script), ...args], { cwd: root, env, stdio: 'inherit', windowsHide: true })
@@ -18,8 +18,17 @@ function run(script, args) {
   if (result.status !== 0) process.exit(result.status || 1)
 }
 console.log(`Building ${info.productName} ${info.displayVersion}`)
+if (platform === 'mac' && process.env.PDM_MAC_BUILD_ISOLATED !== '1') {
+  run('scripts/build-macos.mjs', [edition, action])
+  process.exit(0)
+}
 run('scripts/typecheck.mjs', [])
 if (platform === 'win') run('scripts/build-native-virtual-camera.mjs', [])
+if (platform === 'mac') {
+  run('scripts/build-mac-helper.mjs', [])
+  run('scripts/build-mac-camera.mjs', [])
+  if (info.stream) run('scripts/prepare-mac-ffmpeg.mjs', [])
+}
 run('node_modules/electron-vite/bin/electron-vite.js', ['build'])
 run('scripts/verify-edition.mjs', [info.edition])
 if (action !== 'build') {

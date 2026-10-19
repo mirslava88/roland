@@ -44,6 +44,10 @@ export function matchesRendererPage(
   try {
     const actual = new URL(actualUrl)
     const expected = new URL(rendererPageUrl(page))
+    // file: URLs all have the opaque origin "null". On Mac also require the
+    // exact scheme/authority so a remote file host cannot impersonate the UI.
+    if (process.platform === 'darwin' &&
+        (actual.protocol !== expected.protocol || actual.host !== expected.host)) return false
     return actual.origin === expected.origin && actual.pathname === expected.pathname
   } catch {
     return false
