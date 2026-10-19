@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <cfloat>
 #include <sys/sysctl.h>
+#include "mac-keynote-identity.h"
 
 // Run on Electron's main thread. Leave the user's Dock preferences intact;
 // remove only this application's fullscreen requests to hide desktop chrome.
@@ -460,7 +461,7 @@ static AXUIElementRef keynoteWindow(uint32_t windowID) {
   NSDictionary* record = records.firstObject;
   pid_t pid = [record[(__bridge NSString*)kCGWindowOwnerPID] intValue];
   NSRunningApplication* running = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-  if (!record || ![running.bundleIdentifier isEqualToString:@"com.apple.iWork.Keynote"]) return nullptr;
+  if (!record || !keynoteBundleIdentifier(running.bundleIdentifier)) return nullptr;
   CGRect expected = CGRectZero;
   if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)record[(__bridge NSString*)kCGWindowBounds], &expected)) return nullptr;
   NSString* title = record[(__bridge NSString*)kCGWindowName];
@@ -517,7 +518,7 @@ static napi_value prepareKeynotePlayback(napi_env env, napi_callback_info info) 
     NSArray* records = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, windowID));
     pid_t ownerPID = [records.firstObject[(__bridge NSString*)kCGWindowOwnerPID] intValue];
     NSRunningApplication* keynote = [NSRunningApplication runningApplicationWithProcessIdentifier:ownerPID];
-    if (![keynote.bundleIdentifier isEqualToString:@"com.apple.iWork.Keynote"]) {
+    if (!keynoteBundleIdentifier(keynote.bundleIdentifier)) {
       napi_throw_error(env, nullptr, "Keynote window owner has exited"); return nullptr;
     }
     NSRunningApplication* foreground = NSWorkspace.sharedWorkspace.frontmostApplication;

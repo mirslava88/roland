@@ -64,6 +64,10 @@ jobs:
           node scripts/test-mac-toolchain.mjs
           node scripts/test-mac-release-security.cjs
           node scripts/test-macos-release.mjs
+          node scripts/test-mac-keynote-launcher.cjs
+          node scripts/test-mac-keynote-pool.cjs
+          xcrun clang -fobjc-arc scripts/test-mac-keynote-identity.m -framework AppKit -o "$RUNNER_TEMP/pdm-keynote-identity-test"
+          "$RUNNER_TEMP/pdm-keynote-identity-test"
           npm run test:security
 
       - name: Build Intel and Apple Silicon DMGs

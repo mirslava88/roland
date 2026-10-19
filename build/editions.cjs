@@ -1,10 +1,12 @@
 const { resolve } = require('node:path')
 const pkg = require('../package.json')
 
-function editionInfo(edition = process.env.PDM_EDITION || (pkg.version.endsWith('-stream') ? 'stream' : 'standard')) {
+function editionInfo(edition = process.env.PDM_EDITION || (pkg.version.endsWith('-stream') ? 'stream' : 'standard'), platform = process.platform) {
   if (!['standard', 'stream'].includes(edition)) throw new Error(`Unknown PDM edition: ${edition}`)
   const stream = edition === 'stream'
-  const baseVersion = pkg.version.replace(/-stream$/, '')
+  const baseVersion = platform === 'darwin'
+    ? (require('./mac-runtime.json').appVersion || pkg.version.replace(/-stream$/, ''))
+    : pkg.version.replace(/-stream$/, '')
   const version = `${baseVersion}${stream ? '-stream' : ''}`
   const name = `presentation-display-manager${stream ? '-stream' : ''}`
   const productName = `Presentation Display Manager${stream ? ' Stream' : ''}`
@@ -14,7 +16,7 @@ function editionInfo(edition = process.env.PDM_EDITION || (pkg.version.endsWith(
 }
 
 function builderConfig(edition, platform = process.platform) {
-  const info = editionInfo(edition)
+  const info = editionInfo(edition, platform)
   const windowsResource = new Set(['virtual-camera', 'pdm-launcher-v1.ico', 'licenses/Microsoft-Windows-Camera-LICENSE.txt'])
   return {
     ...pkg.build,

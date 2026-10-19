@@ -10,6 +10,7 @@ import { inspectMacPptxAnimations, type MacPptxAnimationInfo } from './mac-pptx-
 import { keynoteNative, macNativeOffice } from './mac-native-office'
 import type { PresentationCaptureProfile } from '../shared/presentation-output'
 import { diagnosticLog } from './diagnostic-log'
+import { MacKeynoteLauncher } from './mac-keynote-launcher'
 
 const execute = promisify(execFile)
 type NativeResult = {documentId?:string;slideCount?:number;slide?:number;windowId?:number;notes?:string;playing?:boolean}
@@ -23,7 +24,7 @@ export interface KeynoteShow {
 }
 interface Runtime {
   processes():Promise<number[]>
-  spawn():Promise<number>
+  spawn(claimed?:number[]):Promise<number>
   command(pid:number,action:string,...args:(string|number)[]):Promise<NativeResult>
   configure(windowId:number):Promise<void>
   verify(windowId:number):Promise<void>
@@ -38,18 +39,24 @@ interface Options {
   inspect?:(path:string)=>Promise<MacPptxAnimationInfo>
 }
 const delay = (ms:number):Promise<void> => new Promise(resolve=>setTimeout(resolve,ms))
+const launcher = new MacKeynoteLauncher({
+  processes:()=>nativeRuntime.processes(), delay,
+  async launch() {
+    const info=await keynoteNative<{path:string;bundleId:string;version:string}>(0,'application')
+      .catch(error=>{throw Object.assign(new Error(String(error)),{launchNotStarted:true})})
+    diagnosticLog('keynote-launch',`launch bundle=${info.bundleId} version=${info.version} path=${info.path}`)
+    await execute('/usr/bin/open',['-ngj','-a',info.path,'--args','-KNMacPrefersWindowedPlayback','YES','-KNPlaybackPresentationWindowedPresenterDisplayEnabled','NO'],{timeout:8000})
+  }
+})
+let lastProcessSnapshot=''
 const nativeRuntime: Runtime = {
-  async processes() { return (await keynoteNative<{pid:number}[]>(0,'processes')).map(item=>item.pid) },
-  async spawn() {
-    const previous = new Set(await nativeRuntime.processes())
-    await execute('/usr/bin/open',['-ngj','-a','Keynote','--args','-KNMacPrefersWindowedPlayback','YES','-KNPlaybackPresentationWindowedPresenterDisplayEnabled','NO'],{timeout:8000})
-    for(let attempt=0;attempt<100;attempt++) {
-      const pid=(await nativeRuntime.processes()).find(value=>!previous.has(value))
-      if(pid) return pid
-      await delay(50)
-    }
-    throw new Error('Keynote не создал фоновый проигрыватель')
+  async processes() {
+    const processes=await keynoteNative<{pid:number;bundleId?:string;version?:string;path?:string}[]>(0,'processes')
+    const snapshot=JSON.stringify(processes)
+    if(snapshot!==lastProcessSnapshot) {lastProcessSnapshot=snapshot;diagnosticLog('keynote-launch',`processes=${snapshot}`)}
+    return processes.map(item=>item.pid)
   },
+  spawn:claimed=>launcher.spawn(claimed),
   command:(pid,action,...args)=>keynoteNative<NativeResult>(pid,action,...args),
   async configure(id) { await macNativeOffice('prepareKeynotePlayback',[id]) },
   async verify(id) { await macNativeOffice('verifyKeynotePlayback',[id]) }
@@ -93,7 +100,7 @@ export class MacKeynotePool {
           if(state?.playing===false){second=pid;break}
         }
         const owned=!second
-        if(!second)second=await this.runtime.spawn()
+        if(!second)second=await this.runtime.spawn(this.engines.map(engine=>engine.pid))
         this.engines.push({pid:second,owned,queue:new KeynoteQueue(),documents:new Map(),show:null,reserved:false})
       }
     })()
@@ -217,7 +224,7 @@ export class MacKeynotePool {
   private async load(engine:Engine,source:KeynoteSource):Promise<Prepared> {
     const processes=await this.runtime.processes()
     if(!processes.includes(engine.pid)) {
-      engine.pid=await this.runtime.spawn();engine.owned=true;engine.documents.clear();
+      engine.pid=await this.runtime.spawn(this.engines.filter(other=>other!==engine).map(other=>other.pid));engine.owned=true;engine.documents.clear();
       if(engine.show)this.options.retire(`window:${engine.show.windowId}:0`)
       engine.show=null
     }

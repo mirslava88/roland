@@ -30,13 +30,16 @@ const win = { isDestroyed: () => false, webContents: contents }
 assert.equal(trust.isTrustedWindowMainFrame({ sender: contents, senderFrame: frame }, win, 'index.html'), true)
 assert.equal(trust.isTrustedWindowMainFrame({ sender: contents, senderFrame: { url: local } }, win, 'index.html'), false)
 assert.equal(trust.isTrustedWindowMainFrame({ sender: { ...contents }, senderFrame: frame }, win, 'index.html'), false)
-const { builderConfig } = require('../build/editions.cjs')
+const { builderConfig, editionInfo } = require('../build/editions.cjs')
 for (const edition of ['stream', 'standard']) {
   const mac = builderConfig(edition, 'darwin'), windows = builderConfig(edition, 'win32')
   assert.equal(mac.electronVersion, require('../build/mac-runtime.json').electronVersion)
   assert.ok(mac.afterPack.endsWith('afterPack-mac.cjs'))
   assert.ok(windows.afterPack.endsWith('afterPack.js'))
   assert.equal(windows.electronVersion, undefined)
+  const suffix = edition === 'stream' ? '-stream' : ''
+  assert.equal(editionInfo(edition, 'darwin').version, require('../build/mac-runtime.json').appVersion + suffix)
+  assert.equal(editionInfo(edition, 'win32').version, require('../package.json').version.replace(/-stream$/, '') + suffix)
   const baseline = `/private/tmp/pdm-security-windows-${edition}-before.json`
   if (fs.existsSync(baseline)) {
     const expected = JSON.parse(fs.readFileSync(baseline, 'utf8'))

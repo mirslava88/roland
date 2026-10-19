@@ -18,7 +18,8 @@ const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{r
  const cache=await load('src/main/mac-keynote-cache.ts')
  const {MacKeynotePool}=await load('src/main/mac-keynote-pool.ts',{
   electron:{app:{getPath:()=>root}},fs:{...require('node:fs'),watchFile(){},unwatchFile(){}},
-  './mac-office-files':{createOfficeWorkspace:async()=>fs.mkdtemp(path.join(root,'players-'))},'./mac-keynote-cache':cache,'./mac-pptx-animation':{},'./mac-native-office':{},'./diagnostic-log':{diagnosticLog(){}}
+  './mac-office-files':{createOfficeWorkspace:async()=>fs.mkdtemp(path.join(root,'players-'))},'./mac-keynote-cache':cache,'./mac-pptx-animation':{},'./mac-native-office':{},'./diagnostic-log':{diagnosticLog(){}},
+  './mac-keynote-launcher':await load('src/main/mac-keynote-launcher.ts')
  })
  let count=0
  const test=async(name,fn)=>{await fn();console.log('PASS '+name);count++}

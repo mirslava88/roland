@@ -116,12 +116,25 @@ static napi_value keynoteControl(napi_env env, napi_callback_info info) {
    id result=@{};
    if([action isEqualToString:@"processes"]) {
     NSMutableArray *items=[NSMutableArray array];
-    for(NSRunningApplication *running in [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.iWork.Keynote"])
-     [items addObject:@{ @"pid":@(running.processIdentifier) }];
+    for(NSString *identifier in keynoteBundleIdentifiers())
+     for(NSRunningApplication *running in [NSRunningApplication runningApplicationsWithBundleIdentifier:identifier]) {
+      if(running.terminated)continue;
+      NSMutableDictionary *item=[NSMutableDictionary dictionaryWithDictionary:keynoteApplicationInfo(running.bundleURL) ?: @{}];
+      item[@"pid"]=@(running.processIdentifier);item[@"bundleId"]=identifier;
+      [items addObject:item];
+     }
     result=items;
+   } else if([action isEqualToString:@"application"]) {
+    result=nil;
+    for(NSString *identifier in keynoteBundleIdentifiers()) {
+     NSURL *url=[NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:identifier];
+     result=keynoteApplicationInfo(url);
+     if(result)break;
+    }
+    if(!result)@throw [NSException exceptionWithName:@"Keynote" reason:@"Для показа PPTX установите Keynote и запустите его один раз вручную" userInfo:nil];
    } else {
     NSRunningApplication *running=[NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-    if(![running.bundleIdentifier isEqualToString:@"com.apple.iWork.Keynote"])
+    if(!keynoteBundleIdentifier(running.bundleIdentifier))
      @throw [NSException exceptionWithName:@"Keynote" reason:@"Keynote process has exited" userInfo:nil];
     PDMKeynoteApplication *app=(id)[SBApplication applicationWithProcessIdentifier:pid];
     PDMKeynoteEvents *events=[PDMKeynoteEvents new]; app.delegate=events;

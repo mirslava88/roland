@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 const { editionInfo } = createRequire(import.meta.url)('../build/editions.cjs')
 
 export function prepareMacRelease(edition, directory) {
-  const info = editionInfo(edition)
+  const info = editionInfo(edition, 'darwin')
   const tag = `macos-v${info.version}`
   const metadata = JSON.parse(readFileSync(new URL(`../docs/releases/macos-${info.version.replace(/-stream$/, '')}.json`, import.meta.url), 'utf8'))[edition]
   if (typeof metadata?.title !== 'string' || typeof metadata?.body !== 'string') throw new Error('Missing Mac release metadata')

@@ -8,7 +8,7 @@ const { editionInfo } = createRequire(import.meta.url)('../build/editions.cjs')
 export function macReleasePlan(refType, refName, requested = 'all') {
   if (refType === 'tag') {
     const edition = refName.endsWith('-stream') ? 'stream' : 'standard'
-    const expected = `macos-v${editionInfo(edition).version}`
+    const expected = `macos-v${editionInfo(edition, 'darwin').version}`
     if (refName !== expected) throw new Error(`Expected Mac tag ${expected}`)
     return { editions: [edition], tag: expected }
   }

@@ -13,6 +13,7 @@ import { diagnosticLog } from './diagnostic-log'
 import { matchesRendererPage } from './renderer-security'
 import { isMacRenderDisplay, macRenderDisplay } from './mac-render-display'
 import { MacKeynotePool, type KeynoteShow } from './mac-keynote-pool'
+import { keynoteNative } from './mac-native-office'
 
 const execFileAsync = promisify(execFile)
 const keynoteBackdrop = (): string => app.isPackaged
@@ -233,10 +234,12 @@ export const macPowerPoint = {
     return info
   },
   async installed(): Promise<boolean> {
-    for (const name of ['Keynote', 'Microsoft PowerPoint']) {
+    try { await keynoteNative(0, 'application'); return true }
+    catch { /* PowerPoint can still provide static previews. */ }
+    for (const name of ['Microsoft PowerPoint']) {
       if (existsSync(`/Applications/${name}.app`) || existsSync(join(homedir(), `Applications/${name}.app`))) return true
     }
-    for (const name of ['Keynote', 'Microsoft PowerPoint']) {
+    for (const name of ['Microsoft PowerPoint']) {
       try { await execFileAsync('/usr/bin/open', ['-Ra', name], { timeout: 5000 }); return true }
       catch { /* try the other installed engine */ }
     }

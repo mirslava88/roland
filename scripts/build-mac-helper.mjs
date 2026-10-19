@@ -45,7 +45,7 @@ if (process.platform === 'darwin') {
   const nativeTarget = resolve('build/mac-office-accessibility.node')
   let nativeCurrent = false
   try {
-    nativeCurrent = statSync(nativeTarget).mtimeMs >= Math.max(statSync(nativeSource).mtimeMs, statSync(resolve("scripts/mac-keynote-bridge.h")).mtimeMs, statSync(new URL(import.meta.url)).mtimeMs)
+    nativeCurrent = statSync(nativeTarget).mtimeMs >= Math.max(statSync(nativeSource).mtimeMs, statSync(resolve("scripts/mac-keynote-bridge.h")).mtimeMs, statSync(resolve('scripts/mac-keynote-identity.h')).mtimeMs, statSync(new URL(import.meta.url)).mtimeMs)
   } catch { /* build missing */ }
   if (!nativeCurrent) {
     const result = spawnSync('xcrun', ['clang++', '-O2', '-std=c++17', '-fobjc-arc', '-bundle', '-undefined', 'dynamic_lookup',

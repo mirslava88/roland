@@ -8,7 +8,7 @@ import { extractFile, listPackage } from '@electron/asar'
 
 const require = createRequire(import.meta.url)
 const { editionInfo } = require('../build/editions.cjs')
-const info = editionInfo(process.argv[2])
+const info = editionInfo(process.argv[2], 'darwin')
 const app = resolve(process.argv[3])
 function verifyPortableLinks(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
