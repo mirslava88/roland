@@ -57,7 +57,10 @@ const nativeRuntime: Runtime = {
     return processes.map(item=>item.pid)
   },
   spawn:claimed=>launcher.spawn(claimed),
-  command:(pid,action,...args)=>keynoteNative<NativeResult>(pid,action,...args),
+  command:(pid,action,...args)=>{
+    if(['stop','close','quit'].includes(action))diagnosticLog('keynote-control',`request pid=${pid} action=${action}`)
+    return keynoteNative<NativeResult>(pid,action,...args)
+  },
   async configure(id) { await macNativeOffice('prepareKeynotePlayback',[id]) },
   async verify(id) { await macNativeOffice('verifyKeynotePlayback',[id]) }
 }
@@ -75,6 +78,9 @@ export class MacKeynotePool {
   private preferred=''
   private root:Promise<string>|null=null
   private operator=new KeynoteQueue()
+  private intent=0
+  private recovery:{sourceId:string;engine:Engine;importing:boolean;promise:Promise<KeynoteShow|null>}|null=null
+  private recoveryAttempts:number[]=[]
   private runtime:Runtime
   private cache:KeynoteDiskCache
   private inspect:(path:string)=>Promise<MacPptxAnimationInfo>
@@ -291,7 +297,14 @@ export class MacKeynotePool {
     const previous=engine.show
     if(!previous)return
     this.options.retire(`window:${previous.windowId}:0`)
-    await this.runtime.command(engine.pid,'stop',previous.documentId,previous.windowId)
+    try { await this.runtime.command(engine.pid,'stop',previous.documentId,previous.windowId) }
+    catch(error) {
+      // A vanished player is already off-air. Do not reject a painted PDF or
+      // video just because there is no longer a Keynote process to stop.
+      if((await this.runtime.processes()).includes(engine.pid))throw error
+      diagnosticLog('keynote-recovery',`stop already complete; process exited pid=${engine.pid}`)
+      engine.documents.clear()
+    }
     engine.show=null
     this.publish(previous.path,previous.sourceKey,'loaded')
   }
@@ -330,6 +343,7 @@ export class MacKeynotePool {
     }
   }
   async take(path:string,slide:number,displayId:number):Promise<KeynoteShow> {
+    ++this.intent
     return this.operator.run(async()=>{
       const source=await this.source(path,displayId)
       await this.initialize()
@@ -364,6 +378,14 @@ export class MacKeynotePool {
     })
   }
   async stop():Promise<void> {
+    ++this.intent
+    // Importing a replacement after a crash cannot have started playback yet.
+    // Let a ready video/PDF take over immediately; the cancelled recovery may
+    // finish its import but must never start or publish the old presentation.
+    if(this.recovery?.importing&&this.active===this.recovery.engine) {
+      this.active=null
+      return
+    }
     await this.operator.run(async()=>{
       const engine=this.active
       this.active=null
@@ -457,6 +479,65 @@ export class MacKeynotePool {
     const engine=this.engines.find(item=>item.show&&`window:${item.show.windowId}:0`===sourceId)
     if(engine?.show)await engine.queue.run(()=>this.runtime.command(engine.pid,'refresh',engine.show!.windowId)).then(()=>undefined)
   }
+  recover(sourceId:string):Promise<KeynoteShow|null> {
+    if(this.closed)return Promise.resolve(null)
+    if(this.recovery?.sourceId===sourceId)return this.recovery.promise
+    const engine=this.active,previous=engine?.show
+    if(!engine||!previous||`window:${previous.windowId}:0`!==sourceId)return Promise.resolve(null)
+    const intent=this.intent
+    const valid=():boolean=>!this.closed&&this.active===engine&&this.intent===intent
+    const recovery={sourceId,engine,importing:false,promise:Promise.resolve(null) as Promise<KeynoteShow|null>}
+    this.recovery=recovery
+    const promise=this.operator.run(()=>engine.queue.run(async()=>{
+      if(!valid()||engine.show!==previous)return null
+      const processes=await this.runtime.processes()
+      if(processes.includes(engine.pid)) {
+        // A capturer can end while its native player stays alive. The viewer
+        // retries that same source; rebuild only a verified missing window.
+        try { await this.runtime.command(engine.pid,'refresh',previous.windowId);return null }
+        catch(error) {
+          if(!/Player window is no longer available|Keynote process has exited/.test(String(error)))throw error
+        }
+      }
+      if(!valid())return null
+      this.recoveryAttempts=this.recoveryAttempts.filter(time=>Date.now()-time<60_000)
+      if(this.recoveryAttempts.length>=2)throw new Error('Keynote повторно завершился; автоматическое восстановление остановлено. Выберите другой материал или повторите показ вручную.')
+      this.recoveryAttempts.push(Date.now())
+      diagnosticLog('keynote-recovery',`begin pid=${engine.pid} source=${sourceId} slide=${previous.slide}`)
+      if(processes.includes(engine.pid)) {
+        await this.stopEngine(engine)
+        if(!valid())return null
+      }
+      this.options.retire(sourceId)
+      engine.show=null
+      if(!processes.includes(engine.pid))engine.documents.clear()
+      const source=await this.source(previous.path,previous.captureProfile.displayId)
+      if(source.key!==previous.sourceKey)return null
+      let document:Prepared
+      recovery.importing=true
+      try { document=await this.load(engine,source) }
+      finally { recovery.importing=false }
+      if(!valid())return null
+      const plan=await this.options.plan(previous.captureProfile.displayId,previous.slideAspectRatio,this.engines.indexOf(engine))
+      if(!valid())return null
+      const show=await this.stage(engine,previous.path,document,Math.min(previous.slide,document.slideCount),plan)
+      if(!valid()) { await this.stopEngine(engine);return null }
+      // Restore click builds only for decks verified safe for muted off-air
+      // preparation. Media/autoplay decks resume at the start of the slide.
+      if(document.info.safeToPreplay===true)for(let i=0;i<previous.lastSlideClicks;i++) {
+        if(!valid()) { await this.stopEngine(engine);return null }
+        const next=await this.runtime.command(engine.pid,'next',show.documentId)
+        if(next.slide&&next.slide!==show.slide) {show.slide=next.slide;show.lastSlideClicks=0;break}
+        show.lastSlideClicks++
+      }
+      if(!valid()) { await this.stopEngine(engine);return null }
+      this.publish(show.path,show.sourceKey,'ready')
+      diagnosticLog('keynote-recovery',`restored pid=${engine.pid} source=window:${show.windowId}:0 slide=${show.slide}`)
+      return show
+    }))
+    recovery.promise=promise.finally(()=>{if(this.recovery===recovery)this.recovery=null})
+    return recovery.promise
+  }
   async notes(path:string,slide:number):Promise<string> {
     const source=await keynoteSource(path)
     const engine=this.engines.find(item=>item.documents.has(source.key))
@@ -465,6 +546,7 @@ export class MacKeynotePool {
   }
   async shutdown():Promise<void> {
     this.closed=true
+    ++this.intent
     for(const [path,file]of this.files)unwatchFile(path,file.watch)
     this.files.clear()
     await this.initializing?.catch(()=>undefined)

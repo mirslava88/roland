@@ -64,7 +64,7 @@ function prepare() {
       filter: path => !relative(root, path).split('/').some(part => ['node_modules', '.swift-module-cache', 'certs', '.DS_Store'].includes(part))
     })
   }
-  for (const name of ['electron.vite.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
+  for (const name of ['.gitignore', 'electron.vite.config.ts', 'tsconfig.json', 'tsconfig.node.json', 'tsconfig.web.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) {
     cpSync(join(root, name), join(workspace, name))
   }
   const project = readJson(join(root, 'package.json'))

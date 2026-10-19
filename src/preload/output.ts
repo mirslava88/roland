@@ -50,6 +50,7 @@ const INBOUND_CHANNELS = new Set([
 const OUTBOUND_CHANNELS = new Set([
   'presentation-content-ready',
   'keynote-capture-quality',
+  ...(process.platform === 'darwin' ? ['keynote-capture-lost'] : []),
   'keynote-capture-started',
   'presentation-content-committed',
   'presentation-content-prepared',

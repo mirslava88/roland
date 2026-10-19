@@ -298,6 +298,16 @@ export const macPowerPoint = {
     try { await playerPool().refresh(sourceId); return { success: true } }
     catch (error) { return { success: false, error: String(error) } }
   },
+  async recoverCapture(sourceId: string) {
+    try {
+      const show = await playerPool().recover(sourceId)
+      if (show && playerPool().current === show) publishCaptureProfile(show)
+      return { success: true }
+    } catch (error) {
+      diagnosticLog('keynote-recovery', `failed source=${sourceId}: ${String(error)}`)
+      return { success: false, error: String(error) }
+    }
+  },
   async notes(path: string, slide: number) {
     try { return { success: true, notes: await playerPool().notes(path, slide) } }
     catch (error) { return { success: false, error: String(error) } }

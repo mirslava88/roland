@@ -16,6 +16,9 @@ interface KeynoteLiveViewerProps {
 export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent = false, sourceLabel = 'Keynote', crop,
   filePath, captureProfile }: KeynoteLiveViewerProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const freezeRef = useRef<HTMLCanvasElement>(null)
+  const holdingFrame = useRef(false)
+  const [frozen, setFrozen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState({ width: 0, height: 0 })
   const [sourceSize, setSourceSize] = useState({ width: 0, height: 0 })
@@ -71,8 +74,24 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
     let frameCallback = 0
     let recoveryTimer: number | undefined
     let ready = false
+    const holdLastFrame = (): void => {
+      const canvas = freezeRef.current
+      if (holdingFrame.current || !canvas || video.videoWidth < 16 || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+      try {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight
+        const context = canvas.getContext('2d')
+        if (!context) return
+        context.drawImage(video, 0, 0)
+        holdingFrame.current = true; setFrozen(true)
+      } catch { /* the capturer may already have released its final frame */ }
+    }
+    const recoverNativePlayer = (): void => {
+      if (sourceLabel === 'Keynote' && !captureRetired()) window.api.sendToControl('keynote-capture-lost', { sourceId })
+    }
     const recoverEndedCapture = (): void => {
       if (disposed) return
+      if (sourceLabel === 'Keynote' && captureRetired()) return
+      holdLastFrame()
       setSignalLost(true)
       if (sourceLabel !== 'Keynote' || captureRetired()) return
       const now = Date.now()
@@ -81,6 +100,7 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
       }
       if (recovery.current.attempts >= 3) return
       const attempt = ++recovery.current.attempts
+      recoverNativePlayer()
       window.api.dbgLog(`Keynote capture ended; reconnect source=${sourceId} attempt=${attempt}`)
       recoveryTimer = window.setTimeout(() => {
         if (!disposed && !captureRetired()) setCaptureRevision(value => value + 1)
@@ -100,8 +120,10 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
       if (disposed || ready) return
       if (!everReady.current) onErrorRef.current(String(error))
       else {
+        holdLastFrame()
         setSignalLost(true)
         window.api.dbgLog(`Keynote live capture reconnect failed: ${String(error)}`)
+        recoverNativePlayer()
       }
     }
     const firstFrame = (): void => {
@@ -109,6 +131,7 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
       setSourceSize({ width: video.videoWidth, height: video.videoHeight })
       setSignalLost(false)
       everReady.current = true
+      holdingFrame.current = false; setFrozen(false)
       ready = true
       requestAnimationFrame(() => requestAnimationFrame(() => {
         if (!disposed) onReadyRef.current()
@@ -210,5 +233,6 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
     muted
     className="h-full w-full object-contain bg-black select-none"
     style={cropStyle}
-  /></div></div>
+  /><canvas ref={freezeRef} className="absolute inset-0 h-full w-full object-contain pointer-events-none"
+    style={{ ...cropStyle, display: frozen ? 'block' : 'none' }} /></div></div>
 }

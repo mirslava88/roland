@@ -3736,6 +3736,7 @@ function createWindows(): void {
   ipcMain.on('send-to-control', (event, channel: string, ...args: unknown[]) => {
     const presentationChannels = new Set([
       'presentation-content-ready', 'presentation-content-committed', 'keynote-capture-quality', 'keynote-capture-started',
+      ...(process.platform === 'darwin' ? ['keynote-capture-lost'] : []),
       'presentation-content-prepared', 'presentation-content-error',
       'pdf-channel-cache-status', 'presentation-content-suspended',
       'presentation-content-cleared', 'program-scene-applied',
@@ -3767,6 +3768,11 @@ function createWindows(): void {
     if (trustedPresentation && channel === 'keynote-capture-started') {
       const sourceId = (args[0] as { sourceId?: string } | undefined)?.sourceId
       if (sourceId?.startsWith('window:')) void macPowerPoint.refreshCapture(sourceId)
+      return
+    }
+    if (trustedPresentation && process.platform === 'darwin' && channel === 'keynote-capture-lost') {
+      const sourceId = (args[0] as { sourceId?: unknown } | undefined)?.sourceId
+      if (typeof sourceId === 'string' && /^window:\d+:0$/.test(sourceId)) void macPowerPoint.recoverCapture(sourceId)
       return
     }
 

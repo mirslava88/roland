@@ -49,6 +49,128 @@ const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{r
   return{pool,paths,calls,statuses,warm,retired,gates,runtime,setSize(w,h){width=w;height=h},rebind(){rebind=true},get spawns(){return spawns}}
  }
  try{
+ await test('STOP after Keynote exit succeeds so a painted video/PDF can stay on air',async()=>{
+  const s=await fixture('stop-after-exit')
+  try {
+   await s.pool.take(s.paths[0],1,7)
+   const source='window:'+s.pool.current.windowId+':0',command=s.runtime.command
+   s.runtime.processes=async()=>[]
+   s.runtime.command=async(pid,action,...args)=>{if(action==='stop')throw Error('Keynote process has exited');return command(pid,action,...args)}
+   await s.pool.stop()
+   assert.equal(s.pool.current,null)
+   assert.ok(s.retired.includes(source))
+   assert.equal(s.pool.engines.some(engine=>engine.show),false)
+  }finally{await s.pool.shutdown()}
+ })
+ await test('a real STOP failure in a surviving process remains an error',async()=>{
+  const s=await fixture('stop-alive-error')
+  try {
+   await s.pool.take(s.paths[0],1,7)
+   const command=s.runtime.command
+   s.runtime.command=async(pid,action,...args)=>{if(action==='stop')throw Error('Apple event denied');return command(pid,action,...args)}
+   await assert.rejects(s.pool.stop(),/Apple event denied/)
+  }finally{await s.pool.shutdown()}
+ })
+ await test('unexpected exit restores the active slide/build once and navigation resumes',async()=>{
+  const s=await fixture('recover-exit'),alive=new Set([100]);let next=100
+  const command=s.runtime.command
+  s.runtime.processes=async()=>[...alive]
+  s.runtime.spawn=async()=>{alive.add(++next);return next}
+  s.runtime.command=async(pid,action,...args)=>{if(!alive.has(pid))throw Error('Keynote process has exited');return command(pid,action,...args)}
+  try {
+   await s.pool.take(s.paths[0],1,7);await s.pool.command('next');await s.pool.command('next')
+   const old=s.pool.current,imports=s.calls.filter(c=>c.action==='import').length
+   alive.clear()
+   const recovery=s.pool.recover('window:'+old.windowId+':0')
+   assert.equal(s.pool.recover('window:'+old.windowId+':0'),recovery,'duplicate renderer signals share one restore')
+   const restored=await recovery
+   assert.ok(restored);assert.notEqual(restored.windowId,old.windowId)
+   assert.equal(restored.slide,2);assert.equal(restored.lastSlideClicks,1)
+   assert.equal(s.calls.filter(c=>c.action==='import').length,imports+1,'dead-process document IDs must not be reused')
+   assert.ok(s.retired.includes('window:'+old.windowId+':0'))
+   await s.pool.command('next');assert.equal(s.pool.current.lastSlideClicks,2)
+   const fresh=s.pool.current
+   assert.equal(await s.pool.recover('window:'+old.windowId+':0'),null,'a stale ended event cannot restart a new player')
+   assert.equal(s.pool.current,fresh)
+   await s.pool.stop()
+   assert.equal(await s.pool.recover('window:'+fresh.windowId+':0'),null,'STOP must never resurrect the deck')
+  }finally{await s.pool.shutdown()}
+ })
+ await test('STOP during recovery import takes effect immediately and the late import cannot start playback',async()=>{
+  const s=await fixture('cancel-recovery'),alive=new Set([100]);let next=100
+  const command=s.runtime.command
+  s.runtime.processes=async()=>[...alive];s.runtime.spawn=async()=>{alive.add(++next);return next}
+  s.runtime.command=async(pid,action,...args)=>{if(!alive.has(pid))throw Error('Keynote process has exited');return command(pid,action,...args)}
+  let recovery,entered=deferred(),leave=deferred()
+  try {
+   await s.pool.take(s.paths[0],1,7)
+   const old=s.pool.current,starts=s.calls.filter(c=>c.action==='start').length
+   alive.clear()
+   const original=s.runtime.command
+   s.runtime.command=async(pid,action,...args)=>{if(action==='import'){entered.resolve();await leave.promise}return original(pid,action,...args)}
+   recovery=s.pool.recover('window:'+old.windowId+':0');await entered.promise
+   await Promise.race([s.pool.stop(),new Promise((_,reject)=>setTimeout(()=>reject(Error('STOP waited for cold recovery import')),300))])
+   assert.equal(s.pool.current,null)
+   leave.resolve();assert.equal(await recovery,null)
+   assert.equal(s.calls.filter(c=>c.action==='start').length,starts,'late recovery must not start media after STOP')
+  }finally{leave.resolve();await recovery?.catch(()=>undefined);await s.pool.shutdown()}
+ })
+ await test('healthy captures are not restarted, and repeated crashes have a bounded automatic budget',async()=>{
+  const s=await fixture('recovery-budget'),alive=new Set([100]);let next=100
+  const command=s.runtime.command
+  s.runtime.processes=async()=>[...alive];s.runtime.spawn=async()=>{alive.add(++next);return next}
+  s.runtime.command=async(pid,action,...args)=>{if(!alive.has(pid))throw Error('Keynote process has exited');return command(pid,action,...args)}
+  try {
+   await s.pool.take(s.paths[0],1,7)
+   const old=s.pool.current
+   assert.equal(await s.pool.recover('window:'+old.windowId+':0'),null)
+   assert.equal(s.pool.current,old,'a capturer-only interruption must keep the live player')
+   for(let i=0;i<2;i++){const previous=s.pool.current;alive.clear();assert.ok(await s.pool.recover('window:'+previous.windowId+':0'))}
+   const last=s.pool.current;alive.clear()
+   await assert.rejects(s.pool.recover('window:'+last.windowId+':0'),/повторно завершился/)
+   assert.equal(next,103,'automatic recovery must not launch Keynote in a crash loop')
+  }finally{await s.pool.shutdown()}
+ })
+ await test('switching PPTX after both players exit does not fail while closing the previous deck',async()=>{
+  const s=await fixture('take-after-both-exit'),alive=new Set([100]);let next=100
+  const command=s.runtime.command
+  s.runtime.processes=async()=>[...alive];s.runtime.spawn=async()=>{alive.add(++next);return next}
+  s.runtime.command=async(pid,action,...args)=>{if(!alive.has(pid))throw Error('Keynote process has exited');return command(pid,action,...args)}
+  try {
+   await s.pool.take(s.paths[0],1,7);await s.pool.prewarm(s.paths[1],7,true)
+   alive.clear()
+   const show=await s.pool.take(s.paths[1],1,7)
+   assert.equal(show.path,s.paths[1]);assert.equal(s.pool.current,show)
+  }finally{await s.pool.shutdown()}
+ })
+ await test('STOP during restored-player registration cannot publish the restarted deck',async()=>{
+  const s=await fixture('cancel-recovery-stage'),alive=new Set([100]);let next=100
+  const command=s.runtime.command
+  s.runtime.processes=async()=>[...alive];s.runtime.spawn=async()=>{alive.add(++next);return next}
+  s.runtime.command=async(pid,action,...args)=>{if(!alive.has(pid))throw Error('Keynote process has exited');return command(pid,action,...args)}
+  const entered=deferred(),leave=deferred();let recovery,stop
+  try {
+   await s.pool.take(s.paths[0],1,7);const previous=s.pool.current;alive.clear()
+   s.pool.options.warm=async()=>{entered.resolve();await leave.promise}
+   recovery=s.pool.recover('window:'+previous.windowId+':0');await entered.promise
+   stop=s.pool.stop();leave.resolve()
+   assert.equal(await recovery,null);await stop
+   assert.equal(s.pool.current,null)
+   assert.equal(s.pool.engines.some(e=>e.show),false)
+  }finally{leave.resolve();await recovery?.catch(()=>undefined);await stop?.catch(()=>undefined);await s.pool.shutdown()}
+ })
+ await test('STOP during a healthy player refresh still stops native playback',async()=>{
+  const s=await fixture('stop-during-healthy-refresh'),entered=deferred(),leave=deferred()
+  let recovery,stop
+  try {
+   await s.pool.take(s.paths[0],1,7);const previous=s.pool.current,command=s.runtime.command
+   s.runtime.command=async(pid,action,...args)=>{if(action==='refresh'){entered.resolve();await leave.promise}return command(pid,action,...args)}
+   recovery=s.pool.recover('window:'+previous.windowId+':0');await entered.promise
+   stop=s.pool.stop();leave.resolve();await recovery;await stop
+   assert.equal(s.pool.current,null)
+   assert.ok(s.calls.some(call=>call.action==='stop'&&call.args[0]===previous.documentId),'a healthy native player must actually stop, including its audio')
+  }finally{leave.resolve();await recovery?.catch(()=>undefined);await stop?.catch(()=>undefined);await s.pool.shutdown()}
+ })
  await test('all background channels finish automatically, retain readiness, and preserve live and selected players',async()=>{
   const s=await fixture('all-channels'),[a,b,media,c]=s.paths
   try{
