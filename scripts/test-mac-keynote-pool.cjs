@@ -171,6 +171,36 @@ const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{r
    assert.ok(s.calls.some(call=>call.action==='stop'&&call.args[0]===previous.documentId),'a healthy native player must actually stop, including its audio')
   }finally{leave.resolve();await recovery?.catch(()=>undefined);await stop?.catch(()=>undefined);await s.pool.shutdown()}
  })
+ await test('first-frame refresh waits for native completion and rejects retired sources',async()=>{
+  const s=await fixture('first-frame-refresh'),entered=deferred(),leave=deferred()
+  let refresh
+  try {
+   await s.pool.take(s.paths[0],1,7)
+   const id='window:'+s.pool.current.windowId+':0',command=s.runtime.command
+   s.runtime.command=async(pid,action,...args)=>{if(action==='refresh'){entered.resolve();await leave.promise}return command(pid,action,...args)}
+   let completed=false
+   refresh=s.pool.refresh(id).then(()=>{completed=true})
+   await entered.promise
+   assert.equal(completed,false,'do not acknowledge a static capture before native bounds settle')
+   leave.resolve();await refresh;assert.equal(completed,true)
+   await s.pool.stop()
+   await assert.rejects(s.pool.refresh(id),/no longer available/)
+  }finally{leave.resolve();await refresh?.catch(()=>undefined);await s.pool.shutdown()}
+ })
+ await test('queued refresh cannot redraw a replacement player or acknowledge its old source',async()=>{
+  const s=await fixture('stale-first-frame-refresh'),entered=deferred(),leave=deferred()
+  let blocked,refresh
+  try {
+   await s.pool.take(s.paths[0],1,7)
+   const old=s.pool.current,engine=s.pool.engines.find(e=>e.show===old)
+   blocked=engine.queue.run(async()=>{entered.resolve();await leave.promise;engine.show={...old,windowId:old.windowId+100}})
+   await entered.promise
+   refresh=s.pool.refresh('window:'+old.windowId+':0')
+   const rejected=assert.rejects(refresh,/capture has changed/)
+   leave.resolve();await blocked;await rejected
+   assert.equal(s.calls.some(call=>call.action==='refresh'),false,'a stale capture cannot resize the next presentation')
+  }finally{leave.resolve();await blocked?.catch(()=>undefined);await refresh?.catch(()=>undefined);await s.pool.shutdown()}
+ })
  await test('all background channels finish automatically, retain readiness, and preserve live and selected players',async()=>{
   const s=await fixture('all-channels'),[a,b,media,c]=s.paths
   try{

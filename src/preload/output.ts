@@ -7,6 +7,7 @@ const INBOUND_CHANNELS = new Set([
   'keynote-capture-update',
   'keynote-source-prewarm',
   'keynote-source-retire',
+  ...(process.platform === 'darwin' ? ['keynote-capture-refreshed'] : []),
   'document-capture-update',
   'stop',
   'capture-audio-live',

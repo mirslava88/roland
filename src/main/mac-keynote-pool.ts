@@ -477,7 +477,15 @@ export class MacKeynotePool {
   }
   async refresh(sourceId:string):Promise<void> {
     const engine=this.engines.find(item=>item.show&&`window:${item.show.windowId}:0`===sourceId)
-    if(engine?.show)await engine.queue.run(()=>this.runtime.command(engine.pid,'refresh',engine.show!.windowId)).then(()=>undefined)
+    const windowId=engine?.show?.windowId
+    if(!engine||!windowId)throw new Error('Keynote capture is no longer available')
+    await engine.queue.run(async()=>{
+      // A TAKE/STOP can replace the player while this request waits behind
+      // navigation. Never refresh the next deck or acknowledge the old one.
+      if(engine.show?.windowId!==windowId)throw new Error('Keynote capture has changed')
+      await this.runtime.command(engine.pid,'refresh',windowId)
+      if(engine.show?.windowId!==windowId)throw new Error('Keynote capture has changed')
+    })
   }
   recover(sourceId:string):Promise<KeynoteShow|null> {
     if(this.closed)return Promise.resolve(null)

@@ -74,6 +74,10 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
     let frameCallback = 0
     let recoveryTimer: number | undefined
     let ready = false
+    let playbackStarted = false
+    const needsNativeRefresh = sourceLabel === 'Keynote' && window.api.platform === 'darwin'
+    const refreshRequestId = needsNativeRefresh ? crypto.randomUUID() : undefined
+    let refreshComplete = !needsNativeRefresh
     const holdLastFrame = (): void => {
       const canvas = freezeRef.current
       if (holdingFrame.current || !canvas || video.videoWidth < 16 || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
@@ -127,16 +131,29 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
       }
     }
     const firstFrame = (): void => {
-      if (disposed || ready || video.videoWidth < 16 || video.videoHeight < 16) return
+      if (disposed || ready || !refreshComplete || (needsNativeRefresh && !playbackStarted) || video.videoWidth < 16 || video.videoHeight < 16 ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
       setSourceSize({ width: video.videoWidth, height: video.videoHeight })
       setSignalLost(false)
       everReady.current = true
       holdingFrame.current = false; setFrozen(false)
       ready = true
+      if (needsNativeRefresh) window.api.dbgLog(`Keynote first frame ready after native redraw source=${sourceId}`)
       requestAnimationFrame(() => requestAnimationFrame(() => {
         if (!disposed) onReadyRef.current()
       }))
     }
+    // The native refresh resizes the player twice to make a static slide
+    // repaint. Its intermediate frame must stay behind the transition cover.
+    // Static captures may not emit another frame after the completion ACK;
+    // use their already-painted current frame once geometry has settled.
+    const offRefreshed = needsNativeRefresh ? window.api.on('keynote-capture-refreshed', (...args: unknown[]) => {
+      const result = args[0] as { sourceId?: string; requestId?: string; success?: boolean; error?: string } | undefined
+      if (disposed || result?.sourceId !== sourceId || result.requestId !== refreshRequestId) return
+      if (!result.success) { fail(result.error || 'Keynote не закончил перерисовку первого кадра'); return }
+      refreshComplete = true
+      firstFrame()
+    }) : undefined
     const open = async (): Promise<void> => {
       try {
         const constraints = {
@@ -176,8 +193,10 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
           }
         }
         video.srcObject = stream
-        if (sourceLabel === 'Keynote') window.api.sendToControl('keynote-capture-started', { sourceId })
+        if (sourceLabel === 'Keynote') window.api.sendToControl('keynote-capture-started', { sourceId,
+          ...(refreshRequestId ? { requestId: refreshRequestId } : {}) })
         await video.play()
+        playbackStarted = true
         // play() resolves after the first frame is available. A static slide
         // may never produce another frame, so registering a frame callback
         // only now can wait forever even though the slide is ready to show.
@@ -194,6 +213,7 @@ export function KeynoteLiveViewer({ sourceId, onReady, onError, roundedContent =
     const timeout = window.setTimeout(() => fail(`${sourceLabel} не передал кадр за 8 секунд`), 8_000)
     return () => {
       disposed = true
+      offRefreshed?.()
       if (recoveryTimer) clearTimeout(recoveryTimer)
       clearTimeout(timeout)
       video.removeEventListener('loadeddata', firstFrame)

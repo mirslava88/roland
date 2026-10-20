@@ -165,6 +165,7 @@ export function createPresentationWindow(display: Display): BrowserWindow {
     useContentSize: true,
     fullscreen: false,
     frame: false,
+    ...(process.platform === 'darwin' ? { roundedCorners: false, hasShadow: false } : {}),
     // Electron enables WS_THICKFRAME for frameless Windows windows by
     // default. During a display hot-plug Windows can briefly restore that
     // invisible resize border and shrink the client surface by 1–2 pixels.
@@ -268,6 +269,7 @@ export function createOverlayWindow(display?: Display): BrowserWindow {
     width,
     height,
     frame: false,
+    ...(process.platform === 'darwin' ? { roundedCorners: false, hasShadow: false } : {}),
     transparent: false,
     backgroundColor: '#000000',
     alwaysOnTop: true,

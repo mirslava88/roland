@@ -2221,7 +2221,8 @@ function createWindows(): void {
     const wasVisible = targetOverlay.isVisible()
     const keepOpaque = prevOpacity >= 1
     console.log(`[MAIN ${Date.now()}] show-overlay: before setBounds prevOpacity=${prevOpacity} wasVisible=${wasVisible} freshlyCreated=${freshlyCreated} keepOpaque=${keepOpaque}`)
-    targetOverlay.setBounds(targetDisplay!.bounds)
+    if (process.platform === 'darwin') positionPresentationWindow(targetOverlay, targetDisplay)
+    else targetOverlay.setBounds(targetDisplay.bounds)
     if (!keepOpaque) {
       targetOverlay.setOpacity(0)
       if (!targetOverlay.isVisible()) targetOverlay.showInactive()
@@ -3322,7 +3323,8 @@ function createWindows(): void {
       label: string
     ): void => {
       if (!win || win.isDestroyed() || !target) return
-      const useExactContentBounds = label === 'presentation output'
+      const useExactContentBounds = label === 'presentation output' ||
+        (process.platform === 'darwin' && label === 'transition overlay')
       const previous = useExactContentBounds ? win.getContentBounds() : win.getBounds()
       const next = target.bounds
       const changed = previous.x !== next.x || previous.y !== next.y ||
@@ -3766,8 +3768,18 @@ function createWindows(): void {
       return
     }
     if (trustedPresentation && channel === 'keynote-capture-started') {
-      const sourceId = (args[0] as { sourceId?: string } | undefined)?.sourceId
-      if (sourceId?.startsWith('window:')) void macPowerPoint.refreshCapture(sourceId)
+      const request = args[0] as { sourceId?: unknown; requestId?: unknown } | undefined
+      const sourceId = request?.sourceId
+      if (process.platform === 'darwin' && typeof sourceId === 'string' && /^window:\d+:0$/.test(sourceId)) {
+        const requestId = typeof request?.requestId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(request.requestId)
+          ? request.requestId : undefined
+        void macPowerPoint.refreshCapture(sourceId).then(result => {
+          diagnosticLog('keynote-frame', `native redraw complete source=${sourceId} success=${result.success}`)
+          if (requestId && !event.sender.isDestroyed()) event.sender.send('keynote-capture-refreshed', {
+            sourceId, requestId, success: result.success, error: result.error
+          })
+        })
+      }
       return
     }
     if (trustedPresentation && process.platform === 'darwin' && channel === 'keynote-capture-lost') {
