@@ -19,6 +19,7 @@ import { ProgramSceneBridge } from './components/ProgramScene/ProgramSceneBridge
 import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
 import { InternalProgramOutputBridge } from './components/ProgramScene/InternalProgramOutputBridge'
 import { Introduction } from './components/Onboarding/Introduction'
+import { MacSetupGate, isMacSetupOpen } from './components/Onboarding/MacSetupGate'
 import { isIntroductionOpen } from './components/Onboarding/training-model'
 import type { VirtualCameraStatus } from '../../shared/virtual-camera'
 
@@ -204,7 +205,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
 
     let macSlideReconcileRevision = 0
     const navigateSlide = async (direction: 'next' | 'prev'): Promise<void> => {
-      if (isIntroductionOpen()) return
+      if (isIntroductionOpen() || isMacSetupOpen()) return
       if (queueNavigationDuringTransition(direction)) return
 
       const {
@@ -320,7 +321,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
     }
 
     const flushQueuedNavigation = (event: Event): void => {
-      if (isIntroductionOpen()) return
+      if (isIntroductionOpen() || isMacSetupOpen()) return
       const requests = (event as CustomEvent<NavigationRequest[]>).detail || []
       void (async () => {
         window.api.dbgLog(`App: flushing queued navigation count=${requests.length}`)
@@ -384,5 +385,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       </div>
     </div>
   )
-  return training ? workspace : <Introduction>{workspace}</Introduction>
+  return training ? workspace : window.api.platform === 'darwin'
+    ? <MacSetupGate><Introduction>{workspace}</Introduction></MacSetupGate>
+    : <Introduction>{workspace}</Introduction>
 }

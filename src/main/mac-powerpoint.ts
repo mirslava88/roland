@@ -1,11 +1,8 @@
 import { app, desktopCapturer, screen, systemPreferences, webContents } from 'electron'
-import { ChildProcess, execFile, spawn } from 'child_process'
-import { existsSync } from 'fs'
+import { ChildProcess, spawn } from 'child_process'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
-import { homedir } from 'os'
 import { createInterface } from 'readline'
-import { promisify } from 'util'
 import type { DaemonResponse } from './powerpoint-daemon'
 import { inspectMacPptxAnimations, type MacPptxAnimationInfo } from './mac-pptx-animation'
 import { planPresentationCapture, type PresentationCaptureProfile } from '../shared/presentation-output'
@@ -13,9 +10,8 @@ import { diagnosticLog } from './diagnostic-log'
 import { matchesRendererPage } from './renderer-security'
 import { isMacRenderDisplay, macRenderDisplay } from './mac-render-display'
 import { MacKeynotePool, type KeynoteShow } from './mac-keynote-pool'
-import { keynoteNative } from './mac-native-office'
+import { macPresentationSupport, requireMacKeynote } from './mac-setup'
 
-const execFileAsync = promisify(execFile)
 const keynoteBackdrop = (): string => app.isPackaged
   ? join(process.resourcesPath, 'mac-keynote-backdrop')
   : join(__dirname, '../../build/mac-keynote-backdrop')
@@ -225,7 +221,8 @@ function renderPdf(
 export const macPowerPoint = {
   captureProfile(): PresentationCaptureProfile | null { return pool?.current?.captureProfile ?? null },
   retainPrepared(paths: string[]): void { playerPool().retain(paths) },
-  prewarm(path: string, displayId?: number, preferred = false): Promise<{slideCount?: number}> {
+  async prewarm(path: string, displayId?: number, preferred = false): Promise<{slideCount?: number}> {
+    await requireMacKeynote()
     return playerPool().prewarm(path, displayId, preferred)
   },
   async prewarmAnimated(path: string): Promise<MacPptxAnimationInfo> {
@@ -234,20 +231,12 @@ export const macPowerPoint = {
     return info
   },
   async installed(): Promise<boolean> {
-    try { await keynoteNative(0, 'application'); return true }
-    catch { /* PowerPoint can still provide static previews. */ }
-    for (const name of ['Microsoft PowerPoint']) {
-      if (existsSync(`/Applications/${name}.app`) || existsSync(join(homedir(), `Applications/${name}.app`))) return true
-    }
-    for (const name of ['Microsoft PowerPoint']) {
-      try { await execFileAsync('/usr/bin/open', ['-Ra', name], { timeout: 5000 }); return true }
-      catch { /* try the other installed engine */ }
-    }
-    return false
+    return (await macPresentationSupport()).installed
   },
 
   async prepare(path: string): Promise<DaemonResponse> {
     try {
+      await requireMacKeynote()
       let result: { slideCount: number; slideWidth: number; slideHeight: number } | null = null
       await exportPdf(path, async (pdf) => { result = await renderPdf('metadata', pdf) })
       return { id: 0, ok: true, ...result! }
@@ -257,6 +246,7 @@ export const macPowerPoint = {
   async export(path: string, outputDir: string, width: number, height: number,
     onEvent: (event: DaemonResponse) => void, signal?: AbortSignal): Promise<DaemonResponse> {
     try {
+      await requireMacKeynote()
       let result: { slideCount: number; slideWidth: number; slideHeight: number } | null = null
       await exportPdf(path, async (pdf) => {
         signal?.throwIfAborted()
@@ -270,6 +260,7 @@ export const macPowerPoint = {
   async launch(path: string, startSlide: number,
     _bounds: { x: number; y: number; width: number; height: number }, displayId: number, internalOutput = false) {
     try {
+      await requireMacKeynote()
       const captureError = await keynoteCaptureError()
       if (captureError) return { success: false, error: captureError, safeToUncover: true }
       const show = await playerPool().take(path, startSlide, displayId)

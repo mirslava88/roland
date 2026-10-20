@@ -53,6 +53,7 @@ export function Introduction({ children }: { children: ReactNode }): JSX.Element
     const previous = document.activeElement as HTMLElement | null
     dialogRef.current?.focus()
     const trap = (event: KeyboardEvent): void => {
+      if (window.api.platform === 'darwin' && document.querySelector('[data-mac-setup-dialog]')) return
       if (event.key === 'Escape') { event.preventDefault(); close(mode === 'training' ? 'paused' : 'skipped') }
       if (event.key === 'Tab' && mode === 'welcome') {
         const buttons = Array.from(dialogRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])

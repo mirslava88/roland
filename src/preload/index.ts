@@ -7,6 +7,7 @@ import type {
   DirectStreamDeckStatus
 } from '../shared/direct-stream-deck'
 import type { VirtualCameraApi } from '../shared/virtual-camera'
+import type { MacSetupApi, MacPrivacyPermission } from '../shared/mac-setup'
 
 interface DriveInfo {
   name: string
@@ -31,6 +32,14 @@ interface MusicState {
 
 const api = {
   platform: process.platform,
+  ...(process.platform === 'darwin' ? { macSetup: {
+    permissions: () => ipcRenderer.invoke('mac-setup-permissions'),
+    openPrivacy: (permission: MacPrivacyPermission) => ipcRenderer.invoke('mac-setup-open-privacy', permission),
+    presentationSupport: () => ipcRenderer.invoke('mac-setup-presentation-support'),
+    openKeynoteDownload: () => ipcRenderer.invoke('mac-setup-keynote-download'),
+    showApplication: () => ipcRenderer.invoke('mac-setup-show-application'),
+    restart: () => ipcRenderer.invoke('mac-setup-restart')
+  } satisfies MacSetupApi } : {}),
   ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   virtualCamera: {

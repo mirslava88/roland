@@ -1,0 +1,26 @@
+.mac-setup-workspace { height: 100%; }
+.mac-setup-backdrop { position: fixed; inset: 0; z-index: 2147483100; display: grid; place-items: center; padding: 18px; background: #040b14df; color: #edf4fb; color-scheme: dark; backdrop-filter: blur(6px); -webkit-app-region: no-drag; }
+.mac-setup-dialog { position: relative; width: min(720px, 100%); padding: 25px; border: 1px solid #35526a; border-radius: 16px; background: #101e2c; box-shadow: 0 22px 80px #0008; outline: none; font: 13px/1.45 system-ui, sans-serif; }
+.mac-setup-dialog h1 { margin: 5px 0 10px; font-size: 25px; font-weight: 700; }
+.mac-setup-dialog p { margin: 6px 0; color: #aebfcf; }
+.mac-setup-label { font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: #7aceff; }
+.mac-setup-dialog button { cursor: pointer; border: 1px solid #3b5d76; border-radius: 7px; padding: 8px 11px; color: #e6f3fd; background: #1d3548; font: inherit; }
+.mac-setup-dialog button:hover { background: #284c67; }
+.mac-setup-dialog button:focus-visible { outline: 2px solid #7aceff; outline-offset: 2px; }
+.mac-setup-dialog button:disabled { opacity: .6; cursor: wait; }
+.mac-setup-dialog .mac-setup-close { position: absolute; right: 12px; top: 8px; border: 0; padding: 4px 9px; background: transparent; color: #98adbf; font-size: 24px; }
+.mac-setup-permissions { display: grid; gap: 9px; margin: 17px 0; }
+.mac-setup-permissions section { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px; border: 1px solid #314d62; border-radius: 10px; background: #152a3a; }
+.mac-setup-permissions strong { display: flex; gap: 8px; align-items: center; }
+.mac-setup-permissions p { margin-bottom: 0; font-size: 12px; }
+.mac-setup-permissions button { flex-shrink: 0; font-size: 12px; }
+.mac-setup-ok { color: #52dca3; }
+.mac-setup-missing { color: #ffcb74; }
+.mac-setup-hint { padding: 11px 13px; border-radius: 9px; background: #091725; font-size: 12px; }
+.mac-setup-hint button { border: 0; padding: 0; color: #7aceff; background: transparent; text-decoration: underline; }
+.mac-setup-app { padding: 12px 14px; margin-top: 12px; border: 1px solid #8c643b; border-radius: 9px; background: #3a2d1c; }
+.mac-setup-app button { padding: 6px 10px; margin-top: 5px; font-size: 12px; }
+.mac-setup-dialog footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 17px; }
+.mac-setup-dialog .mac-setup-primary { background: #0972bd; border-color: #3eaffb; }
+.mac-setup-dialog .mac-setup-error { color: #ffaaaa; font-size: 12px; }
+@media (max-height: 750px) { .mac-setup-dialog { padding: 17px 22px; font-size: 12px; } .mac-setup-dialog h1 { font-size: 22px; margin-bottom: 7px; } .mac-setup-permissions { margin: 11px 0; gap: 7px; } .mac-setup-permissions section { padding: 9px 11px; } .mac-setup-dialog footer { margin-top: 12px; } }

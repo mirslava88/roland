@@ -196,6 +196,7 @@ interface DriveInfo {
 
 interface Api {
   platform: NodeJS.Platform
+  macSetup?: import('../../shared/mac-setup').MacSetupApi
   virtualCamera: import('../../shared/virtual-camera').VirtualCameraApi
   listDirectStreamDecks(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckDeviceInfo[]>
   getDirectStreamDeckStatus(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>

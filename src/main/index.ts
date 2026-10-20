@@ -25,6 +25,7 @@ import { macPowerPoint } from './mac-powerpoint'
 import { isMacRenderDisplay, macRenderDisplay } from './mac-render-display'
 import { setMacSimpleFullscreen } from './mac-desktop-ui'
 import { hardenMacReleaseRuntime } from './mac-release-security'
+import { macPermissionStatus, openMacPrivacy, macPresentationSupport, openKeynoteDownload, showMacApplication } from './mac-setup'
 import { StreamingManager } from './streaming'
 import { VirtualCameraManager } from './virtual-camera'
 import { MacVirtualCameraManager } from './mac-virtual-camera'
@@ -1288,6 +1289,14 @@ function createWindows(): void {
       }
       return handler(event, ...args)
     })
+  }
+  if (process.platform === 'darwin') {
+    handleControl('mac-setup-permissions', () => macPermissionStatus())
+    handleControl('mac-setup-open-privacy', (_event, permission: unknown) => openMacPrivacy(permission))
+    handleControl('mac-setup-presentation-support', () => macPresentationSupport())
+    handleControl('mac-setup-keynote-download', () => openKeynoteDownload())
+    handleControl('mac-setup-show-application', () => showMacApplication())
+    handleControl('mac-setup-restart', () => { app.relaunch(); app.quit() })
   }
   handleControl('toggle-control-fullscreen', (): boolean => {
     if (process.platform !== 'darwin' || !controlWindow || controlWindow.isDestroyed()) return false

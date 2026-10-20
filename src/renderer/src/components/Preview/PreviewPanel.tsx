@@ -38,6 +38,7 @@ import { acquireOutputTransition } from '../../output-transition-lock'
 import { DEFAULT_CONTENT_ZOOM } from '../../../../shared/content-zoom'
 import { hasQrData } from '../../../../shared/qr-overlay'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
+import { requireMacPresentationSupport } from '../../mac-presentation-support'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -834,9 +835,14 @@ export function PreviewPanel(): JSX.Element {
     ch: ChannelId,
     options: { videoAutoplay?: boolean; nativeRecovery?: boolean } = {}
   ): Promise<boolean> => {
-    const freshState = useAppStore.getState()
+    let freshState = useAppStore.getState()
     const file = freshState.channels[ch]?.file
     if (!file) return false
+    if (window.api.platform === 'darwin' && file.type === 'presentation') {
+      if (!await requireMacPresentationSupport()) return false
+      freshState = useAppStore.getState()
+      if (useAppStore.getState().channels[ch]?.file?.path !== file.path) return false
+    }
     const nativeMacPptx = window.api.platform === 'darwin'
     if (file.type === 'presentation' && !nativeMacPptx && !canStartPptx(
       freshState.pptxCacheStatuses[file.path], freshState.pptxSlidesMap[file.path] || [],
