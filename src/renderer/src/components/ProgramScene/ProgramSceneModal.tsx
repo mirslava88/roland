@@ -899,7 +899,11 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
     try {
       const previousSnapshot = useAppStore.getState().programSnapshot
       setProgramScene({
-        ...(enableScene ? { enabled: true, viewMode: 'both' as const } : {}),
+        ...(enableScene ? { enabled: true, viewMode: 'both' as const }
+          // Removing a camera can disable the editable config while its
+          // published snapshot is still on air. Refresh must be able to
+          // publish that camera-free draft instead of silently aborting.
+          : window.api.platform === 'darwin' && previousSnapshot ? { enabled: true } : {}),
         contentChannelId: previewChannelId,
         textOverlays: textOverlayDraft,
         mediaLayers: mediaLayerDraft,

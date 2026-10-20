@@ -5,6 +5,7 @@ import { acquireOutputTransition } from '../../output-transition-lock'
 import { PROGRAM_SCENE_TRANSITION_DURATION_MS } from '../../../../shared/program-scene'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
 import { shouldRenderTimerInProgramRenderer, shouldShowTimerOnProgram } from '../../timer-controls'
+import { useMacSceneCameraRelease } from './useMacSceneCameraRelease'
 
 const OFFICE_PROGRAM_EXTENSIONS = new Set(['.doc', '.docx', '.rtf', '.odt', '.xls', '.xlsx', '.ods'])
 
@@ -202,6 +203,8 @@ export function ProgramSceneBridge(): null {
   useEffect(() => {
     sendState()
   }, [sendState])
+
+  useMacSceneCameraRelease()
 
   useEffect(() => window.api.on('program-scene-ready', () => sendState(true)), [sendState])
 
