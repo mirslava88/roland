@@ -55,6 +55,22 @@ public class WinMgr {
     public static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    // Electron sends physical display coordinates. GetWindowRect from an
+    // ordinary PowerShell helper is DPI-virtualized on a scaled operator
+    // monitor, so the secondary taskbar can appear to intersect that monitor.
+    public static bool GetPhysicalWindowRect(IntPtr hWnd, out RECT rect) {
+        IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+        if (previous == IntPtr.Zero) {
+            rect = new RECT();
+            return false;
+        }
+        try { return GetWindowRect(hWnd, out rect); }
+        finally { SetThreadDpiAwarenessContext(previous); }
+    }
+
+    [DllImport("user32.dll")]
     public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
 
     [DllImport("user32.dll")]
@@ -1141,7 +1157,9 @@ switch ($Action) {
         $taskbars = [WinMgr]::FindTaskbars()
         foreach ($tb in $taskbars) {
             $rect = New-Object WinMgr+RECT
-            [WinMgr]::GetWindowRect($tb, [ref]$rect) | Out-Null
+            if (-not [WinMgr]::GetPhysicalWindowRect($tb, [ref]$rect)) {
+                throw 'Physical taskbar bounds could not be read'
+            }
             $className = New-Object System.Text.StringBuilder -ArgumentList 256
             [WinMgr]::GetClassName($tb, $className, $className.Capacity) | Out-Null
             $isMainTaskbar = $className.ToString() -eq "Shell_TrayWnd"
@@ -1178,7 +1196,9 @@ switch ($Action) {
         $taskbars = [WinMgr]::FindTaskbars()
         foreach ($tb in $taskbars) {
             $rect = New-Object WinMgr+RECT
-            [WinMgr]::GetWindowRect($tb, [ref]$rect) | Out-Null
+            if (-not [WinMgr]::GetPhysicalWindowRect($tb, [ref]$rect)) {
+                throw 'Physical taskbar bounds could not be read'
+            }
             $intersectsDisplay = (
                 $rect.Right -gt $X -and
                 $rect.Left -lt ($X + $Width) -and

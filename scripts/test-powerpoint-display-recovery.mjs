@@ -23,6 +23,31 @@ const auxiliaryMetricsPlacement = main.slice(
   main.indexOf('const auxiliaryPlacements ='),
   main.indexOf('if (timerActive)', main.indexOf('const auxiliaryPlacements ='))
 )
+const [windowHelper, taskbarManager] = await Promise.all([
+  readFile(new URL('./manage-window.ps1', import.meta.url), 'utf8'),
+  readFile(new URL('../src/main/taskbar-manager.ts', import.meta.url), 'utf8')
+])
+
+assert.match(
+  taskbarManager,
+  /dipToScreenRect\(null, targetDisplay\.bounds\)/,
+  'taskbar target must be expressed in physical pixels'
+)
+assert.match(
+  windowHelper,
+  /GetPhysicalWindowRect\(IntPtr hWnd, out RECT rect\)[\s\S]*?SetThreadDpiAwarenessContext\(new IntPtr\(-4\)\)[\s\S]*?GetWindowRect\(hWnd, out rect\)[\s\S]*?SetThreadDpiAwarenessContext\(previous\)/,
+  'taskbar HWND bounds must use the same physical-pixel coordinate space as Electron'
+)
+for (const action of ['hide-taskbar', 'show-taskbar-on-display']) {
+  const start = windowHelper.indexOf(`    "${action}" {`)
+  const end = windowHelper.indexOf('    "', start + 5)
+  assert.ok(start >= 0, `${action} action must exist`)
+  assert.match(
+    windowHelper.slice(start, end < 0 ? undefined : end),
+    /GetPhysicalWindowRect\(\$tb, \[ref\]\$rect\)/,
+    `${action} must compare physical taskbar and display bounds`
+  )
+}
 
 assert.match(
   daemon,

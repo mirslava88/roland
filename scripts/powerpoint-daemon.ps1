@@ -212,6 +212,14 @@ public static long GetWindowProcessId(long hwnd) {
     return pid;
 }
 
+public static bool IsOwnedSlideShowWindow(long hwnd, long processId) {
+    if (hwnd == 0 || processId <= 0 || !IsWindow((System.IntPtr)hwnd) ||
+        GetWindowProcessId(hwnd) != processId) return false;
+    var name = new System.Text.StringBuilder(64);
+    GetClassName((System.IntPtr)hwnd, name, name.Capacity);
+    return name.ToString() == "screenClass";
+}
+
 public static void StartPowerPointEditorGuard(long processId, long[] existingHwnds) {
     StopPowerPointEditorGuard();
     var protectedWindows = new System.Collections.Generic.HashSet<long>(existingHwnds ?? new long[0]);
@@ -630,6 +638,7 @@ function Hide-PPEditor($ppt) {
 # trigger path and returns immediately.
 $script:startedSlideVideos = @{}
 $script:activeSlideShowHwnd = 0
+$script:activeSlideShowProcessId = 0
 $script:activeSlideShowWindow = $null
 $script:activePresentation = $null
 $script:activePresentationPath = ''
@@ -711,19 +720,23 @@ function Get-SlideVideoShapes($view) {
 function Resolve-SlideShowHwnd {
     $hwnd = [long]$script:activeSlideShowHwnd
     try {
-        if ($hwnd -ne 0 -and [PptDaemon.Native]::IsWindow([System.IntPtr]$hwnd)) {
+        if (Test-TrackedSlideShowHwnd) {
             return $hwnd
         }
     } catch {}
 
     # SlideShowWindow.HWND is missing on some Office builds. The open poller
-    # normally records the exact handle; this is a safe fallback for a single
-    # visible slideshow.
+    # normally records the exact handle. Never adopt an arbitrary user's
+    # visible slideshow from a shared PowerPoint process or another process.
     try {
-        $handles = @([PptDaemon.Native]::FindSlideShowHwnds())
-        if ($handles.Count -gt 0) {
-            $hwnd = [long]$handles[$handles.Count - 1]
-            $script:activeSlideShowHwnd = $hwnd
+        $expectedPid = [long]$script:activeSlideShowProcessId
+        if ($expectedPid -le 0) { return 0 }
+        $handles = @([PptDaemon.Native]::FindSlideShowHwnds() | Where-Object {
+            [PptDaemon.Native]::IsOwnedSlideShowWindow([long]$_, $expectedPid)
+        })
+        if ($handles.Count -eq 1) {
+            $hwnd = [long]$handles[0]
+            Set-TrackedSlideShowHwnd $hwnd
             return $hwnd
         }
     } catch {}
@@ -1794,7 +1807,7 @@ function Restore-PowerPointSession {
         Log "PowerPoint session cleanup cannot reset tracking while $($script:unidentifiedManagedPresentations.Count) unidentified managed presentation(s) remain"
     }
     if ($cleanupOk) {
-        $script:activeSlideShowHwnd = 0
+        Set-TrackedSlideShowHwnd 0
         $script:activeSlideShowWindow = $null
         $script:activePresentation = $null
         $script:activePresentationPath = ''
@@ -1854,7 +1867,7 @@ function Release-IdleOwnedPowerPointHost([string]$reason) {
                 return
             } catch {
                 $script:activeSlideShowWindow = $null
-                $script:activeSlideShowHwnd = 0
+                Set-TrackedSlideShowHwnd 0
             }
         }
     } catch {
@@ -1900,7 +1913,7 @@ function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
                     $script:activeSlideShowWindow = $candidate
                     $script:activePresentation = $candidate.Presentation
                     $script:activePresentationPath = $candidatePath
-                    try { $script:activeSlideShowHwnd = [long]$candidate.HWND } catch {}
+                    try { Set-TrackedSlideShowHwnd ([long]$candidate.HWND) } catch {}
                     return $candidate
                 }
             }
@@ -1909,22 +1922,50 @@ function Resolve-ActiveSlideShowWindow($ppt, [string]$expectedPath = '') {
     return $null
 }
 
+function Set-TrackedSlideShowHwnd([long]$hwnd) {
+    $script:activeSlideShowHwnd = $hwnd
+    $script:activeSlideShowProcessId = if ($hwnd -ne 0) {
+        [long][PptDaemon.Native]::GetWindowProcessId($hwnd)
+    } else { 0 }
+}
+
+function Test-TrackedSlideShowHwnd {
+    return [PptDaemon.Native]::IsOwnedSlideShowWindow(
+        [long]$script:activeSlideShowHwnd,
+        [long]$script:activeSlideShowProcessId
+    )
+}
+
+function Clear-StaleSlideShowReference {
+    $script:activeSlideShowWindow = $null
+    # Office can reject COM calls while loading an animation or video. Losing
+    # its RCW must not also forget the exact native HWND that PDM already
+    # verified at OPEN: CLOSE still needs that HWND to hide the live output.
+    if (-not (Test-TrackedSlideShowHwnd)) {
+        Set-TrackedSlideShowHwnd 0
+    }
+}
+
 function Resolve-PdmSlideShowWindow($ppt) {
     # Commands such as NEXT/CLOSE must never fall through to an arbitrary user
     # slideshow merely because PDM currently has no active path.
     $cached = $script:activeSlideShowWindow
     if ($cached) {
-        try {
-            $cachedView = $cached.View
-            if ($cachedView -and [int]$cachedView.Slide.SlideIndex -gt 0) {
-                return $cached
+        for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+                $cachedView = $cached.View
+                if ($cachedView -and [int]$cachedView.Slide.SlideIndex -gt 0) {
+                    return $cached
+                }
+            } catch {
+                # Busy Office/media COM calls can fail briefly while the
+                # native slideshow remains on screen. Retry the same exact
+                # object before consulting the eventually-consistent list.
             }
-            $script:activeSlideShowWindow = $null
-            $script:activeSlideShowHwnd = 0
-        } catch {
-            $script:activeSlideShowWindow = $null
-            $script:activeSlideShowHwnd = 0
+            if ($attempt -ge 4 -or -not (Test-TrackedSlideShowHwnd)) { break }
+            Start-Sleep -Milliseconds 100
         }
+        Clear-StaleSlideShowReference
     }
     $expectedPath = [string]$script:activePresentationPath
     if ([string]::IsNullOrEmpty($expectedPath)) { return $null }
@@ -2039,7 +2080,7 @@ function Abort-PowerPointOpenTransaction {
                 $previousHwnd = [long]$previousWindow.HWND
                 $previousPresentation = $previousWindow.Presentation
                 $script:activeSlideShowWindow = $previousWindow
-                $script:activeSlideShowHwnd = $previousHwnd
+                Set-TrackedSlideShowHwnd $previousHwnd
                 $script:activePresentation = $previousPresentation
                 $script:activePresentationPath = [string]$previousPresentation.FullName
                 if ($previousHwnd -ne 0) {
@@ -2052,7 +2093,7 @@ function Abort-PowerPointOpenTransaction {
             }
         } elseif ([string]::IsNullOrEmpty($previousPath)) {
             $script:activeSlideShowWindow = $null
-            $script:activeSlideShowHwnd = 0
+            Set-TrackedSlideShowHwnd 0
             $script:activePresentation = $null
             $script:activePresentationPath = ''
             $transaction.previousRestored = $true
@@ -2510,7 +2551,7 @@ while ($true) {
                         $previousActiveSlide = [int]$previousActiveWindow.View.Slide.SlideIndex
                     }
                 } catch {}
-                $script:activeSlideShowHwnd = 0
+                Set-TrackedSlideShowHwnd 0
                 $targetRect = $null
                 try {
                     if ($null -ne $req.bounds) {
@@ -2956,7 +2997,7 @@ while ($true) {
                         }
                     } catch {}
                 }
-                $script:activeSlideShowHwnd = $newHwnd
+                Set-TrackedSlideShowHwnd $newHwnd
                 $script:activeSlideShowWindow = $newSW
                 $script:activePresentation = $pres
                 $script:activePresentationPath = [string]$pres.FullName
@@ -3349,7 +3390,7 @@ while ($true) {
                         if ($placed) { break }
                     }
                     if ($placed) {
-                        $script:activeSlideShowHwnd = $hwnd
+                        Set-TrackedSlideShowHwnd $hwnd
                         Reply @{ id = $id; ok = $true }
                     } else {
                         Reply @{
@@ -3380,8 +3421,11 @@ while ($true) {
                 $visualStopped = $false
                 if ($visualHwnd -eq 0) {
                     $visualStopped = -not $hasActiveMarker
-                } elseif (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$visualHwnd) -or
-                    -not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$visualHwnd)) {
+                } elseif (-not [PptDaemon.Native]::IsWindow([System.IntPtr]$visualHwnd)) {
+                    $visualStopped = $true
+                } elseif (-not (Test-TrackedSlideShowHwnd)) {
+                    Log "close: tracked slideshow HWND is no longer owned by the recorded PowerPoint process; refusing to hide hwnd=$visualHwnd"
+                } elseif (-not [PptDaemon.Native]::IsWindowVisible([System.IntPtr]$visualHwnd)) {
                     $visualStopped = $true
                 } else {
                     [PptDaemon.Native]::ShowWindow([System.IntPtr]$visualHwnd, 0) | Out-Null
@@ -3394,6 +3438,7 @@ while ($true) {
                     } while (-not $visualStopped -and [DateTime]::UtcNow -lt $hideDeadline)
                 }
                 if (-not $visualStopped) {
+                    Log "close: native hide unavailable hwnd=$visualHwnd activeMarker=$hasActiveMarker trackedPid=$($script:activeSlideShowProcessId)"
                     Reply @{ id = $id; ok = $false; error = 'PowerPoint slideshow could not be hidden safely' }
                     continue
                 }
@@ -3513,7 +3558,7 @@ while ($true) {
                     $ppt = if ($script:pptSessionInitialized) { $script:pptApplication } else { $null }
                 }
                 if ($closeOk -or $activeCloseOk) {
-                    $script:activeSlideShowHwnd = 0
+                    Set-TrackedSlideShowHwnd 0
                     $script:activeSlideShowWindow = $null
                     $script:activePresentation = $null
                     $script:activePresentationPath = ''

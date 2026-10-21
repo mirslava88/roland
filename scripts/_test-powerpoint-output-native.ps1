@@ -49,6 +49,11 @@ public class SyntheticPptEditor {
   RegisterClass(ref windowClass);
   return CreateWindowEx(0,"PPTFrameClass","synthetic - PowerPoint",0xCF0000,100,100,200,100,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
  }
+ public static IntPtr CreateSlideShow() {
+  var windowClass = new WindowClass { name="screenClass", procedure=procedure };
+  RegisterClass(ref windowClass);
+  return CreateWindowEx(0,"screenClass","synthetic slideshow",unchecked((int)0x80000000),-5000,-5000,200,100,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+ }
 }
 '@
 $taskEditor = [SyntheticPptEditor]::Create()
@@ -76,7 +81,7 @@ try {
  if([PptDaemon.Native]::GetWindowLong($taskEditor,-20) -ne $taskStyle){throw 'Editor styles not restored'}
  if([PptDaemon.Native]::ExposeEditorForLinkedPictures($taskEditor.ToInt64(),$PID,$taskScope)){throw 'Retired worker exposure scope accepted'}
 } finally { [PptDaemon.Native]::RestoreLinkedPicturesEditor(); [SyntheticPptEditor]::DestroyWindow($taskEditor) | Out-Null }
-foreach($taskName in @('Resolve-ActiveSlideShowWindow','Resolve-PdmSlideShowWindow','Reset-SlideVideoClickState')){
+foreach($taskName in @('Resolve-ActiveSlideShowWindow','Resolve-PdmSlideShowWindow','Resolve-SlideShowHwnd','Set-TrackedSlideShowHwnd','Test-TrackedSlideShowHwnd','Clear-StaleSlideShowReference','Reset-SlideVideoClickState')){
  $taskFunction = $taskAst.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $taskName},$true)
  Invoke-Expression $taskFunction.Extent.Text
 }
@@ -87,8 +92,35 @@ if($script:startedSlideVideos -isnot [hashtable]){throw 'Video visit reset did n
 $script:activeSlideShowWindow = [PSCustomObject]@{View=$null}
 $script:activePresentationPath = ''
 $script:activeSlideShowHwnd = 123
+$script:activeSlideShowProcessId = $PID
 if($null -ne (Resolve-PdmSlideShowWindow $null)){throw 'Null slideshow view was accepted'}
 if($script:activeSlideShowHwnd -ne 0){throw 'Invalid cached HWND retained'}
+$taskSlideShow = [SyntheticPptEditor]::CreateSlideShow()
+try {
+ if($taskSlideShow -eq [IntPtr]::Zero){throw 'Synthetic slideshow HWND creation failed'}
+ Set-TrackedSlideShowHwnd $taskSlideShow.ToInt64()
+ $script:activePresentationPath = 'synthetic.pptx'
+ if((Resolve-SlideShowHwnd) -ne $taskSlideShow.ToInt64()){throw 'Tracked native slideshow was not reused'}
+ $script:taskTransientAttempts = 0
+ $taskTransient = New-Object PSObject
+ $taskTransient | Add-Member -MemberType ScriptProperty -Name View -Value {
+  $script:taskTransientAttempts++
+  if($script:taskTransientAttempts -eq 1){throw 'Office temporarily busy'}
+  [PSCustomObject]@{Slide=[PSCustomObject]@{SlideIndex=91}}
+ }
+ $script:activeSlideShowWindow = $taskTransient
+ if(-not [object]::ReferenceEquals((Resolve-PdmSlideShowWindow $null),$taskTransient)){throw 'Transient COM failure was not retried'}
+ if($script:taskTransientAttempts -ne 2){throw 'Transient COM retry count was unexpected'}
+ $script:activeSlideShowWindow = [PSCustomObject]@{View=$null}
+ if($null -ne (Resolve-PdmSlideShowWindow $null)){throw 'Invalid COM slideshow was accepted'}
+ if($script:activeSlideShowHwnd -ne $taskSlideShow.ToInt64()){throw 'Live native slideshow HWND was lost after transient COM failure'}
+ if(-not (Test-TrackedSlideShowHwnd)){throw 'Live native slideshow HWND was not verified'}
+ $script:activeSlideShowProcessId = $PID + 1
+ if(Test-TrackedSlideShowHwnd){throw 'Foreign slideshow PID was accepted'}
+ if((Resolve-SlideShowHwnd) -ne 0){throw 'Foreign slideshow was adopted for media click'}
+ Clear-StaleSlideShowReference
+ if($script:activeSlideShowHwnd -ne 0){throw 'Foreign slideshow HWND was retained'}
+} finally { [SyntheticPptEditor]::DestroyWindow($taskSlideShow) | Out-Null }
 $script:activePresentationPath = 'synthetic.pptx'
 $script:activeSlideShowWindow = [PSCustomObject]@{Presentation=[PSCustomObject]@{FullName='synthetic.pptx'};View=[PSCustomObject]@{Slide=$null}}
 if($null -ne (Resolve-ActiveSlideShowWindow $null 'synthetic.pptx')){throw 'Null slide was accepted by the fallback resolver'}
@@ -96,4 +128,4 @@ $script:activePresentationPath = ''
 $taskValid = [PSCustomObject]@{View=[PSCustomObject]@{Slide=[PSCustomObject]@{SlideIndex=1}}}
 $script:activeSlideShowWindow = $taskValid
 if(-not [object]::ReferenceEquals((Resolve-PdmSlideShowWindow $null),$taskValid)){throw 'Valid direct slideshow was lost'}
-Write-Output 'PASS: production PowerShell parser/C# compilation, real hidden HWND batch, geometry/focus, invalid HWND rejection, null view and video state reset'
+Write-Output 'PASS: production PowerShell parser/C# compilation, native HWND ownership and transient COM retention, geometry/focus and video state reset'

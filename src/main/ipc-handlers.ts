@@ -1454,6 +1454,9 @@ export function registerIpcHandlers(
         setActivePowerPointSceneLayout(null)
         setActivePowerPointZoom(null)
       }
+      if (!res.ok && (command === 'next' || command === 'prev' || command === 'goto')) {
+        diagnosticLog('pptx-navigation', `command=${command} failed: ${res.error || 'unknown PowerPoint error'}`)
+      }
       if (command === 'close' && !controlWindow.isDestroyed()) {
         // PowerPoint owns the foreground while its slideshow is running. When
         // that HWND is destroyed Windows can promote Explorer/Start unless a

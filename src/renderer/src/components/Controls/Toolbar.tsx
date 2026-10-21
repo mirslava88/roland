@@ -399,8 +399,9 @@ export function Toolbar(): JSX.Element {
     }
   })
 
-  const handleTogglePresentation = async (): Promise<void> => {
+  const handleTogglePresentation = async (source: 'toolbar' | 'scene' | 'stream-deck'): Promise<void> => {
     if (isOutputActive) {
+      window.api.dbgLog(`output close requested source=${source}`)
       if (outputCloseInFlightRef.current) return
       const cancelHandledByTake = !window.dispatchEvent(new CustomEvent('cancel-active-take', {
         cancelable: true,
@@ -559,10 +560,10 @@ export function Toolbar(): JSX.Element {
 
   useEffect(() => {
     const closeProgramOutput = (): void => {
-      if (isOutputActive) void handleTogglePresentation()
+      if (isOutputActive) void handleTogglePresentation('scene')
     }
     const toggleProgramOutput = (): void => {
-      void handleTogglePresentation()
+      void handleTogglePresentation('stream-deck')
     }
     window.addEventListener('close-program-output', closeProgramOutput)
     window.addEventListener('pdm-toggle-program-output', toggleProgramOutput)
@@ -676,7 +677,7 @@ export function Toolbar(): JSX.Element {
         </ToolbarItem>
         <ToolbarItem id="output" visible>
           <button
-            onClick={handleTogglePresentation}
+            onClick={() => { void handleTogglePresentation('toolbar') }}
             disabled={!canTogglePresentation || outputCloseInFlight}
             className={`text-[11px] px-2 py-1 rounded-lg font-medium transition-colors whitespace-nowrap ${
               isOutputActive
