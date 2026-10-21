@@ -35,6 +35,7 @@ const suites = {
   ],
   ui: [
     ['Toolbar UI', process.execPath, ['scripts/test-toolbar-ui.mjs']],
+    ['Library resize UI', process.execPath, ['scripts/test-library-resize.mjs']],
     ['Onboarding UI', process.execPath, ['scripts/test-onboarding-ui.mjs']],
     ['Scene audio UI', process.execPath, ['scripts/test-program-scene-audio-ui.mjs']],
     ['Scene video UI', process.execPath, ['scripts/test-program-scene-video-ui.mjs']]

@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { navigateSpeakerOnlyPdf, useAppStore } from './stores/useAppStore'
 import { FileLibrary } from './components/Library/FileLibrary'
+import { ResizableFileLibrary } from './components/Library/ResizableFileLibrary'
 import { PreviewPanel } from './components/Preview/PreviewPanel'
 import { ControlBar } from './components/Controls/ControlBar'
 import { Toolbar } from './components/Controls/Toolbar'
@@ -349,7 +350,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       <QrOverlayBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="pdm-main-workspace flex flex-1 overflow-hidden">
-        <FileLibrary />
+        <ResizableFileLibrary><FileLibrary /></ResizableFileLibrary>
         <div className="pdm-stage flex-1 flex flex-col overflow-hidden">
           <PreviewPanel />
           <ControlBar />
