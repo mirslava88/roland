@@ -7,6 +7,7 @@ import { getCurrentFuseWire, FuseV1Options, FuseState } from '@electron/fuses'
 import { extractFile, listPackage } from '@electron/asar'
 
 const require = createRequire(import.meta.url)
+const { verifyMacSigning } = require('./verify-mac-signing.cjs')
 const { editionInfo } = require('../build/editions.cjs')
 const info = editionInfo(process.argv[2], 'darwin')
 const app = resolve(process.argv[3])
@@ -49,6 +50,7 @@ for (const [key, enabled] of Object.entries({
 })) assert.equal(fuses[FuseV1Options[key]], enabled ? FuseState.ENABLE : FuseState.DISABLE, key)
 const files = listPackage(archive)
 assert.ok(!files.some(file => /\.(?:pdmconfig|log|enc|dmp)$/.test(file) || /^\/(?:tmp|outputs|\.git|\.env)(?:\/|$)/.test(file)), 'Operator data in package')
-execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], { stdio: 'pipe' })
+const signing = verifyMacSigning(app)
 console.log(JSON.stringify({ edition: info.edition, app, electron: metadata.electron, signatureVerified: true,
+  signingTeam: signing.team, signedBinaries: signing.binaries,
   fusesVerified: true, libraryValidation: true, asarIntegrity: true, privateDataExcluded: true, portableBundleLinks: true }))

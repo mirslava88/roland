@@ -12,8 +12,8 @@
 
 [![Скачать Stream для Windows](https://img.shields.io/badge/PDM_1.1.7_stream-Windows-ef4444?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream)
 
-[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.1)
-[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.1-stream)
+[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2)
+[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream)
 
 [![Latest release](https://img.shields.io/github/v/release/mirslava88/roland?label=версия&logo=github)](https://github.com/mirslava88/roland/releases/latest)
 [![Build Windows](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml)
@@ -36,8 +36,8 @@
 
 | Редакция | Для чего | Windows | macOS |
 |---|---|---|---|
-| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.1) |
-| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.1-stream) |
+| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2) |
+| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream) |
 
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
@@ -48,8 +48,15 @@ Stream устанавливается отдельно: **Presentation Display M
 
 В настройках Stream отображается **«1.1.7 stream»**. В `package.json`, имени установщика и теге
 используется техническая запись `1.1.7-stream` / `v1.1.7-stream`.
-Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261021.1`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`; выпуск предварительный, без нотариальной проверки Apple.
+Исправленная Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261021.2`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`; выпуск предварительный, без нотариальной проверки Apple.
 Встроенный стриминг доступен только в Stream.
+
+## Исправление запуска macOS 1.1.7 — ревизия 20261021.2
+
+- Исправлен отказ запуска с ошибкой `DYLD: different Team IDs`: приложение, Electron, дочерние процессы и нативные библиотеки подписываются одним сертификатом с Team ID. Проверка библиотек и Hardened Runtime сохранены.
+- До создания DMG сборка проверяет сертификат и совпадение Team ID у всех вложенных Mach-O файлов; подпись ad hoc блокирует выпуск. CI без настроенного сертификата проверяет исходники, но не создаёт установщики для распространения.
+- Standard и Stream публикуются отдельно, для Intel и Apple Silicon. Номер приложения остаётся 1.1.7 / 1.1.7-stream; прежняя ревизия 20261021.1 сохранена.
+- Подпись Apple Development не заменяет Developer ID и нотариальную проверку Apple: выпуск остаётся предварительным. Запуск исправленного Stream проверен на Intel Mac с macOS 15.8.1; запуск на физическом Apple Silicon не проверен.
 
 ## Релиз 1.1.7 — Windows и macOS
 

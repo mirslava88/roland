@@ -82,7 +82,8 @@ function builderConfig(edition, platform = process.platform) {
       }
     },
     nsis: { ...pkg.build.nsis, shortcutName: info.productName },
-    afterPack: resolve(__dirname, platform === 'darwin' ? 'afterPack-mac.cjs' : 'afterPack.js')
+    afterPack: resolve(__dirname, platform === 'darwin' ? 'afterPack-mac.cjs' : 'afterPack.js'),
+    ...(platform === 'darwin' ? { afterSign: resolve(__dirname, 'afterSign-mac.cjs') } : {})
   }
 }
 
