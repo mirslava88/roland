@@ -592,19 +592,18 @@ powershell -ExecutionPolicy Bypass -File .\build\build-signed.ps1 -Edition strea
 При ручном запуске выбирается редакция, результат сохраняется как artifact. Теги `vX.Y.Z`
 собирают обычную редакцию, `vX.Y.Z-stream` — Stream; номер тега проверяется против исходников.
 Stream-релизы не заменяют обычные релизы и не меняют ссылку `releases/latest` обычной PDM.
-Текущие установщики `1.1.6` и `1.1.6-stream` обновлены исправленным выпуском без изменения
-отображаемой версии. При следующем общем функциональном обновлении базовый номер повышается
-для обеих редакций одновременно.
+Текущие установщики `1.1.7` и `1.1.7-stream` выпускаются из одного проверенного коммита.
+Предыдущие установщики и теги 1.1.6 сохранены.
 
 ## Технологии
 
 | Слой | Реализация |
 |---|---|
-| Версии приложения | 1.1.6 (обычная) / 1.1.6 stream |
+| Версии приложения | 1.1.7 (обычная) / 1.1.7 stream |
 | Desktop runtime | Electron 44.9.3 |
 | Интерфейс | React 19.2.8, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
 | Состояние | Zustand 5.0.15 |
-| Сборка | electron-vite 5.0.0, Vite 7.3.6, PostCSS 8.5.27, electron-builder 26.15.3, NSIS |
+| Сборка | electron-vite 5.0.0, Vite 7.3.7, PostCSS 8.5.27, electron-builder 26.15.3, NSIS |
 | PowerPoint | PowerShell, COM Automation, постоянный JSON-демон с восстановлением состояния Office |
 | PDF | PDFium WASM (@hyzyla/pdfium 2.1.13), pdfjs-dist 6.3.289 и Windows.Data.Pdf |
 | Внешние источники | Electron Desktop Capture, MediaDevices, постоянные видеопотоки и нативное перечисление окон Windows |
@@ -660,7 +659,7 @@ Key features include numbered multi-page channels, automatic folder-to-channel a
 
 Download the latest Windows installer from [GitHub Releases](https://github.com/mirslava88/roland/releases/latest). Microsoft PowerPoint is required for PPT/PPTX playback and preview generation. The application itself works offline and is released under the [MIT License](LICENSE).
 
-The separate [1.1.6 stream edition](https://github.com/mirslava88/roland/releases/tag/v1.1.6-stream)
+The separate [1.1.7 stream edition](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream)
 adds RTMP/RTMPS output up to 1080p and bundles FFmpeg under its own GPLv3 license.
 Both editions have separate installers, shortcuts and profiles; operate only one at a time.
 
