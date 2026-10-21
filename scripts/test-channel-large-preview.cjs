@@ -1,5 +1,6 @@
 const { app, BrowserWindow } = require('electron')
 const { resolve } = require('node:path')
+const { writeFileSync } = require('node:fs')
 const assert = require('node:assert/strict')
 
 app.setPath('userData', resolve('tmp/channel-large-preview-ui/profile'))
@@ -24,8 +25,13 @@ app.whenReady().then(async () => {
     assert.equal(menuProbe.preview, true, `Channel context menu offers Preview: ${JSON.stringify(menuProbe)}`)
     await js(`document.querySelector('[data-channel-large-preview]').click()`)
     await pause(100)
+    await js('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))')
+    win.webContents.invalidate()
+    await pause(150)
+    writeFileSync(resolve('tmp/channel-large-preview-ui/preview.png'), (await win.webContents.capturePage()).toPNG())
     assert.equal(await js(`document.querySelector('[data-channel-preview-dialog] img')?.getAttribute('src')`),
       await js('window.testFrames[1]'), 'Large preview uses the full-resolution PPTX frame')
+    assert.equal(await js('document.body.style.overflow'), 'hidden', 'Preview has no page scrollbar')
     await js(`document.querySelector('[aria-label="Следующий слайд"]').click()`)
     await pause(50)
     assert.equal(await js(`document.querySelector('[data-channel-preview-dialog] img')?.getAttribute('alt')`), 'Слайд 3')

@@ -4369,6 +4369,12 @@ function ChannelLargePreview({
     ? pptxFrames[slide - 1] || pptxThumbnails[slide - 1]
     : null
 
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = previousOverflow }
+  }, [])
+
   const close = useCallback((): void => {
     onClose()
     if (document.fullscreenElement === rootRef.current) {
