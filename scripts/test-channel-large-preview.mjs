@@ -18,7 +18,6 @@ import { useAppStore } from './src/renderer/src/stores/useAppStore';
 window.testErrors=[];
 window.addEventListener('error', event=>window.testErrors.push(String(event.error||event.message)));
 window.addEventListener('unhandledrejection', event=>window.testErrors.push(String(event.reason)));
-window.api={};
 window.testTakeCalls=0;
 const frame = color => 'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><rect width="1280" height="720" fill="'+color+'"/></svg>');
 window.testFrames=[frame('#ff0000'),frame('#00ff00'),frame('#0000ff')];

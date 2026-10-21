@@ -4357,10 +4357,11 @@ function ChannelLargePreview({
   pptxThumbnails: string[]
   onClose: () => void
 }): JSX.Element {
-  const rootRef = useRef<HTMLDivElement>(null)
   const fullscreenOwnedRef = useRef(false)
+  const fullscreenRequestRef = useRef(0)
   const [fullscreen, setFullscreen] = useState(false)
   const [slide, setSlide] = useState(initialSlide)
+  const [slideInput, setSlideInput] = useState(String(initialSlide))
   const [pdfTotalSlides, setPdfTotalSlides] = useState(0)
   const count = file.type === 'pdf'
     ? pdfTotalSlides || totalSlides
@@ -4369,31 +4370,41 @@ function ChannelLargePreview({
     ? pptxFrames[slide - 1] || pptxThumbnails[slide - 1]
     : null
 
+  useEffect(() => { setSlideInput(String(slide)) }, [slide])
+
+  const jumpToSlide = (): void => {
+    const requested = Number(slideInput)
+    if (!Number.isSafeInteger(requested) || requested < 1 || count < 1) {
+      setSlideInput(String(slide))
+      return
+    }
+    const target = Math.min(requested, count)
+    setSlide(target)
+    setSlideInput(String(target))
+  }
+
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = previousOverflow }
+    void window.api.setChannelPreviewKeyboardGuard(true)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      void window.api.setChannelPreviewKeyboardGuard(false)
+      fullscreenRequestRef.current += 1
+      if (fullscreenOwnedRef.current) {
+        fullscreenOwnedRef.current = false
+        void window.api.setControlPreviewFullscreen(false)
+      }
+    }
   }, [])
 
   const close = useCallback((): void => {
+    fullscreenRequestRef.current += 1
+    if (fullscreenOwnedRef.current) {
+      fullscreenOwnedRef.current = false
+      void window.api.setControlPreviewFullscreen(false)
+    }
     onClose()
-    if (document.fullscreenElement === rootRef.current) {
-      void document.exitFullscreen().catch(() => undefined)
-    }
-  }, [onClose])
-
-  useEffect(() => {
-    const onFullscreenChange = (): void => {
-      const ownsFullscreen = document.fullscreenElement === rootRef.current
-      setFullscreen(ownsFullscreen)
-      if (ownsFullscreen) fullscreenOwnedRef.current = true
-      else if (fullscreenOwnedRef.current) {
-        fullscreenOwnedRef.current = false
-        onClose()
-      }
-    }
-    document.addEventListener('fullscreenchange', onFullscreenChange)
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
   }, [onClose])
 
   useEffect(() => {
@@ -4402,31 +4413,20 @@ function ChannelLargePreview({
         event.preventDefault()
         event.stopPropagation()
         close()
-      } else if (['ArrowRight', 'ArrowDown', 'PageDown', ' '].includes(event.key)) {
+      } else if (event.target instanceof HTMLInputElement && event.target.matches('[data-channel-preview-slide-input]')) {
+        // Arrow/Home/End keys edit the number while this field has focus.
+        return
+      } else if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) {
         event.preventDefault()
         event.stopPropagation()
-        setSlide((current) => count > 0 ? Math.min(count, current + 1) : current + 1)
-      } else if (['ArrowLeft', 'ArrowUp', 'PageUp'].includes(event.key)) {
-        event.preventDefault()
-        event.stopPropagation()
-        setSlide((current) => Math.max(1, current - 1))
-      } else if (event.key === 'Home') {
-        event.preventDefault()
-        event.stopPropagation()
-        setSlide(1)
-      } else if (event.key === 'End' && count > 0) {
-        event.preventDefault()
-        event.stopPropagation()
-        setSlide(count)
       }
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [close, count])
+  }, [close])
 
   return (
     <div
-      ref={rootRef}
       data-channel-preview-dialog
       role="dialog"
       aria-modal="true"
@@ -4439,17 +4439,27 @@ function ChannelLargePreview({
       <div className="flex min-h-12 shrink-0 items-center gap-3 border-b border-white/15 px-4 py-2">
         <span className="min-w-0 flex-1 truncate text-sm font-semibold" title={caption}>{caption}</span>
         <span className="shrink-0 text-xs text-gray-400">Только предпросмотр · в эфир не влияет</span>
-        {!fullscreen && (
-          <button
-            type="button"
-            onClick={() => {
-              if (rootRef.current) void rootRef.current.requestFullscreen().catch(() => undefined)
-            }}
-            className="rounded-lg border border-white/20 px-3 py-1.5 text-xs hover:bg-white/10"
-          >
-            На весь экран
-          </button>
-        )}
+        <button
+          type="button"
+          data-channel-preview-fullscreen
+          onClick={() => {
+            const request = ++fullscreenRequestRef.current
+            const requestedFullscreen = !fullscreen
+            void window.api.setControlPreviewFullscreen(requestedFullscreen).then((enabled) => {
+              if (request !== fullscreenRequestRef.current) {
+                if (requestedFullscreen && enabled) void window.api.setControlPreviewFullscreen(false)
+                return
+              }
+              if (enabled) {
+                fullscreenOwnedRef.current = requestedFullscreen
+                setFullscreen(requestedFullscreen)
+              }
+            }).catch(() => undefined)
+          }}
+          className="rounded-lg border border-white/20 px-3 py-1.5 text-xs hover:bg-white/10"
+        >
+          {fullscreen ? 'В окно' : 'На весь экран'}
+        </button>
         <button type="button" onClick={close} aria-label="Закрыть предпросмотр" className="rounded-lg border border-white/20 px-3 py-1.5 text-xs hover:bg-white/10">
           Закрыть ✕
         </button>
@@ -4471,9 +4481,33 @@ function ChannelLargePreview({
       </div>
       <div className="flex min-h-12 shrink-0 items-center justify-center gap-4 border-t border-white/15 px-4 py-2 text-sm">
         <button type="button" aria-label="Предыдущий слайд" disabled={slide <= 1} onClick={() => setSlide((current) => Math.max(1, current - 1))} className="rounded-lg border border-white/20 px-4 py-1 disabled:opacity-30 hover:bg-white/10">←</button>
-        <span className="min-w-20 text-center">{slide}{count > 0 ? ` / ${count}` : ''}</span>
+        <label className="flex items-center gap-2 whitespace-nowrap text-gray-400">
+          <span>Слайд</span>
+          <input
+            data-channel-preview-slide-input
+            aria-label="Номер слайда в предпросмотре"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={slideInput}
+            disabled={count < 1}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setSlideInput(event.currentTarget.value.replace(/\D/g, '').slice(0, 6))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+            onBlur={jumpToSlide}
+            className="w-14 rounded-lg border border-white/25 bg-white/10 px-2 py-1 text-center text-white outline-none focus:border-blue-400 disabled:opacity-40"
+          />
+          {count > 0 && <span>/ {count}</span>}
+        </label>
         <button type="button" aria-label="Следующий слайд" disabled={count > 0 && slide >= count} onClick={() => setSlide((current) => current + 1)} className="rounded-lg border border-white/20 px-4 py-1 disabled:opacity-30 hover:bg-white/10">→</button>
-        <span className="hidden text-xs text-gray-500 sm:inline">Листайте стрелками · Esc — закрыть</span>
+        <span className="hidden text-xs text-gray-500 sm:inline">Введите номер и нажмите Enter</span>
+      </div>
+      <div data-channel-preview-keyboard-warning className="shrink-0 border-t border-amber-400/40 bg-amber-400/15 px-4 py-2 text-center text-xs font-semibold text-amber-200">
+        ⚠ Стрелки клавиатуры здесь отключены. Предпросмотр листайте кнопками или по номеру; кликер продолжает листать эфир. Esc — закрыть.
       </div>
     </div>
   )

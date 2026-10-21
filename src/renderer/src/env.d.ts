@@ -323,6 +323,8 @@ interface Api {
   captureDisplay(displayId?: number): Promise<string | null>
   capturePresentationFrame(): Promise<string | null>
   captureProgramPreviewFrame(): Promise<{ dataUrl: string; width: number; height: number } | null>
+  setControlPreviewFullscreen(enabled: boolean): Promise<boolean>
+  setChannelPreviewKeyboardGuard(enabled: boolean): Promise<boolean>
   getDesktopCaptureSources(
     types?: Array<'window' | 'screen'>,
     excludedDisplayId?: number

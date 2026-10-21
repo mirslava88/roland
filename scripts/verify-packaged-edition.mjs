@@ -8,7 +8,7 @@ import { extractFile, listPackage } from '@electron/asar'
 const require = createRequire(import.meta.url)
 const { editionInfo } = require('../build/editions.cjs')
 const info = editionInfo(process.argv[2])
-const root = resolve(`dist/${info.edition}/win-unpacked`)
+const root = resolve(process.env.PDM_PACKAGE_ROOT || `dist/${info.edition}/win-unpacked`)
 const archive = join(root, 'resources/app.asar')
 const pkg = JSON.parse(extractFile(archive, 'package.json').toString())
 assert.equal(pkg.version, info.version)
