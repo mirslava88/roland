@@ -34,6 +34,7 @@ import {
   type QrOverlayConfig
 } from '../../../shared/qr-overlay'
 import { selectProgramSnapshotTimer } from '../program-snapshot-timer'
+import { visibleLibraryFiles } from '../library-visible-files'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
 // для контекста. inflight = текущая chain promise; pendingTarget = последний
@@ -1130,9 +1131,10 @@ export const useAppStore = create<AppState>()(persist(
 
   setFiles: (files) => {
     const { filter } = get()
+    const visibleFiles = visibleLibraryFiles(files)
     set({
-      files,
-      filteredFiles: filter === 'all' ? files : files.filter((f) => f.type === filter)
+      files: visibleFiles,
+      filteredFiles: filter === 'all' ? visibleFiles : visibleFiles.filter((f) => f.type === filter)
     })
   },
 
