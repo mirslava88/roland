@@ -14,6 +14,7 @@ const suites = {
   core: [
     ['Strict TypeScript', process.execPath, ['scripts/typecheck.mjs']],
     ['Type safety regressions', process.execPath, ['scripts/test-type-safety.cjs']],
+    ['Library temporary files', process.execPath, ['scripts/test-library-visible-files.mjs']],
     ['Virtual camera frame conversion', process.execPath, ['scripts/test-virtual-camera-frame.mjs']],
     ['Windows 10 installer camera gate', process.execPath, ['scripts/test-virtual-camera-win10-installer.mjs']],
     ['Race regressions', process.execPath, ['scripts/test-race-regressions.cjs']],
@@ -35,6 +36,8 @@ const suites = {
   ],
   ui: [
     ['Toolbar UI', process.execPath, ['scripts/test-toolbar-ui.mjs']],
+    ['Library resize UI', process.execPath, ['scripts/test-library-resize.mjs']],
+    ['Channel large preview UI', process.execPath, ['scripts/test-channel-large-preview.mjs']],
     ['Onboarding UI', process.execPath, ['scripts/test-onboarding-ui.mjs']],
     ['Scene audio UI', process.execPath, ['scripts/test-program-scene-audio-ui.mjs']],
     ['Scene video UI', process.execPath, ['scripts/test-program-scene-video-ui.mjs']]

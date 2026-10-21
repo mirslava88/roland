@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { reconcileMacSlide } from './mac-slide-reconcile'
 import { navigateSpeakerOnlyPdf, useAppStore } from './stores/useAppStore'
 import { FileLibrary } from './components/Library/FileLibrary'
+import { ResizableFileLibrary } from './components/Library/ResizableFileLibrary'
 import { PreviewPanel } from './components/Preview/PreviewPanel'
 import { ControlBar } from './components/Controls/ControlBar'
 import { Toolbar } from './components/Controls/Toolbar'
@@ -302,6 +303,12 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       const isNext = e.key === 'PageDown' || e.key === 'ArrowRight' || e.key === 'ArrowDown'
       const isPrev = e.key === 'PageUp' || e.key === 'ArrowLeft' || e.key === 'ArrowUp'
       if (!isNext && !isPrev) return
+      if (e.key.startsWith('Arrow') && document.querySelector('[data-channel-preview-dialog]')) {
+        if (!(e.target instanceof HTMLInputElement && e.target.matches('[data-channel-preview-slide-input]'))) {
+          e.preventDefault()
+        }
+        return
+      }
       window.api.dbgLog(
         `App: local keydown key=${e.key} code=${e.code} repeat=${e.repeat} next=${isNext}`
       )
@@ -311,6 +318,12 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
 
     const unsubGlobalKey = window.api.on('global-key', (...args: unknown[]) => {
       const direction = args[0] as 'next' | 'prev'
+      const accelerator = args[1]
+      if (
+        typeof accelerator === 'string' &&
+        ['Right', 'Left', 'Down', 'Up'].includes(accelerator) &&
+        document.querySelector('[data-channel-preview-dialog]')
+      ) return
       window.api.dbgLog(`App: global-key received direction=${direction}`)
       navigateSlide(direction)
     })
@@ -376,7 +389,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       <QrOverlayBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="pdm-main-workspace flex flex-1 overflow-hidden">
-        <FileLibrary />
+        <ResizableFileLibrary><FileLibrary /></ResizableFileLibrary>
         <div className="pdm-stage flex-1 flex flex-col overflow-hidden">
           <PreviewPanel />
           <ControlBar />

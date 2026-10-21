@@ -233,6 +233,12 @@ const api = {
   captureProgramPreviewFrame: (): Promise<{ dataUrl: string; width: number; height: number } | null> =>
     ipcRenderer.invoke('capture-program-preview-frame'),
 
+  setControlPreviewFullscreen: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('set-control-preview-fullscreen', enabled),
+
+  setChannelPreviewKeyboardGuard: (enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('set-channel-preview-keyboard-guard', enabled),
+
   getDesktopCaptureSources: (
     types?: Array<'window' | 'screen'>,
     excludedDisplayId?: number

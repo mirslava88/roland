@@ -3892,7 +3892,7 @@ interface ChannelPanelProps {
   compact: boolean
 }
 
-function ChannelPanel({
+export function ChannelPanel({
   label, channel, isLive, isSelected, isTaking, openingMessage,
   onDrop, onSlideChange, onSetTotalSlides, onVideoEndChannelChange, onCaptionChange,
   onSelect, onTake, onClear, pptxThumbnails, cacheStatus, keynoteStatus, videoEndChannelOptions, compact
@@ -3907,6 +3907,7 @@ function ChannelPanel({
     y: number
     sourceIdentity: string | null
   } | null>(null)
+  const [largePreviewSlide, setLargePreviewSlide] = useState<number | null>(null)
   const [showAllSpeakerPicker, setShowAllSpeakerPicker] = useState(false)
   const captionInputRef = useRef<HTMLInputElement>(null)
   const cancelCaptionOnBlurRef = useRef(false)
@@ -3921,6 +3922,10 @@ function ChannelPanel({
     scale: number
   } | null>(null)
   const [isZoomDragging, setIsZoomDragging] = useState(false)
+
+  useEffect(() => {
+    setLargePreviewSlide(null)
+  }, [channel.file?.path])
 
   // Keep input synced with channel.slide when not being edited
   useEffect(() => {
@@ -4008,6 +4013,7 @@ function ChannelPanel({
     captureSources,
     contentZoom,
     programScene,
+    pptxSlidesMap,
     qrOverlay,
     setBroadcastTitles,
     setCaptureTitlesOutput,
@@ -4088,8 +4094,8 @@ function ChannelPanel({
     event.stopPropagation()
     const menuWidth = 310
     const menuHeight = titlesContextSourceIdentity
-      ? Math.min(710, 380 + broadcastTitles.speakers.length * 54)
-      : 150
+      ? Math.min(750, 420 + broadcastTitles.speakers.length * 54)
+      : 190
     setShowAllSpeakerPicker(false)
     setTitlesMenu({
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
@@ -4537,6 +4543,23 @@ function ChannelPanel({
               </div>
             </div>
 
+            {(channel.file?.type === 'presentation' || channel.file?.type === 'pdf') && (
+              <div className="border-b border-gray-700 p-1.5">
+                <button
+                  data-channel-large-preview={label}
+                  type="button"
+                  onClick={() => {
+                    setTitlesMenu(null)
+                    setLargePreviewSlide(Math.max(1, channel.slide))
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold text-white hover:bg-gray-700/70"
+                >
+                  <span aria-hidden="true">▣</span>
+                  Предпросмотр
+                </button>
+              </div>
+            )}
+
             <div className="border-b border-gray-700 p-1.5">
               <button
                 data-channel-toggle-qr
@@ -4715,6 +4738,20 @@ function ChannelPanel({
         </>,
         document.body
       )}
+      {largePreviewSlide !== null && channel.file &&
+        (channel.file.type === 'presentation' || channel.file.type === 'pdf') && createPortal(
+          <ChannelLargePreview
+            key={channel.file.path}
+            file={channel.file}
+            caption={channel.caption || channel.file.name}
+            initialSlide={largePreviewSlide}
+            totalSlides={channel.totalSlides}
+            pptxFrames={pptxSlidesMap[channel.file.path] || []}
+            pptxThumbnails={pptxThumbnails}
+            onClose={() => setLargePreviewSlide(null)}
+          />,
+          document.body
+        )}
       {/* Video end target remains editable while the video is on air. */}
       {channel.file && (channel.file.type === 'video' || (!isLive && (channel.file.type === 'capture' || channel.file.type === 'other'))) && (
         <div
@@ -4754,6 +4791,170 @@ function ChannelPanel({
           </button>}
         </div>
       )}
+    </div>
+  )
+}
+
+function ChannelLargePreview({
+  file, caption, initialSlide, totalSlides, pptxFrames, pptxThumbnails, onClose
+}: {
+  file: FileEntry
+  caption: string
+  initialSlide: number
+  totalSlides: number
+  pptxFrames: string[]
+  pptxThumbnails: string[]
+  onClose: () => void
+}): JSX.Element {
+  const fullscreenOwnedRef = useRef(false)
+  const fullscreenRequestRef = useRef(0)
+  const [fullscreen, setFullscreen] = useState(false)
+  const [slide, setSlide] = useState(initialSlide)
+  const [slideInput, setSlideInput] = useState(String(initialSlide))
+  const [pdfTotalSlides, setPdfTotalSlides] = useState(0)
+  const count = file.type === 'pdf'
+    ? pdfTotalSlides || totalSlides
+    : totalSlides || Math.max(pptxFrames.length, pptxThumbnails.length)
+  const frame = file.type === 'presentation'
+    ? pptxFrames[slide - 1] || pptxThumbnails[slide - 1]
+    : null
+
+  useEffect(() => { setSlideInput(String(slide)) }, [slide])
+
+  const jumpToSlide = (): void => {
+    const requested = Number(slideInput)
+    if (!Number.isSafeInteger(requested) || requested < 1 || count < 1) {
+      setSlideInput(String(slide))
+      return
+    }
+    const target = Math.min(requested, count)
+    setSlide(target)
+    setSlideInput(String(target))
+  }
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    void window.api.setChannelPreviewKeyboardGuard(true)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      void window.api.setChannelPreviewKeyboardGuard(false)
+      fullscreenRequestRef.current += 1
+      if (fullscreenOwnedRef.current) {
+        fullscreenOwnedRef.current = false
+        void window.api.setControlPreviewFullscreen(false)
+      }
+    }
+  }, [])
+
+  const close = useCallback((): void => {
+    fullscreenRequestRef.current += 1
+    if (fullscreenOwnedRef.current) {
+      fullscreenOwnedRef.current = false
+      void window.api.setControlPreviewFullscreen(false)
+    }
+    onClose()
+  }, [onClose])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        close()
+      } else if (event.target instanceof HTMLInputElement && event.target.matches('[data-channel-preview-slide-input]')) {
+        return
+      } else if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
+  }, [close])
+
+  return (
+    <div
+      data-channel-preview-dialog
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Предпросмотр: ${caption}`}
+      className="fixed inset-0 z-[300] flex flex-col bg-[#090d15] text-white"
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="flex min-h-12 shrink-0 items-center gap-3 border-b border-white/15 px-4 py-2">
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold" title={caption}>{caption}</span>
+        <span className="shrink-0 text-xs text-gray-400">Только предпросмотр · в эфир не влияет</span>
+        <button
+          type="button"
+          data-channel-preview-fullscreen
+          onClick={() => {
+            const request = ++fullscreenRequestRef.current
+            const requestedFullscreen = !fullscreen
+            void window.api.setControlPreviewFullscreen(requestedFullscreen).then((enabled) => {
+              if (request !== fullscreenRequestRef.current) {
+                if (requestedFullscreen && enabled) void window.api.setControlPreviewFullscreen(false)
+                return
+              }
+              if (enabled) {
+                fullscreenOwnedRef.current = requestedFullscreen
+                setFullscreen(requestedFullscreen)
+              }
+            }).catch(() => undefined)
+          }}
+          className="rounded-lg border border-white/20 px-3 py-1.5 text-xs hover:bg-white/10"
+        >
+          {fullscreen ? 'В окно' : 'На весь экран'}
+        </button>
+        <button type="button" onClick={close} aria-label="Закрыть предпросмотр" className="rounded-lg border border-white/20 px-3 py-1.5 text-xs hover:bg-white/10">
+          Закрыть ✕
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-hidden p-3">
+        <div className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg bg-black">
+          {file.type === 'presentation'
+            ? frame
+              ? <img src={mediaUrl(frame)} alt={`Слайд ${slide}`} className="max-h-full max-w-full object-contain" />
+              : <span className="text-sm text-gray-400">Слайд {slide} ещё кэшируется</span>
+            : <SlideRenderer
+                key={fullscreen ? 'fullscreen' : 'windowed'}
+                file={file}
+                slideNum={slide}
+                pptxThumbnails={[]}
+                onTotalSlides={setPdfTotalSlides}
+              />}
+        </div>
+      </div>
+      <div className="flex min-h-12 shrink-0 items-center justify-center gap-4 border-t border-white/15 px-4 py-2 text-sm">
+        <button type="button" aria-label="Предыдущий слайд" disabled={slide <= 1} onClick={() => setSlide((current) => Math.max(1, current - 1))} className="rounded-lg border border-white/20 px-4 py-1 disabled:opacity-30 hover:bg-white/10">←</button>
+        <label className="flex items-center gap-2 whitespace-nowrap text-gray-400">
+          <span>Слайд</span>
+          <input
+            data-channel-preview-slide-input
+            aria-label="Номер слайда в предпросмотре"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={slideInput}
+            disabled={count < 1}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setSlideInput(event.currentTarget.value.replace(/\D/g, '').slice(0, 6))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur()
+            }}
+            onBlur={jumpToSlide}
+            className="w-14 rounded-lg border border-white/25 bg-white/10 px-2 py-1 text-center text-white outline-none focus:border-blue-400 disabled:opacity-40"
+          />
+          {count > 0 && <span>/ {count}</span>}
+        </label>
+        <button type="button" aria-label="Следующий слайд" disabled={count > 0 && slide >= count} onClick={() => setSlide((current) => current + 1)} className="rounded-lg border border-white/20 px-4 py-1 disabled:opacity-30 hover:bg-white/10">→</button>
+        <span className="hidden text-xs text-gray-500 sm:inline">Введите номер и нажмите Enter</span>
+      </div>
+      <div data-channel-preview-keyboard-warning className="shrink-0 border-t border-amber-400/40 bg-amber-400/15 px-4 py-2 text-center text-xs font-semibold text-amber-200">
+        ⚠ Стрелки клавиатуры здесь отключены. Предпросмотр листайте кнопками или по номеру; кликер продолжает листать эфир. Esc — закрыть.
+      </div>
     </div>
   )
 }

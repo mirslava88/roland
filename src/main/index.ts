@@ -3816,6 +3816,34 @@ function createWindows(): void {
   })
 
   let globalHookEnabled = true
+  let channelPreviewKeyboardGuard = false
+
+  handleControl('set-control-preview-fullscreen', async (_event, enabled: unknown): Promise<boolean> => {
+    if (typeof enabled !== 'boolean' || !controlWindow || controlWindow.isDestroyed()) return false
+    const win = controlWindow
+    if (win.isFullScreen() === enabled) return true
+    return await new Promise<boolean>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timeout)
+        if (enabled) win.removeListener('enter-full-screen', finish)
+        else win.removeListener('leave-full-screen', finish)
+        resolve(!win.isDestroyed() && win.isFullScreen() === enabled)
+      }
+      const timeout = setTimeout(finish, 2500)
+      if (enabled) win.once('enter-full-screen', finish)
+      else win.once('leave-full-screen', finish)
+      try { win.setFullScreen(enabled) } catch { finish() }
+    })
+  })
+
+  handleControl('set-channel-preview-keyboard-guard', (_event, enabled: unknown): boolean => {
+    if (typeof enabled !== 'boolean') return false
+    channelPreviewKeyboardGuard = enabled
+    return true
+  })
+  thisControlWindow.webContents.on('did-finish-load', () => {
+    channelPreviewKeyboardGuard = false
+  })
 
   const navigationShortcuts: Array<{
     accelerator: string
@@ -3836,11 +3864,15 @@ function createWindows(): void {
   const registerNavigationShortcuts = (): void => {
     for (const { accelerator, direction } of navigationShortcuts) {
       const registered = globalShortcut.register(accelerator, () => {
+        if (channelPreviewKeyboardGuard && accelerator !== 'PageDown' && accelerator !== 'PageUp') {
+          diagnosticLog('input', `channel preview blocked shortcut=${accelerator}`)
+          return
+        }
         diagnosticLog(
           'input',
           `global shortcut=${accelerator} direction=${direction} activeContent=${activeContentType ?? 'none'}`
         )
-        controlWindow?.webContents.send('global-key', direction)
+        controlWindow?.webContents.send('global-key', direction, accelerator)
       })
       diagnosticLog('input', `register shortcut=${accelerator} success=${registered}`)
     }

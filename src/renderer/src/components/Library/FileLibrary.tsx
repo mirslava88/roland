@@ -540,7 +540,7 @@ export function FileLibrary(): JSX.Element {
   // Drives view (no folder selected)
   if (!folderPath) {
     return (
-      <div className="pdm-library w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
+      <div className="pdm-library border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
         <div className="pdm-library-header p-3 border-b border-gray-800">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-gray-400 uppercase">Материалы</span>
@@ -602,7 +602,7 @@ export function FileLibrary(): JSX.Element {
   const parentPath = getParentPath()
 
   return (
-    <div className="pdm-library w-72 border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
+    <div className="pdm-library border-r border-gray-800 flex flex-col bg-surface-300 shrink-0">
       <div className="pdm-library-header p-3 border-b border-gray-800">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-bold text-gray-400 uppercase">Материалы</span>

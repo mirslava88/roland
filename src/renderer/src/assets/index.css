@@ -231,6 +231,60 @@
   background-size: 24px 24px, 24px 24px, auto, auto;
 }
 
+.pdm-library-resizable {
+  position: relative;
+  width: 288px;
+  flex: 0 0 auto;
+  min-height: 0;
+  max-width: max(200px, min(560px, calc(100vw - 550px)));
+}
+
+.pdm-library-resizable > .pdm-library {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+}
+
+.pdm-library-resize-handle {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pdm-library-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 35%;
+  bottom: 35%;
+  left: 4px;
+  width: 2px;
+  border-radius: 2px;
+  background: #53616e;
+  opacity: .7;
+  transition: background .15s, box-shadow .15s, opacity .15s;
+}
+
+.pdm-library-resize-handle:hover::after,
+.pdm-library-resize-handle:focus-visible::after {
+  background: #37b7ff;
+  box-shadow: 0 0 10px #37b7ff;
+  opacity: 1;
+}
+
+.pdm-library-resize-handle:focus-visible {
+  outline: 2px solid #37b7ff;
+  outline-offset: 2px;
+}
+
+.pdm-operator-shell .pdm-stage {
+  min-width: 0;
+}
+
 .pdm-operator-shell.theme-broadcast-pro .pdm-library,
 .pdm-operator-shell.theme-broadcast-pro .pdm-stage,
 .pdm-operator-shell.theme-broadcast-pro .pdm-slide-navigator,
@@ -252,8 +306,11 @@
   box-shadow: none !important;
 }
 
-.pdm-operator-shell.theme-broadcast-pro .pdm-library {
+.pdm-operator-shell.theme-broadcast-pro .pdm-library-resizable {
   width: clamp(236px, 20vw, 282px);
+}
+
+.pdm-operator-shell.theme-broadcast-pro .pdm-library {
   overflow: hidden;
   box-shadow: inset 0 3px 0 #1388cf, 0 15px 35px rgba(0, 0, 0, .38);
 }
@@ -499,7 +556,7 @@
     padding-left: 8px;
   }
 
-  .pdm-operator-shell.theme-broadcast-pro .pdm-library {
+  .pdm-operator-shell.theme-broadcast-pro .pdm-library-resizable {
     width: 225px;
   }
 
