@@ -25,6 +25,7 @@
     "test:program-scene-background": "node scripts/test-program-scene-background.mjs",
     "test:toolbar:ui": "node scripts/test-toolbar-ui.mjs",
     "test:library-resize": "node scripts/test-library-resize.mjs",
+    "test:channel-preview": "node scripts/test-channel-large-preview.mjs",
     "test:powerpoint-display-recovery": "node scripts/test-powerpoint-display-recovery.mjs",
     "test:powerpoint-output-recovery": "node scripts/test-powerpoint-output-recovery.mjs",
     "test:streaming": "node scripts/test-streaming.mjs && node scripts/test-streaming-handshake.mjs && node scripts/test-streaming-keyframes.mjs",
