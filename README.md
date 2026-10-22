@@ -39,7 +39,7 @@
 | **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2) |
 | **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream) |
 
-**Mac с процессором M:** [открыть загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream#user-content-download-mac-m) → в **Assets** выбрать **`PDM-Stream-1.1.7-arm64-build-20261021.2.zip`**. Запуск и показ PPTX из этой ZIP-копии подтверждены пользователем на Apple Silicon.
+**Mac с процессором M:** [открыть загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream#user-content-download-mac-m) → в **Assets** выбрать **`PDM-Stream-1.1.7-arm64-build-20261021.2.dmg`**. DMG содержит то же подписанное приложение, запуск и показ PPTX которого пользователь подтвердил на Apple Silicon из ZIP. ZIP остаётся дополнительным вариантом.
 
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
@@ -283,12 +283,12 @@ PDF, изображения, видео, музыка и таймер не тр�
 | Редакция | Intel Mac | Apple Silicon (M1/M2/M3/M4 и новее) |
 |---|---|---|
 | PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2/PDM-1.1.7-mac-arm64.dmg) |
-| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать проверенный ZIP arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-arm64-build-20261021.2.zip) |
+| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать DMG arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-arm64-build-20261021.2.dmg) |
 
-Для DMG есть `SHA256SUMS.txt`, для ZIP — отдельный файл `.zip.sha256` в Assets. Требуется **macOS 13 или новее**. Stream проверен на Intel с macOS 15.8.1; запуск и показ PPTX из ZIP на Apple Silicon подтверждены пользователем. Standard остаётся предварительным релизом.
+Для прежних DMG есть `SHA256SUMS.txt`; для нового DMG Apple Silicon и дополнительного ZIP — отдельные файлы `.dmg.sha256` и `.zip.sha256` в Assets. Требуется **macOS 13 или новее**. Stream проверен на Intel с macOS 15.8.1; запуск и показ PPTX из ZIP на Apple Silicon подтверждены пользователем. Standard остаётся предварительным релизом.
 
-1. **Stream на Mac с M:** распакуйте ZIP и запустите приложение прямо из папки `PDM-Stream-1.1.7-arm64-build-20261021.2`. Именно этот способ проверен на Apple Silicon. Для остальных загрузок откройте DMG своей архитектуры и перетащите приложение в **«Программы»**.
-2. После установки из DMG запускайте приложение из **«Программ»**. У сборок пока нет нотариальной проверки Apple; macOS может потребовать отдельное подтверждение открытия. Используйте [инструкцию Apple](https://support.apple.com/ru-ru/102445) для доверенного приложения.
+1. Откройте DMG своей архитектуры и перетащите приложение в **«Программы»**. Если там уже есть старая копия PDM, закройте её и подтвердите замену.
+2. Извлеките образ DMG и запустите приложение из **«Программ»**. У сборок пока нет нотариальной проверки Apple; macOS может потребовать отдельное подтверждение открытия. Используйте [инструкцию Apple](https://support.apple.com/ru-ru/102445) для доверенного приложения.
 3. Для PPTX и подготовки миниатюр установите Keynote. Для Word/Excel нужны соответствующие приложения Microsoft Office для Mac.
 4. При нехватке записи экрана или универсального доступа PDM покажет инструкцию и откроет нужный раздел настроек. Разрешите также автоматизацию Keynote/Office по запросу macOS. Камеру разрешайте при подключении источника. PDM и PDM Stream получают разрешения отдельно.
 5. Подключите внешний дисплей, назначьте ему «Основной эфир» и выберите канал.
