@@ -39,6 +39,8 @@
 | **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2) |
 | **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream) |
 
+**Mac с процессором M:** [открыть загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream#user-content-download-mac-m) → в **Assets** выбрать **`PDM-Stream-1.1.7-arm64-build-20261021.2.zip`**. Запуск и показ PPTX из этой ZIP-копии подтверждены пользователем на Apple Silicon.
+
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
 Обычная PDM сохраняет прежнее имя и профиль `%APPDATA%/presentation-display-manager`.
@@ -48,7 +50,7 @@ Stream устанавливается отдельно: **Presentation Display M
 
 В настройках Stream отображается **«1.1.7 stream»**. В `package.json`, имени установщика и теге
 используется техническая запись `1.1.7-stream` / `v1.1.7-stream`.
-Исправленная Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261021.2`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`; выпуск предварительный, без нотариальной проверки Apple.
+Исправленная Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261021.2`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`. Stream опубликован обычным релизом; Standard остаётся предварительным. Нотариальной проверки Apple нет.
 Встроенный стриминг доступен только в Stream.
 
 ## Исправление запуска macOS 1.1.7 — ревизия 20261021.2
@@ -56,7 +58,7 @@ Stream устанавливается отдельно: **Presentation Display M
 - Исправлен отказ запуска с ошибкой `DYLD: different Team IDs`: приложение, Electron, дочерние процессы и нативные библиотеки подписываются одним сертификатом с Team ID. Проверка библиотек и Hardened Runtime сохранены.
 - До создания DMG сборка проверяет сертификат и совпадение Team ID у всех вложенных Mach-O файлов; подпись ad hoc блокирует выпуск. CI без настроенного сертификата проверяет исходники, но не создаёт установщики для распространения.
 - Standard и Stream публикуются отдельно, для Intel и Apple Silicon. Номер приложения остаётся 1.1.7 / 1.1.7-stream; прежняя ревизия 20261021.1 сохранена.
-- Подпись Apple Development не заменяет Developer ID и нотариальную проверку Apple: выпуск остаётся предварительным. Запуск исправленного Stream проверен на Intel Mac с macOS 15.8.1; запуск на физическом Apple Silicon не проверен.
+- Подпись Apple Development не заменяет Developer ID и нотариальную проверку Apple. Исправленный Stream запущен на Intel Mac с macOS 15.8.1; 22 октября 2026 пользователь подтвердил запуск и показ PPTX на Apple Silicon из ZIP ревизии 20261021.2. Отдельная живая проверка Standard на Apple Silicon ещё не выполнена.
 
 ## Релиз 1.1.7 — Windows и macOS
 
@@ -64,7 +66,7 @@ Stream устанавливается отдельно: **Presentation Display M
 - Стрелки клавиатуры в крупном предпросмотре отключены от эфирного листания; кликер с PageUp/PageDown продолжает вести эфир. Пульт, который посылает стрелки, тоже блокируется на время предпросмотра. PPTX-анимации и встроенное видео в этом статическом предпросмотре не воспроизводятся.
 - Левая панель материалов расширяется мышью, сохраняет ширину и сбрасывается двойным щелчком. Временные файлы Office с именем на `~` в библиотеке скрыты без удаления с диска.
 - В Windows дополнительно исправлены панель задач на эфирном мониторе с отличающимся масштабом и восстановление подтверждённого окна PowerPoint после краткого сбоя доступа к нему.
-- Electron 44.9.3 в Windows и macOS. Mac 1.1.7 включает прежние исправления Keynote, разрешений первого запуска и освобождения скрытой камеры. Реальная проверка новых Mac-сборок на устройстве ещё нужна.
+- Electron 44.9.3 в Windows и macOS. Mac 1.1.7 включает прежние исправления Keynote, разрешений первого запуска и освобождения скрытой камеры. Запуск Stream и показ PPTX на Apple Silicon подтверждены пользователем для ZIP ревизии 20261021.2; это не означает проверки всех функций и всех Mac-сборок.
 
 ## Обновление macOS 1.1.6 — ревизия 20261020.2
 
@@ -274,19 +276,19 @@ CI-сборки публикуются без коммерческой цифр�
 
 PDF, изображения, видео, музыка и таймер не требуют установленного PowerPoint.
 
-## macOS: Standard и Stream (предварительный релиз)
+## macOS: Standard и Stream
 
 ### Скачать и установить
 
 | Редакция | Intel Mac | Apple Silicon (M1/M2/M3/M4 и новее) |
 |---|---|---|
-| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.1/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.1/PDM-1.1.7-mac-arm64.dmg) |
-| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.1-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.1-stream/PDM-Stream-1.1.7-stream-mac-arm64.dmg) |
+| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2/PDM-1.1.7-mac-arm64.dmg) |
+| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать проверенный ZIP arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-arm64-build-20261021.2.zip) |
 
-В каждом релизе есть `SHA256SUMS.txt` для проверки загруженных DMG. Требуется **macOS 13 или новее**; фактическая проверка выполнена на macOS 15.8.1 / Intel.
+Для DMG есть `SHA256SUMS.txt`, для ZIP — отдельный файл `.zip.sha256` в Assets. Требуется **macOS 13 или новее**. Stream проверен на Intel с macOS 15.8.1; запуск и показ PPTX из ZIP на Apple Silicon подтверждены пользователем. Standard остаётся предварительным релизом.
 
-1. Откройте DMG своей архитектуры и перетащите приложение в **«Программы»**.
-2. Запустите его из **«Программ»**. У сборок пока нет нотариальной проверки Apple; macOS может потребовать отдельное подтверждение открытия. Используйте [инструкцию Apple](https://support.apple.com/ru-ru/102445) для доверенного приложения.
+1. **Stream на Mac с M:** распакуйте ZIP и запустите приложение прямо из папки `PDM-Stream-1.1.7-arm64-build-20261021.2`. Именно этот способ проверен на Apple Silicon. Для остальных загрузок откройте DMG своей архитектуры и перетащите приложение в **«Программы»**.
+2. После установки из DMG запускайте приложение из **«Программ»**. У сборок пока нет нотариальной проверки Apple; macOS может потребовать отдельное подтверждение открытия. Используйте [инструкцию Apple](https://support.apple.com/ru-ru/102445) для доверенного приложения.
 3. Для PPTX и подготовки миниатюр установите Keynote. Для Word/Excel нужны соответствующие приложения Microsoft Office для Mac.
 4. При нехватке записи экрана или универсального доступа PDM покажет инструкцию и откроет нужный раздел настроек. Разрешите также автоматизацию Keynote/Office по запросу macOS. Камеру разрешайте при подключении источника. PDM и PDM Stream получают разрешения отдельно.
 5. Подключите внешний дисплей, назначьте ему «Основной эфир» и выберите канал.
