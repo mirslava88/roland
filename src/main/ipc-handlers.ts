@@ -30,6 +30,7 @@ import {
 import { isTrustedWindowMainFrame } from './renderer-security'
 import { loadQrWifiPassword, saveQrWifiPassword } from './secure-secrets'
 import { PowerPointOutputWatchdog } from './powerpoint-output-watchdog'
+import { auditPresentation } from './presentation-audit'
 
 const execFileAsync = promisify(execFile)
 
@@ -1503,6 +1504,16 @@ export function registerIpcHandlers(
       return { success: true, thumbnails: result.thumbnails, slideCount: result.slideCount }
     } catch (error) {
       return { success: false, error: String(error) }
+    }
+  })
+
+  handleControl('audit-presentation', async (_event, filePath: unknown, force: unknown) => {
+    try {
+      const report = await auditPresentation(filePath as string, force === true)
+      return { success: true, report }
+    } catch (error) {
+      diagnosticLog('presentation-audit', `failed ${formatDiagnosticError(error)}`)
+      return { success: false, error: error instanceof Error ? error.message : 'Не удалось проверить презентацию.' }
     }
   })
 

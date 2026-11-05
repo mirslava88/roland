@@ -43,6 +43,13 @@ import { DEFAULT_STREAM_SETTINGS } from './src/shared/streaming';
 window.testStore = useAppStore;
 window.testCalls = [];
 window.testErrors = [];
+window.testPresentationMessages = [];
+window.testPlaylistTakeEvents = [];
+window.testChannelTakeEvents = [];
+window.testMusicState = {playing:true,currentIndex:0,currentTime:10,duration:100,volume:1,trackName:'Test music',loopTrack:false,loopPlaylist:true,stopAfterTrack:false,playlistLength:0,pendingChannel:null,transitionSerial:0};
+window.testMediaFiles = {music:[],video:[]};
+window.addEventListener('take-playlist-video', event => window.testPlaylistTakeEvents.push(event.detail));
+window.addEventListener('take-channel', event => window.testChannelTakeEvents.push(event.detail));
 window.addEventListener('error', event => window.testErrors.push(String(event.error || event.message)));
 window.addEventListener('unhandledrejection', event => window.testErrors.push(String(event.reason)));
 const listeners = new Map();
@@ -53,8 +60,17 @@ window.api = {
   dbgLog() {}, on(event,fn) {if (!listeners.has(event)) listeners.set(event,new Set()); listeners.get(event).add(fn); return () => listeners.get(event).delete(fn);},
   getTimerOverlayLayout:call('timer-layout',{x:.9,y:.9,scale:1}),
   updateTimerOverlay:call('timer-update'), showTimerOverlay:call('timer-show'), hideTimerOverlay:call('timer-hide'),
-  sendToPresentation:call('presentation-message'),
-  musicGetState:call('music-status',{playing:true,currentIndex:0,currentTime:10,duration:100,volume:1,trackName:'Test music',loopTrack:false}),
+  sendToPresentation:(...args) => { window.testCalls.push('presentation-message'); window.testPresentationMessages.push(args); return Promise.resolve(); },
+  musicGetState:() => { window.testCalls.push('music-status'); return Promise.resolve({...window.testMusicState}); },
+  scanMediaFolder:kind => {window.testCalls.push('scan-'+kind);return Promise.resolve([...window.testMediaFiles[kind]]);},
+  musicSetPlaylist:(files,index=0,autoplay=false) => {window.testCalls.push('music-set-playlist');window.testMusicState={...window.testMusicState,currentIndex:index,playlistLength:files.length,loadedPath:files[index]||null,playing:autoplay};return Promise.resolve();},
+  musicPlay:() => {window.testCalls.push('music-play');window.testMusicState.playing=true;return Promise.resolve();},
+  musicSetStopAfterTrack:value => {window.testCalls.push('music-stop-after-track');window.testMusicState.stopAfterTrack=value;if(value){window.testMusicState.loopTrack=false;window.testMusicState.loopPlaylist=false;}return Promise.resolve();},
+  musicSetLoopTrack:value => {window.testCalls.push('music-loop-track');window.testMusicState.loopTrack=value;if(value)window.testMusicState.stopAfterTrack=false;return Promise.resolve();},
+  musicSetLoopPlaylist:value => {window.testCalls.push('music-loop-playlist');window.testMusicState.loopPlaylist=value;if(value)window.testMusicState.stopAfterTrack=false;return Promise.resolve();},
+  musicSetNextActions:actions => {window.testCalls.push('music-next-actions');window.testMusicActions=actions;return Promise.resolve();},
+  musicReorderPlaylist:files => {window.testCalls.push('music-reorder');window.testMusicReorder=files;return Promise.resolve();},
+  musicConsumeChannelTransition:serial => {if(serial!==window.testMusicState.transitionSerial)return Promise.resolve(null);const id=window.testMusicState.pendingChannel;window.testMusicState.pendingChannel=null;return Promise.resolve(id);},
   getAudioDevices:call('audio-devices',[]), getAppVersion:call('version','1.1.5 test'),
   virtualCamera:{status:call('virtual-camera-status',{phase:'idle',supported:true,installed:true,available:true,source:null,error:null,name:'PDM Virtual Camera',width:1920,height:1080,fps:30,startedAt:null}),install:call('virtual-camera-install'),start:call('virtual-camera-start'),stop:call('virtual-camera-stop')},
   streaming:{load:call('stream-load',{settings:DEFAULT_STREAM_SETTINGS,available:true,canSave:true}),status:call('stream-status',{phase:'running',destinations:[]}),start:call('stream-start'),stop:call('stream-stop')}

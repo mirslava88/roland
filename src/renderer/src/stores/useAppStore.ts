@@ -114,8 +114,23 @@ function dispatchPptxGotoCollapsed(target: number): Promise<PptxResult> {
 }
 
 export type ContentType = 'presentation' | 'pdf' | 'video' | 'capture' | 'other' | null
-export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'other'
+export type FilterType = 'all' | 'presentation' | 'pdf' | 'video' | 'music' | 'other'
+
+export function matchesLibraryFilter(file: FileEntry, filter: FilterType): boolean {
+  if (filter === 'all') return true
+  if (filter === 'music') return file.type === 'other' && file.isAudio === true
+  if (filter === 'other') return file.type === 'other' && !file.isAudio
+  return file.type === filter
+}
 export type ChannelId = string
+export type VideoNextAction =
+  | { kind: 'stop' }
+  | { kind: 'video'; path: string }
+  | { kind: 'channel'; channelId: ChannelId }
+export type MusicNextAction =
+  | { kind: 'stop' }
+  | { kind: 'music'; path: string }
+  | { kind: 'channel'; channelId: ChannelId }
 export type ChannelCacheStatus = 'loading' | 'partial' | 'ready' | 'error'
 
 export type OverlayState =
@@ -764,20 +779,36 @@ interface AppState {
 
   // Music playlist (shared between MusicPlayer and channel take)
   musicPlaylist: string[]
+  musicFolderPath: string | null
+  setMusicFolderPath: (path: string | null) => void
   setMusicPlaylist: (files: string[]) => void
+  moveMusicPlaylistItem: (from: number, to: number) => void
+  musicStopAfterTrack: boolean
+  setMusicStopAfterTrack: (value: boolean) => void
+  musicNextActions: Record<string, MusicNextAction>
+  setMusicNextAction: (path: string, action: MusicNextAction | null) => void
 
   // Video playlist — plays in presentation window, auto-advance on 'ended'
   videoPlaylist: string[]
+  videoFolderPath: string | null
+  setVideoFolderPath: (path: string | null) => void
   videoCurrentIndex: number
   videoIsPlaying: boolean
   videoLoopTrack: boolean
   videoLoopPlaylist: boolean
+  videoStopAfterTrack: boolean
+  channelVideoAutoplay: boolean
+  videoNextActions: Record<string, VideoNextAction>
   videoPlayback: Record<string, VideoPlaybackState>
   setVideoPlaylist: (files: string[]) => void
+  moveVideoPlaylistItem: (from: number, to: number) => void
+  setVideoNextAction: (path: string, action: VideoNextAction | null) => void
   setVideoCurrentIndex: (idx: number) => void
   setVideoIsPlaying: (playing: boolean) => void
   setVideoLoopTrack: (v: boolean) => void
   setVideoLoopPlaylist: (v: boolean) => void
+  setVideoStopAfterTrack: (v: boolean) => void
+  setChannelVideoAutoplay: (v: boolean) => void
   setVideoPlayback: (path: string, state: Partial<VideoPlaybackState>) => void
 
   // Timer
@@ -909,8 +940,8 @@ export const useAppStore = create<AppState>()(persist(
     const saved = file ? slidePositions[file.path] || 1 : 1
     const current = channels[ch] || EMPTY_CHANNEL
     const keepVideoEndChannel = (
-      current.file?.type === 'video' &&
-      file?.type === 'video' &&
+      (current.file?.type === 'video' || current.file?.isAudio) &&
+      (file?.type === 'video' || file?.isAudio) &&
       current.file.path === file.path
     )
     const nextChannels = {
@@ -962,7 +993,7 @@ export const useAppStore = create<AppState>()(persist(
   setChannelVideoEndChannel: (ch, target) => {
     const { channels } = get()
     const channel = channels[ch]
-    if (!channel || channel.file?.type !== 'video') return
+    if (!channel || (channel.file?.type !== 'video' && !channel.file?.isAudio)) return
     const safeTarget = target && target !== ch && channels[target]?.file ? target : null
     set({
       channels: {
@@ -1134,7 +1165,7 @@ export const useAppStore = create<AppState>()(persist(
     const visibleFiles = visibleLibraryFiles(files)
     set({
       files: visibleFiles,
-      filteredFiles: filter === 'all' ? visibleFiles : visibleFiles.filter((f) => f.type === filter)
+      filteredFiles: visibleFiles.filter((f) => matchesLibraryFilter(f, filter))
     })
   },
 
@@ -1142,7 +1173,7 @@ export const useAppStore = create<AppState>()(persist(
     const { files } = get()
     set({
       filter,
-      filteredFiles: filter === 'all' ? files : files.filter((f) => f.type === filter)
+      filteredFiles: files.filter((f) => matchesLibraryFilter(f, filter))
     })
   },
 
@@ -1620,20 +1651,88 @@ export const useAppStore = create<AppState>()(persist(
 
   // Music
   musicPlaylist: [],
-  setMusicPlaylist: (files) => set({ musicPlaylist: files }),
+  musicFolderPath: null,
+  setMusicFolderPath: (path) => set({ musicFolderPath: path }),
+  musicStopAfterTrack: false,
+  musicNextActions: {},
+  setMusicPlaylist: (files) => set((state) => {
+    const paths = new Set(files)
+    return {
+      musicPlaylist: files,
+      musicNextActions: Object.fromEntries(Object.entries(state.musicNextActions).filter(([path, action]) =>
+        paths.has(path) && (action.kind !== 'music' || paths.has(action.path))
+      ))
+    }
+  }),
+  moveMusicPlaylistItem: (from, to) => set((state) => {
+    if (from === to || from < 0 || to < 0 || from >= state.musicPlaylist.length || to >= state.musicPlaylist.length) return state
+    const musicPlaylist = [...state.musicPlaylist]
+    const [moved] = musicPlaylist.splice(from, 1)
+    musicPlaylist.splice(to, 0, moved)
+    return { musicPlaylist }
+  }),
+  setMusicStopAfterTrack: (value) => set({ musicStopAfterTrack: value }),
+  setMusicNextAction: (path, action) => set((state) => {
+    if (!state.musicPlaylist.includes(path)) return state
+    if (action?.kind === 'music' && (!state.musicPlaylist.includes(action.path) || action.path === path)) return state
+    const musicNextActions = { ...state.musicNextActions }
+    if (action) musicNextActions[path] = action
+    else delete musicNextActions[path]
+    return { musicNextActions }
+  }),
 
   // Video playlist
   videoPlaylist: [],
+  videoFolderPath: null,
+  setVideoFolderPath: (path) => set({ videoFolderPath: path }),
   videoCurrentIndex: 0,
   videoIsPlaying: false,
   videoLoopTrack: false,
   videoLoopPlaylist: true,
+  videoStopAfterTrack: false,
+  channelVideoAutoplay: false,
+  videoNextActions: {},
   videoPlayback: {},
-  setVideoPlaylist: (files) => set({ videoPlaylist: files }),
+  setVideoPlaylist: (files) => set((state) => {
+    const paths = new Set(files)
+    const selectedPath = state.videoPlaylist[state.videoCurrentIndex]
+    const videoNextActions = Object.fromEntries(
+      Object.entries(state.videoNextActions).filter(([source, action]) =>
+        paths.has(source) && (action.kind !== 'video' || paths.has(action.path))
+      )
+    )
+    return {
+      videoPlaylist: files,
+      videoCurrentIndex: Math.max(0, files.indexOf(selectedPath)),
+      videoNextActions
+    }
+  }),
+  moveVideoPlaylistItem: (from, to) => set((state) => {
+    if (from === to || from < 0 || to < 0 || from >= state.videoPlaylist.length || to >= state.videoPlaylist.length) return state
+    const videoPlaylist = [...state.videoPlaylist]
+    const [moved] = videoPlaylist.splice(from, 1)
+    videoPlaylist.splice(to, 0, moved)
+    const selected = state.videoCurrentIndex
+    const videoCurrentIndex = selected === from ? to
+      : from < selected && to >= selected ? selected - 1
+      : from > selected && to <= selected ? selected + 1
+      : selected
+    return { videoPlaylist, videoCurrentIndex }
+  }),
+  setVideoNextAction: (path, action) => set((state) => {
+    if (!state.videoPlaylist.includes(path)) return state
+    if (action?.kind === 'video' && (!state.videoPlaylist.includes(action.path) || action.path === path)) return state
+    const videoNextActions = { ...state.videoNextActions }
+    if (action) videoNextActions[path] = action
+    else delete videoNextActions[path]
+    return { videoNextActions }
+  }),
   setVideoCurrentIndex: (idx) => set({ videoCurrentIndex: idx }),
   setVideoIsPlaying: (playing) => set({ videoIsPlaying: playing }),
   setVideoLoopTrack: (v) => set({ videoLoopTrack: v }),
   setVideoLoopPlaylist: (v) => set({ videoLoopPlaylist: v }),
+  setVideoStopAfterTrack: (v) => set({ videoStopAfterTrack: v }),
+  setChannelVideoAutoplay: (v) => set({ channelVideoAutoplay: v }),
   setVideoPlayback: (path, state) => set((current) => ({
     videoPlayback: {
       ...current.videoPlayback,
@@ -1969,6 +2068,7 @@ export const useAppStore = create<AppState>()(persist(
         writeStoredAppTheme(legacyTheme)
       }
       delete migrated.appTheme
+      migrated.channelVideoAutoplay = migrated.channelVideoAutoplay === true
       const rawScene = migrated.programScene && typeof migrated.programScene === 'object'
         ? migrated.programScene as Record<string, unknown>
         : {}
@@ -2009,6 +2109,7 @@ export const useAppStore = create<AppState>()(persist(
       folderPath: state.folderPath,
       rootFolderPath: state.rootFolderPath,
       globalHookEnabled: state.globalHookEnabled,
+      channelVideoAutoplay: state.channelVideoAutoplay,
       timerOverlayPosition: state.timerOverlayPosition,
       timerOverlayScale: state.timerOverlayScale,
       timerSpeakerPosition: state.timerSpeakerPosition,

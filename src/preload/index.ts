@@ -25,8 +25,22 @@ interface MusicState {
   volume: number
   loopTrack: boolean
   loopPlaylist: boolean
+  stopAfterTrack: boolean
+  loadedPath: string | null
+  pendingChannel: string | null
+  transitionSerial: number
   trackName: string
   playlistLength: number
+}
+
+interface ChannelMusicState {
+  path: string | null
+  session: number
+  endedSession: number
+  playing: boolean
+  currentTime: number
+  duration: number
+  loop: boolean
 }
 
 const api = {
@@ -170,6 +184,9 @@ const api = {
 
   generatePptxThumbnails: (filePath: string, keepPrepared?: boolean) =>
     ipcRenderer.invoke('generate-pptx-thumbnails', filePath, keepPrepared),
+
+  auditPresentation: (filePath: string, force?: boolean) =>
+    ipcRenderer.invoke('audit-presentation', filePath, force),
 
   getPptxSlideNotes: (filePath: string, slide: number) =>
     ipcRenderer.invoke('get-pptx-slide-notes', filePath, slide),
@@ -330,10 +347,16 @@ const api = {
 
   selectMusicFiles: (): Promise<string[] | null> => ipcRenderer.invoke('select-music-files'),
 
-  selectMusicFolder: (): Promise<string[] | null> => ipcRenderer.invoke('select-music-folder'),
+  selectMusicFolder: (): Promise<{ folderPath: string; files: string[] } | null> => ipcRenderer.invoke('select-music-folder'),
+  scanMediaFolder: (kind: 'music' | 'video', folderPath: string): Promise<string[] | null> =>
+    ipcRenderer.invoke('scan-media-folder', kind, folderPath),
 
   musicSetPlaylist: (files: string[], startIndex?: number, autoplay?: boolean): Promise<void> =>
     ipcRenderer.invoke('music-set-playlist', files, startIndex, autoplay),
+  musicReorderPlaylist: (files: string[]): Promise<void> => ipcRenderer.invoke('music-reorder-playlist', files),
+  musicSetNextActions: (actions: Record<string, unknown>): Promise<void> => ipcRenderer.invoke('music-set-next-actions', actions),
+  musicSetStopAfterTrack: (value: boolean): Promise<void> => ipcRenderer.invoke('music-set-stop-after-track', value),
+  musicConsumeChannelTransition: (serial: number): Promise<string | null> => ipcRenderer.invoke('music-consume-channel-transition', serial),
 
   musicPlay: (): Promise<void> => ipcRenderer.invoke('music-play'),
 
@@ -354,9 +377,17 @@ const api = {
   musicSeek: (time: number): Promise<void> => ipcRenderer.invoke('music-seek', time),
 
   musicGetState: (): Promise<MusicState | null> => ipcRenderer.invoke('music-get-state'),
+  musicChannelLoadPlay: (path: string): Promise<number> => ipcRenderer.invoke('music-channel-load-play', path),
+  musicChannelPlay: (): Promise<void> => ipcRenderer.invoke('music-channel-play'),
+  musicChannelPause: (): Promise<void> => ipcRenderer.invoke('music-channel-pause'),
+  musicChannelStop: (): Promise<void> => ipcRenderer.invoke('music-channel-stop'),
+  musicChannelUnload: (): Promise<void> => ipcRenderer.invoke('music-channel-unload'),
+  musicChannelSeek: (time: number): Promise<void> => ipcRenderer.invoke('music-channel-seek', time),
+  musicChannelSetLoop: (value: boolean): Promise<void> => ipcRenderer.invoke('music-channel-set-loop', value),
+  musicChannelGetState: (): Promise<ChannelMusicState | null> => ipcRenderer.invoke('music-channel-get-state'),
 
   selectVideoFiles: (): Promise<string[] | null> => ipcRenderer.invoke('select-video-files'),
-  selectVideoFolder: (): Promise<string[] | null> => ipcRenderer.invoke('select-video-folder'),
+  selectVideoFolder: (): Promise<{ folderPath: string; files: string[] } | null> => ipcRenderer.invoke('select-video-folder'),
 
   openFileExternal: (filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('open-file-external', filePath, displayBounds),

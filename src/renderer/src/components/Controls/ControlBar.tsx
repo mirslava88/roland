@@ -21,6 +21,9 @@ export function ControlBar(): JSX.Element {
   const [videoLoop, setVideoLoop] = useState(false)
   const [videoTime, setVideoTime] = useState(0)
   const [videoDuration, setVideoDuration] = useState(0)
+  const [channelMusic, setChannelMusic] = useState<ChannelMusicState | null>(null)
+  const channelMusicEndTarget = useAppStore((state) => state.liveChannel && state.activeFile?.isAudio
+    ? state.channels[state.liveChannel]?.videoEndChannel : null)
   const pendingNavCount = useRef(0)
 
   // Listen for video time/state updates from presentation window
@@ -38,6 +41,28 @@ export function ControlBar(): JSX.Element {
     })
     return () => { unsubTime(); unsubState() }
   }, [])
+
+  useEffect(() => {
+    if (!activeFile?.isAudio) {
+      setChannelMusic(null)
+      return
+    }
+    let disposed = false
+    let inFlight = false
+    const refresh = async (): Promise<void> => {
+      if (disposed || inFlight) return
+      inFlight = true
+      try {
+        const state = await window.api.musicChannelGetState()
+        if (!disposed) setChannelMusic(state?.path === activeFile.path ? state : null)
+      } finally {
+        inFlight = false
+      }
+    }
+    void refresh().catch(() => undefined)
+    const timer = setInterval(() => { void refresh().catch(() => undefined) }, 250)
+    return () => { disposed = true; clearInterval(timer) }
+  }, [activeFile?.path, activeFile?.isAudio])
 
   if (!activeFile) {
     return (
@@ -233,6 +258,40 @@ export function ControlBar(): JSX.Element {
           <span className="text-[10px] text-gray-400 tabular-nums w-[38px]">
             {formatTime(videoDuration)}
           </span>
+        </div>
+      )}
+
+      {activeFile.isAudio && (
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <button
+            aria-label={channelMusic?.playing ? 'Пауза музыки из канала' : 'Воспроизвести музыку из канала'}
+            onClick={() => { void (channelMusic?.playing ? window.api.musicChannelPause() : window.api.musicChannelPlay()) }}
+            className="btn-icon text-lg"
+          >{channelMusic?.playing ? '⏸' : '▶'}</button>
+          <button
+            aria-label="Остановить музыку из канала"
+            onClick={() => { void window.api.musicChannelStop() }}
+            className="btn-icon text-lg"
+          >⏹</button>
+          <button
+            aria-label="Зациклить музыку из канала"
+            aria-pressed={channelMusic?.loop ?? false}
+            onClick={() => { void window.api.musicChannelSetLoop(!channelMusic?.loop) }}
+            disabled={Boolean(channelMusicEndTarget)}
+            className={`btn-icon text-sm px-2 py-1 rounded transition-colors disabled:opacity-40 ${channelMusic?.loop ? 'bg-blue-600/80 text-white' : 'text-gray-400'}`}
+            title={channelMusicEndTarget ? 'Чтобы включить повтор, выберите «Не переключать» после музыки' : channelMusic?.loop ? 'Зацикливание ВКЛ' : 'Зацикливание музыки'}
+          >🔁</button>
+          <div className="w-px h-8 bg-gray-800 mx-1" />
+          <span className="text-[10px] text-gray-400 tabular-nums w-[38px] text-right">{formatTime(channelMusic?.currentTime ?? 0)}</span>
+          <input
+            aria-label="Позиция музыки из канала"
+            type="range" min={0} max={channelMusic?.duration || 100} step={0.5}
+            value={channelMusic?.currentTime ?? 0}
+            onChange={(event) => { void window.api.musicChannelSeek(Number(event.target.value)) }}
+            disabled={!channelMusic?.duration}
+            className="flex-1 h-1 accent-blue-500 disabled:opacity-30 min-w-[120px]"
+          />
+          <span className="text-[10px] text-gray-400 tabular-nums w-[38px]">{formatTime(channelMusic?.duration ?? 0)}</span>
         </div>
       )}
 

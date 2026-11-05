@@ -14,6 +14,8 @@ const suites = {
   core: [
     ['Strict TypeScript', process.execPath, ['scripts/typecheck.mjs']],
     ['Type safety regressions', process.execPath, ['scripts/test-type-safety.cjs']],
+    ['Music playlist transitions', process.execPath, ['scripts/test-music-playlist.cjs']],
+    ['Media folder refresh', process.execPath, ['scripts/test-media-folder-playlist.cjs']],
     ['Library temporary files', process.execPath, ['scripts/test-library-visible-files.mjs']],
     ['Virtual camera frame conversion', process.execPath, ['scripts/test-virtual-camera-frame.mjs']],
     ['Windows 10 installer camera gate', process.execPath, ['scripts/test-virtual-camera-win10-installer.mjs']],
@@ -26,6 +28,7 @@ const suites = {
     ['Stream Deck commands', process.execPath, ['scripts/test-direct-stream-deck.mjs']],
     ['Scene and timer commands', process.execPath, ['scripts/test-scene-and-timer-commands.mjs']],
     ['PPTX cache', process.execPath, ['scripts/test-pptx-cache.mjs']],
+    ['Presentation audit', process.execPath, ['scripts/test-presentation-audit.cjs']],
     ['PPTX cache shutdown', process.execPath, ['scripts/test-pptx-cache-shutdown.mjs']],
     ['PPTX early start', process.execPath, ['scripts/test-pptx-early-start.mjs']],
     ['PPTX thumbnails', process.execPath, ['scripts/test-pptx-thumbnail.mjs']],

@@ -1397,7 +1397,7 @@ app.whenReady().then(async () => {
         size.dispatchEvent(new Event('input',{bubbles:true}));
       })()`);
       for (const above of [true, false, true]) {
-        await win.webContents.executeJavaScript(`window.retainedMediaElement ||= document.querySelector('[data-program-scene-media-id] img')`);
+        await win.webContents.executeJavaScript(`Boolean(window.retainedMediaElement ||= document.querySelector('[data-program-scene-media-id] img'))`);
         if (!above || above === true && await win.webContents.executeJavaScript(`document.querySelector('[data-program-scene-media-editor]').innerText.includes('Под презентацией')`)) {
           await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-program-scene-media-editor] button')).find(b=>b.textContent.trim()===${JSON.stringify(above ? 'Выше' : 'Ниже')}).click()`);
         }

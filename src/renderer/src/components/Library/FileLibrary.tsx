@@ -9,6 +9,7 @@ const FILTERS: { label: string; value: FilterType }[] = [
   { label: 'PPTX', value: 'presentation' },
   { label: 'PDF', value: 'pdf' },
   { label: 'Видео', value: 'video' },
+  { label: 'Музыка', value: 'music' },
   { label: 'Разное', value: 'other' }
 ]
 

@@ -52,6 +52,13 @@ complete license is included at `resources/licenses/zustand-LICENSE.txt`.
 
 Source: https://github.com/pmndrs/zustand
 
+## unzipper 0.12.5 and @xmldom/xmldom 0.8.15
+
+PPTX structure inspection uses unzipper to read the archive and xmldom to
+parse slide XML. Both are distributed under the MIT License. Their complete
+licenses are included at `resources/licenses/unzipper-LICENSE.txt` and
+`resources/licenses/xmldom-LICENSE.txt`.
+
 ## qr-code-styling 1.9.2 and qrcode-generator 1.5.2
 
 QR-code generation and styling components, distributed under the MIT License.

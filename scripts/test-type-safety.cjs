@@ -91,9 +91,9 @@ export { useAppStore } from './src/renderer/src/stores/useAppStore';
   const api = {
     loadAppConfig: async () => ({ success: true, content: JSON.stringify(raw) }),
     saveAppConfig: async text => { saved = JSON.parse(text); return { success: true } },
-    validateConfigPaths: async paths => paths.map(path => ({ path, exists: !path.includes('missing'), isDirectory: false })),
+    validateConfigPaths: async paths => paths.map(path => ({ path, exists: !path.includes('missing'), isDirectory: path.endsWith('/music-folder') || path.endsWith('/video-folder') })),
     toggleGlobalHook: async enabled => enabled, watchFolder: noop,
-    musicStop: noop, musicSetPlaylist: noop, musicSetLoopTrack: noop, musicSetLoopPlaylist: noop, musicSetVolume: noop,
+    musicStop: noop, musicSetPlaylist: noop, musicSetLoopTrack: noop, musicSetLoopPlaylist: noop, musicSetStopAfterTrack: noop, musicSetNextActions: noop, musicSetVolume: noop,
     getAudioDevices: async () => [], musicGetState: async () => null
   }
   const module = { exports: {} }
@@ -117,13 +117,92 @@ export { useAppStore } from './src/renderer/src/stores/useAppStore';
   raw = saved
   await loadAppConfigFromFile()
   assert.equal(useAppStore.getState().programScene.contentChannelId, id)
+  const musicFile = { id: 'channel-song', name: 'Channel song', type: 'other', path: 'C:/channel-song.mp3', extension: '.mp3', size: 1, isAudio: true }
+  const targetFile = { id: 'next-slide', name: 'Next slide', type: 'pdf', path: 'C:/next-slide.pdf', extension: '.pdf', size: 1 }
+  raw = { ...base, channels: { items: [
+    { file: musicFile, videoEndChannel: useAppStore.getState().channelIds[1] },
+    { file: targetFile }
+  ] } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().channels[id].videoEndChannel, useAppStore.getState().channelIds[1], 'Music channel target survives import')
+  await saveCurrentAppConfig()
+  assert.equal(saved.channels.items[0].videoEndChannel, useAppStore.getState().channelIds[1], 'Music channel target survives export')
+  raw = { ...base, video: { playlist: [file.path], currentIndex: 0, loopTrack: true, loopPlaylist: true, stopAfterTrack: true } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().channelVideoAutoplay, false, 'Older configs keep channel videos paused')
+  useAppStore.getState().setChannelVideoAutoplay(true)
+  assert.equal(useAppStore.getState().channelVideoAutoplay, true)
+  assert.equal(useAppStore.getState().videoStopAfterTrack, true)
+  assert.equal(useAppStore.getState().videoLoopTrack, false, 'One-track mode must override a conflicting saved track loop')
+  assert.equal(useAppStore.getState().videoLoopPlaylist, false, 'One-track mode must override a conflicting saved playlist loop')
+  await saveCurrentAppConfig()
+  assert.equal(saved.video.stopAfterTrack, true, 'One-track mode must survive export')
+  assert.equal(saved.video.channelAutoplay, true, 'Channel video autoplay must survive export')
+  raw = saved
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().videoStopAfterTrack, true, 'One-track mode must survive import')
+  assert.equal(useAppStore.getState().channelVideoAutoplay, true, 'Channel video autoplay must survive import')
+  assert.match(source('src/renderer/src/components/Preview/PreviewPanel.tsx'), /adHoc\?\.videoAutoplay \?\? freshState\.channelVideoAutoplay/, 'Ordinary channel TAKE must use the saved autoplay setting')
+  const secondVideo = 'C:/second.mp4'
+  raw = { ...base, video: { playlist: [file.path, secondVideo], currentIndex: 0,
+    nextActions: { [file.path]: { kind: 'video', path: secondVideo } } } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().videoNextActions[file.path].path, secondVideo)
+  useAppStore.getState().moveVideoPlaylistItem(0, 1)
+  assert.deepEqual(Array.from(useAppStore.getState().videoPlaylist), [secondVideo, file.path])
+  assert.equal(useAppStore.getState().videoCurrentIndex, 1, 'Reorder must preserve the selected video')
+  assert.equal(useAppStore.getState().videoNextActions[file.path].path, secondVideo, 'Reorder must preserve the source transition')
+  await saveCurrentAppConfig()
+  assert.equal(saved.video.nextActions[file.path].path, secondVideo)
+  raw = saved
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().videoNextActions[file.path].path, secondVideo, 'Next video must survive import')
+  const pdf = { ...file, id: 'synthetic-pdf', path: 'C:/slides.pdf', type: 'pdf', extension: '.pdf' }
+  raw = { ...base, channels: { items: [{ file: pdf }] }, video: { playlist: [file.path],
+    nextActions: { [file.path]: { kind: 'channel', channelId: id } } } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().videoNextActions[file.path].channelId, id, 'Presentation channel target must survive import')
+  raw = { ...base, video: { playlist: [file.path], nextActions: { [file.path]: { kind: 'video', path: 'C:/missing.mp4' } } } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().videoNextActions[file.path], undefined, 'Unavailable video target must be discarded')
+  const firstMusic = 'C:/intro.mp3'
+  const secondMusic = 'C:/outro.mp3'
+  raw = { ...base, music: { playlist: [firstMusic, secondMusic], stopAfterTrack: true, loopTrack: true, loopPlaylist: true,
+    nextActions: { [firstMusic]: { kind: 'music', path: secondMusic } } } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().musicStopAfterTrack, true)
+  assert.equal(useAppStore.getState().musicNextActions[firstMusic].path, secondMusic)
+  useAppStore.getState().moveMusicPlaylistItem(0, 1)
+  assert.deepEqual(Array.from(useAppStore.getState().musicPlaylist), [secondMusic, firstMusic])
+  assert.equal(useAppStore.getState().musicNextActions[firstMusic].path, secondMusic)
+  await saveCurrentAppConfig()
+  assert.equal(saved.music.stopAfterTrack, true)
+  assert.equal(saved.music.nextActions[firstMusic].path, secondMusic)
+  raw = saved
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().musicNextActions[firstMusic].path, secondMusic)
+  raw = { ...base, channels: { items: [{ file: pdf }] }, music: { playlist: [firstMusic],
+    nextActions: { [firstMusic]: { kind: 'channel', channelId: id } } } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().musicNextActions[firstMusic].channelId, id)
+  raw = { ...base, music: { playlist: [firstMusic], nextActions: { [firstMusic]: { kind: 'music', path: 'C:/missing.mp3' } } } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().musicNextActions[firstMusic], undefined)
+  raw = { ...base, music: { playlist: [firstMusic], folderPath: 'C:/music-folder' },
+    video: { playlist: [file.path], folderPath: 'C:/video-folder' } }
+  await loadAppConfigFromFile()
+  assert.equal(useAppStore.getState().musicFolderPath, 'C:/music-folder')
+  assert.equal(useAppStore.getState().videoFolderPath, 'C:/video-folder')
+  await saveCurrentAppConfig()
+  assert.equal(saved.music.folderPath, 'C:/music-folder')
+  assert.equal(saved.video.folderPath, 'C:/video-folder')
   useAppStore.getState().setVideoPlayback(file.path, { currentTime: 12 })
   let playback = useAppStore.getState().videoPlayback[file.path]
   assert.equal(playback.currentTime, 12); assert.equal(playback.duration, 0); assert.equal(playback.playing, true)
   useAppStore.getState().setVideoPlayback(file.path, { playing: false, duration: 90 })
   playback = useAppStore.getState().videoPlayback[file.path]
   assert.equal(playback.currentTime, 12); assert.equal(playback.duration, 90); assert.equal(playback.playing, false)
-  console.log('PASS: Scene config round trip, old/missing/invalid channel restoration, import stays off air, partial video updates')
+  console.log('PASS: Scene and video transitions round trips, playlist reorder, import stays off air, partial video updates')
 }
 
 async function main() {
