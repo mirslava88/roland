@@ -41,6 +41,8 @@
 
 **Mac с процессором M:** [открыть загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream#user-content-download-mac-m) → в **Assets** выбрать **`PDM-Stream-1.1.7-arm64-build-20261021.2.dmg`**. DMG содержит то же подписанное приложение, запуск и показ PPTX которого пользователь подтвердил на Apple Silicon из ZIP. ZIP остаётся дополнительным вариантом.
 
+Новые функции плейлистов и проверки PPTX уже есть в исходниках ветки `macos` (техническая ревизия `20261105.1`), но **новые Mac DMG пока не опубликованы**: CI проверил код, а упаковку пропустил без сертификата подписи. Ссылки выше остаются на предыдущие проверенные установщики `20261021.2` без этих новых функций.
+
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
 Обычная PDM сохраняет прежнее имя и профиль `%APPDATA%/presentation-display-manager`.
