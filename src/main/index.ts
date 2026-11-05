@@ -13,12 +13,12 @@ import {
 import type { AuxiliaryWindowRole } from './windows'
 import { ChildProcess, spawn } from 'child_process'
 import { writeFileSync, unlinkSync, existsSync, createReadStream, readFileSync } from 'fs'
-import { readFile, stat } from 'fs/promises'
+import { readFile, readdir, stat } from 'fs/promises'
 import { Readable } from 'stream'
 import { tmpdir } from 'os'
 import { registerIpcHandlers, closeAllExternalFiles, stopPptxCacheJobs, clearPptxDiskCaches } from './ipc-handlers'
 import { invalidateTaskbarVisibilityCache, showAllTaskbars } from './taskbar-manager'
-import { isAbsolute, join, resolve } from 'path'
+import { extname, isAbsolute, join, resolve } from 'path'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 import { macPowerPoint } from './mac-powerpoint'
@@ -3115,6 +3115,26 @@ function createWindows(): void {
   })
 
   // --- Music Player ---
+  const scanMediaFolder = async (kind: 'music' | 'video', folderPath: string): Promise<string[] | null> => {
+    if (typeof folderPath !== 'string' || !isAbsolute(folderPath)) return null
+    const extensions = kind === 'music'
+      ? new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma'])
+      : new Set(['.mp4', '.mov', '.avi', '.webm', '.mkv', '.m4v'])
+    try {
+      const entries = await readdir(folderPath, { withFileTypes: true })
+      return entries.filter((entry) => entry.isFile() && extensions.has(extname(entry.name).toLowerCase()))
+        .map((entry) => join(folderPath, entry.name))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+    } catch {
+      return null
+    }
+  }
+
+  handleControl('scan-media-folder', async (_event, kind: 'music' | 'video', folderPath: string) => {
+    if (kind !== 'music' && kind !== 'video') return null
+    return scanMediaFolder(kind, folderPath)
+  })
+
   function ensureMusicWindow(): BrowserWindow {
     if (musicPlayerWindow && !musicPlayerWindow.isDestroyed()) return musicPlayerWindow
     const displays = userDisplays()
@@ -3141,18 +3161,7 @@ function createWindows(): void {
     })
     if (result.canceled || result.filePaths.length === 0) return null
     const folderPath = result.filePaths[0]
-    // Scan folder for audio files
-    const { readdir } = require('fs/promises')
-    const { join, extname } = require('path')
-    const entries = await readdir(folderPath)
-    const audioExts = ['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma']
-    const files: string[] = []
-    for (const entry of entries) {
-      if (audioExts.includes(extname(entry).toLowerCase())) {
-        files.push(join(folderPath, entry))
-      }
-    }
-    return files.length > 0 ? files : null
+    return { folderPath, files: await scanMediaFolder('music', folderPath) ?? [] }
   })
 
   handleControl('music-set-playlist', async (_event, files: string[], startIndex?: number, autoplay?: boolean) => {
@@ -3162,6 +3171,26 @@ function createWindows(): void {
     await win.webContents.executeJavaScript(
       `window._setPlaylist(${JSON.stringify(files)}, ${Number(startIndex) || 0}, ${Boolean(autoplay)})`
     )
+  })
+
+  handleControl('music-reorder-playlist', async (_event, files: string[]) => {
+    if (!musicPlayerWindow || musicPlayerWindow.isDestroyed()) return
+    await musicPlayerWindow.webContents.executeJavaScript(`window._reorderPlaylist(${JSON.stringify(files)})`)
+  })
+
+  handleControl('music-set-next-actions', async (_event, actions: Record<string, unknown>) => {
+    if (!musicPlayerWindow || musicPlayerWindow.isDestroyed()) return
+    await musicPlayerWindow.webContents.executeJavaScript(`window._setNextActions(${JSON.stringify(actions)})`)
+  })
+
+  handleControl('music-set-stop-after-track', async (_event, value: boolean) => {
+    const win = ensureMusicWindow()
+    await win.webContents.executeJavaScript(`window._setStopAfterTrack(${Boolean(value)})`)
+  })
+
+  handleControl('music-consume-channel-transition', async (_event, serial: number) => {
+    if (!musicPlayerWindow || musicPlayerWindow.isDestroyed()) return null
+    return await musicPlayerWindow.webContents.executeJavaScript(`window._consumeChannelTransition(${Number(serial) || 0})`) as string | null
   })
 
   handleControl('music-play', async () => {
@@ -3225,6 +3254,45 @@ function createWindows(): void {
     return null
   })
 
+  // Channel audio never replaces the playlist configured in the Music toolbar.
+  handleControl('music-channel-load-play', async (_event, filePath: string) => {
+    if (typeof filePath !== 'string' || !isAbsolute(filePath) ||
+      !new Set(['.mp3', '.wav', '.ogg', '.aac', '.m4a', '.flac', '.wma']).has(extname(filePath).toLowerCase())) {
+      throw new Error('Недопустимый аудиофайл канала')
+    }
+    const win = ensureMusicWindow()
+    return await win.webContents.executeJavaScript(`window._channelLoadAndPlay(${JSON.stringify(filePath)})`) as number
+  })
+  handleControl('music-channel-play', async () => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      await musicPlayerWindow.webContents.executeJavaScript('window._channelPlay()')
+  })
+  handleControl('music-channel-pause', async () => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      await musicPlayerWindow.webContents.executeJavaScript('window._channelPause()')
+  })
+  handleControl('music-channel-stop', async () => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      await musicPlayerWindow.webContents.executeJavaScript('window._channelStop()')
+  })
+  handleControl('music-channel-unload', async () => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      await musicPlayerWindow.webContents.executeJavaScript('window._channelUnload()')
+  })
+  handleControl('music-channel-seek', async (_event, time: number) => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      await musicPlayerWindow.webContents.executeJavaScript(`window._channelSeek(${Math.max(0, Number(time) || 0)})`)
+  })
+  handleControl('music-channel-set-loop', async (_event, value: boolean) => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      await musicPlayerWindow.webContents.executeJavaScript(`window._channelSetLoop(${value === true})`)
+  })
+  handleControl('music-channel-get-state', async () => {
+    if (musicPlayerWindow && !musicPlayerWindow.isDestroyed())
+      return await musicPlayerWindow.webContents.executeJavaScript('window._channelGetState()')
+    return null
+  })
+
   // --- Video playlist: file dialogs only. Playback happens in the presentation
   // window via existing load-content + VideoViewer flow (control-side state
   // in useAppStore). ---
@@ -3245,17 +3313,7 @@ function createWindows(): void {
     })
     if (result.canceled || result.filePaths.length === 0) return null
     const folderPath = result.filePaths[0]
-    const { readdir } = require('fs/promises')
-    const { join, extname } = require('path')
-    const entries = await readdir(folderPath)
-    const videoExts = ['.mp4', '.mov', '.avi', '.webm', '.mkv', '.m4v']
-    const files: string[] = []
-    for (const entry of entries) {
-      if (videoExts.includes(extname(entry).toLowerCase())) {
-        files.push(join(folderPath, entry))
-      }
-    }
-    return files.length > 0 ? files : null
+    return { folderPath, files: await scanMediaFolder('video', folderPath) ?? [] }
   })
 
   handleControl('get-displays', () => {

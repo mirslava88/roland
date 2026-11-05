@@ -627,17 +627,49 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
 
   const html = `<html><head><title></title></head><body>
     <audio id="player"></audio>
+    <audio id="channel-player"></audio>
     <script>
       const player = document.getElementById('player');
+      const channelPlayer = document.getElementById('channel-player');
+      let channelPath = null;
+      let channelSession = 0;
+      let channelEndedSession = 0;
       let playlist = [];
       let currentIndex = 0;
       let loopTrack = false;
       let loopPlaylist = true;
+      let stopAfterTrack = false;
+      let nextActions = {};
+      let pendingChannel = null;
+      let transitionSerial = 0;
 
       player.addEventListener('ended', () => {
+        const endedPath = playlist[currentIndex];
+        if (stopAfterTrack) {
+          window._stop();
+          return;
+        }
         if (loopTrack) {
           player.currentTime = 0;
           player.play();
+          return;
+        }
+        const action = nextActions[endedPath];
+        if (action?.kind === 'stop') {
+          window._stop();
+          return;
+        }
+        if (action?.kind === 'music') {
+          const nextIndex = playlist.indexOf(action.path);
+          if (nextIndex < 0 || nextIndex === currentIndex) { window._stop(); return; }
+          currentIndex = nextIndex;
+          loadAndPlay();
+          return;
+        }
+        if (action?.kind === 'channel') {
+          window._stop();
+          pendingChannel = action.channelId;
+          transitionSerial++;
           return;
         }
         if (currentIndex < playlist.length - 1) {
@@ -658,6 +690,62 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
       player.addEventListener('play', () => window._sendState());
       player.addEventListener('pause', () => window._sendState());
 
+      channelPlayer.addEventListener('ended', () => {
+        if (channelPath && !channelPlayer.loop) channelEndedSession = channelSession;
+      });
+
+      window._channelLoadAndPlay = function(path) {
+        player.pause();
+        channelPlayer.pause();
+        channelPath = path;
+        channelSession++;
+        channelEndedSession = 0;
+        channelPlayer.loop = false;
+        channelPlayer.src = 'pdm-media://file/' + encodeURIComponent(path);
+        channelPlayer.play().catch(() => {});
+        return channelSession;
+      };
+      window._channelPlay = function() {
+        if (!channelPath) return;
+        player.pause();
+        if (channelPlayer.ended) channelPlayer.currentTime = 0;
+        channelEndedSession = 0;
+        channelPlayer.play().catch(() => {});
+      };
+      window._channelPause = function() { channelPlayer.pause(); };
+      window._channelStop = function() {
+        channelPlayer.pause();
+        channelPlayer.currentTime = 0;
+        channelEndedSession = 0;
+      };
+      window._channelUnload = function() {
+        channelPlayer.pause();
+        channelPlayer.removeAttribute('src');
+        channelPlayer.load();
+        channelPath = null;
+        channelEndedSession = 0;
+      };
+      window._channelSeek = function(time) {
+        if (!channelPath) return;
+        const duration = Number.isFinite(channelPlayer.duration) ? channelPlayer.duration : time;
+        channelPlayer.currentTime = Math.max(0, Math.min(time, duration));
+      };
+      window._channelSetLoop = function(value) {
+        channelPlayer.loop = value === true;
+        if (channelPlayer.loop) channelEndedSession = 0;
+      };
+      window._channelGetState = function() {
+        return {
+          path: channelPath,
+          session: channelSession,
+          endedSession: channelEndedSession,
+          playing: !!channelPath && !channelPlayer.paused,
+          currentTime: channelPlayer.currentTime || 0,
+          duration: Number.isFinite(channelPlayer.duration) ? channelPlayer.duration : 0,
+          loop: channelPlayer.loop
+        };
+      };
+
       function loadAndPlay(autoplay) {
         if (currentIndex < 0 || currentIndex >= playlist.length) return;
         const filePath = playlist[currentIndex];
@@ -670,13 +758,16 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
       window._setPlaylist = function(files, startIndex, autoplay) {
         playlist = files;
         currentIndex = startIndex || 0;
+        pendingChannel = null;
         // Picking files via the music button loads without playing (autoplay
         // defaults to false); the user presses Play to start.
         if (playlist.length > 0) loadAndPlay(autoplay === true);
-        else window._sendState();
+        else window._stop();
       };
 
       window._play = function() {
+        pendingChannel = null;
+        channelPlayer.pause();
         if (player.src && player.src !== location.href) player.play().catch(() => {});
         else if (playlist.length > 0) loadAndPlay();
       };
@@ -684,6 +775,7 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
       window._pause = function() { player.pause(); };
 
       window._stop = function() {
+        pendingChannel = null;
         player.pause();
         player.currentTime = 0;
         player.src = '';
@@ -692,12 +784,14 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
 
       window._next = function() {
         if (playlist.length === 0) return;
+        pendingChannel = null;
         currentIndex = (currentIndex + 1) % playlist.length;
         loadAndPlay();
       };
 
       window._prev = function() {
         if (playlist.length === 0) return;
+        pendingChannel = null;
         if (player.currentTime > 3) {
           player.currentTime = 0;
           return;
@@ -708,8 +802,27 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
 
       window._seek = function(t) { player.currentTime = t; window._sendState(); };
 
-      window._setLoopTrack = function(v) { loopTrack = v; window._sendState(); };
-      window._setLoopPlaylist = function(v) { loopPlaylist = v; window._sendState(); };
+      window._setLoopTrack = function(v) { loopTrack = v; if (v) stopAfterTrack = false; window._sendState(); };
+      window._setLoopPlaylist = function(v) { loopPlaylist = v; if (v) stopAfterTrack = false; window._sendState(); };
+      window._setStopAfterTrack = function(v) {
+        stopAfterTrack = v;
+        if (v) { loopTrack = false; loopPlaylist = false; }
+        window._sendState();
+      };
+      window._setNextActions = function(actions) { nextActions = actions || {}; };
+      window._reorderPlaylist = function(files) {
+        const playingPath = playlist[currentIndex];
+        playlist = files;
+        const nextIndex = playlist.indexOf(playingPath);
+        currentIndex = nextIndex >= 0 ? nextIndex : 0;
+        window._sendState();
+      };
+      window._consumeChannelTransition = function(serial) {
+        if (!pendingChannel || serial !== transitionSerial) return null;
+        const channel = pendingChannel;
+        pendingChannel = null;
+        return channel;
+      };
 
       window._setVolume = function(v) { player.volume = v; window._sendState(); };
 
@@ -722,7 +835,11 @@ export function createMusicPlayerWindow(display?: Display): BrowserWindow {
           volume: player.volume,
           loopTrack: loopTrack,
           loopPlaylist: loopPlaylist,
+          stopAfterTrack: stopAfterTrack,
+          pendingChannel: pendingChannel,
+          transitionSerial: transitionSerial,
           trackName: playlist[currentIndex] ? playlist[currentIndex].split(/[\\\\/]/).pop() : '',
+          loadedPath: player.src && player.src !== location.href ? playlist[currentIndex] || null : null,
           playlistLength: playlist.length
         };
       };

@@ -36,6 +36,23 @@ app.whenReady().then(async () => {
     const js = (code) => win.webContents.executeJavaScript(code)
     await win.loadFile(resolve('tmp/channel-large-preview-ui/test.html'))
     await pause(250)
+    const badgeProbe = await js(`(() => {
+      const badge = document.querySelector('[data-pdm-presentation-audit]');
+      const preview = badge?.parentElement;
+      return { summary: Object.fromEntries([...badge.querySelectorAll('[data-pdm-audit-summary]')].map((part) => [part.dataset.pdmAuditSummary, part.textContent.trim()])), width: badge.getBoundingClientRect().width, previewWidth: preview?.getBoundingClientRect().width };
+    })()`)
+    assert.deepEqual(Object.keys(badgeProbe.summary), ['video', 'audio', 'animation', 'fonts', 'links'])
+    assert.deepEqual(badgeProbe.summary, { video: 'Видео', audio: 'Аудио', animation: 'Анимации', fonts: 'Шрифты', links: 'Ссылки' }, `Compact badge only names categories: ${JSON.stringify(badgeProbe)}`)
+    assert.ok(badgeProbe.width <= badgeProbe.previewWidth, `Audit badge stays inside preview: ${JSON.stringify(badgeProbe)}`)
+    await js(`document.querySelector('[data-pdm-presentation-audit]').scrollIntoView({block:'center'})`)
+    await pause(50)
+    writeFileSync(resolve('tmp/channel-large-preview-ui/audit-badge.png'), (await win.webContents.capturePage()).toPNG())
+    await js(`document.querySelector('[data-pdm-presentation-audit]').click()`)
+    await pause(50)
+    const auditProbe = await js(`({open:Boolean(document.querySelector('[data-pdm-presentation-audit-dialog]')),text:document.querySelector('[data-pdm-presentation-audit-dialog]')?.textContent||'',errors:window.testErrors})`)
+    assert.equal(auditProbe.open, true, `Presentation audit opens: ${JSON.stringify(auditProbe)}`)
+    assert.ok(auditProbe.text.includes('Отсутствующий шрифт') && auditProbe.text.includes('Анимации') && auditProbe.text.includes('Медиа по ссылке'))
+    await js(`document.querySelector('[aria-label="Закрыть проверку"]').click()`)
     await js(`(() => {
       const card=document.querySelector('.pdm-channel-card');
       card?.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:120,clientY:120}));
@@ -83,8 +100,39 @@ app.whenReady().then(async () => {
     assert.equal(await js(`Boolean(document.querySelector('[data-channel-preview-dialog]'))`), false)
     assert.deepEqual(keyboardGuardCalls, [true, false])
     assert.equal(win.isFullScreen(), false)
+    await js('window.testRenderLiveVideo()')
+    await pause(100)
+    writeFileSync(resolve('tmp/channel-large-preview-ui/live-video-end.png'), (await win.webContents.capturePage()).toPNG())
+    assert.equal(await js(`Boolean(document.querySelector('[data-channel-video-end-target]'))`), true,
+      'An on-air video channel keeps its end target selector visible')
+    assert.equal(await js(`document.querySelector('[data-channel-video-end-target]').disabled`), false)
+    assert.equal(await js(`Boolean(document.querySelector('[data-pdm-channel-take]'))`), false,
+      'An on-air video channel must not show a second Take button')
+    await js(`(() => {
+      const select=document.querySelector('[data-channel-video-end-target]');
+      select.value=window.testVideoTarget;
+      select.dispatchEvent(new Event('change',{bubbles:true}));
+    })()`)
+    await pause(100)
+    assert.equal(await js(`window.testStore.getState().channels[window.testChannelId].videoEndChannel`),
+      await js('window.testVideoTarget'), 'Changing the end target while live updates the current channel')
+    assert.equal(await js(`document.querySelector('[data-channel-video-end-target]').value`),
+      await js('window.testVideoTarget'), 'The live selector reflects the newly selected channel')
+    assert.equal(await js('window.testTakeCalls'), 0, 'Changing the live end target does not restart the video')
+    await js('window.testRenderLiveMusic()')
+    await pause(75)
+    assert.equal(await js(`Boolean(document.querySelector('[aria-label^="Канал после окончания музыки"]'))`), true)
+    await js(`(() => {
+      const select=document.querySelector('[aria-label^="Канал после окончания музыки"]');
+      select.value=window.testVideoTarget;
+      select.dispatchEvent(new Event('change',{bubbles:true}));
+    })()`)
+    await pause(75)
+    assert.equal(await js(`window.testStore.getState().channels[window.testChannelId].videoEndChannel`),
+      await js('window.testVideoTarget'))
+    assert.equal(await js('window.testTakeCalls'), 0)
     assert.deepEqual(await js('window.testErrors'), [])
-    console.log('PASS: channel preview fullscreen and slide-number navigation leave air untouched')
+    console.log('PASS: channel preview and editable live-video end target leave air untouched')
   } catch (error) {
     console.error(error)
     process.exitCode = 1

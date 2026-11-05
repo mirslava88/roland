@@ -29,9 +29,137 @@ app.whenReady().then(async()=>{
       assert.equal(await js(`document.querySelector('[data-toolbar-item="output"] button').disabled`),true,'30/123 is still below 25%')
       await js(`window.testStore.setState({pptxCacheStatuses:{'early-test.pptx':'partial'},pptxSlidesMap:{'early-test.pptx':Array.from({length:31},(_,i)=>'slide_'+i+'.png')}})`); await pause(80)
       assert.equal(await js(`document.querySelector('[data-toolbar-item="output"] button').disabled`),false,'31/123 enables the real operator TAKE button')
+      await js(`(() => {
+        const store=window.testStore.getState();
+        store.setFiles([
+          {id:'song',path:'song.mp3',name:'Song',type:'other',extension:'.mp3',size:1,isAudio:true},
+          {id:'doc',path:'doc.docx',name:'Doc',type:'other',extension:'.docx',size:1},
+          {id:'clip',path:'clip.mp4',name:'Clip',type:'video',extension:'.mp4',size:1}
+        ]);
+        store.setFilter('music');
+      })()`)
+      assert.deepEqual(await js(`window.testStore.getState().filteredFiles.map(file=>file.id)`),['song'])
+      await js(`window.testStore.getState().setFilter('other')`)
+      assert.deepEqual(await js(`window.testStore.getState().filteredFiles.map(file=>file.id)`),['doc'])
+      await js(`window.testStore.getState().setFilter('all');window.testStore.getState().setFiles([])`)
       await js(`(() => {const state=window.testStore.getState(),id=state.channelIds[0];window.testStore.setState({selectedChannel:null,channels:{...state.channels,[id]:{...state.channels[id],file:null,totalSlides:0}},pptxCacheStatuses:{},pptxSlidesMap:{}});})()`)
       console.log(`PASS: ${edition} real toolbar enables PPTX TAKE at 31/123, not 30/123`)
       if(process.env.PDM_PPTX_THRESHOLD_ONLY) continue
+      await js(`(() => {
+        const state=window.testStore.getState(),id=state.channelIds[0];
+        const file={id:'music-target',path:'music-target.pdf',name:'Music target',type:'pdf',extension:'.pdf',size:0};
+        window.testStore.setState({musicPlaylist:['first.mp3','second.mp3','third.mp3'],musicNextActions:{},musicStopAfterTrack:false,
+          channels:{...state.channels,[id]:{...state.channels[id],file}}});
+        window.testMusicState={...window.testMusicState,currentIndex:1,playlistLength:3,loopTrack:false,loopPlaylist:true,stopAfterTrack:false};
+      })()`); await pause(80)
+      await js(`document.querySelector('[data-toolbar-item="music"] > div > button').click()`); await pause(80)
+      await screenshot(`music-playlist-${edition}`)
+      const musicStartsBefore=await js(`window.testCalls.filter(call=>call==='music-set-playlist').length`)
+      await js(`document.querySelector('[data-music-playlist-row="2"]').click()`); await pause(80)
+      assert.equal(await js(`window.testCalls.filter(call=>call==='music-set-playlist').length`),musicStartsBefore,'Single click only selects a music track')
+      await js(`document.querySelector('[data-music-playlist-row="2"]').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`); await pause(80)
+      assert.equal(await js(`window.testCalls.filter(call=>call==='music-set-playlist').length`),musicStartsBefore+1,'Double click starts the selected music track')
+      assert.equal(await js(`document.querySelector('[data-music-stop-after-track]').getAttribute('aria-pressed')`),'false')
+      await js(`document.querySelector('[data-music-stop-after-track]').click()`); await pause(80)
+      assert.equal(await js(`window.testStore.getState().musicStopAfterTrack`),true)
+      assert.deepEqual(await js(`({track:window.testMusicState.loopTrack,playlist:window.testMusicState.loopPlaylist})`),{track:false,playlist:false})
+      await js(`document.querySelector('[data-music-stop-after-track]').parentElement.querySelector('[title="Зацикливание плейлиста"]').click()`); await pause(80)
+      assert.equal(await js(`window.testStore.getState().musicStopAfterTrack`),false)
+      await js(`(() => {const select=document.querySelector('[data-music-next-action="0"]');select.value='music:third.mp3';select.dispatchEvent(new Event('change',{bubbles:true}));})()`); await pause(80)
+      assert.deepEqual(await js(`window.testStore.getState().musicNextActions['first.mp3']`),{kind:'music',path:'third.mp3'})
+      assert.deepEqual(await js(`window.testMusicActions['first.mp3']`),{kind:'music',path:'third.mp3'})
+      await js(`(() => {const id=window.testStore.getState().channelIds[0],select=document.querySelector('[data-music-next-action="0"]');select.value='channel:'+id;select.dispatchEvent(new Event('change',{bubbles:true}));})()`); await pause(80)
+      assert.equal(await js(`window.testStore.getState().musicNextActions['first.mp3'].kind`),'channel')
+      await js(`(() => {const transfer=new DataTransfer();document.querySelector('[data-music-drag-handle="0"]').dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));const row=document.querySelector('[data-music-playlist-row="2"]');row.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));row.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));})()`); await pause(80)
+      assert.deepEqual(await js(`window.testStore.getState().musicPlaylist`),['second.mp3','third.mp3','first.mp3'])
+      assert.deepEqual(await js(`window.testMusicReorder`),['second.mp3','third.mp3','first.mp3'])
+      assert.equal(await js(`window.testMusicState.playing`),true,'Reorder must not stop playback')
+      await js(`(() => {window.testMusicState.pendingChannel=window.testStore.getState().channelIds[0];window.testMusicState.transitionSerial++;})()`)
+      await pause(1100)
+      assert.deepEqual(await js(`window.testChannelTakeEvents`),[await js(`window.testStore.getState().channelIds[0]`)],'Music completion must take selected presentation channel once')
+      await js(`document.querySelector('[data-toolbar-item="music"] > div > button').click()`); await pause(80)
+      await js(`window.testStore.setState({musicPlaylist:[],musicNextActions:{},musicStopAfterTrack:false});window.testChannelTakeEvents=[]`)
+      console.log(`PASS: ${edition} music one-track stop, next action, drag reorder and channel transition`)
+      await js(`(() => {
+        const state=window.testStore.getState(), id=state.channelIds[0];
+        const before={id:'return-channel-file',path:'before.pdf',name:'Before video',type:'presentation',extension:'.pdf',size:0};
+        window.testStore.setState({
+          channels:{...state.channels,[id]:{...state.channels[id],file:before}},
+          videoPlaylist:['first.mp4','selected.mp4'],videoCurrentIndex:1,
+          activeFile:{id:'video-playlist-current',path:'selected.mp4',name:'Selected',type:'video',extension:'.mp4',size:0},
+          liveChannel:null,videoIsPlaying:true,videoLoopTrack:true,videoLoopPlaylist:true,videoStopAfterTrack:false,channelVideoAutoplay:false
+        });
+      })()`); await pause(80)
+      await js(`document.querySelector('[data-toolbar-item="video"] > div > button').click()`); await pause(80)
+      assert.equal(await js(`document.querySelector('[data-channel-video-autoplay]').checked`),false,'Channel video autoplay must default off')
+      await js(`document.querySelector('[data-channel-video-autoplay]').click()`); await pause(80)
+      assert.equal(await js(`window.testStore.getState().channelVideoAutoplay`),true,'Operator can enable channel video autoplay')
+      await js(`document.querySelector('[data-channel-video-autoplay]').click()`); await pause(80)
+      assert.equal(await js(`window.testStore.getState().channelVideoAutoplay`),false,'Operator can disable channel video autoplay')
+      assert.equal(await js(`document.querySelector('[data-video-stop-after-track]')?.getAttribute('aria-pressed')`),'false')
+      await js(`document.querySelector('[data-video-stop-after-track]').click()`); await pause(80)
+      await screenshot(`video-one-track-${edition}`)
+      assert.deepEqual(await js(`({stop:window.testStore.getState().videoStopAfterTrack,track:window.testStore.getState().videoLoopTrack,playlist:window.testStore.getState().videoLoopPlaylist})`),{stop:true,track:false,playlist:false})
+      assert.deepEqual(await js(`window.testPresentationMessages.at(-1)`),['set-loop',false],'One-track mode must turn off the active video loop immediately')
+      await js(`(() => {const state=window.testStore.getState(),id=state.channelIds[0];window.testStore.setState({liveChannel:id,activeFile:state.channels[id].file});document.querySelector('[data-toolbar-item="video"] .cursor-pointer[title="selected.mp4"]').click()})()`); await pause(80)
+      assert.equal(await js(`window.testPlaylistTakeEvents.length`),0,'Single click only selects a video')
+      await js(`document.querySelector('[data-toolbar-item="video"] .cursor-pointer[title="selected.mp4"]').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`); await pause(80)
+      assert.equal(await js(`window.testPlaylistTakeEvents.length`),1)
+      assert.equal(await js(`window.testPlaylistTakeEvents[0].loop`),false,'The selected playlist video must start without looping')
+      await js(`window.testStore.setState({liveChannel:null,activeFile:{id:'video-playlist-new',path:'selected.mp4',name:'Selected',type:'video',extension:'.mp4',size:0},videoIsPlaying:true})`); await pause(80)
+      await js(`window.testEmit('video-ended',{path:'first.mp4'})`)
+      assert.equal(await js(`window.testPresentationMessages.filter(message=>message[0]==='stop').length`),0,'Stale ended event must not stop another selected video')
+      await js(`window.testEmit('video-ended',{path:'selected.mp4'})`); await pause(80)
+      assert.equal(await js(`window.testPresentationMessages.filter(message=>message[0]==='stop').length`),1,'The selected video must stop after its end')
+      await js(`window.testEmit('video-ended',{path:'selected.mp4'})`)
+      assert.equal(await js(`window.testPresentationMessages.filter(message=>message[0]==='stop').length`),1,'Duplicate ended events must not stop twice')
+      assert.equal(await js(`window.testPlaylistTakeEvents.length`),1,'One-track mode must not advance to the next playlist video')
+      assert.deepEqual(await js(`window.testChannelTakeEvents`),[await js(`window.testStore.getState().channelIds[0]`)],'End-of-track stop returns to the prior on-air channel')
+      assert.equal(await js(`window.testStore.getState().videoIsPlaying`),false)
+      await js(`document.querySelector('[data-video-stop-after-track]').parentElement.querySelector('[title="Зацикливание плейлиста"]').click()`); await pause(80)
+      assert.deepEqual(await js(`({stop:window.testStore.getState().videoStopAfterTrack,playlist:window.testStore.getState().videoLoopPlaylist})`),{stop:false,playlist:true})
+      await js(`(() => {
+        window.testPlaylistTakeEvents=[];window.testChannelTakeEvents=[];window.testPresentationMessages=[];
+        window.testStore.setState({
+          videoPlaylist:['first.mp4','selected.mp4','third.mp4'],videoCurrentIndex:0,videoNextActions:{},
+          activeFile:{id:'video-playlist-choice',path:'first.mp4',name:'First',type:'video',extension:'.mp4',size:0},
+          liveChannel:null,videoIsPlaying:true,videoLoopTrack:true,videoLoopPlaylist:true,videoStopAfterTrack:true
+        });
+      })()`); await pause(80)
+      await js(`(() => {const select=document.querySelector('[data-video-next-action="0"]');select.value='video:third.mp4';select.dispatchEvent(new Event('change',{bubbles:true}));})()`); await pause(80)
+      assert.deepEqual(await js(`({action:window.testStore.getState().videoNextActions['first.mp4'],one:window.testStore.getState().videoStopAfterTrack,loop:window.testStore.getState().videoLoopTrack})`),{action:{kind:'video',path:'third.mp4'},one:false,loop:false},'Choosing a specific next video disables conflicting modes')
+      await js(`window.testEmit('video-ended',{path:'first.mp4'})`); await pause(80)
+      assert.equal(await js(`window.testPlaylistTakeEvents.at(-1)?.file.path`),'third.mp4','Configured next video must replace playlist order')
+      await js(`(() => {
+        window.testPlaylistTakeEvents=[];window.testChannelTakeEvents=[];
+        window.testStore.setState({videoCurrentIndex:0,videoNextActions:{},activeFile:{id:'video-playlist-channel-choice',path:'first.mp4',name:'First',type:'video',extension:'.mp4',size:0},videoIsPlaying:true});
+      })()`); await pause(80)
+      await js(`(() => {const id=window.testStore.getState().channelIds[0],select=document.querySelector('[data-video-next-action="0"]');select.value='channel:'+id;select.dispatchEvent(new Event('change',{bubbles:true}));})()`); await pause(80)
+      await screenshot(`video-next-action-${edition}`)
+      assert.equal(await js(`window.testStore.getState().videoNextActions['first.mp4'].kind`),'channel')
+      await js(`window.testEmit('video-ended',{path:'first.mp4'})`); await pause(80)
+      assert.deepEqual(await js(`window.testChannelTakeEvents`),[await js(`window.testStore.getState().channelIds[0]`)],'Configured presentation channel must take over after video')
+      assert.equal(await js(`window.testPlaylistTakeEvents.length`),0,'Channel target must not start another video')
+      await js(`(() => {
+        window.testStore.setState({liveChannel:null,videoCurrentIndex:1,activeFile:{id:'video-playlist-drag',path:'selected.mp4',name:'Selected',type:'video',extension:'.mp4',size:0},videoIsPlaying:true});
+        const transfer=new DataTransfer();
+        document.querySelector('[data-video-drag-handle="0"]').dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+        const row=document.querySelector('[data-video-playlist-row="2"]');
+        row.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+        row.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));
+      })()`); await pause(80)
+      assert.deepEqual(await js(`({playlist:window.testStore.getState().videoPlaylist,index:window.testStore.getState().videoCurrentIndex,playing:window.testStore.getState().videoIsPlaying,action:window.testStore.getState().videoNextActions['first.mp4']})`),{playlist:['selected.mp4','third.mp4','first.mp4'],index:0,playing:true,action:{kind:'channel',channelId:await js(`window.testStore.getState().channelIds[0]`)}},'Drag reorder must preserve selected playing video and its end action')
+      assert.equal(await js(`window.testPlaylistTakeEvents.length`),0,'Drag reorder must not restart playback')
+      await js(`window.testStore.setState({liveChannel:null,activeFile:null,videoPlaylist:[],videoIsPlaying:false})`)
+      await js(`document.querySelector('[data-toolbar-item="video"] > div > button').click()`); await pause(80)
+      console.log(`PASS: ${edition} one-track stop, explicit next video/channel and drag reorder`)
+      await js(`window.testStore.setState({musicPlaylist:[],videoPlaylist:[],musicFolderPath:'C:/music',videoFolderPath:'C:/video'});window.testMediaFiles={music:['C:/music/new.mp3'],video:['C:/video/new.mp4']}`)
+      await pause(2200)
+      assert.deepEqual(await js(`window.testStore.getState().musicPlaylist`),['C:/music/new.mp3'],'Music folder updates without reopening dialog')
+      assert.deepEqual(await js(`window.testStore.getState().videoPlaylist`),['C:/video/new.mp4'],'Video folder updates without reopening dialog')
+      await js(`window.testStore.setState({musicFolderPath:null,videoFolderPath:null,musicPlaylist:[],videoPlaylist:[]})`)
+      console.log(`PASS: ${edition} music and video folders automatically gain new files`)
+      if (process.env.PDM_ONE_TRACK_ONLY) continue
       for(const theme of ['classic','broadcast-pro']) {
         await js(`window.testStore.getState().setAppTheme(${JSON.stringify(theme)})`)
         for(const width of [1280,1024,900,880]) {

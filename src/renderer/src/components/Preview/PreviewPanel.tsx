@@ -39,6 +39,9 @@ import { DEFAULT_CONTENT_ZOOM } from '../../../../shared/content-zoom'
 import { hasQrData } from '../../../../shared/qr-overlay'
 import { resolveProgramSceneBackground } from '../../program-scene-background'
 import { requireMacPresentationSupport } from '../../mac-presentation-support'
+import type { PresentationAuditReport } from '../../../../shared/presentation-audit'
+import { PresentationAuditDialog } from './PresentationAuditDialog'
+import { PresentationAuditBadge } from './PresentationAuditBadge'
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.mjs',
@@ -762,7 +765,7 @@ export function PreviewPanel(): JSX.Element {
         liveOutputReleased = true
       }
       if (isAudio) {
-        await window.api.musicStop()
+        await window.api.musicChannelUnload()
         liveOutputReleased = true
       }
       if (isExternalDoc) {
@@ -977,6 +980,10 @@ export function PreviewPanel(): JSX.Element {
         setOverlayState({ kind: 'hidden' })
       }
     } finally {
+      const finalActive = useAppStore.getState().activeFile
+      if (committed && freshState.activeFile?.isAudio && !finalActive?.isAudio) {
+        try { await window.api.musicChannelUnload() } catch { /* best effort */ }
+      }
       try {
         const mirrorResult = await window.api.completeProgramMirrorTransition(takeId)
         window.api.dbgLog(
@@ -1071,7 +1078,9 @@ export function PreviewPanel(): JSX.Element {
         } catch (error) {
           log(`cancellation cover failed: ${String(error)}`)
         }
-        try { await window.api.musicStop() } catch { /* already stopped */ }
+        if (channel.file?.isAudio) {
+          try { await window.api.musicChannelUnload() } catch { /* already stopped */ }
+        }
         const targetExternalPath = channel.file?.type === 'other' &&
           !channel.file.isImage && !channel.file.isAudio
           ? channel.file.path
@@ -2506,7 +2515,7 @@ export function PreviewPanel(): JSX.Element {
         backdropWasCommitted = false
       ): Promise<void> => {
         window.api.sendToPresentation('cancel-content-load', { takeId })
-        try { await window.api.musicStop() } catch { /* best effort */ }
+        try { await window.api.musicChannelUnload() } catch { /* best effort */ }
         if (backdropWasCommitted) {
           window.api.sendToPresentation('clear-active-content')
         }
@@ -2542,13 +2551,7 @@ export function PreviewPanel(): JSX.Element {
       // player. Keep the old program picture until the media element confirms
       // that playback has actually started.
       try {
-        useAppStore.getState().setMusicPlaylist([channel.file.path])
-        await window.api.musicSetPlaylist([channel.file.path], 0)
-        if (isTakeCancelled()) {
-          await finishCancelledTake()
-          return
-        }
-        await window.api.musicPlay()
+        await window.api.musicChannelLoadPlay(channel.file.path)
       } catch (error) {
         log(`audio take failed before playback: ${String(error)}`)
         await rollbackAudioTake('Не удалось запустить аудиофайл.')
@@ -2561,8 +2564,8 @@ export function PreviewPanel(): JSX.Element {
           await finishCancelledTake()
           return
         }
-        const musicState = await window.api.musicGetState().catch(() => null)
-        audioReady = musicState?.playing === true
+        const musicState = await window.api.musicChannelGetState().catch(() => null)
+        audioReady = musicState?.path === channel.file.path && musicState.playing === true
         if (!audioReady) {
           await new Promise((resolve) => setTimeout(resolve, 50))
         }
@@ -3282,7 +3285,7 @@ export function PreviewPanel(): JSX.Element {
       startSlide: channel.slide,
       startTime: savedVideo?.currentTime,
       autoplay: channel.file.type === 'video'
-        ? adHoc?.videoAutoplay ?? false
+        ? adHoc?.videoAutoplay ?? freshState.channelVideoAutoplay
         : undefined,
       isImage: channel.file.isImage,
       capture: channel.file.capture,
@@ -3695,6 +3698,43 @@ export function PreviewPanel(): JSX.Element {
     })
   })
 
+  useEffect(() => {
+    let disposed = false
+    let inFlight = false
+    let handledSession = 0
+    const check = async (): Promise<void> => {
+      if (disposed || inFlight) return
+      const state = useAppStore.getState()
+      const sourceId = state.liveChannel
+      const source = sourceId ? state.channels[sourceId] : null
+      if (!sourceId || !source?.file?.isAudio || state.activeFile?.path !== source.file.path) return
+      inFlight = true
+      try {
+        const playback = await window.api.musicChannelGetState()
+        if (disposed || !playback || playback.path !== source.file.path ||
+          playback.session < 1 || playback.endedSession !== playback.session ||
+          playback.session === handledSession) return
+        handledSession = playback.session
+        const current = useAppStore.getState()
+        if (current.liveChannel !== sourceId || current.activeFile?.path !== source.file.path) return
+        const targetId = current.channels[sourceId]?.videoEndChannel
+        if (!targetId) return
+        if (targetId === sourceId || !current.channels[targetId]?.file) {
+          current.setChannelVideoEndChannel(sourceId, null)
+          return
+        }
+        current.setSelectedChannel(targetId)
+        const targetIndex = current.channelIds.indexOf(targetId)
+        if (targetIndex >= 0) current.setCurrentChannelPage(Math.floor(targetIndex / current.channelGridSize))
+        void handleTake(targetId)
+      } finally {
+        inFlight = false
+      }
+    }
+    const timer = setInterval(() => { void check().catch(() => undefined) }, 250)
+    return () => { disposed = true; clearInterval(timer) }
+  })
+
   return (
     <div className="pdm-preview-panel flex-1 flex flex-col overflow-hidden">
       <div className="pdm-preview-header shrink-0 h-8 bg-surface-300 border-b border-gray-800 flex items-center justify-between px-3 select-none">
@@ -3751,7 +3791,12 @@ export function PreviewPanel(): JSX.Element {
               onDrop={(file) => setChannelFile(id, file)}
               onSlideChange={(s) => setChannelSlide(id, s)}
               onSetTotalSlides={(t) => setChannelTotalSlides(id, t)}
-              onVideoEndChannelChange={(target) => setChannelVideoEndChannel(id, target)}
+              onVideoEndChannelChange={(target) => {
+                setChannelVideoEndChannel(id, target)
+                if (target && liveChannel === id && channel.file?.isAudio) {
+                  void window.api.musicChannelSetLoop(false)
+                }
+              }}
               onCaptionChange={(caption) => setChannelCaption(id, caption)}
               onSelect={() => setSelectedChannel(id)}
               onTake={() => handleTake(id)}
@@ -3908,6 +3953,11 @@ export function ChannelPanel({
     sourceIdentity: string | null
   } | null>(null)
   const [largePreviewSlide, setLargePreviewSlide] = useState<number | null>(null)
+  const [auditOpen, setAuditOpen] = useState(false)
+  const [auditLoading, setAuditLoading] = useState(false)
+  const [auditReport, setAuditReport] = useState<PresentationAuditReport | null>(null)
+  const [auditError, setAuditError] = useState<string | null>(null)
+  const auditGenerationRef = useRef(0)
   const [showAllSpeakerPicker, setShowAllSpeakerPicker] = useState(false)
   const captionInputRef = useRef<HTMLInputElement>(null)
   const cancelCaptionOnBlurRef = useRef(false)
@@ -3926,6 +3976,36 @@ export function ChannelPanel({
   useEffect(() => {
     setLargePreviewSlide(null)
   }, [channel.file?.path])
+
+  const auditPath = channel.file?.type === 'presentation' ? channel.file.path : null
+  const isPptxAudit = auditPath?.toLowerCase().endsWith('.pptx') === true
+  const requestAudit = useCallback((path: string, force = false): void => {
+    const generation = ++auditGenerationRef.current
+    setAuditLoading(true)
+    setAuditError(null)
+    if (force) setAuditReport(null)
+    void window.api.auditPresentation(path, force).then((result) => {
+      if (generation !== auditGenerationRef.current) return
+      if (result.success) setAuditReport(result.report)
+      else { setAuditReport(null); setAuditError(result.error) }
+    }).catch(() => {
+      if (generation === auditGenerationRef.current) {
+        setAuditReport(null)
+        setAuditError('Не удалось проверить презентацию.')
+      }
+    }).finally(() => {
+      if (generation === auditGenerationRef.current) setAuditLoading(false)
+    })
+  }, [])
+
+  useEffect(() => {
+    setAuditOpen(false)
+    setAuditReport(null)
+    setAuditError(null)
+    if (auditPath && isPptxAudit) requestAudit(auditPath)
+    else if (auditPath) setAuditError('Проверка доступна для PPTX. Сохраните старый файл PPT в формате PPTX.')
+    return () => { auditGenerationRef.current++ }
+  }, [auditPath, isPptxAudit, requestAudit])
 
   // Keep input synced with channel.slide when not being edited
   useEffect(() => {
@@ -4355,6 +4435,16 @@ export function ChannelPanel({
             titles={channelTitlesOutput}
           />
         )}
+        {auditPath && (
+          <PresentationAuditBadge
+            report={auditReport}
+            loading={auditLoading}
+            error={auditError}
+            compact={compact}
+            channel={label}
+            onClick={() => setAuditOpen(true)}
+          />
+        )}
         {isLive && zoomSupported && (
           <button
             type="button"
@@ -4560,6 +4650,17 @@ export function ChannelPanel({
               </div>
             )}
 
+            {auditPath && <div className="border-b border-gray-700 p-1.5">
+              <button
+                type="button"
+                onClick={() => { setTitlesMenu(null); setAuditOpen(true) }}
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-semibold text-white hover:bg-gray-700/70"
+              >
+                <span aria-hidden="true">◇</span>
+                Проверка презентации
+              </button>
+            </div>}
+
             <div className="border-b border-gray-700 p-1.5">
               <button
                 data-channel-toggle-qr
@@ -4752,22 +4853,35 @@ export function ChannelPanel({
           />,
           document.body
         )}
+      {auditOpen && auditPath && createPortal(
+        <PresentationAuditDialog
+          title={channel.file?.name || 'Презентация'}
+          report={auditReport}
+          loading={auditLoading}
+          error={auditError}
+          onClose={() => setAuditOpen(false)}
+          onRetry={() => isPptxAudit && requestAudit(auditPath, true)}
+          onPreview={(slide) => { setAuditOpen(false); setLargePreviewSlide(slide) }}
+        />,
+        document.body
+      )}
       {/* Video end target remains editable while the video is on air. */}
-      {channel.file && (channel.file.type === 'video' || (!isLive && (channel.file.type === 'capture' || channel.file.type === 'other'))) && (
+      {channel.file && (channel.file.type === 'video' || channel.file.isAudio || (!isLive && (channel.file.type === 'capture' || channel.file.type === 'other'))) && (
         <div
-          className={`flex items-center ${channel.file.type === 'video' ? 'justify-between gap-1' : 'justify-end'} ${compact ? 'py-0.5 px-1' : 'py-1.5 px-2'} bg-surface-200 border-t border-gray-800`}
+          className={`flex items-center ${channel.file.type === 'video' || channel.file.isAudio ? 'justify-between gap-1' : 'justify-end'} ${compact ? 'py-0.5 px-1' : 'py-1.5 px-2'} bg-surface-200 border-t border-gray-800`}
           onDoubleClick={(e) => e.stopPropagation()}
         >
-          {channel.file.type === 'video' && (
+          {(channel.file.type === 'video' || channel.file.isAudio) && (
             <label
               className={`flex min-w-0 items-center ${compact ? 'gap-0.5' : 'gap-1.5'} text-gray-500`}
-              title="Канал, который автоматически выйдет в эфир после окончания ролика"
+              title={`Канал, который автоматически выйдет в эфир после окончания ${channel.file.isAudio ? 'музыки' : 'ролика'}`}
               onClick={(event) => event.stopPropagation()}
               onDoubleClick={(event) => event.stopPropagation()}
             >
               <span className={`shrink-0 ${compact ? 'text-[8px]' : 'text-[9px]'}`}>После:</span>
               <select
-                aria-label={`Канал после окончания видео на канале ${label}`}
+                data-channel-video-end-target={label}
+                aria-label={`Канал после окончания ${channel.file.isAudio ? 'музыки' : 'видео'} на канале ${label}`}
                 value={channel.videoEndChannel || ''}
                 disabled={isTaking}
                 onChange={(event) => onVideoEndChannelChange(event.target.value || null)}

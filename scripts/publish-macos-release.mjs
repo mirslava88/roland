@@ -10,7 +10,8 @@ const { editionInfo, macReleaseTag } = createRequire(import.meta.url)('../build/
 export function prepareMacRelease(edition, directory) {
   const info = editionInfo(edition, 'darwin')
   const tag = macReleaseTag(edition)
-  const metadata = JSON.parse(readFileSync(new URL(`../docs/releases/macos-${info.version.replace(/-stream$/, '')}.json`, import.meta.url), 'utf8'))[edition]
+  const revision = JSON.parse(readFileSync(new URL('../build/mac-runtime.json', import.meta.url), 'utf8')).releaseRevision
+  const metadata = JSON.parse(readFileSync(new URL(`../docs/releases/macos-${info.version.replace(/-stream$/, '')}-build.${revision}.json`, import.meta.url), 'utf8'))[edition]
   if (typeof metadata?.title !== 'string' || typeof metadata?.body !== 'string') throw new Error('Missing Mac release metadata')
   const files = ['x64', 'arm64'].map(arch => join(directory, `PDM${info.stream ? '-Stream' : ''}-${info.version}-mac-${arch}.dmg`))
   const sums = files.map(file => {

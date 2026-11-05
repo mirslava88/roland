@@ -181,8 +181,22 @@ interface MusicState {
   volume: number
   loopTrack: boolean
   loopPlaylist: boolean
+  stopAfterTrack: boolean
+  loadedPath: string | null
+  pendingChannel: string | null
+  transitionSerial: number
   trackName: string
   playlistLength: number
+}
+
+interface ChannelMusicState {
+  path: string | null
+  session: number
+  endedSession: number
+  playing: boolean
+  currentTime: number
+  duration: number
+  loop: boolean
 }
 
 interface DriveInfo {
@@ -315,6 +329,7 @@ interface Api {
     zoom: import('../../shared/content-zoom').ContentZoomState
   ): Promise<{ success: boolean; zoomPercent?: number; error?: string }>
   generatePptxThumbnails(filePath: string, keepPrepared?: boolean): Promise<{ success: boolean; thumbnails?: string[]; slideCount?: number; error?: string }>
+  auditPresentation(filePath: string, force?: boolean): Promise<import('../../shared/presentation-audit').PresentationAuditResult>
   getPptxSlideNotes(filePath: string, slide: number): Promise<{ success: boolean; notes?: string; error?: string }>
   generatePptxSlides(filePath: string, width?: number, height?: number): Promise<{ success: boolean; slides?: string[]; slideCount?: number; error?: string }>
   readFile(filePath: string): Promise<ArrayBuffer>
@@ -386,8 +401,13 @@ interface Api {
   moveTimerOverlay(dx: number, dy: number): void
   resizeTimerOverlay(w: number, h: number): void
   selectMusicFiles(): Promise<string[] | null>
-  selectMusicFolder(): Promise<string[] | null>
+  selectMusicFolder(): Promise<{ folderPath: string; files: string[] } | null>
+  scanMediaFolder(kind: 'music' | 'video', folderPath: string): Promise<string[] | null>
   musicSetPlaylist(files: string[], startIndex?: number, autoplay?: boolean): Promise<void>
+  musicReorderPlaylist(files: string[]): Promise<void>
+  musicSetNextActions(actions: Record<string, unknown>): Promise<void>
+  musicSetStopAfterTrack(value: boolean): Promise<void>
+  musicConsumeChannelTransition(serial: number): Promise<string | null>
   musicPlay(): Promise<void>
   musicPause(): Promise<void>
   musicStop(): Promise<void>
@@ -398,8 +418,16 @@ interface Api {
   musicSetVolume(value: number): Promise<void>
   musicSeek(time: number): Promise<void>
   musicGetState(): Promise<MusicState | null>
+  musicChannelLoadPlay(path: string): Promise<number>
+  musicChannelPlay(): Promise<void>
+  musicChannelPause(): Promise<void>
+  musicChannelStop(): Promise<void>
+  musicChannelUnload(): Promise<void>
+  musicChannelSeek(time: number): Promise<void>
+  musicChannelSetLoop(value: boolean): Promise<void>
+  musicChannelGetState(): Promise<ChannelMusicState | null>
   selectVideoFiles(): Promise<string[] | null>
-  selectVideoFolder(): Promise<string[] | null>
+  selectVideoFolder(): Promise<{ folderPath: string; files: string[] } | null>
   openFileExternal(filePath: string, displayBounds?: { x: number; y: number; width: number; height: number }): Promise<{ success: boolean; error?: string }>
   closeExternalFile(filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }>
   minimizeExternalFile(filePath?: string): Promise<{ success: boolean; error?: string; windowGone?: boolean }>

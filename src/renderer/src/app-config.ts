@@ -5,6 +5,7 @@ import {
   DEFAULT_BROADCAST_TITLES,
   DEFAULT_BROADCAST_TITLES_OUTPUT,
   DEFAULT_EVENT_TIMER_STATE,
+  matchesLibraryFilter,
   useAppStore,
   type ChannelGridSize,
   type ChannelId,
@@ -17,7 +18,9 @@ import {
   type DisplayOutputMode,
   type EventTimerState,
   type FilterType,
-  type InformationMediaConfig
+  type InformationMediaConfig,
+  type VideoNextAction,
+  type MusicNextAction
 } from './stores/useAppStore'
 import {
   DEFAULT_PROGRAM_SCENE_LAYOUT,
@@ -129,17 +132,24 @@ interface PdmConfigV1 {
   }
   music: {
     playlist: string[]
+    folderPath: string | null
     currentIndex: number
     currentTime: number
     volume: number
     loopTrack: boolean
     loopPlaylist: boolean
+    stopAfterTrack: boolean
+    nextActions: Record<string, MusicNextAction>
   }
   video: {
     playlist: string[]
+    folderPath: string | null
     currentIndex: number
     loopTrack: boolean
     loopPlaylist: boolean
+    stopAfterTrack: boolean
+    channelAutoplay: boolean
+    nextActions: Record<string, VideoNextAction>
     playback: Record<string, { currentTime: number; duration: number; playing: false }>
   }
   timer: {
@@ -314,6 +324,8 @@ function collectConfigPaths(raw: Record<string, unknown>): string[] {
 
   const music = isRecord(raw.music) ? raw.music : {}
   const video = isRecord(raw.video) ? raw.video : {}
+  addPath(music.folderPath)
+  addPath(video.folderPath)
   for (const path of Array.isArray(music.playlist) ? music.playlist.slice(0, MAX_PLAYLIST_ITEMS) : []) addPath(path)
   for (const path of Array.isArray(video.playlist) ? video.playlist.slice(0, MAX_PLAYLIST_ITEMS) : []) addPath(path)
   const videoPlayback = isRecord(video.playback) ? Object.keys(video.playback).slice(0, MAX_PLAYLIST_ITEMS) : []
@@ -591,17 +603,24 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
     audio: { outputDeviceId },
     music: {
       playlist: state.musicPlaylist.slice(0, MAX_PLAYLIST_ITEMS),
+      folderPath: state.musicFolderPath,
       currentIndex: musicState?.currentIndex ?? 0,
       currentTime: musicState?.currentTime ?? 0,
       volume: musicState?.volume ?? 1,
       loopTrack: musicState?.loopTrack ?? false,
-      loopPlaylist: musicState?.loopPlaylist ?? true
+      loopPlaylist: musicState?.loopPlaylist ?? true,
+      stopAfterTrack: state.musicStopAfterTrack,
+      nextActions: Object.fromEntries(Object.entries(state.musicNextActions).slice(0, MAX_PLAYLIST_ITEMS))
     },
     video: {
       playlist: state.videoPlaylist.slice(0, MAX_PLAYLIST_ITEMS),
+      folderPath: state.videoFolderPath,
       currentIndex: state.videoCurrentIndex,
       loopTrack: state.videoLoopTrack,
       loopPlaylist: state.videoLoopPlaylist,
+      stopAfterTrack: state.videoStopAfterTrack,
+      channelAutoplay: state.channelVideoAutoplay,
+      nextActions: Object.fromEntries(Object.entries(state.videoNextActions).slice(0, MAX_PLAYLIST_ITEMS)),
       playback: videoPlayback
     },
     timer: {
@@ -686,7 +705,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   if (requestedRoot && !pathExists(requestedRoot, validation, true) && requestedRoot !== requestedFolder) {
     warnings.push(`Корневая папка библиотеки не найдена: ${requestedRoot}`)
   }
-  const filter = ['all', 'presentation', 'pdf', 'video', 'other'].includes(String(rawLibrary.filter))
+  const filter = ['all', 'presentation', 'pdf', 'video', 'music', 'other'].includes(String(rawLibrary.filter))
     ? rawLibrary.filter as FilterType
     : 'all'
 
@@ -713,7 +732,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       file,
       slide: file ? safeInteger(rawItem.slide, 1, 1, 100000) : 1,
       totalSlides: file ? safeInteger(rawItem.totalSlides, 0, 0, 100000) : 0,
-      videoEndChannel: file?.type === 'video' && typeof rawItem.videoEndChannel === 'string'
+      videoEndChannel: (file?.type === 'video' || file?.isAudio) && typeof rawItem.videoEndChannel === 'string'
         ? rawItem.videoEndChannel
         : null,
       caption: safeString(rawItem.caption, 80) || ''
@@ -839,8 +858,38 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   }
   const rawMusic = isRecord(raw.music) ? raw.music : {}
   const rawVideo = isRecord(raw.video) ? raw.video : {}
+  const musicFolderCandidate = safeString(rawMusic.folderPath)
+  const videoFolderCandidate = safeString(rawVideo.folderPath)
+  const musicFolderPath = pathExists(musicFolderCandidate, validation, true) ? musicFolderCandidate : null
+  const videoFolderPath = pathExists(videoFolderCandidate, validation, true) ? videoFolderCandidate : null
   const musicPlaylist = restorePlaylist(rawMusic.playlist, 'Музыкальный файл')
+  const rawMusicNextActions = isRecord(rawMusic.nextActions) ? rawMusic.nextActions : {}
+  const musicNextActions: Record<string, MusicNextAction> = {}
+  for (const [path, value] of Object.entries(rawMusicNextActions).slice(0, MAX_PLAYLIST_ITEMS)) {
+    if (!musicPlaylist.includes(path) || !isRecord(value)) continue
+    if (value.kind === 'stop') musicNextActions[path] = { kind: 'stop' }
+    else if (value.kind === 'music' && typeof value.path === 'string' && value.path !== path && musicPlaylist.includes(value.path)) {
+      musicNextActions[path] = { kind: 'music', path: value.path }
+    } else if (value.kind === 'channel' && typeof value.channelId === 'string') {
+      const target = channels[value.channelId]?.file
+      if (target?.type === 'presentation' || target?.type === 'pdf') musicNextActions[path] = { kind: 'channel', channelId: value.channelId }
+    }
+  }
   const videoPlaylist = restorePlaylist(rawVideo.playlist, 'Видео из плейлиста')
+  const rawVideoNextActions = isRecord(rawVideo.nextActions) ? rawVideo.nextActions : {}
+  const videoNextActions: Record<string, VideoNextAction> = {}
+  for (const [path, value] of Object.entries(rawVideoNextActions).slice(0, MAX_PLAYLIST_ITEMS)) {
+    if (!videoPlaylist.includes(path) || !isRecord(value)) continue
+    if (value.kind === 'stop') videoNextActions[path] = { kind: 'stop' }
+    else if (value.kind === 'video' && typeof value.path === 'string' && value.path !== path && videoPlaylist.includes(value.path)) {
+      videoNextActions[path] = { kind: 'video', path: value.path }
+    } else if (value.kind === 'channel' && typeof value.channelId === 'string') {
+      const target = channels[value.channelId]?.file
+      if (target?.type === 'presentation' || target?.type === 'pdf') {
+        videoNextActions[path] = { kind: 'channel', channelId: value.channelId }
+      }
+    }
+  }
   const rawVideoPlayback = isRecord(rawVideo.playback) ? rawVideo.playback : {}
   const videoPlayback: Record<string, { currentTime: number; duration: number; playing: boolean }> = {}
   for (const [path, value] of Object.entries(rawVideoPlayback).slice(0, MAX_PLAYLIST_ITEMS)) {
@@ -1081,7 +1130,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     rootFolderPath,
     subfolders,
     files,
-    filteredFiles: filter === 'all' ? files : files.filter((file) => file.type === filter),
+    filteredFiles: files.filter((file) => matchesLibraryFilter(file, filter)),
     filter,
     selectedFile: null,
     activeFile: null,
@@ -1132,11 +1181,18 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     captureSources: [...restoredCaptureSources.values()],
     docPreviewsMap: {},
     musicPlaylist,
+    musicFolderPath,
+    musicStopAfterTrack: safeBoolean(rawMusic.stopAfterTrack, false),
+    musicNextActions,
     videoPlaylist,
+    videoFolderPath,
     videoCurrentIndex: safeInteger(rawVideo.currentIndex, 0, 0, Math.max(0, videoPlaylist.length - 1)),
     videoIsPlaying: false,
-    videoLoopTrack: safeBoolean(rawVideo.loopTrack, false),
-    videoLoopPlaylist: safeBoolean(rawVideo.loopPlaylist, true),
+    videoLoopTrack: safeBoolean(rawVideo.stopAfterTrack, false) ? false : safeBoolean(rawVideo.loopTrack, false),
+    videoLoopPlaylist: safeBoolean(rawVideo.stopAfterTrack, false) ? false : safeBoolean(rawVideo.loopPlaylist, true),
+    videoStopAfterTrack: safeBoolean(rawVideo.stopAfterTrack, false),
+    channelVideoAutoplay: safeBoolean(rawVideo.channelAutoplay, false),
+    videoNextActions,
     videoPlayback,
     timerDuration: duration,
     timerRemaining: remaining,
@@ -1199,8 +1255,10 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
   const musicIndex = safeInteger(rawMusic.currentIndex, 0, 0, Math.max(0, musicPlaylist.length - 1))
   await window.api.musicStop().catch(() => undefined)
   await window.api.musicSetPlaylist(musicPlaylist, musicIndex, false).catch(() => undefined)
-  await window.api.musicSetLoopTrack(safeBoolean(rawMusic.loopTrack, false)).catch(() => undefined)
-  await window.api.musicSetLoopPlaylist(safeBoolean(rawMusic.loopPlaylist, true)).catch(() => undefined)
+  await window.api.musicSetLoopTrack(safeBoolean(rawMusic.stopAfterTrack, false) ? false : safeBoolean(rawMusic.loopTrack, false)).catch(() => undefined)
+  await window.api.musicSetLoopPlaylist(safeBoolean(rawMusic.stopAfterTrack, false) ? false : safeBoolean(rawMusic.loopPlaylist, true)).catch(() => undefined)
+  await window.api.musicSetStopAfterTrack(safeBoolean(rawMusic.stopAfterTrack, false)).catch(() => undefined)
+  await window.api.musicSetNextActions(musicNextActions).catch(() => undefined)
   await window.api.musicSetVolume(safeNumber(rawMusic.volume, 1, 0, 1)).catch(() => undefined)
   const musicTime = safeNumber(rawMusic.currentTime, 0, 0, 30 * 24 * 60 * 60)
   if (musicPlaylist.length > 0 && musicTime > 0) {

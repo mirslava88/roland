@@ -435,7 +435,7 @@ export function Toolbar(): JSX.Element {
         window.api.sendToPresentation('capture-audio-live', null)
       }
       if (closingFile?.type === 'other' && closingFile.isAudio) {
-        await window.api.musicStop()
+        await window.api.musicChannelUnload()
       }
       // Minimize external file (Word/Excel) if open — don't close it
       if (closingExternalDocument) {

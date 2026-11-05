@@ -29,13 +29,42 @@ const file={id:'large-preview',path:'large-preview.pptx',name:'Большая п
 const channel={...state.channels[window.testChannelId],file,slide:2,totalSlides:3,caption:'Проверка предпросмотра'};
 useAppStore.setState({channels:{...state.channels,[window.testChannelId]:channel},liveChannel:window.testChannelId,pptxSlidesMap:{[file.path]:window.testFrames},pptxThumbnailsMap:{[file.path]:window.testThumbnails}});
 window.testStore=useAppStore;
-createRoot(document.getElementById('root')).render(<ChannelPanel
+window.testRoot=createRoot(document.getElementById('root'));
+window.testRoot.render(<ChannelPanel
   label={window.testChannelId} channel={channel} isLive={true} isSelected={true} isTaking={false}
   openingMessage={null} onDrop={()=>{}} onSlideChange={()=>{}} onSetTotalSlides={()=>{}}
   onVideoEndChannelChange={()=>{}} onCaptionChange={()=>{}} onSelect={()=>{}}
   onTake={()=>{window.testTakeCalls++}} onClear={()=>{}}
   pptxThumbnails={window.testThumbnails} cacheStatus="ready" videoEndChannelOptions={[]} compact={false}
 />);
+window.testVideoTarget=state.channelIds[1];
+window.testRenderLiveVideo=()=>{
+  const current=useAppStore.getState();
+  const video={id:'live-video',path:'live-video.mp4',name:'Эфирный ролик',type:'video',extension:'.mp4',size:1};
+  const targetFile={id:'next-presentation',path:'next-presentation.pdf',name:'Следующая презентация',type:'pdf',extension:'.pdf',size:1};
+  const videoChannel={...current.channels[window.testChannelId],file:video,slide:1,totalSlides:0};
+  useAppStore.setState({channels:{...current.channels,[window.testChannelId]:videoChannel,[window.testVideoTarget]:{...current.channels[window.testVideoTarget],file:targetFile}}});
+  window.testRoot.render(<ChannelPanel
+    label={window.testChannelId} channel={videoChannel} isLive={true} isSelected={true} isTaking={false}
+    openingMessage={null} onDrop={()=>{}} onSlideChange={()=>{}} onSetTotalSlides={()=>{}}
+    onVideoEndChannelChange={(target)=>{useAppStore.getState().setChannelVideoEndChannel(window.testChannelId,target);window.testRenderLiveVideo()}} onCaptionChange={()=>{}} onSelect={()=>{}}
+    onTake={()=>{window.testTakeCalls++}} onClear={()=>{}}
+    pptxThumbnails={[]} cacheStatus={undefined} videoEndChannelOptions={[window.testVideoTarget]} compact={false}
+  />);
+};
+window.testRenderLiveMusic=()=>{
+  const current=useAppStore.getState();
+  const music={id:'live-music',path:'live-music.mp3',name:'Эфирная музыка',type:'other',extension:'.mp3',size:1,isAudio:true};
+  const musicChannel={...current.channels[window.testChannelId],file:music,slide:1,totalSlides:0};
+  useAppStore.setState({channels:{...current.channels,[window.testChannelId]:musicChannel}});
+  window.testRoot.render(<ChannelPanel
+    label={window.testChannelId} channel={musicChannel} isLive={true} isSelected={true} isTaking={false}
+    openingMessage={null} onDrop={()=>{}} onSlideChange={()=>{}} onSetTotalSlides={()=>{}}
+    onVideoEndChannelChange={(target)=>{useAppStore.getState().setChannelVideoEndChannel(window.testChannelId,target);window.testRenderLiveMusic()}} onCaptionChange={()=>{}} onSelect={()=>{}}
+    onTake={()=>{window.testTakeCalls++}} onClear={()=>{}}
+    pptxThumbnails={[]} cacheStatus={undefined} videoEndChannelOptions={[window.testVideoTarget]} compact={false}
+  />);
+};
 `,
     loader: 'tsx',
     resolveDir: process.cwd()
