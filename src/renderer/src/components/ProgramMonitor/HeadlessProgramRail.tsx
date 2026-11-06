@@ -82,7 +82,9 @@ export function HeadlessProgramRail(): JSX.Element {
   const selectedDisplayId = useAppStore((state) => state.selectedDisplayId)
   const [collapsed, setCollapsed] = useState(false)
   const [large, setLarge] = useState(false)
-  const headless = connectedProgramDisplayId({ displays, displayAssignments, selectedDisplayId }) === null
+  const showInternalMonitor = window.api.platform !== 'darwin' || __PDM_STREAM_ENABLED__
+  const headless = showInternalMonitor &&
+    connectedProgramDisplayId({ displays, displayAssignments, selectedDisplayId }) === null
 
   useEffect(() => {
     if (!headless) setLarge(false)
@@ -142,7 +144,9 @@ export function HeadlessProgramRail(): JSX.Element {
           <ActualProgramFrame />
         </div>
         <div className="border-b border-gray-800 px-3 pb-2 text-[9px] leading-4 text-gray-500">
-          Здесь показан кадр, который получает виртуальная камера и стрим.
+          {window.api.platform === 'darwin'
+            ? 'Здесь показан кадр, который получает стрим.'
+            : 'Здесь показан кадр, который получает виртуальная камера и стрим.'}
         </div>
         <div className="pdm-headless-program-slides min-h-0 flex-1">
           <SlideNavigator />
