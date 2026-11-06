@@ -311,7 +311,7 @@ static napi_value configureRenderDisplay(napi_env env, napi_callback_info info) 
   }
   struct Position { uint32_t id; double x, y, width, height; };
   std::vector<Position> positions;
-  double bottom = -INFINITY, left = 0;
+  double top = INFINITY, left = 0;
   bool unchanged = true;
   for (uint32_t i = 0; i < length; i++) {
     napi_value item; napi_get_element(env, args[1], i, &item);
@@ -329,11 +329,19 @@ static napi_value configureRenderDisplay(napi_env env, napi_callback_info info) 
     positions.push_back(p);
     CGRect current = appDisplayBounds(p.id);
     unchanged &= current.origin.x == p.x && current.origin.y == p.y;
-    if (p.y + p.height > bottom) { bottom = p.y + p.height; left = p.x; }
+    if (p.y < top || (p.y == top && p.x < left)) { top = p.y; left = p.x; }
   }
+  // Keep the physical screens' lower edges available to the Dock. A render
+  // display below a lone Mac screen moves the Dock to an inaccessible edge:
+  // the cursor guard correctly blocks entry into that internal display.
+  const double renderHeight = renderID
+    ? std::max((double)appDisplayBounds(renderID).size.height, (double)CGDisplayBounds(renderID).size.height)
+    : 0;
+  const double renderTop = top - renderHeight;
   if (renderID) {
     CGRect current = appDisplayBounds(renderID);
-    unchanged &= current.origin.x == left && current.origin.y == bottom;
+    unchanged &= std::isfinite(top) && renderHeight > 0 &&
+      current.origin.x == left && current.origin.y == renderTop;
   }
   CGError status = kCGErrorSuccess;
   if (!unchanged) {
@@ -344,8 +352,8 @@ static napi_value configureRenderDisplay(napi_env env, napi_callback_info info) 
         status = CGConfigureDisplayOrigin(config, p.id, (int32_t)p.x, (int32_t)p.y);
         if (status != kCGErrorSuccess) break;
       }
-      if (status == kCGErrorSuccess && renderID && std::isfinite(bottom))
-        status = CGConfigureDisplayOrigin(config, renderID, (int32_t)left, (int32_t)bottom);
+      if (status == kCGErrorSuccess && renderID && std::isfinite(top) && renderHeight > 0)
+        status = CGConfigureDisplayOrigin(config, renderID, (int32_t)left, (int32_t)renderTop);
       if (status == kCGErrorSuccess) status = CGCompleteDisplayConfiguration(config, kCGConfigureForSession);
       else CGCancelDisplayConfiguration(config);
     }

@@ -1,6 +1,25 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict')
 const {transformSync}=require('esbuild')
 const moduleScope={exports:{}}
+const nativeLayoutSource=fs.readFileSync('scripts/mac-office-accessibility.mm','utf8')
+const renderTopExpression=nativeLayoutSource.match(/const double renderTop = ([^;]+);/)?.[1]
+assert.ok(renderTopExpression,'Native render-display placement must declare its vertical origin')
+assert.match(nativeLayoutSource,/if \(p\.y < top \|\| \(p\.y == top && p\.x < left\)\)/,
+  'The native layout must anchor above the topmost physical screen')
+assert.match(nativeLayoutSource,/CGConfigureDisplayOrigin\(config, renderID, \(int32_t\)left, \(int32_t\)renderTop\)/,
+  'Native display configuration must use the checked render origin')
+const renderTop=Function('top','renderHeight',`return ${renderTopExpression}`)
+for (const [screens, internalHeight] of [
+ [[{x:0,y:0,width:1440,height:900}],1568],
+ [[{x:0,y:0,width:1440,height:900},{x:1440,y:120,width:1920,height:1080}],2560],
+ [[{x:-1920,y:-1080,width:1920,height:1080},{x:0,y:0,width:3840,height:2160}],4320]
+]) {
+ const physicalTop=Math.min(...screens.map(screen=>screen.y))
+ const internalTop=renderTop(physicalTop,internalHeight)
+ assert.equal(internalTop+internalHeight,physicalTop,
+   'The internal screen must sit above the physical screens, leaving every Dock edge exposed')
+ assert.ok(screens.every(screen=>screen.y+screen.height>internalTop+internalHeight))
+}
 const screen={getAllDisplays:()=>[{id:123}]}
 vm.runInNewContext(transformSync(fs.readFileSync('src/main/mac-render-display.ts','utf8'),{loader:'ts',format:'cjs'}).code,{
  module:moduleScope,exports:moduleScope.exports,console,process,
