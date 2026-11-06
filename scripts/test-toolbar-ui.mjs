@@ -79,7 +79,7 @@ window.setTestBusy = busy => {
   const state = useAppStore.getState();
   useAppStore.setState({
     musicPlaylist:busy?['test.mp3']:[],videoPlaylist:busy?['test.mp4']:[],videoCurrentIndex:0,
-    activeFile:busy?{id:'test',path:'test.mp4',name:'Test video',type:'video',extension:'.mp4',size:0}:null,
+    activeFile:busy?{id:'${process.platform === 'darwin' ? 'video-playlist-test' : 'test'}',path:'test.mp4',name:'Test video',type:'video',extension:'.mp4',size:0}:null,
     videoIsPlaying:busy,isPresentationWindowOpen:busy,
     backdropImage:busy?'test-background':null,
     programScene:{...state.programScene,enabled:busy,viewMode:'both'},
@@ -96,7 +96,9 @@ createRoot(document.getElementById('root')).render(<TestApp/>);
       build.onLoad({filter:/.*/,namespace:'fake'},args=>({contents:args.path==='app-config'?'export const loadAppConfigFromFile = async () => ({}); export const saveCurrentAppConfig = async () => ({});':`export const ${args.path} = () => null`,loader:'js'}))
     }}]})
   const assets = resolve('out/stream/renderer/assets')
-  const css = readdirSync(assets).find(name=>name.endsWith('.css'))
+  // The Mac build emits a small App stylesheet before the main index CSS.
+  // Load the actual toolbar styles rather than the first alphabetical file.
+  const css = readdirSync(assets).find(name=>name.endsWith('.css') && (process.platform !== 'darwin' || name.startsWith('index-')))
   if (!css) throw Error('Build stream edition first')
   writeFileSync(resolve(directory,edition+'.html'),`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="${pathToFileURL(resolve(assets,css))}"></head><body><div id="root"></div><script src="${edition}.js"></script></body></html>`)
 }
