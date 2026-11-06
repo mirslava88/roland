@@ -12,8 +12,8 @@
 
 [![Скачать Stream для Windows](https://img.shields.io/badge/PDM_1.1.7_stream-Windows-ef4444?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream)
 
-[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1)
-[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1-stream)
+[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261106.1)
+[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261106.1-stream)
 
 [![Latest release](https://img.shields.io/github/v/release/mirslava88/roland?label=версия&logo=github)](https://github.com/mirslava88/roland/releases/latest)
 [![Build Windows](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml)
@@ -36,10 +36,10 @@
 
 | Редакция | Для чего | Windows | macOS |
 |---|---|---|---|
-| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1) |
-| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1-stream) |
+| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261106.1) |
+| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261106.1-stream) |
 
-**Mac с процессором M:** [загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1-stream) → в **Assets** выберите **`PDM-Stream-1.1.7-stream-mac-arm64.dmg`**. Для Intel нужен файл `x64`. Обычная PDM доступна отдельным релизом в таблице выше.
+**Mac с процессором M:** [загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261106.1-stream) → в **Assets** выберите **`PDM-Stream-1.1.7-stream-mac-arm64.dmg`**. Для Intel нужен файл `x64`. Обычная PDM доступна отдельным релизом в таблице выше.
 
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
@@ -50,8 +50,14 @@ Stream устанавливается отдельно: **Presentation Display M
 
 В настройках Stream отображается **«1.1.7 stream»**. В `package.json`, имени установщика и теге
 используется техническая запись `1.1.7-stream` / `v1.1.7-stream`.
-Текущая Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261105.1`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`. Обе новые сборки опубликованы как предварительные; предыдущий проверенный Stream сохранён отдельно. Нотариальной проверки Apple нет.
+Текущая Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261106.1`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`. Обе новые сборки опубликованы как предварительные; предыдущий проверенный Stream сохранён отдельно. Нотариальной проверки Apple нет.
 Встроенный стриминг доступен только в Stream.
+
+## Исправление Dock — ревизия 20261106.1
+
+Новые DMG включают исправление [`1f3e05e`](https://github.com/mirslava88/roland/commit/1f3e05ef7c0e41cf277d9f58048febd37c7f59bc): внутренний экран отрисовки размещается над физическими дисплеями. Нижняя граница основного экрана остаётся доступной для Dock; защита от попадания курсора на служебный экран сохраняется. Расположение физических мониторов не меняется.
+
+Версии сохранены: **1.1.7 / 1.1.7-stream**, Electron **45.2.3**. Standard и Stream опубликованы отдельно для Intel и Apple Silicon; предыдущие ревизии сохранены. Подписи и содержимое всех четырёх DMG проверены. На Intel проверен запуск обеих редакций: внутренний экран расположен выше физического, геометрия основного дисплея сохранена. Проверка на физическом Apple Silicon и живой PPTX этой ревизии отдельно не выполнены; выпуск предварительный, без нотариальной проверки Apple.
 
 ## Новые DMG для macOS — ревизия 20261105.1
 
@@ -293,10 +299,10 @@ PDF, изображения, видео, музыка и таймер не тр�
 
 | Редакция | Intel Mac | Apple Silicon (M1/M2/M3/M4 и новее) |
 |---|---|---|
-| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1/PDM-1.1.7-mac-arm64.dmg) |
-| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать DMG arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1-stream/PDM-Stream-1.1.7-stream-mac-arm64.dmg) |
+| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261106.1/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261106.1/PDM-1.1.7-mac-arm64.dmg) |
+| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261106.1-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать DMG arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261106.1-stream/PDM-Stream-1.1.7-stream-mac-arm64.dmg) |
 
-В каждом новом релизе есть два DMG и `SHA256SUMS.txt`. Требуется **macOS 13 или новее**. Запуск Standard и Stream ревизии `20261105.1` проверен на Intel; отдельная проверка этой ревизии на физическом Apple Silicon ещё нужна. Обе новые редакции опубликованы как предварительные релизы. Подтверждённый ранее показ PPTX на Apple Silicon относится к Stream `20261021.2`, который сохранён отдельно.
+В каждом новом релизе есть два DMG и `SHA256SUMS.txt`. Требуется **macOS 13 или новее**. Запуск Standard и Stream ревизии `20261106.1` проверен на Intel; отдельная проверка этой ревизии на физическом Apple Silicon ещё нужна. Обе новые редакции опубликованы как предварительные релизы. Подтверждённый ранее показ PPTX на Apple Silicon относится к Stream `20261021.2`, который сохранён отдельно.
 
 1. Откройте DMG своей архитектуры и перетащите приложение в **«Программы»**. Если там уже есть старая копия PDM, закройте её и подтвердите замену.
 2. Извлеките образ DMG и запустите приложение из **«Программ»**. У сборок пока нет нотариальной проверки Apple; macOS может потребовать отдельное подтверждение открытия. Используйте [инструкцию Apple](https://support.apple.com/ru-ru/102445) для доверенного приложения.
