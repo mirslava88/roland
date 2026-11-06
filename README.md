@@ -12,8 +12,8 @@
 
 [![Скачать Stream для Windows](https://img.shields.io/badge/PDM_1.1.7_stream-Windows-ef4444?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream)
 
-[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2)
-[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream)
+[![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1)
+[![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1-stream)
 
 [![Latest release](https://img.shields.io/github/v/release/mirslava88/roland?label=версия&logo=github)](https://github.com/mirslava88/roland/releases/latest)
 [![Build Windows](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml/badge.svg)](https://github.com/mirslava88/roland/actions/workflows/build-windows.yml)
@@ -22,7 +22,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
 ![Electron Windows](https://img.shields.io/badge/Electron_Windows-45.2.3-47848f?logo=electron&logoColor=white)
-![Electron macOS](https://img.shields.io/badge/Electron_macOS-44.9.3-47848f?logo=electron&logoColor=white)
+![Electron macOS](https://img.shields.io/badge/Electron_macOS-45.2.3-47848f?logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=111827)
 ![TypeScript](https://img.shields.io/badge/TypeScript-7-3178c6?logo=typescript&logoColor=white)
 ![Vite](https://img.shields.io/badge/Vite-7-646cff?logo=vite&logoColor=white)
@@ -36,12 +36,10 @@
 
 | Редакция | Для чего | Windows | macOS |
 |---|---|---|---|
-| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2) |
-| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream) |
+| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1) |
+| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1-stream) |
 
-**Mac с процессором M:** [открыть загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream#user-content-download-mac-m) → в **Assets** выбрать **`PDM-Stream-1.1.7-arm64-build-20261021.2.dmg`**. DMG содержит то же подписанное приложение, запуск и показ PPTX которого пользователь подтвердил на Apple Silicon из ZIP. ZIP остаётся дополнительным вариантом.
-
-Новые функции плейлистов и проверки PPTX уже есть в исходниках ветки `macos` (техническая ревизия `20261105.1`), но **новые Mac DMG пока не опубликованы**: CI проверил код, а упаковку пропустил без сертификата подписи. Ссылки выше остаются на предыдущие проверенные установщики `20261021.2` без этих новых функций.
+**Mac с процессором M:** [загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261105.1-stream) → в **Assets** выберите **`PDM-Stream-1.1.7-stream-mac-arm64.dmg`**. Для Intel нужен файл `x64`. Обычная PDM доступна отдельным релизом в таблице выше.
 
 Stream устанавливается отдельно: **Presentation Display Manager Stream** имеет свой ярлык,
 идентификатор установщика и папку настроек `%APPDATA%/presentation-display-manager-stream`.
@@ -52,8 +50,16 @@ Stream устанавливается отдельно: **Presentation Display M
 
 В настройках Stream отображается **«1.1.7 stream»**. В `package.json`, имени установщика и теге
 используется техническая запись `1.1.7-stream` / `v1.1.7-stream`.
-Исправленная Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261021.2`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`. Stream опубликован обычным релизом; Standard остаётся предварительным. Нотариальной проверки Apple нет.
+Текущая Mac-сборка 1.1.7 выходит отдельной технической ревизией `20261105.1`: старые Mac-релизы с тем же номером не перезаписываются. Исходники Mac находятся в ветке `macos`. Обе новые сборки опубликованы как предварительные; предыдущий проверенный Stream сохранён отдельно. Нотариальной проверки Apple нет.
 Встроенный стриминг доступен только в Stream.
+
+## Новые DMG для macOS — ревизия 20261105.1
+
+Standard и Stream собраны из коммита [`c369cad`](https://github.com/mirslava88/roland/commit/c369cad88b86a3c6eceff2dc9e176b9e7b37473e), отдельно для Intel и Apple Silicon. Включены новые плейлисты и проверка содержимого PPTX; Electron 45.2.3. Версии приложения сохранены: **1.1.7 / 1.1.7-stream**.
+
+Подписи приложения и вложенных компонентов проверены внутри всех четырёх DMG. Аудит зависимостей — 0 уязвимостей. На Intel проверены запуск обеих редакций и UI-тесты; живой показ PPTX и запуск этой ревизии на физическом Apple Silicon отдельно не проверялись. Нативный полноэкранный переход крупного предпросмотра не подтвердился в автоматическом UI-тесте и требует ручной проверки. Нотариальной проверки Apple нет.
+
+[Предыдущий проверенный Stream 20261021.2](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261021.2-stream) сохранён вместе со старыми установщиками.
 
 ## Исправление запуска macOS 1.1.7 — ревизия 20261021.2
 
@@ -70,7 +76,7 @@ Stream устанавливается отдельно: **Presentation Display M
 - Стрелки клавиатуры в крупном предпросмотре отключены от эфирного листания; кликер с PageUp/PageDown продолжает вести эфир. Пульт, который посылает стрелки, тоже блокируется на время предпросмотра. PPTX-анимации и встроенное видео в этом статическом предпросмотре не воспроизводятся.
 - Левая панель материалов расширяется мышью, сохраняет ширину и сбрасывается двойным щелчком. Временные файлы Office с именем на `~` в библиотеке скрыты без удаления с диска.
 - В Windows дополнительно исправлены панель задач на эфирном мониторе с отличающимся масштабом и восстановление подтверждённого окна PowerPoint после краткого сбоя доступа к нему.
-- Electron 45.2.3 в обновлённой Windows-сборке; опубликованная ранее Mac-ревизия 20261021.2 пока использует 44.9.3. Mac 1.1.7 включает прежние исправления Keynote, разрешений первого запуска и освобождения скрытой камеры. Запуск Stream и показ PPTX на Apple Silicon подтверждены пользователем для ZIP ревизии 20261021.2; это не означает проверки всех функций и всех Mac-сборок.
+- Electron 45.2.3 в обновлённой Windows-сборке; новая Mac-ревизия 20261105.1 также использует 45.2.3. Mac 1.1.7 включает прежние исправления Keynote, разрешений первого запуска и освобождения скрытой камеры. Запуск Stream и показ PPTX на Apple Silicon подтверждены пользователем для ZIP ревизии 20261021.2; это не означает проверки всех функций и всех Mac-сборок.
 
 ## Обновление macOS 1.1.6 — ревизия 20261020.2
 
@@ -292,10 +298,10 @@ PDF, изображения, видео, музыка и таймер не тр�
 
 | Редакция | Intel Mac | Apple Silicon (M1/M2/M3/M4 и новее) |
 |---|---|---|
-| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2/PDM-1.1.7-mac-arm64.dmg) |
-| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать DMG arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261021.2-stream/PDM-Stream-1.1.7-arm64-build-20261021.2.dmg) |
+| PDM | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1/PDM-1.1.7-mac-x64.dmg) | [Скачать arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1/PDM-1.1.7-mac-arm64.dmg) |
+| PDM Stream | [Скачать x64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1-stream/PDM-Stream-1.1.7-stream-mac-x64.dmg) | [Скачать DMG arm64](https://github.com/mirslava88/roland/releases/download/macos-v1.1.7-build.20261105.1-stream/PDM-Stream-1.1.7-stream-mac-arm64.dmg) |
 
-Для прежних DMG есть `SHA256SUMS.txt`; для нового DMG Apple Silicon и дополнительного ZIP — отдельные файлы `.dmg.sha256` и `.zip.sha256` в Assets. Требуется **macOS 13 или новее**. Stream проверен на Intel с macOS 15.8.1; запуск и показ PPTX из ZIP на Apple Silicon подтверждены пользователем. Standard остаётся предварительным релизом.
+В каждом новом релизе есть два DMG и `SHA256SUMS.txt`. Требуется **macOS 13 или новее**. Запуск Standard и Stream ревизии `20261105.1` проверен на Intel; отдельная проверка этой ревизии на физическом Apple Silicon ещё нужна. Обе новые редакции опубликованы как предварительные релизы. Подтверждённый ранее показ PPTX на Apple Silicon относится к Stream `20261021.2`, который сохранён отдельно.
 
 1. Откройте DMG своей архитектуры и перетащите приложение в **«Программы»**. Если там уже есть старая копия PDM, закройте её и подтвердите замену.
 2. Извлеките образ DMG и запустите приложение из **«Программ»**. У сборок пока нет нотариальной проверки Apple; macOS может потребовать отдельное подтверждение открытия. Используйте [инструкцию Apple](https://support.apple.com/ru-ru/102445) для доверенного приложения.
