@@ -27,6 +27,7 @@ const suites = {
     ['Virtual camera', process.execPath, ['scripts/test-virtual-camera.mjs']],
     ['Stream Deck commands', process.execPath, ['scripts/test-direct-stream-deck.mjs']],
     ['Scene and timer commands', process.execPath, ['scripts/test-scene-and-timer-commands.mjs']],
+    ['Program output power state', process.execPath, ['scripts/test-program-output-power.mjs']],
     ['PPTX cache', process.execPath, ['scripts/test-pptx-cache.mjs']],
     ['Presentation audit', process.execPath, ['scripts/test-presentation-audit.cjs']],
     ['PPTX cache shutdown', process.execPath, ['scripts/test-pptx-cache-shutdown.mjs']],

@@ -111,6 +111,9 @@ const api = {
     ipcRenderer.invoke('open-presentation-window', displayId, behindPowerPoint),
   prepareInternalProgramOutput: () => ipcRenderer.invoke('prepare-internal-program-output'),
   releaseInternalProgramOutput: () => ipcRenderer.invoke('release-internal-program-output'),
+  setProgramOutputPowerRequest: (active: boolean): void => {
+    ipcRenderer.send('program-output-power-request', active)
+  },
 
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
     ipcRenderer.invoke('place-presentation-window', displayId),

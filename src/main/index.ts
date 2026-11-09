@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, crashReporter } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, powerSaveBlocker, crashReporter } from 'electron'
 import type { DesktopCapturerSource, Display } from 'electron'
 import {
   createAuxiliaryWindow,
@@ -84,6 +84,25 @@ let streamingManager: StreamingManager | null = null
 let virtualCameraManager: VirtualCameraManager | null = null
 let presentationWindow: BrowserWindow | null = null
 let rendererInternalProgramOutputRequested = false
+let programPowerBlockerId: number | null = null
+
+function setProgramOutputPowerRequest(active: boolean): void {
+  if (process.platform !== 'win32') return
+  if (active) {
+    if (programPowerBlockerId !== null) return
+    try {
+      programPowerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+      diagnosticLog('power', 'program output keeps display and system awake')
+    } catch (error) {
+      diagnosticLog('power', `program output power request failed ${formatDiagnosticError(error)}`)
+    }
+    return
+  }
+  if (programPowerBlockerId === null) return
+  powerSaveBlocker.stop(programPowerBlockerId)
+  programPowerBlockerId = null
+  diagnosticLog('power', 'program output power request released')
+}
 
 function isInternalProgramOutputActive(): boolean {
   return rendererInternalProgramOutputRequested ||
@@ -1192,6 +1211,9 @@ function createWindows(): void {
       handler(event, ...args)
     })
   }
+  onControl('program-output-power-request', (_event, active: unknown) => {
+    if (typeof active === 'boolean') setProgramOutputPowerRequest(active)
+  })
   const isTrustedOutputInvoke = (
     event: Electron.IpcMainInvokeEvent,
     channel: string,
@@ -1631,6 +1653,7 @@ function createWindows(): void {
   })
 
   controlWindow.on('closed', () => {
+    setProgramOutputPowerRequest(false)
     streamingManager?.stop()
     virtualCameraManager?.stop()
     diagnosticLog('lifecycle', `control window closed trigger=${shutdownTrigger}`)
@@ -1657,6 +1680,9 @@ function createWindows(): void {
   })
   thisControlWindow.webContents.on('responsive', () => {
     diagnosticLog('renderer-failure', `control renderer responsive wc=${thisControlWindow.webContents.id}`)
+  })
+  thisControlWindow.webContents.on('render-process-gone', () => {
+    setProgramOutputPowerRequest(false)
   })
 
   // dbg-log: renderer processes (control + presentation) forward debug strings
@@ -4293,6 +4319,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
+  setProgramOutputPowerRequest(false)
   if (shutdownTrigger === 'unknown') shutdownTrigger = 'app-quit-or-system'
   diagnosticLog(
     'lifecycle',

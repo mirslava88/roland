@@ -242,6 +242,7 @@ interface Api {
   openPresentationWindow(displayId?: number, behindPowerPoint?: boolean): Promise<void>
   prepareInternalProgramOutput(): Promise<void>
   releaseInternalProgramOutput(): Promise<void>
+  setProgramOutputPowerRequest(active: boolean): void
   placePresentationWindow(displayId?: number): Promise<boolean>
   raisePresentationWindow(): Promise<boolean>
   openAuxiliaryWindow(role: AuxiliaryDisplayRole, displayId: number): Promise<{ success: boolean; error?: string }>

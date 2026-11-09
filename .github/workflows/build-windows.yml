@@ -73,6 +73,9 @@ jobs:
       - name: Electron security regression tests
         run: npm run test:security
 
+      - name: Program output power regression tests
+        run: node scripts/test-program-output-power.mjs
+
       - name: Local streaming regression tests
         if: env.PDM_EDITION == 'stream'
         run: npm run test:streaming
