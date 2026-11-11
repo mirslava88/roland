@@ -29,7 +29,7 @@ createRoot(document.getElementById('root')).render(<TestApp/>);
   outfile: resolve(directory, 'test.js')
 })
 const assets = resolve('out/stream/renderer/assets')
-const css = readdirSync(assets).find(name => name.startsWith('index-') && name.endsWith('.css'))
+const css = readdirSync(assets).find(name => /^(?:index|assets)-.*\.css$/.test(name))
 if (!css) throw new Error('Build Stream edition before library resize UI test')
 writeFileSync(resolve(directory, 'test.html'), `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="${pathToFileURL(resolve(assets, css))}"></head><body><div id="root"></div><script src="test.js"></script></body></html>`)
 const env = { ...process.env }

@@ -21,11 +21,11 @@
 [![Downloads](https://img.shields.io/github/downloads/mirslava88/roland/total?label=загрузки&logo=github)](https://github.com/mirslava88/roland/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2563eb.svg)](LICENSE)
 
-![Electron Windows](https://img.shields.io/badge/Electron_Windows-45.2.3-47848f?logo=electron&logoColor=white)
+![Electron Windows](https://img.shields.io/badge/Electron_Windows-45.3.0-47848f?logo=electron&logoColor=white)
 ![Electron macOS](https://img.shields.io/badge/Electron_macOS-45.2.3-47848f?logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=111827)
 ![TypeScript](https://img.shields.io/badge/TypeScript-7-3178c6?logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-7-646cff?logo=vite&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-8-646cff?logo=vite&logoColor=white)
 ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4-06b6d4?logo=tailwindcss&logoColor=white)
 
 </div>
@@ -84,6 +84,7 @@ Standard и Stream собраны из коммита [`c369cad`](https://github
 
 ## Релиз 1.1.7 — Windows и macOS
 
+- Windows Standard и Stream пересобраны на Electron 45.3.0, React 19.3.1, Vite 8.3.8, PDFium 3.0.0 и обновлённых библиотеках. Номер приложения остаётся 1.1.7 / 1.1.7-stream. Установщики macOS этой пересборкой не затрагиваются.
 - В Windows во время эфира PDM удерживает экран включённым и компьютер активным даже при показе неподвижной картинки или Сцены без презентации. После выхода из эфира запрос снимается, и снова действуют обычные настройки питания Windows. Ручную блокировку и выключение ноутбука это не отменяет.
 - В канале PPTX компактно видны метки «Видео», «Аудио», «Анимации», «Шрифты». По нажатию открываются подробности с номерами слайдов и отсутствующими шрифтами. Проверка читает структуру файла без запуска PowerPoint или Keynote.
 - Видео и музыка получили перестановку файлов мышью, выбор следующего файла или канала и обновление выбранной папки без повторного выбора. Один щелчок выделяет файл, двойной запускает; запуск из канала не сбрасывает отдельный плейлист. Для видеоканала доступен автозапуск при выходе в эфир, для музыкального — управление внизу окна.
@@ -91,7 +92,7 @@ Standard и Stream собраны из коммита [`c369cad`](https://github
 - Стрелки клавиатуры в крупном предпросмотре отключены от эфирного листания; кликер с PageUp/PageDown продолжает вести эфир. Пульт, который посылает стрелки, тоже блокируется на время предпросмотра. PPTX-анимации и встроенное видео в этом статическом предпросмотре не воспроизводятся.
 - Левая панель материалов расширяется мышью, сохраняет ширину и сбрасывается двойным щелчком. Временные файлы Office с именем на `~` в библиотеке скрыты без удаления с диска.
 - В Windows дополнительно исправлены панель задач на эфирном мониторе с отличающимся масштабом и восстановление подтверждённого окна PowerPoint после краткого сбоя доступа к нему.
-- Electron 45.2.3 в обновлённой Windows-сборке; новая Mac-ревизия 20261105.1 также использует 45.2.3. Mac 1.1.7 включает прежние исправления Keynote, разрешений первого запуска и освобождения скрытой камеры. Запуск Stream и показ PPTX на Apple Silicon подтверждены пользователем для ZIP ревизии 20261021.2; это не означает проверки всех функций и всех Mac-сборок.
+- Mac-ревизия 20261105.1 использует Electron 45.2.3. Mac 1.1.7 включает прежние исправления Keynote, разрешений первого запуска и освобождения скрытой камеры. Запуск Stream и показ PPTX на Apple Silicon подтверждены пользователем для ZIP ревизии 20261021.2; это не означает проверки всех функций и всех Mac-сборок.
 
 ## Обновление macOS 1.1.6 — ревизия 20261020.2
 
@@ -634,12 +635,12 @@ Stream-релизы не заменяют обычные релизы и не м
 | Слой | Реализация |
 |---|---|
 | Версии приложения | Windows: 1.1.7 / 1.1.7 stream; macOS: 1.1.7 / 1.1.7 stream |
-| Desktop runtime | Electron 45.2.3 (Windows и macOS) |
-| Интерфейс | React 19.2.8, TypeScript 7.0.2, Tailwind CSS 4.3.3 |
-| Состояние | Zustand 5.0.15 |
-| Сборка | electron-vite 5.0.0, Vite 7.3.7, PostCSS 8.5.27, electron-builder 26.15.3, NSIS |
+| Desktop runtime | Windows: Electron 45.3.0; macOS: Electron 45.2.3 |
+| Интерфейс Windows | React 19.3.1, TypeScript 7.0.2, Tailwind CSS 4.3.5 |
+| Состояние Windows | Zustand 5.1.0 |
+| Сборка Windows | electron-vite 6.0.0, Vite 8.3.8, PostCSS 8.5.32, electron-builder 26.18.1, NSIS |
 | PowerPoint | PowerShell, COM Automation, постоянный JSON-демон с восстановлением состояния Office |
-| PDF | PDFium WASM (@hyzyla/pdfium 2.1.13), pdfjs-dist 6.3.289 и Windows.Data.Pdf |
+| PDF в Windows | PDFium WASM (@hyzyla/pdfium 3.0.0), pdfjs-dist 6.5.438 и Windows.Data.Pdf |
 | Внешние источники | Electron Desktop Capture, MediaDevices, постоянные видеопотоки и нативное перечисление окон Windows |
 | Таймеры | простой WPF-оверлей через PowerShell и отдельное React-табло мероприятия |
 

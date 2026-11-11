@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { Readable } from 'node:stream'
 import { DOMParser } from '@xmldom/xmldom'
+import type { Document as XmlDocument, Element as XmlElement } from '@xmldom/xmldom'
 import type { PresentationAuditReport, PresentationAuditSlide } from '../shared/presentation-audit'
 
 type ZipEntry = {
@@ -24,21 +25,21 @@ const VIDEO_EXT = new Set(['.mp4', '.mov', '.avi', '.wmv', '.m4v', '.mpeg', '.mp
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.wma', '.m4a', '.aac', '.ogg', '.flac', '.mid', '.midi'])
 const ANIMATION_ELEMENTS = ['anim', 'animClr', 'animEffect', 'animMotion', 'animRot', 'animScale', 'set']
 
-function xml(text: string): Document {
+function xml(text: string): XmlDocument {
   const document = new DOMParser().parseFromString(text, 'application/xml')
   if (document.getElementsByTagName('parsererror').length) throw new Error('Повреждена структура XML в PPTX.')
   return document
 }
 
-function elements(root: Document | Element, namespace: string, name: string): Element[] {
-  return Array.from(root.getElementsByTagNameNS(namespace, name)) as Element[]
+function elements(root: XmlDocument | XmlElement, namespace: string, name: string): XmlElement[] {
+  return Array.from(root.getElementsByTagNameNS(namespace, name)) as XmlElement[]
 }
 
 function normalPath(base: string, target: string): string {
   return target.startsWith('/') ? posix.normalize(target.slice(1)) : posix.normalize(posix.join(base, target))
 }
 
-async function readXml(entry: ZipEntry | undefined, budget: { bytes: number }): Promise<Document | null> {
+async function readXml(entry: ZipEntry | undefined, budget: { bytes: number }): Promise<XmlDocument | null> {
   if (!entry) return null
   if ((entry.vars?.uncompressedSize ?? 0) > MAX_XML_BYTES) throw new Error('Слишком большой XML-файл в PPTX.')
   const stream = entry.stream()
@@ -58,7 +59,7 @@ async function readXml(entry: ZipEntry | undefined, budget: { bytes: number }): 
 }
 
 type Relationship = { target: string; kind: string; external: boolean }
-function relationships(document: Document | null): Map<string, Relationship> {
+function relationships(document: XmlDocument | null): Map<string, Relationship> {
   const result = new Map<string, Relationship>()
   if (!document) return result
   for (const element of elements(document, PKG, 'Relationship')) {
@@ -73,7 +74,7 @@ function relationships(document: Document | null): Map<string, Relationship> {
   return result
 }
 
-function fontNames(document: Document): Set<string> {
+function fontNames(document: XmlDocument): Set<string> {
   const result = new Set<string>()
   for (const name of ['latin', 'ea', 'cs', 'sym']) {
     for (const element of elements(document, A, name)) {
@@ -84,7 +85,7 @@ function fontNames(document: Document): Set<string> {
   return result
 }
 
-function embeddedFontNames(document: Document | null): Set<string> {
+function embeddedFontNames(document: XmlDocument | null): Set<string> {
   const result = new Set<string>()
   if (!document) return result
   for (const element of elements(document, P, 'embeddedFont')) {
