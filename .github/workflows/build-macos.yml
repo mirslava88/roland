@@ -98,6 +98,20 @@ jobs:
           lipo -info tmp/macos-build/build/mac-pdf-pages | grep 'x86_64 arm64'
           lipo -info tmp/macos-build/build/mac-virtual-camera/mac-camera-writer | grep 'x86_64 arm64'
 
+      - name: Check speaker layout on macOS
+        working-directory: tmp/macos-build
+        run: node scripts/test-speaker-layout.mjs
+
+      - name: Check Stream recording and editing on macOS
+        if: matrix.edition == 'stream'
+        working-directory: tmp/macos-build
+        run: |
+          export PDM_TEST_FFMPEG="$PWD/build/mac-ffmpeg"
+          node scripts/test-mac-recording.mjs
+          node scripts/test-mac-recording-pipe.mjs
+          node scripts/test-recording-engine.mjs
+          node scripts/test-recording-editor.mjs
+
       - name: Verify signed installer files
         if: steps.signing.outputs.signed == 'true'
         run: |

@@ -1,3 +1,5 @@
+import { progressReader } from './media-progress'
+export { progressReader } from './media-progress'
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'child_process'
 import { performance } from 'perf_hooks'
 import type { Writable } from 'stream'
@@ -55,21 +57,6 @@ export const encoderArguments = (s: StreamSettings, encoder: string, videoInput:
   '-progress', 'pipe:2', '-stats_period', '0.5', '-flush_packets', '1', '-max_interleave_delta', '1000000',
   '-flvflags', 'no_duration_filesize', '-f', 'flv', 'pipe:1'
 ]
-
-export function progressReader(onProgress: (values: Record<string, number>) => void): (chunk: Buffer) => void {
-  let rest = ''
-  let values: Record<string, number> = {}
-  return (chunk) => {
-    rest += chunk.toString()
-    const lines = rest.split(/\r?\n/)
-    rest = (lines.pop() || '').slice(-4096)
-    for (const line of lines) {
-      const match = /^(frame|fps|drop_frames|out_time_us|total_size|speed)=\s*(-?\d+(?:\.\d+)?)(?:x)?$/.exec(line)
-      if (match) values[match[1]] = Number(match[2])
-      if (line.startsWith('progress=')) { onProgress(values); values = {} }
-    }
-  }
-}
 
 export function probeEncoder(path: string, encoder: string): Promise<boolean> {
   return new Promise((resolve) => {

@@ -49,7 +49,10 @@
     "package:mac": "node scripts/build-edition.mjs standard package mac",
     "build:mac:standard": "node scripts/build-edition.mjs standard build mac",
     "build:mac:stream": "node scripts/build-edition.mjs stream build mac",
-    "package:mac:stream": "node scripts/build-edition.mjs stream package mac"
+    "package:mac:stream": "node scripts/build-edition.mjs stream package mac",
+    "test:recording": "node scripts/test-recording-engine.mjs",
+    "test:recording:editor": "node scripts/test-recording-editor.mjs",
+    "test:recording:mac": "node scripts/test-mac-recording.mjs && node scripts/test-mac-recording-pipe.mjs"
   },
   "dependencies": {
     "@elgato-stream-deck/node": "^7.6.3",

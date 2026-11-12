@@ -72,6 +72,7 @@ window.api = {
   musicReorderPlaylist:files => {window.testCalls.push('music-reorder');window.testMusicReorder=files;return Promise.resolve();},
   musicConsumeChannelTransition:serial => {if(serial!==window.testMusicState.transitionSerial)return Promise.resolve(null);const id=window.testMusicState.pendingChannel;window.testMusicState.pendingChannel=null;return Promise.resolve(id);},
   getAudioDevices:call('audio-devices',[]), getAppVersion:call('version','1.1.5 test'),
+  recording:{load:call('record-load',{format:'quality-mp4',fps:30,audio:'none',microphoneId:''}),status:call('record-status',{phase:'idle',startedAt:null,frames:0,fps:0,droppedFrames:0,sizeBytes:0})},
   virtualCamera:{status:call('virtual-camera-status',{phase:'idle',supported:true,installed:true,available:true,source:null,error:null,name:'PDM Virtual Camera',width:1920,height:1080,fps:30,startedAt:null}),install:call('virtual-camera-install'),start:call('virtual-camera-start'),stop:call('virtual-camera-stop')},
   streaming:{load:call('stream-load',{settings:DEFAULT_STREAM_SETTINGS,available:true,canSave:true}),status:call('stream-status',{phase:'running',destinations:[]}),start:call('stream-start'),stop:call('stream-stop')}
 };
@@ -91,7 +92,7 @@ function TestApp(){const theme=useAppStore(s=>s.appTheme);return <div className=
 createRoot(document.getElementById('root')).render(<TestApp/>);
 `,loader:'tsx',resolveDir:process.cwd()},bundle:true,platform:'browser',format:'iife',jsx:'automatic',
     define:{__PDM_STREAM_ENABLED__:String(stream),'import.meta.url':JSON.stringify(pathToFileURL(resolve(directory,'index.html')).href)},
-    outfile:resolve(directory,edition+'.js'),plugins:[{name:'no-output',setup(build){
+    outfile:resolve(directory,edition+'.js'),loader:{'.mp4':'dataurl'},plugins:[{name:'no-output',setup(build){
       build.onResolve({filter:/(?:\/app-config|\/ProgramSceneModal|\/QrOverlayModal|\/AuxiliaryDisplaysModal)$/}, args=>({path:args.path.split('/').pop(),namespace:'fake'}))
       build.onLoad({filter:/.*/,namespace:'fake'},args=>({contents:args.path==='app-config'?'export const loadAppConfigFromFile = async () => ({}); export const saveCurrentAppConfig = async () => ({});':`export const ${args.path} = () => null`,loader:'js'}))
     }}]})

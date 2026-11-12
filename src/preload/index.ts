@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { streamingApi } from './streaming-api'
+import { recordingApi } from './recording-api'
 import type {
   DirectStreamDeckConfig,
   DirectStreamDeckDeviceInfo,
@@ -55,6 +56,7 @@ const api = {
     restart: () => ipcRenderer.invoke('mac-setup-restart')
   } satisfies MacSetupApi } : {}),
   ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
+  ...(__PDM_STREAM_ENABLED__ ? { recording: recordingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   virtualCamera: {
     status: () => ipcRenderer.invoke('virtual-camera-status'),
@@ -126,6 +128,9 @@ const api = {
   prepareInternalProgramOutput: (detachPhysicalOutput = false) =>
     ipcRenderer.invoke('prepare-internal-program-output', detachPhysicalOutput),
   releaseInternalProgramOutput: () => ipcRenderer.invoke('release-internal-program-output'),
+  setProgramOutputPowerRequest: (active: boolean): void => {
+    ipcRenderer.send('program-output-power-request', active)
+  },
 
   placePresentationWindow: (displayId?: number): Promise<boolean> =>
     ipcRenderer.invoke('place-presentation-window', displayId),

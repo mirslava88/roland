@@ -79,8 +79,11 @@ final class ProgramCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 
 let args = CommandLine.arguments
-guard args.count == 5, let displayID = UInt32(args[1]), let width = Int(args[2]), let height = Int(args[3]),
-    let fps = Int(args[4]), [1280, 1920].contains(width), [720, 1080].contains(height), [25, 30, 50, 60].contains(fps) else {
+let recording = args.count == 6 && args[5] == "--record"
+guard (args.count == 5 || recording), let displayID = UInt32(args[1]), let width = Int(args[2]), let height = Int(args[3]),
+    let fps = Int(args[4]), [25, 30, 50, 60].contains(fps),
+    (recording ? (width >= 16 && height >= 16 && width <= 16384 && height <= 16384 && width * height <= 67108864)
+               : ([1280, 1920].contains(width) && [720, 1080].contains(height))) else {
     captureError("Некорректные параметры захвата PDM.")
 }
 if #available(macOS 12.3, *) {

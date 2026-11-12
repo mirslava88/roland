@@ -13,6 +13,7 @@ import { OperatorCursorGuard } from './components/Capture/OperatorCursorGuard'
 import { queueNavigationDuringTransition } from './navigation-transition'
 import type { NavigationRequest } from './navigation-transition'
 import { takeAdjacentChannel } from './channel-boundary-navigation'
+import { shouldKeepProgramAwake } from './program-output-power'
 import { AuxiliaryDisplayBridge } from './components/AuxiliaryDisplays/AuxiliaryDisplayBridge'
 import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTitlesBridge'
 import { DirectStreamDeckBridge } from './components/StreamDeck/DirectStreamDeckBridge'
@@ -69,6 +70,23 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
   useEffect(() => {
     window.api.dbgLog(`operator theme applied=${appTheme}`)
   }, [appTheme])
+
+  useEffect(() => {
+    if (training) return
+    let lastActive: boolean | null = null
+    const syncPowerRequest = (): void => {
+      const active = shouldKeepProgramAwake(useAppStore.getState())
+      if (active === lastActive) return
+      lastActive = active
+      window.api.setProgramOutputPowerRequest(active)
+    }
+    syncPowerRequest()
+    const unsubscribe = useAppStore.subscribe(syncPowerRequest)
+    return () => {
+      unsubscribe()
+      window.api.setProgramOutputPowerRequest(false)
+    }
+  }, [training])
 
   // Validate the synchronously restored crash-recovery snapshot. Missing or
   // renamed files are cleared from their channels, while capture:// sources

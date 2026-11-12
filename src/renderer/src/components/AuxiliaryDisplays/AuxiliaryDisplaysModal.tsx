@@ -4,6 +4,18 @@ import { mediaUrl } from '../../media'
 import { canvasToDataUrl } from '../../canvas-export'
 import { releasePdfiumResources, renderPdfiumPageToCanvas, warmPdfiumDocument } from '../../pdfium-renderer'
 import { DesktopCapturePicker } from '../Capture/DesktopCapturePicker'
+import { SpeakerSlideCanvas } from './SpeakerSlideCanvas'
+import {
+  DEFAULT_SPEAKER_SLIDE_LAYOUT,
+  resizeSpeakerSlide,
+  scaleSpeakerCaptions,
+  selectSpeakerCaptions,
+  sameSpeakerSlideLayout,
+  speakerCaptionPlacement,
+  type SpeakerCaption,
+  type SpeakerSlideLayout
+} from '../../../../shared/speaker-layout'
+import { formatTimerTime, resolveTimerTextColor } from '../../../../shared/timer-format'
 import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
 import {
   captureSourceIdentity,
@@ -13,7 +25,8 @@ import {
   type BroadcastTitlesOutput,
   type DisplayOutputMode,
   type InformationMediaConfig,
-  type InformationMediaType
+  type InformationMediaType,
+  type SpeakerTimerEditDraft
 } from '../../stores/useAppStore'
 import {
   setDisplayAssignmentWithProgramRouting,
@@ -42,7 +55,7 @@ interface DeviceResponse {
   error?: string
 }
 
-function InformationPdfPreview({ filePath, page }: { filePath: string; page: number }): JSX.Element {
+function InformationPdfPreview({ filePath, page, renderWidth = 720, transparentBackground = false }: { filePath: string; page: number; renderWidth?: number; transparentBackground?: boolean }): JSX.Element {
   const [frame, setFrame] = useState<{ filePath: string; page: number; src: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -54,7 +67,7 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
 
     const render = async (): Promise<void> => {
       try {
-        const nativePath = await window.api.renderPdfPage(filePath, page - 1, 720)
+        const nativePath = await window.api.renderPdfPage(filePath, page - 1, renderWidth)
         if (cancelled) return
         if (nativePath) {
           setFrame({ filePath, page, src: mediaUrl(nativePath) })
@@ -65,8 +78,8 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
         const rendered = await renderPdfiumPageToCanvas({
           filePath,
           pageNumber: page,
-          targetWidth: 720,
-          targetHeight: 405,
+          targetWidth: renderWidth,
+          targetHeight: renderWidth === 720 ? 405 : Math.round(renderWidth * 1.2),
           lane: 'background'
         })
         if (cancelled) return
@@ -84,13 +97,13 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
 
     void render()
     return () => { cancelled = true }
-  }, [filePath, page])
+  }, [filePath, page, renderWidth])
 
   useEffect(() => () => releasePdfiumResources(filePath), [filePath])
 
   const isCurrentFrame = frame?.filePath === filePath && frame.page === page
   return (
-    <div className="relative flex h-full w-full items-center justify-center bg-black">
+    <div className={`relative flex h-full w-full items-center justify-center ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}>
       {frame && (
         <img
           src={frame.src}
@@ -108,6 +121,401 @@ function InformationPdfPreview({ filePath, page }: { filePath: string; page: num
           Не удалось подготовить превью PDF
         </div>
       )}
+    </div>
+  )
+}
+
+function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element {
+  const activeFile = useAppStore((state) => state.activeFile)
+  const currentSlide = useAppStore((state) => state.currentSlide)
+  const totalSlides = useAppStore((state) => state.totalSlides)
+  const pptxSlidesMap = useAppStore((state) => state.pptxSlidesMap)
+  const pptxThumbnailsMap = useAppStore((state) => state.pptxThumbnailsMap)
+  const displays = useAppStore((state) => state.displays)
+  const displayAssignments = useAppStore((state) => state.displayAssignments)
+  const savedLayout = useAppStore((state) => state.speakerSlideLayout)
+  const draftLayout = useAppStore((state) => state.speakerSlideLayoutDraft)
+  const setSpeakerSlideLayoutDraft = useAppStore((state) => state.setSpeakerSlideLayoutDraft)
+  const publishSpeakerSlideLayout = useAppStore((state) => state.publishSpeakerSlideLayout)
+  const discardSpeakerEditorDraft = useAppStore((state) => state.discardSpeakerEditorDraft)
+  const timerSpeakerOutputEnabled = useAppStore((state) => state.timerSpeakerOutputEnabled)
+  const storedTimerDraft = useAppStore((state) => state.speakerTimerEditDraft)
+  const setSpeakerTimerEditDraft = useAppStore((state) => state.setSpeakerTimerEditDraft)
+  const timerOutputVisible = useAppStore((state) => state.timerOutputVisible)
+  const timerDuration = useAppStore((state) => state.timerDuration)
+  const timerRemaining = useAppStore((state) => state.timerRemaining)
+  const timerRunning = useAppStore((state) => state.timerRunning)
+  const timerTextColor = useAppStore((state) => state.timerTextColor)
+  const timerWarningTextColor = useAppStore((state) => state.timerWarningTextColor)
+  const timerOvertimeTextColor = useAppStore((state) => state.timerOvertimeTextColor)
+  const timerTextOpacity = useAppStore((state) => state.timerTextOpacity)
+  const timerSpeakerPosition = useAppStore((state) => state.timerSpeakerPosition)
+  const timerSpeakerScale = useAppStore((state) => state.timerSpeakerScale)
+  const backdropImage = useAppStore((state) => state.backdropImage)
+  const [layout, setLayout] = useState(draftLayout || savedLayout)
+  const layoutRef = useRef(layout)
+  const [selectedCaptions, setSelectedCaptions] = useState<SpeakerCaption[]>([])
+  const [scaleBadgeCaptions, setScaleBadgeCaptions] = useState<SpeakerCaption[]>([])
+  const scaleBadgeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [timerDraft, setTimerDraft] = useState<SpeakerTimerEditDraft>(() => storedTimerDraft || {
+    enabled: timerSpeakerOutputEnabled,
+    position: { ...timerSpeakerPosition },
+    scale: timerSpeakerScale
+  })
+  const timerDraftRef = useRef(timerDraft)
+  const canvasRef = useRef<HTMLDivElement>(null)
+  const [notes, setNotes] = useState('')
+  const isPdf = activeFile?.type === 'pdf'
+  const hasPresentation = isPdf || activeFile?.type === 'presentation'
+  const imagePaths = activeFile?.type === 'presentation'
+    ? pptxSlidesMap[activeFile.path] || pptxThumbnailsMap[activeFile.path] || []
+    : []
+  const safeTotal = Math.max(totalSlides, imagePaths.length)
+  const safeCurrent = Math.max(1, Math.min(currentSlide, safeTotal || 1))
+  const nextSlide = safeCurrent < safeTotal ? safeCurrent + 1 : null
+  const timerDirty = timerDraft.enabled !== timerSpeakerOutputEnabled ||
+    Math.abs(timerDraft.position.x - timerSpeakerPosition.x) > 0.01 ||
+    Math.abs(timerDraft.position.y - timerSpeakerPosition.y) > 0.01 ||
+    Math.abs(timerDraft.scale - timerSpeakerScale) > 0.001
+  const layoutDirty = !sameSpeakerSlideLayout(layout, savedLayout) || timerDirty
+  const speakerDisplay = displays.find((display) => (
+    !display.isPrimary && displayAssignments[String(display.id)] === 'speaker'
+  ))
+  const aspectRatio = speakerDisplay
+    ? `${speakerDisplay.bounds.width} / ${speakerDisplay.bounds.height}`
+    : '16 / 9'
+  const speakerOutputWidth = speakerDisplay?.bounds.width || 1920
+  const timerPreviewFontPercent = Math.max(34, Math.min(82, speakerOutputWidth * 0.048)) / speakerOutputWidth * 100
+  const showSpeakerBackdrop = layout.showBackdrop !== false && Boolean(backdropImage)
+
+  useEffect(() => {
+    const currentDraft = draftLayout || savedLayout
+    layoutRef.current = currentDraft
+    setLayout(currentDraft)
+  }, [savedLayout, draftLayout])
+
+  useEffect(() => {
+    const currentDraft = storedTimerDraft || {
+      enabled: timerSpeakerOutputEnabled,
+      position: { ...timerSpeakerPosition },
+      scale: timerSpeakerScale
+    }
+    timerDraftRef.current = currentDraft
+    setTimerDraft(currentDraft)
+  }, [storedTimerDraft, timerSpeakerOutputEnabled, timerSpeakerPosition, timerSpeakerScale])
+
+  useEffect(() => () => {
+    if (scaleBadgeTimeoutRef.current) clearTimeout(scaleBadgeTimeoutRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (activeFile?.type !== 'presentation') { setNotes(''); return }
+    let cancelled = false
+    void window.api.getPptxSlideNotes(activeFile.path, safeCurrent).then((result) => {
+      if (!cancelled) setNotes(result.success ? result.notes || '' : '')
+    }).catch(() => { if (!cancelled) setNotes('') })
+    return () => { cancelled = true }
+  }, [activeFile?.path, activeFile?.type, safeCurrent])
+
+  const beginResize = (slide: 'current' | 'next', event: React.PointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const start = { x: event.clientX, y: event.clientY, layout: layoutRef.current }
+    const onMove = (move: PointerEvent): void => {
+      const bounds = canvasRef.current?.getBoundingClientRect()
+      if (!bounds) return
+      const next = resizeSpeakerSlide(
+        start.layout,
+        slide,
+        (move.clientX - start.x) / bounds.width * 100,
+        (move.clientY - start.y) / bounds.height * 100 / (isPdf || !start.layout.showNotes ? 0.96 : 0.76)
+      )
+      layoutRef.current = next
+      setLayout(next)
+    }
+    const onEnd = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onEnd)
+      window.removeEventListener('pointercancel', onEnd)
+      setSpeakerSlideLayoutDraft(layoutRef.current)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onEnd, { once: true })
+    window.addEventListener('pointercancel', onEnd, { once: true })
+  }
+
+  const timerText = formatTimerTime(timerRemaining)
+  const previewTimerColor = resolveTimerTextColor({
+    remaining: timerRemaining,
+    running: timerRunning,
+    textColor: timerTextColor,
+    warningTextColor: timerWarningTextColor,
+    overtimeTextColor: timerOvertimeTextColor
+  })
+  const timerVisible = timerDraft.enabled
+  const changeDraft = (next: SpeakerSlideLayout): void => {
+    layoutRef.current = next
+    setLayout(next)
+    setSpeakerSlideLayoutDraft(next)
+  }
+  const showScaleBadges = (captions: SpeakerCaption[]): void => {
+    if (scaleBadgeTimeoutRef.current) clearTimeout(scaleBadgeTimeoutRef.current)
+    setScaleBadgeCaptions(captions)
+    scaleBadgeTimeoutRef.current = setTimeout(() => {
+      setScaleBadgeCaptions([])
+      scaleBadgeTimeoutRef.current = null
+    }, 2000)
+  }
+  const selectCaption = (caption: SpeakerCaption, additive: boolean): void => {
+    const next = selectSpeakerCaptions(selectedCaptions, caption, additive)
+    setSelectedCaptions(next)
+    showScaleBadges(next)
+  }
+  const beginCaptionMove = (caption: SpeakerCaption, event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.button !== 0) return
+    const multiple = event.ctrlKey || (window.api.platform === 'darwin' && event.metaKey)
+    selectCaption(caption, multiple)
+    if (multiple) {
+      return
+    }
+    const bounds = canvasRef.current?.getBoundingClientRect()
+    if (!bounds) return
+    const placement = speakerCaptionPlacement(layoutRef.current, caption, isPdf)
+    const captionBounds = event.currentTarget.getBoundingClientRect()
+    const maxX = Math.max(0, 100 - captionBounds.width / bounds.width * 100)
+    const maxY = Math.max(0, 100 - captionBounds.height / bounds.height * 100)
+    const start = { x: event.clientX, y: event.clientY }
+    const onMove = (move: PointerEvent): void => {
+      const next = {
+        ...layoutRef.current,
+        captions: {
+          ...layoutRef.current.captions,
+          [caption]: {
+            ...placement,
+            x: Math.max(0, Math.min(maxX, placement.x + (move.clientX - start.x) / bounds.width * 100)),
+            y: Math.max(0, Math.min(maxY, placement.y + (move.clientY - start.y) / bounds.height * 100))
+          }
+        }
+      }
+      layoutRef.current = next
+      setLayout(next)
+    }
+    const onEnd = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onEnd)
+      window.removeEventListener('pointercancel', onEnd)
+      setSpeakerSlideLayoutDraft(layoutRef.current)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onEnd, { once: true })
+    window.addEventListener('pointercancel', onEnd, { once: true })
+  }
+  const scaleCaption = (caption: SpeakerCaption, event: React.WheelEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const bounds = canvasRef.current?.getBoundingClientRect()
+    if (!bounds) return
+    const selectedTargets = selectedCaptions.includes(caption)
+      ? selectedCaptions.filter((target) => target !== 'title' || layoutRef.current.showTitle)
+      : []
+    const targets: SpeakerCaption[] = selectedTargets.length > 1 ? selectedTargets : [caption]
+    if (targets.length === 1) setSelectedCaptions([caption])
+    showScaleBadges(targets)
+    const dimensions = targets.map((target) => {
+      const element = canvasRef.current?.querySelector<HTMLElement>(`[data-speaker-caption-${target}]`)
+      const placement = speakerCaptionPlacement(layoutRef.current, target, isPdf)
+      const rect = element?.getBoundingClientRect()
+      if (!rect || rect.width <= 0 || rect.height <= 0) return null
+      return {
+        target,
+        placement,
+        widthAtScaleOne: rect.width / bounds.width * 100 / placement.scale,
+        heightAtScaleOne: rect.height / bounds.height * 100 / placement.scale
+      }
+    })
+    if (dimensions.some((item) => item === null)) return
+    const sized = dimensions.filter((item): item is NonNullable<typeof item> => item !== null)
+    const maxScale = Math.min(2, ...sized.map(({ widthAtScaleOne, heightAtScaleOne }) =>
+      Math.min(98 / widthAtScaleOne, 98 / heightAtScaleOne)))
+    const currentPercent = Math.round(speakerCaptionPlacement(layoutRef.current, caption, isPdf).scale * 100)
+    const nextPercent = Math.max(50, Math.min(Math.floor(maxScale * 100), currentPercent + (event.deltaY < 0 ? 10 : -10)))
+    changeDraft(scaleSpeakerCaptions(layoutRef.current, sized.map(({ target, widthAtScaleOne, heightAtScaleOne }) => ({
+      caption: target,
+      widthAtScaleOne,
+      heightAtScaleOne
+    })), nextPercent, isPdf))
+  }
+  const changeTimerDraft = (next: SpeakerTimerEditDraft): void => {
+    timerDraftRef.current = next
+    setTimerDraft(next)
+    setSpeakerTimerEditDraft(next)
+  }
+  const beginTimerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const start = { x: event.clientX, y: event.clientY, draft: timerDraftRef.current }
+    const onMove = (move: PointerEvent): void => {
+      const bounds = canvasRef.current?.getBoundingClientRect()
+      if (!bounds) return
+      const next = {
+        ...start.draft,
+        position: {
+          x: Math.max(8, Math.min(92, start.draft.position.x + (move.clientX - start.x) / bounds.width * 100)),
+          y: Math.max(8, Math.min(92, start.draft.position.y + (move.clientY - start.y) / bounds.height * 100))
+        }
+      }
+      timerDraftRef.current = next
+      setTimerDraft(next)
+    }
+    const onEnd = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onEnd)
+      window.removeEventListener('pointercancel', onEnd)
+      setSpeakerTimerEditDraft(timerDraftRef.current)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onEnd, { once: true })
+    window.addEventListener('pointercancel', onEnd, { once: true })
+  }
+
+  return (
+    <div className="fixed inset-0 z-[140] flex flex-col items-center justify-center gap-3 bg-black/90 p-4 text-white" data-speaker-layout-editor>
+      <div className="flex w-full max-w-[1300px] items-center justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Настроить суфлёр</h2>
+          <p className="text-xs text-gray-400">Подписи: перетаскивание и масштаб колёсиком. {window.api.platform === 'darwin' ? '⌘' : 'Ctrl'}+клик — выбрать несколько с одним масштабом. Применить: ↻.</p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1">
+          <label className="flex items-center gap-2 text-xs text-gray-200">
+            <input
+              data-speaker-notes-toggle
+              type="checkbox"
+              checked={layout.showNotes !== false}
+              onChange={(event) => changeDraft({ ...layoutRef.current, showNotes: event.target.checked })}
+              className="h-4 w-4 accent-blue-500"
+            />
+            Показывать окно заметок
+          </label>
+          <label className="flex items-center gap-2 text-xs text-gray-200" title="Используется фон, выбранный кнопкой «Фон»">
+            <input
+              data-speaker-backdrop-toggle
+              type="checkbox"
+              checked={layout.showBackdrop !== false}
+              onChange={(event) => changeDraft({ ...layoutRef.current, showBackdrop: event.target.checked })}
+              className="h-4 w-4 accent-blue-500"
+            />
+            Показывать фон
+          </label>
+          <label className="flex items-center gap-2 text-xs text-gray-200">
+            <input
+              data-speaker-title-toggle
+              type="checkbox"
+              checked={layout.showTitle !== false}
+              onChange={(event) => {
+                const showTitle = event.target.checked
+                changeDraft({ ...layoutRef.current, showTitle })
+                if (!showTitle) {
+                  setSelectedCaptions((current) => current.filter((caption) => caption !== 'title'))
+                  setScaleBadgeCaptions((current) => current.filter((caption) => caption !== 'title'))
+                }
+              }}
+              className="h-4 w-4 accent-blue-500"
+            />
+            Показывать название презентации
+          </label>
+          <button
+            type="button"
+            data-speaker-timer-toggle
+            onClick={() => changeTimerDraft({ ...timerDraftRef.current, enabled: !timerDraftRef.current.enabled })}
+            className={`rounded border px-2 py-1 text-xs font-semibold ${timerVisible
+              ? 'border-blue-400 bg-blue-700 text-white'
+              : 'border-gray-600 bg-gray-800 text-gray-200 hover:border-blue-500'}`}
+          >{timerVisible ? 'Убрать таймер' : '+ Таймер'}</button>
+          {timerVisible && (!timerOutputVisible || timerDuration <= 0) && (
+            <span className="text-[10px] text-amber-300">Для показа запустите «Таймер доклада».</span>
+          )}
+          {!backdropImage && layout.showBackdrop && (
+            <span className="text-[10px] text-gray-500">Фон выбирается кнопкой «Фон».</span>
+          )}
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button type="button" onClick={() => changeDraft({
+            ...DEFAULT_SPEAKER_SLIDE_LAYOUT,
+            showNotes: layoutRef.current.showNotes,
+            showBackdrop: layoutRef.current.showBackdrop,
+            showTitle: layoutRef.current.showTitle,
+            captions: layoutRef.current.captions
+          })} className="rounded border border-gray-600 px-3 py-2 text-xs hover:bg-gray-700">Сбросить размеры</button>
+          {layoutDirty && <button type="button" onClick={discardSpeakerEditorDraft} className="rounded border border-gray-700 px-2 py-2 text-xs text-gray-300 hover:bg-gray-800">Отменить</button>}
+          <button
+            type="button"
+            data-speaker-layout-refresh
+            data-pending-changes={layoutDirty ? 'true' : 'false'}
+            aria-label="Обновить суфлёр"
+            title={layoutDirty ? 'Передать изменения на суфлёр' : 'Суфлёр обновлён'}
+            disabled={!layoutDirty}
+            onClick={() => {
+              setSpeakerSlideLayoutDraft(layoutRef.current)
+              setSpeakerTimerEditDraft(timerDraftRef.current)
+              publishSpeakerSlideLayout()
+            }}
+            className={`flex h-9 w-9 items-center justify-center rounded-full border text-xl font-bold leading-none ${layoutDirty
+              ? 'program-scene-refresh-attention border-blue-300 bg-blue-600 text-white hover:bg-blue-500'
+              : 'cursor-default border-gray-700 bg-surface-100 text-gray-500 shadow-none'}`}
+          >↻</button>
+          <button type="button" onClick={onClose} className="rounded bg-blue-600 px-4 py-2 text-xs font-semibold hover:bg-blue-500">Готово</button>
+        </div>
+      </div>
+      <div
+        ref={canvasRef}
+        className="min-h-0 w-full max-w-[1300px] overflow-hidden rounded-xl border border-gray-600 shadow-2xl"
+        style={{ aspectRatio, maxHeight: 'calc(100vh - 130px)', width: `min(95vw, calc((100vh - 130px) * ${speakerDisplay ? speakerDisplay.bounds.width / speakerDisplay.bounds.height : 16 / 9}))`, containerType: 'inline-size' }}
+      >
+        <SpeakerSlideCanvas
+          layout={layout}
+          isPdf={isPdf}
+          current={isPdf && activeFile
+            ? <InformationPdfPreview filePath={activeFile.path} page={safeCurrent} renderWidth={1600} transparentBackground={showSpeakerBackdrop} />
+            : activeFile?.type === 'presentation' && imagePaths[safeCurrent - 1]
+              ? <img src={mediaUrl(imagePaths[safeCurrent - 1])} className="h-full w-full object-contain" draggable={false} />
+              : <div className="flex h-full items-center justify-center text-center text-gray-400">{hasPresentation ? 'Подготовка слайда…' : 'Откройте презентацию для просмотра'}</div>}
+          next={isPdf && activeFile && nextSlide
+            ? <InformationPdfPreview filePath={activeFile.path} page={nextSlide} renderWidth={1200} transparentBackground={showSpeakerBackdrop} />
+            : activeFile?.type === 'presentation' && nextSlide && imagePaths[nextSlide - 1]
+              ? <img src={mediaUrl(imagePaths[nextSlide - 1])} className="h-full w-full object-contain" draggable={false} />
+              : <div className="flex h-full items-center justify-center text-center text-gray-400">{nextSlide ? 'Подготовка слайда…' : 'Конец презентации'}</div>}
+          backdropImage={backdropImage}
+          fileName={activeFile?.name || 'Презентация'}
+          currentSlide={safeCurrent}
+          totalSlides={safeTotal}
+          notes={notes}
+          timer={timerVisible ? (
+            <div
+              data-speaker-timer-draft
+              onPointerDown={beginTimerMove}
+              onWheel={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                const nextScale = Math.max(0.5, Math.min(2, timerDraftRef.current.scale + (event.deltaY < 0 ? 0.05 : -0.05)))
+                changeTimerDraft({ ...timerDraftRef.current, scale: nextScale })
+              }}
+              className="absolute z-50 cursor-move touch-none select-none rounded outline outline-1 outline-dashed outline-blue-400/80 px-2 py-1 text-center font-mono font-black tabular-nums leading-none tracking-tight"
+              style={{
+                left: `${timerDraft.position.x}%`, top: `${timerDraft.position.y}%`,
+                transform: `translate(-50%, -50%) scale(${timerDraft.scale})`,
+                fontSize: `${timerPreviewFontPercent}cqw`, textShadow: '0 2px 8px #000'
+              }}
+            ><span style={{ color: previewTimerColor, opacity: timerTextOpacity }}>{timerDuration > 0 ? timerText : '15:00'}</span></div>
+          ) : null}
+          onResizeStart={beginResize}
+          onCaptionPointerDown={beginCaptionMove}
+          onCaptionWheel={scaleCaption}
+          selectedCaptions={selectedCaptions}
+          scaleBadgeCaptions={scaleBadgeCaptions}
+        />
+      </div>
     </div>
   )
 }
@@ -335,6 +743,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
   const [displayStatus, setDisplayStatus] = useState('')
   const [devicePickerOpen, setDevicePickerOpen] = useState(false)
   const [desktopPickerOpen, setDesktopPickerOpen] = useState(false)
+  const [speakerLayoutOpen, setSpeakerLayoutOpen] = useState(false)
   const [titlesMenu, setTitlesMenu] = useState<{ x: number; y: number } | null>(null)
 
   const informationSourceIdentity = informationMedia?.type === 'capture'
@@ -569,7 +978,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
             : undefined
         )
     if (!resolvedCaptureId && source.kind !== 'window') {
-      setMediaStatus('Windows не смогла подготовить выбранный экран для захвата.')
+      setMediaStatus(`${window.api.platform === 'darwin' ? 'macOS не смогла' : 'Windows не смогла'} подготовить выбранный экран для захвата.`)
       setDesktopPickerOpen(false)
       return
     }
@@ -788,6 +1197,13 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
             ) : externalDisplays.length === 0 && (
               <div className="mt-3 text-xs text-amber-300">Дополнительные мониторы не обнаружены.</div>
             )}
+            <button
+              type="button"
+              onClick={() => setSpeakerLayoutOpen(true)}
+              className="mt-3 rounded-lg border border-blue-500/60 bg-blue-950/40 px-3 py-2 text-xs font-semibold text-blue-100 hover:bg-blue-900/60"
+            >
+              Настроить суфлёр
+            </button>
           </section>
 
           <section className="rounded-xl border border-gray-700 bg-surface-100 p-4">
@@ -1175,6 +1591,7 @@ export function AuxiliaryDisplaysModal({ onClose }: AuxiliaryDisplaysModalProps)
           onSelect={selectDesktopSource}
         />
       )}
+      {speakerLayoutOpen && <SpeakerLayoutEditor onClose={() => setSpeakerLayoutOpen(false)} />}
     </>
   )
 }

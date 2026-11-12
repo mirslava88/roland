@@ -134,8 +134,10 @@ export class StreamingManager {
     if (this.workerReady) return this.workerReady
     const captureSession = session.fromPartition('pdm-stream-capture')
     const isWorker = (contents: Electron.WebContents | null): boolean => !!contents && contents === this.worker?.webContents
-    captureSession.setPermissionCheckHandler((contents, permission) => isWorker(contents) && permission === 'media')
-    captureSession.setPermissionRequestHandler((contents, permission, callback) => callback(isWorker(contents) && permission === 'media'))
+    captureSession.setPermissionCheckHandler((contents, permission) => isWorker(contents) &&
+      (permission === 'media' || process.platform === 'darwin' && permission === 'display-capture'))
+    captureSession.setPermissionRequestHandler((contents, permission, callback) => callback(isWorker(contents) &&
+      (permission === 'media' || process.platform === 'darwin' && permission === 'display-capture')))
     captureSession.setDisplayMediaRequestHandler(async (request, callback) => {
       try {
         if (!this.worker || request.frame !== this.worker.webContents.mainFrame || this.audioCaptureDisplayId === null) { callback({}); return }

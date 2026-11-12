@@ -1,4 +1,5 @@
 import type { VirtualCameraStatus } from '../../../../shared/virtual-camera'
+import type { RecordingEditSource, RecordingSettings, RecordingStatus, RecordingWaveformWindow } from '../../../../shared/recording'
 
 // Installed before importing App/store. No preload, main process or parent API.
 const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
@@ -27,6 +28,33 @@ function makeTrainingFrames(titles: string[], colors: [string, string]): string[
 export const trainingFrames = makeTrainingFrames(['Открытие мероприятия', 'Программа дня', 'Добро пожаловать'], ['#143c56', '#166b7c'])
 export const trainingFramesSecond = makeTrainingFrames(['Доклад выступающего', 'Главная мысль', 'Спасибо за внимание'], ['#3f255f', '#7c315f'])
 export const trainingCalls: string[] = []
+const TRAINING_RECORDING_PATH = 'training://recording.mp4'
+const TRAINING_RECORDING_SOURCE: RecordingEditSource = {
+  path: TRAINING_RECORDING_PATH, duration: 8, hasAudio: true, format: 'mp4', frameRate: 24
+}
+let trainingRecordingSettings: RecordingSettings = { format: 'quality-mp4', fps: 30, audio: 'system', microphoneId: '' }
+let trainingRecordingStatus: RecordingStatus = {
+  phase: 'idle', startedAt: null, frames: 0, fps: 0, droppedFrames: 0, sizeBytes: 0
+}
+export function setTrainingRecordingStage(stage: 'ready' | 'running' | 'finished'): void {
+  trainingRecordingStatus = stage === 'running'
+    ? { phase: 'running', startedAt: Date.now() - 5000, frames: 120, fps: 24, droppedFrames: 0,
+      sizeBytes: 200000, source: 'display' }
+    : { phase: 'idle', startedAt: null, frames: stage === 'finished' ? 192 : 0, fps: 0,
+      droppedFrames: 0, sizeBytes: stage === 'finished' ? 403429 : 0,
+      ...(stage === 'finished' ? { path: TRAINING_RECORDING_PATH } : {}) }
+}
+function trainingWaveform(window: RecordingWaveformWindow): string {
+  const width = Math.max(16, Math.min(2048, Math.round(window.width)))
+  const count = Math.ceil(width / 4) + 1
+  const strokes = Array.from({ length: count }, (_, index) => {
+    const x = Math.min(width, index * 4)
+    const time = window.start + (window.end - window.start) * index / Math.max(1, count - 1)
+    const amplitude = 3 + Math.abs(Math.sin(time * 18) * Math.cos(time * 7)) * 17
+    return `M${x} ${Math.round(24 - amplitude)}V${Math.round(24 + amplitude)} M${x} ${Math.round(72 - amplitude)}V${Math.round(72 + amplitude)}`
+  }).join(' ')
+  return `data:image/svg+xml;base64,${btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="96" viewBox="0 0 ${width} 96"><path d="${strokes}" stroke="#79d8f4" stroke-width="2" opacity=".85"/></svg>`)}`
+}
 
 export function installTrainingRuntime(): void {
   if (window === window.top) throw new Error('Training may only run in its isolated frame')
@@ -54,6 +82,9 @@ export function installTrainingRuntime(): void {
     { deviceId: 'training-microphone', kind: 'audioinput', label: 'Микрофон учебной камеры', groupId: 'training-camera-group' }
   ]
   const api = {
+    platform: new URLSearchParams(location.search).get('platform') === 'darwin' ? 'darwin' : 'win32',
+    macSetup: { presentationSupport: asyncValue('macSetup.presentationSupport', { installed: true }), permissions: asyncValue('macSetup.permissions', { screen: 'granted', accessibility: true }) },
+    ensureCameraAccess: asyncValue('ensureCameraAccess', 'granted'),
     dbgLog() {}, on(event: string, fn: (...args: unknown[]) => void) { if (!listeners.has(event)) listeners.set(event, new Set()); listeners.get(event)!.add(fn); return () => { listeners.get(event)?.delete(fn) } },
     getDisplays: asyncValue('getDisplays', TRAINING_DISPLAYS), getDrives: asyncValue('getDrives', []),
     loadFolder: asyncValue('loadFolder', { files: [TRAINING_FILE, TRAINING_FILE_SECOND], subfolders: [] }), watchFolder() {},
@@ -99,6 +130,28 @@ export function installTrainingRuntime(): void {
         return Promise.resolve({ ...virtualCameraStatus })
       }
     },
+    ...(__PDM_STREAM_ENABLED__ ? { recording: {
+      load: () => { trainingCalls.push('recording.load'); return Promise.resolve({ ...trainingRecordingSettings }) },
+      save: (settings: RecordingSettings) => { trainingCalls.push('recording.save'); trainingRecordingSettings = { ...settings }; return Promise.resolve() },
+      devices: asyncValue('recording.devices', [{ id: 'training-mic', label: 'Учебный микрофон' }]),
+      status: () => { trainingCalls.push('recording.status'); return Promise.resolve({ ...trainingRecordingStatus }) },
+      start: (settings: RecordingSettings) => {
+        trainingCalls.push('recording.start'); trainingRecordingSettings = { ...settings }
+        setTrainingRecordingStage('running'); return Promise.resolve(true)
+      },
+      stop: () => { trainingCalls.push('recording.stop'); setTrainingRecordingStage('finished'); return Promise.resolve() },
+      editOpen: (useLast = false) => { trainingCalls.push(`recording.editOpen:${useLast}`); return Promise.resolve({ ...TRAINING_RECORDING_SOURCE }) },
+      editFrame: (time: number) => { trainingCalls.push('recording.editFrame'); return Promise.resolve(trainingFrames[Math.min(2, Math.floor(time / 8 * 3))]) },
+      editThumbnails: () => { trainingCalls.push('recording.editThumbnails'); return Promise.resolve(Array.from({ length: 12 }, (_, index) => trainingFrames[Math.floor(index / 4)])) },
+      editTimelineFrames: (times: number[]) => { trainingCalls.push('recording.editTimelineFrames'); return Promise.resolve(times.map(time => trainingFrames[Math.min(2, Math.floor(time / 8 * 3))])) },
+      editWaveform: () => { trainingCalls.push('recording.editWaveform'); return Promise.resolve(trainingWaveform({ start: 0, end: 8, width: 1200 })) },
+      editWaveformWindows: (windows: RecordingWaveformWindow[]) => { trainingCalls.push('recording.editWaveformWindows'); return Promise.resolve(windows.map(trainingWaveform)) },
+      editTimelineCancel: asyncValue('recording.editTimelineCancel', undefined),
+      editStatus: asyncValue('recording.editStatus', { phase: 'idle', progress: 0, outputs: [] }),
+      editExport: asyncValue('recording.editExport', { phase: 'done', progress: 1, outputs: ['Учебный монтаж.mp4'] }),
+      editCancel: asyncValue('recording.editCancel', undefined)
+    } } : {}),
+    setControlPreviewFullscreen: asyncValue('setControlPreviewFullscreen', true),
     getAppVersion: asyncValue('getAppVersion', 'Учебный режим'),
     getDesktopCaptureSources: asyncValue('getDesktopCaptureSources', []),
     sendToPresentation(event: string, payload?: unknown) {

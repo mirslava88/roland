@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('streamCapture', {
+  platform: process.platform,
   onCommand: (listener: (id: number, command: string, data: unknown) => void) => {
     ipcRenderer.on('stream-command', (_event, id, command, data) => listener(id, command, data))
   },

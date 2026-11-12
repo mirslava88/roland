@@ -145,8 +145,8 @@ export function HeadlessProgramRail(): JSX.Element {
         </div>
         <div className="border-b border-gray-800 px-3 pb-2 text-[9px] leading-4 text-gray-500">
           {window.api.platform === 'darwin'
-            ? 'Здесь показан кадр, который получает стрим.'
-            : 'Здесь показан кадр, который получает виртуальная камера и стрим.'}
+            ? 'Здесь показан кадр, который получают стрим и запись.'
+            : 'Здесь показан кадр, который получают виртуальная камера, стрим и запись.'}
         </div>
         <div className="pdm-headless-program-slides min-h-0 flex-1">
           <SlideNavigator />

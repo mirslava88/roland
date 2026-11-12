@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, crashReporter, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, shell, desktopCapturer, protocol, session, powerMonitor, powerSaveBlocker, crashReporter, systemPreferences } from 'electron'
 import type { DesktopCapturerSource, Display } from 'electron'
 import {
   createAuxiliaryWindow,
@@ -27,6 +27,8 @@ import { setMacSimpleFullscreen } from './mac-desktop-ui'
 import { hardenMacReleaseRuntime } from './mac-release-security'
 import { macPermissionStatus, openMacPrivacy, macPresentationSupport, openKeynoteDownload, showMacApplication } from './mac-setup'
 import { StreamingManager } from './streaming'
+import { RecordingManager } from './recording'
+import { MacRecordingManager } from './mac-recording'
 import { VirtualCameraManager } from './virtual-camera'
 import { MacVirtualCameraManager } from './mac-virtual-camera'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
@@ -93,9 +95,29 @@ const directStreamDeckManager = new DirectStreamDeckManager(
   }
 )
 let streamingManager: StreamingManager | null = null
+let recordingManager: RecordingManager | MacRecordingManager | null = null
 let virtualCameraManager: VirtualCameraManager | MacVirtualCameraManager | null = null
 let presentationWindow: BrowserWindow | null = null
 let rendererInternalProgramOutputRequested = false
+let programPowerBlockerId: number | null = null
+
+function setProgramOutputPowerRequest(active: boolean): void {
+  if (process.platform !== 'darwin') return
+  if (active) {
+    if (programPowerBlockerId !== null) return
+    try {
+      programPowerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+      diagnosticLog('power', 'program output keeps display and system awake')
+    } catch (error) {
+      diagnosticLog('power', `program output power request failed ${formatDiagnosticError(error)}`)
+    }
+    return
+  }
+  if (programPowerBlockerId === null) return
+  powerSaveBlocker.stop(programPowerBlockerId)
+  programPowerBlockerId = null
+  diagnosticLog('power', 'program output power request released')
+}
 
 function runMacDisplayControl<T>(args: string[]): Promise<T> {
   const helper = app.isPackaged
@@ -121,6 +143,7 @@ function runMacDisplayControl<T>(args: string[]): Promise<T> {
 function isInternalProgramOutputActive(): boolean {
   return rendererInternalProgramOutputRequested ||
     streamingManager?.isInternalProgramOutputActive() === true ||
+    recordingManager?.isInternalProgramOutputActive() === true ||
     virtualCameraManager?.isInternalProgramOutputActive() === true
 }
 const outputReadablePaths = new Map<number, Set<string>>()
@@ -1318,6 +1341,9 @@ function createWindows(): void {
       handler(event, ...args)
     })
   }
+  onControl('program-output-power-request', (_event, active: unknown) => {
+    if (typeof active === 'boolean') setProgramOutputPowerRequest(active)
+  })
   const isTrustedOutputInvoke = (
     event: Electron.IpcMainInvokeEvent,
     channel: string,
@@ -1759,7 +1785,9 @@ function createWindows(): void {
   })
 
   controlWindow.on('closed', () => {
+    setProgramOutputPowerRequest(false)
     streamingManager?.stop()
+    void recordingManager?.shutdown()
     virtualCameraManager?.stop()
     diagnosticLog('lifecycle', `control window closed trigger=${shutdownTrigger}`)
     cancelMemoryReleaseSnapshots()
@@ -1785,6 +1813,9 @@ function createWindows(): void {
   })
   thisControlWindow.webContents.on('responsive', () => {
     diagnosticLog('renderer-failure', `control renderer responsive wc=${thisControlWindow.webContents.id}`)
+  })
+  thisControlWindow.webContents.on('render-process-gone', () => {
+    setProgramOutputPowerRequest(false)
   })
 
   // dbg-log: renderer processes (control + presentation) forward debug strings
@@ -2119,7 +2150,10 @@ function createWindows(): void {
     }
   })
 
-  handleControl('close-presentation-window', () => {
+  handleControl('close-presentation-window', async () => {
+    if (__PDM_STREAM_ENABLED__ && process.platform === 'darwin' && recordingManager instanceof MacRecordingManager) {
+      await recordingManager.beforeProgramHide()
+    }
     presentationWindowRequestedVisible = false
     // This path bypasses renderer `send-to-presentation`, so invalidate any
     // prewarm command waiting for presentation-ready here as well. Otherwise
@@ -4366,18 +4400,18 @@ app.whenReady().then(() => {
     return isPresentation || isTrustedAuxiliaryCapture
   }
 
-  // Default-deny remains in place for every permission except media requested
+  // Default-deny remains in place for every permission except media/capture requested
   // by the exact local presentation renderer and the auxiliary renderers that
   // need video capture (program mirrors and information displays). The control
   // renderer itself never opens a camera or microphone.
   session.defaultSession.setPermissionCheckHandler((contents, permission) => {
-    const allowed = permission === 'media' && isTrustedMediaRequester(contents)
+    const allowed = (permission === 'media' || permission === 'display-capture') && isTrustedMediaRequester(contents)
     diagnosticLog('capture', `permission check=${permission} allowed=${allowed} wc=${contents?.id ?? '-'}`)
     return allowed
   })
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
-    const allowed = permission === 'media' && isTrustedMediaRequester(contents)
-    const mediaTypes = permission === 'media' && 'mediaTypes' in details
+    const allowed = (permission === 'media' || permission === 'display-capture') && isTrustedMediaRequester(contents)
+    const mediaTypes = (permission === 'media' || permission === 'display-capture') && 'mediaTypes' in details
       ? details.mediaTypes?.join(',') || '-'
       : '-'
     diagnosticLog(
@@ -4464,6 +4498,7 @@ app.whenReady().then(() => {
       const isControl = controlWindow?.webContents.id === contents.id
       if (isControl) {
         streamingManager?.stop()
+        void recordingManager?.shutdown()
         virtualCameraManager?.stop()
       }
       const isPresentation = presentationWindow?.webContents.id === contents.id
@@ -4497,6 +4532,11 @@ app.whenReady().then(() => {
 
   if (__PDM_STREAM_ENABLED__) {
     streamingManager = new StreamingManager(
+      () => controlWindow,
+      () => presentationDisplayId,
+      () => presentationWindow
+    )
+    recordingManager = new (process.platform === 'darwin' ? MacRecordingManager : RecordingManager)(
       () => controlWindow,
       () => presentationDisplayId,
       () => presentationWindow
@@ -4562,6 +4602,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
+  setProgramOutputPowerRequest(false)
   if (shutdownTrigger === 'unknown') shutdownTrigger = 'app-quit-or-system'
   diagnosticLog(
     'lifecycle',
@@ -4593,7 +4634,8 @@ app.on('before-quit', (event) => {
     // hide, and all later hides become no-ops during shutdown.
     showAllTaskbars(true),
     closeAllExternalFiles(),
-    directStreamDeckManager.shutdown()
+    directStreamDeckManager.shutdown(),
+    recordingManager?.shutdown() ?? Promise.resolve()
   ])
     .then((results) => {
       if (results[0].status === 'rejected') {

@@ -2,6 +2,7 @@ import { Component, useEffect, useLayoutEffect, useRef, useState, type ErrorInfo
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { Timer } from './Timer'
 import { StreamControl } from './StreamControl'
+import { RecordControl } from './RecordControl'
 import { EventTimer } from '../EventTimer/EventTimer'
 import { MusicPlayer } from './MusicPlayer'
 import { VideoPlayer } from './VideoPlayer'
@@ -777,6 +778,7 @@ export function Toolbar(): JSX.Element {
         {__PDM_STREAM_ENABLED__ && (
           <ToolbarItem id="stream" visible={toolbarVisibility.stream}>
             <StreamControl />
+            <RecordControl />
           </ToolbarItem>
         )}
       </div>

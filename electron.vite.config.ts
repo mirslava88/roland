@@ -36,7 +36,7 @@ export default defineConfig({
           index: resolve(__dirname, 'src/preload/index.ts'),
           output: resolve(__dirname, 'src/preload/output.ts'),
           timer: resolve(__dirname, 'src/preload/timer.ts'),
-          ...(edition.stream ? { streaming: resolve(__dirname, 'src/preload/streaming.ts') } : {})
+          ...(edition.stream ? { streaming: resolve(__dirname, 'src/preload/streaming.ts'), recording: resolve(__dirname, 'src/preload/recording.ts') } : {})
         }
       }
     }

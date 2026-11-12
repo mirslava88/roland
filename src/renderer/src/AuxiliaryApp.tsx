@@ -5,11 +5,14 @@ import { releasePdfiumResources, renderPdfiumPageToCanvas } from './pdfium-rende
 import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
 import { InformationTitlesLayer } from './components/AuxiliaryDisplays/InformationTitlesLayer'
+import { SpeakerSlideCanvas } from './components/AuxiliaryDisplays/SpeakerSlideCanvas'
 import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
 import { ProgramSceneMediaLayerSurface } from './components/ProgramScene/ProgramSceneMediaLayers'
 import { normalizeQrOverlay, type QrOverlayConfig } from '../../shared/qr-overlay'
 import { DEFAULT_CONTENT_ZOOM, normalizeContentZoom, type ContentZoomState } from '../../shared/content-zoom'
 import { pdfZoomRenderSize } from '../../shared/pdf-zoom-render'
+import { DEFAULT_SPEAKER_SLIDE_LAYOUT } from '../../shared/speaker-layout'
+import { formatTimerTime, resolveTimerTextColor } from '../../shared/timer-format'
 import type { ProgramSceneMediaLayer } from '../../shared/program-scene'
 
 const requestedRole = new URLSearchParams(window.location.search).get('role')
@@ -108,23 +111,11 @@ function playAndWaitForVideoFrame(
   })
 }
 
-function formatTime(totalSeconds: number): string {
-  const negative = totalSeconds < 0
-  const absolute = Math.abs(totalSeconds)
-  const hours = Math.floor(absolute / 3600)
-  const minutes = Math.floor((absolute % 3600) / 60)
-  const seconds = absolute % 60
-  const pad = (value: number): string => value.toString().padStart(2, '0')
-  const value = hours > 0
-    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
-    : `${pad(minutes)}:${pad(seconds)}`
-  return negative ? `-${value}` : value
-}
-
 function SpeakerPdfFrame({
   filePath,
   page,
   compact = false,
+  transparentBackground = false,
   maxRenderWidth = 2560,
   maxRenderHeight = 1600,
   zoomRenderScale = 1,
@@ -135,6 +126,7 @@ function SpeakerPdfFrame({
   filePath: string
   page: number | null
   compact?: boolean
+  transparentBackground?: boolean
   maxRenderWidth?: number
   maxRenderHeight?: number
   zoomRenderScale?: number
@@ -219,7 +211,7 @@ function SpeakerPdfFrame({
   }, [filePath, maxRenderHeight, maxRenderWidth, page, size.width, size.height, zoomRenderScale])
 
   return (
-    <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-black flex items-center justify-center">
+    <div ref={containerRef} className={`relative h-full w-full overflow-hidden flex items-center justify-center ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}>
       {page === null ? (
         <div className="text-center text-gray-400">
           <div className={compact ? 'text-2xl' : 'text-4xl'}>Конец презентации</div>
@@ -263,22 +255,22 @@ function SpeakerPdfFrame({
   )
 }
 
-function SpeakerImageFrame({ path, isEnd = false }: { path?: string | null; isEnd?: boolean }): JSX.Element {
+function SpeakerImageFrame({ path, isEnd = false, transparentBackground = false }: { path?: string | null; isEnd?: boolean; transparentBackground?: boolean }): JSX.Element {
   if (isEnd) {
     return (
-      <div className="h-full w-full bg-black flex items-center justify-center text-3xl text-gray-400">
+      <div className={`h-full w-full flex items-center justify-center text-3xl text-gray-400 ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}>
         Конец презентации
       </div>
     )
   }
   if (!path) {
     return (
-      <div className="h-full w-full bg-black flex items-center justify-center text-lg text-gray-400">
+      <div className={`h-full w-full flex items-center justify-center text-lg text-gray-400 ${transparentBackground ? 'bg-transparent' : 'bg-black'}`}>
         Подготовка слайда…
       </div>
     )
   }
-  return <img src={mediaUrl(path)} className="h-full w-full object-contain bg-black" draggable={false} />
+  return <img src={mediaUrl(path)} className={`h-full w-full object-contain ${transparentBackground ? 'bg-transparent' : 'bg-black'}`} draggable={false} />
 }
 
 const EMPTY_SPEAKER_TIMER: SpeakerTimerDisplayState = {
@@ -345,7 +337,7 @@ function SpeakerDisplay(): JSX.Element {
   }, [])
 
   if (!state.active || !state.filePath || !state.fileType) {
-    if (state.backdropImage) {
+    if (state.backdropImage && state.layout?.showBackdrop !== false) {
       return (
         <div
           className="relative h-screen w-screen bg-black bg-cover bg-center bg-no-repeat select-none"
@@ -366,65 +358,37 @@ function SpeakerDisplay(): JSX.Element {
 
   const nextSlide = state.currentSlide < state.totalSlides ? state.currentSlide + 1 : null
   const isPdf = state.fileType === 'pdf'
+  const transparentBackground = state.layout?.showBackdrop !== false && Boolean(state.backdropImage)
 
   return (
-    <div
-      className={`relative h-screen w-screen bg-[#090b10] text-white p-5 grid grid-cols-[minmax(0,2fr)_minmax(300px,1fr)] gap-4 select-none ${
-        isPdf
-          ? 'grid-rows-[minmax(0,1fr)]'
-          : 'grid-rows-[minmax(0,1fr)_minmax(150px,0.34fr)]'
-      }`}
-    >
-      <section className="min-w-0 min-h-0 rounded-xl border border-gray-700 bg-black overflow-hidden shadow-2xl">
-        {isPdf ? (
-          <SpeakerPdfFrame filePath={state.filePath} page={state.currentSlide} />
-        ) : (
-          <SpeakerImageFrame path={state.currentImagePath} />
-        )}
-      </section>
-
-      <aside className="min-w-0 min-h-0 flex flex-col gap-3">
-        <div className="text-sm uppercase tracking-[0.18em] text-gray-400">Следующий слайд</div>
-        <div className="flex-1 min-h-0 rounded-xl border border-gray-700 bg-black overflow-hidden">
-          {isPdf ? (
-            <SpeakerPdfFrame filePath={state.filePath} page={nextSlide} compact />
-          ) : (
-            <SpeakerImageFrame path={state.nextImagePath} isEnd={nextSlide === null} />
-          )}
-        </div>
-        <div className="rounded-lg bg-gray-900 border border-gray-700 px-4 py-3 flex items-center justify-between gap-4">
-          <span className="truncate text-lg">{state.fileName}</span>
-          <span className="shrink-0 text-2xl tabular-nums font-semibold">
-            {state.currentSlide} / {state.totalSlides || '—'}
-          </span>
-        </div>
-      </aside>
-
-      {!isPdf && (
-        <section className="col-span-2 min-h-0 rounded-xl border border-gray-700 bg-gray-900/80 px-5 py-4 overflow-hidden">
-          <div className="text-xs uppercase tracking-[0.18em] text-gray-400 mb-2">Заметки докладчика</div>
-          <div className="h-[calc(100%-24px)] overflow-hidden whitespace-pre-wrap text-[clamp(18px,2vw,34px)] leading-snug text-gray-100">
-            {state.notes?.trim() || 'Заметок к этому слайду нет'}
-          </div>
-        </section>
-      )}
-      <SpeakerTimerOverlay timer={timer} />
+    <div className="h-screen w-screen">
+      <SpeakerSlideCanvas
+        layout={state.layout || DEFAULT_SPEAKER_SLIDE_LAYOUT}
+        isPdf={isPdf}
+        current={isPdf
+          ? <SpeakerPdfFrame filePath={state.filePath} page={state.currentSlide} transparentBackground={transparentBackground} maxRenderWidth={3840} maxRenderHeight={2400} />
+          : <SpeakerImageFrame path={state.currentImagePath} transparentBackground={transparentBackground} />}
+        next={isPdf
+          ? <SpeakerPdfFrame filePath={state.filePath} page={nextSlide} compact transparentBackground={transparentBackground} maxRenderWidth={2560} maxRenderHeight={1600} />
+          : <SpeakerImageFrame path={state.nextImagePath} isEnd={nextSlide === null} transparentBackground={transparentBackground} />}
+        backdropImage={state.backdropImage}
+        fileName={state.fileName}
+        currentSlide={state.currentSlide}
+        totalSlides={state.totalSlides}
+        notes={state.notes}
+        timer={<SpeakerTimerOverlay timer={timer} />}
+      />
     </div>
   )
 }
 
 function TimerValue({ timer }: { timer: TimerDisplayState }): JSX.Element {
-  const color = timer.remaining < 0
-    ? timer.overtimeTextColor
-    : timer.remaining <= 60 && timer.running
-      ? timer.warningTextColor
-      : timer.textColor
   return (
     <div
       className="font-mono font-black tabular-nums leading-none tracking-tight"
-      style={{ color, opacity: timer.textOpacity }}
+      style={{ color: resolveTimerTextColor(timer), opacity: timer.textOpacity }}
     >
-      {formatTime(timer.remaining)}
+      {formatTimerTime(timer.remaining)}
     </div>
   )
 }
@@ -492,7 +456,7 @@ function ProgramTimerOverlay({
         textShadow: '0 2px 8px rgba(0,0,0,0.8)'
       }}
     >
-      <span style={{ opacity: timer.textOpacity }}>{formatTime(timer.remaining)}</span>
+      <span style={{ opacity: timer.textOpacity }}>{formatTimerTime(timer.remaining)}</span>
     </div>
   )
 }

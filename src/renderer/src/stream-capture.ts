@@ -4,6 +4,7 @@ import workletUrl from './stream-audio-worklet.js?url&no-inline'
 declare global {
   interface Window {
     streamCapture: {
+      platform?: string
       onCommand(listener: (id: number, command: string, data: unknown) => void): void
       reply(id: number, value: unknown, error?: string): void
       chunk(bytes: ArrayBuffer, capturedAt: number): Promise<boolean>
@@ -47,11 +48,18 @@ async function start(settings: StreamCaptureSettings): Promise<void> {
       audioContext.createMediaStreamSource(stream).connect(gain).connect(bus)
     }
     if (settings.audio === 'system' || settings.audio === 'both') {
-      // Electron loopback is requested together with a video track. Stop that
-      // track immediately: video is captured natively by the encoding process.
+      // Electron requests loopback together with a screen track; only its
+      // audio is mixed here. Recording/streaming video has a separate source.
       const desktop = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 1, width: 16, height: 16 }, audio: true })
-      desktop.getVideoTracks().forEach(t => t.stop())
-      if (!desktop.getAudioTracks().length) throw Error('Системный звук недоступен. Выберите микрофон или режим без звука.')
+      // Keep the tiny screen track on Mac: ending the display session can
+      // also end its system-audio track. It is never used as recording video.
+      if (window.streamCapture.platform === 'darwin') tracks.push(...desktop.getVideoTracks())
+      else desktop.getVideoTracks().forEach(t => t.stop())
+      if (!desktop.getAudioTracks().length || desktop.getAudioTracks().every(track => track.readyState === 'ended')) {
+        throw Error(window.streamCapture.platform === 'darwin'
+          ? 'macOS не предоставила системный звук. Проверьте доступ PDM Stream к записи экрана и системного звука в настройках конфиденциальности. Можно выбрать микрофон или режим без звука.'
+          : 'Системный звук недоступен. Выберите микрофон или режим без звука.')
+      }
       mix(keep(new MediaStream(desktop.getAudioTracks())))
     }
     if (settings.audio === 'microphone' || settings.audio === 'both') {

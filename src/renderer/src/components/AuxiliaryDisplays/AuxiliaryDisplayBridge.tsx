@@ -87,12 +87,14 @@ function currentSpeakerDisplayState(
     currentSlide,
     totalSlides,
     pptxSlidesMap,
-    pptxThumbnailsMap
+    pptxThumbnailsMap,
+    speakerSlideLayout
   } = state
   const supported = activeFile?.type === 'presentation' || activeFile?.type === 'pdf'
   if (!activeFile || !supported) {
     return {
       active: false,
+      layout: speakerSlideLayout,
       fileType: null,
       filePath: null,
       fileName: '',
@@ -110,6 +112,7 @@ function currentSpeakerDisplayState(
   const safeCurrent = Math.max(1, knownTotal > 0 ? Math.min(currentSlide, knownTotal) : currentSlide)
   return {
     active: true,
+    layout: speakerSlideLayout,
     fileType: activeFile.type === 'presentation' ? 'presentation' : 'pdf',
     filePath: activeFile.path,
     fileName: activeFile.name,
@@ -310,6 +313,7 @@ export function AuxiliaryDisplayBridge(): null {
     pptxThumbnailsMap,
     displays,
     displayAssignments,
+    speakerSlideLayout,
     selectedDisplayId,
     informationMedia,
     captureTitlesOutputs,
@@ -605,7 +609,9 @@ export function AuxiliaryDisplayBridge(): null {
       const notes = await getSlideNotes(activeFile.path, safeCurrent)
       if (cancelled) return
       notesCache.set(cacheKey, notes)
-      window.api.sendToAuxiliary('speaker', 'speaker-state', { ...baseState, notes })
+      window.api.sendToAuxiliary('speaker', 'speaker-state', {
+        ...currentSpeakerDisplayState(useAppStore.getState()), notes
+      })
     }
 
     void sync()
@@ -619,6 +625,13 @@ export function AuxiliaryDisplayBridge(): null {
     roleIds.speaker,
     totalSlides
   ])
+
+  useEffect(() => {
+    if (roleIds.speaker.length === 0) return
+    window.api.sendToAuxiliary(
+      'speaker', 'speaker-state', currentSpeakerDisplayState(useAppStore.getState())
+    )
+  }, [speakerSlideLayout, roleIds.speaker])
 
   useEffect(() => {
     window.api.sendToAuxiliary('backdrop', 'backdrop-state', { backdropImage })

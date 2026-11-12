@@ -72,6 +72,7 @@ export function Introduction({ children }: { children: ReactNode }): JSX.Element
   const begin = (): void => { setSession({ step, theme }); setError(''); setPanelHint(''); setMode('training') }
   const src = new URL('training.html', window.location.href)
   src.searchParams.set('step', String(session.step)); src.searchParams.set('theme', session.theme)
+  src.searchParams.set('platform', window.api.platform === 'darwin' ? 'darwin' : 'win32')
 
   return <>
     <div className="intro-real-workspace" inert={active} aria-hidden={active || undefined}>{children}</div>
@@ -82,7 +83,7 @@ export function Introduction({ children }: { children: ReactNode }): JSX.Element
           <span className="intro-label">ДОБРО ПОЖАЛОВАТЬ В PDM</span>
           <h1>Подготовим ваш<br />первый показ</h1>
           <p>Программа по шагам покажет, как добавить презентацию, вывести её на экран и использовать основные возможности PDM.</p>
-          <div className="intro-welcome-display"><span>▱ → ▱</span><div><strong>Перед настоящим показом подключите второй экран</strong><p>Это может быть телевизор, проектор или другой монитор. Если изображения на нём нет, нажмите клавиши Windows и P, затем выберите «Расширить».</p></div></div>
+          <div className="intro-welcome-display"><span>▱ → ▱</span><div><strong>Перед настоящим показом подключите второй экран</strong><p>Это может быть телевизор, проектор или другой монитор. {window.api.platform === 'darwin' ? 'В «Настройки системы → Дисплеи» выберите расширение экрана.' : 'Если изображения на нём нет, нажмите клавиши Windows и P, затем выберите «Расширить».'}</p></div></div>
           <div className="intro-note">Обучение можно пройти и без второго экрана. Здесь можно нажимать всё без страха: ваши рабочие каналы останутся как были, а зрители ничего не увидят.</div>
           <div className="intro-welcome-actions"><button className="intro-primary" onClick={begin}>{step > 0 ? 'Продолжить обучение' : 'Пройти обучение'}</button><button onClick={() => close('skipped')}>Пропустить обучение</button></div>
           <small>Повторить знакомство: Настройки → Помощь → Обучение</small>

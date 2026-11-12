@@ -5,11 +5,12 @@ import { pathToFileURL } from 'node:url'
 import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
 import electron from 'electron'
-const compiled = await build({entryPoints:['src/renderer/src/components/Onboarding/training-model.ts'],bundle:true,platform:'node',format:'esm',write:false})
+const compiled = await build({entryPoints:['src/renderer/src/components/Onboarding/training-model.ts'],bundle:true,platform:'node',format:'esm',write:false,
+ define:{__PDM_STREAM_ENABLED__:'true'}})
 const model = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`)
 assert.equal(model.readIntroduction({getItem(){throw Error('blocked')}}).status,'new')
 for(const raw of ['null','{}','{bad','{"status":"paused","step":-2}','{"status":"paused","step":400}']){
- const p=model.readIntroduction({getItem:()=>raw});assert.ok(p.step>=0&&p.step<=31)
+ const p=model.readIntroduction({getItem:()=>raw});assert.ok(p.step>=0&&p.step<=model.LAST_TRAINING_STEP)
 }
 const runtime=readFileSync('src/renderer/src/components/Onboarding/training-runtime.ts','utf8')
 assert.ok(!runtime.includes('window.parent.api') && !runtime.includes('ipcRenderer'))
@@ -31,7 +32,7 @@ import {openIntroduction,ONBOARDING_KEY} from './src/renderer/src/components/Onb
 window.testErrors=[];window.testCalls=[];
 window.addEventListener('error',e=>window.testErrors.push(String(e.error||e.message)));
 window.addEventListener('unhandledrejection',e=>window.testErrors.push(String(e.reason)));
-window.api=new Proxy({}, {get:(_,name)=>(...args)=>{window.testCalls.push(String(name));if(name==='getAudioDevices')return Promise.resolve([]);if(name==='getAppVersion')return Promise.resolve('test');throw Error('Forbidden real IPC: '+String(name));}});
+window.api=new Proxy({}, {get:(_,name)=>name==='platform'?${JSON.stringify(process.env.PDM_TEST_PLATFORM || 'win32')}:(...args)=>{window.testCalls.push(String(name));if(name==='getAudioDevices')return Promise.resolve([]);if(name==='getAppVersion')return Promise.resolve('test');throw Error('Forbidden real IPC: '+String(name));}});
 window.testStore=useAppStore;window.testKey=ONBOARDING_KEY;window.openIntroduction=openIntroduction;
 function TestApp(){const [settings,setSettings]=React.useState(false);return <Introduction><main><button id="real-button" onClick={()=>setSettings(true)}>Настройки</button>{settings&&<SettingsModal onClose={()=>setSettings(false)}/>}</main></Introduction>}
 createRoot(document.getElementById('root')).render(<TestApp/>);

@@ -76,8 +76,12 @@ function builderConfig(edition, platform = process.platform) {
         NSAppleEventsUsageDescription: 'Presentation Display Manager управляет показом PowerPoint, Keynote и выбранных документов Word и Excel.',
         NSScreenCaptureDescription: 'Presentation Display Manager захватывает выбранные окна и экраны для эфира.',
         NSCameraUsageDescription: 'Presentation Display Manager показывает выбранную камеру в эфире.',
-        NSMicrophoneUsageDescription: 'Presentation Display Manager воспроизводит звук выбранного источника.',
-        NSAudioCaptureUsageDescription: 'Presentation Display Manager передаёт выбранный системный звук в трансляцию.',
+        NSMicrophoneUsageDescription: info.stream
+          ? 'Presentation Display Manager Stream захватывает выбранный микрофон для трансляции и записи.'
+          : 'Presentation Display Manager воспроизводит звук выбранного источника.',
+        NSAudioCaptureUsageDescription: info.stream
+          ? 'Presentation Display Manager Stream передаёт выбранный системный звук в трансляцию и запись.'
+          : 'Presentation Display Manager передаёт выбранный системный звук в трансляцию.',
         NSDocumentsFolderUsageDescription: 'Presentation Display Manager открывает выбранные презентации и медиафайлы из папки Документы.'
       }
     },
