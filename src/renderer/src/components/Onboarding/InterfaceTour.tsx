@@ -5,7 +5,7 @@ interface Lesson {
   title: string
   text: string
   selector: string
-  kind: 'file' | 'fileSecond' | 'channel' | 'channelSecond' | 'take' | 'takeSecond' | 'slide' | 'click' | 'panel' | 'scene' | 'menu' | 'text' | 'publish' | 'draft' | 'refresh' | 'external' | 'chroma' | 'qr' | 'titles' | 'titlesPublish' | 'closedScene' | 'layout' | 'settings' | 'virtualCamera' | 'exit'
+  kind: 'file' | 'fileSecond' | 'channel' | 'channelSecond' | 'take' | 'takeSecond' | 'slide' | 'click' | 'panel' | 'scene' | 'menu' | 'text' | 'publish' | 'draft' | 'refresh' | 'external' | 'chroma' | 'qr' | 'titles' | 'titlesPublish' | 'closedScene' | 'layout' | 'settings' | 'virtualCamera' | 'recordOpen' | 'recordStart' | 'recordStop' | 'montageOpen' | 'montageRange' | 'montageFullscreen' | 'montageEdit' | 'montageClose' | 'exit'
   panelSelector?: string
   panelHint?: string
   doneText?: string
@@ -44,6 +44,16 @@ const lessons: Lesson[] = [
   { title: 'Выберите аудиовыход', text: 'Нажмите «Настройки». В разделе «Аудиовыход» выберите «Проектор / HDMI». Настройки закрывать не нужно — сразу перейдём к виртуальной камере.', selector: '[data-toolbar-item="settings"] button', kind: 'settings', panelSelector: '[data-pdm-training-panel="settings"]', panelHint: 'Выберите «Проектор / HDMI (учебный)» — затем перейдём к виртуальной камере' },
   { title: 'Виртуальная камера', text: 'Если настройки закрыты, откройте их. Перейдите во вкладку «Виртуальная камера» и включите её. После этого PDM можно выбрать как обычную камеру в программе видеосвязи.', selector: '[data-toolbar-item="settings"] button', kind: 'virtualCamera', panelSelector: '[data-pdm-training-panel="settings"]', panelHint: 'Жёлтой рамкой выделена вкладка «Виртуальная камера». Откройте её, нажмите «Включить камеру», затем закройте настройки крестиком', doneText: 'В программе видеосвязи выберите «PDM Virtual Camera». Функция доступна в Windows 11 и новее и передаёт только изображение — микрофон или звуковую карту выберите отдельно.' },
   { title: 'Настройте трансляцию', text: 'Нажмите «Стрим». Здесь выбираются площадка, качество изображения и звук. Трансляцию можно запустить и без дополнительного монитора.', selector: '[data-toolbar-item="stream"] button', kind: 'panel', panelSelector: '[data-pdm-training-panel="stream"]' },
+  ...(__PDM_STREAM_ENABLED__ ? [
+    { title: 'Запись эфира', text: 'Нажмите «Запись». Здесь сохраняется именно итоговая картинка со звуком. Запись работает и без трансляции в интернет.', selector: '[data-pdm-training-record-open]', kind: 'recordOpen', doneText: 'Окно записи открыто. В учебном режиме файл не создаётся.' },
+    { title: 'Начните учебную запись', text: 'Посмотрите параметры «Качество» и «Звук», затем нажмите «Начать запись». MP4 занимает меньше места; MKV без потерь создаёт большой файл.', selector: '[data-pdm-training-panel="recording"]', kind: 'recordStart', doneText: 'Учебная запись идёт. В настоящем показе PDM сохранит изображение эфира и выбранный звук.' },
+    { title: 'Остановите запись', text: 'Нажмите «Остановить запись». PDM попросит подтверждение, чтобы запись не закончилась случайно. Затем подтвердите остановку.', selector: '[data-pdm-training-panel="recording"]', kind: 'recordStop', doneText: 'Учебная запись завершена. После настоящей записи готовый файл можно сразу открыть в монтаже.' },
+    { title: 'Откройте монтаж', text: 'Нажмите «Монтаж записи». Здесь можно просмотреть готовый файл, оставить нужный фрагмент и сохранить результат отдельно от исходника.', selector: '[data-pdm-training-record-montage]', kind: 'montageOpen', doneText: 'Открылась учебная запись с видеодорожкой и звуковой волной.' },
+    { title: 'Выберите фрагмент', text: 'Нажмите на дорожку около 2 секунд и кнопку «Отметить здесь» у начала. Потом перейдите примерно к 6 секундам и отметьте конец. Синяя область показывает выбранный кусок.', selector: '[data-pdm-training-panel="montage"]', kind: 'montageRange', doneText: 'Фрагмент выбран. Внизу можно сохранить только его или весь монтаж. Исходная запись останется на месте.' },
+    { title: 'Предпросмотр на весь экран', text: 'Нажмите «На весь экран». Внизу появится полоса: передвиньте её в другое место записи, затем нажмите «Стоп». Кнопка «Пауза» оставляет текущий кадр.', selector: '[data-pdm-training-edit-fullscreen]', kind: 'montageFullscreen', doneText: 'Полноэкранная перемотка и стоп работают. Нажмите «В окно», чтобы вернуться к монтажной шкале.' },
+    { title: 'Монтажные действия', text: 'Нажмите «В окно», затем правой кнопкой мыши на видеодорожке. Здесь есть «Копировать», «Вырезать», «Вставить», «Удалить» и отмена. Колёсико над дорожками приближает кадры и звуковую волну.', selector: '[data-pdm-training-panel="montage"]', kind: 'montageEdit', doneText: 'Теперь вы знаете, где находятся монтажные действия. Готовый результат сохраняется кнопками внизу окна.' },
+    { title: 'Закройте монтаж', text: 'Щёлкните рядом с контекстным меню, если оно открыто, затем закройте монтаж крестиком. Учебная запись не сохранится на компьютере.', selector: '[data-pdm-training-panel="montage"] [data-pdm-training-close]', kind: 'montageClose', doneText: 'Монтаж закрыт. Теперь можно завершить учебный показ.' }
+  ] satisfies Lesson[] : []),
   { title: 'Завершите показ', text: 'Нажмите «Выйти из эфира». Презентация и элементы Сцены исчезнут с экрана зрителей.', selector: '[data-toolbar-item="output"]', kind: 'exit' }
 ]
 
@@ -76,6 +86,8 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
   const qrDragStart = useRef<{ x: number; y: number } | null>(null)
   const qrMoved = useRef(false)
   const titlesConfirmed = useRef(false)
+  const recordingScrubbed = useRef(false)
+  const recordingStopped = useRef(false)
   const advancing = useRef(false)
   const readyStep = useRef(-1)
   const current = lessons[step]
@@ -89,10 +101,13 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
     return () => { window.parent.postMessage({ kind: 'pdm-training-panel-hint', open: false }, '*') }
   }, [panelVisible, current.title, current.panelHint])
   useEffect(() => {
-    baseline.current = ''; edited.current = false; clicked.current = false; panelOpened.current = false; audioSelected.current = false; virtualCameraEnabled.current = false; qrDragStart.current = null; qrMoved.current = false; titlesConfirmed.current = false; advancing.current = false; readyStep.current = -1
+    baseline.current = ''; edited.current = false; clicked.current = false; panelOpened.current = false; audioSelected.current = false; virtualCameraEnabled.current = false; qrDragStart.current = null; qrMoved.current = false; titlesConfirmed.current = false; recordingScrubbed.current = false; recordingStopped.current = false; advancing.current = false; readyStep.current = -1
     revision.current = useAppStore.getState().programSnapshot?.revision ?? 0
     setReady(false); setPanelVisible(false); setActionResult(''); setActionButtonRect(null); setRightClickGuideRect(null); setVirtualCameraStage('tab')
-    const input = (event: Event): void => { if ((event.target as Element).closest('[data-program-scene-inline-text]')) edited.current = true }
+    const input = (event: Event): void => {
+      if ((event.target as Element).closest('[data-program-scene-inline-text]')) edited.current = true
+      if (current.kind === 'montageFullscreen' && (event.target as Element).closest('[data-pdm-training-edit-scrub]')) recordingScrubbed.current = true
+    }
     const click = (event: MouseEvent): void => {
       if (advancing.current) return
       if (current.kind === 'click' && (event.target as Element).closest(current.selector)) clicked.current = true
@@ -100,6 +115,8 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       if (current.kind === 'closedScene' && (event.target as Element).closest(current.selector)) clicked.current = true
       if (current.kind === 'settings' && (event.target as Element).closest('[data-pdm-audio-device="training-hdmi"]')) audioSelected.current = true
       if (current.kind === 'titles' && (event.target as Element).closest('[data-broadcast-titles-preview]')) titlesConfirmed.current = true
+      if (current.kind === 'montageFullscreen' && (event.target as Element).closest('[data-pdm-training-edit-stop]')) recordingStopped.current = true
+      if (current.kind === 'montageClose' && (event.target as Element).closest('[data-pdm-training-panel="montage"] [data-pdm-training-close]')) clicked.current = true
     }
     const pointerDown = (event: PointerEvent): void => {
       if (current.kind !== 'qr' || !(event.target as Element).closest('[data-scene-qr-object]')) return
@@ -197,6 +214,22 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
         document.querySelector('[data-broadcast-titles-event-visible]')?.getAttribute('aria-pressed') === 'true'
       if (current.kind === 'closedScene') complete = clicked.current && !scene
       if (current.kind === 'layout') complete = clicked.current && s.programScene.viewMode === 'content'
+      const recordingPanel = document.querySelector<HTMLElement>('[data-pdm-training-panel="recording"]')
+      const montagePanel = document.querySelector<HTMLElement>('[data-pdm-training-panel="montage"]')
+      const fullscreenPreview = document.querySelector<HTMLElement>('[data-pdm-training-edit-preview="fullscreen"]')
+      if (current.kind === 'recordOpen') complete = !!recordingPanel
+      if (current.kind === 'recordStart') complete = recordingPanel?.getAttribute('data-pdm-training-record-phase') === 'running'
+      if (current.kind === 'recordStop') complete = recordingPanel?.getAttribute('data-pdm-training-record-phase') === 'idle' &&
+        recordingPanel.getAttribute('data-pdm-training-record-has-file') === 'true'
+      if (current.kind === 'montageOpen') complete = !!montagePanel?.querySelector('[data-pdm-training-edit-timeline]')
+      if (current.kind === 'montageRange') {
+        const markedStart = montagePanel?.querySelector<HTMLInputElement>('[data-pdm-training-edit-start-time]')?.value
+        const markedEnd = montagePanel?.querySelector<HTMLInputElement>('[data-pdm-training-edit-end-time]')?.value
+        complete = !!markedStart && markedStart !== '00:00:00.00' && !!markedEnd && markedEnd !== '00:00:08.00' && markedEnd > markedStart
+      }
+      if (current.kind === 'montageFullscreen') complete = !!fullscreenPreview && recordingScrubbed.current && recordingStopped.current
+      if (current.kind === 'montageEdit') complete = !!document.querySelector('[data-pdm-training-edit-menu]')
+      if (current.kind === 'montageClose') complete = clicked.current && !montagePanel
       if (current.kind === 'exit') complete = !s.activeFile && !s.programScene.enabled
       if (complete && current.kind === 'click' && current.selector.includes('clicker')) {
         setActionResult(s.globalHookEnabled
@@ -212,6 +245,15 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
       if (current.kind === 'channel') target = document.querySelector<HTMLElement>(`[data-pdm-channel-id="${firstChannelId}"]`) ?? target
       if (current.kind === 'channelSecond') target = document.querySelector<HTMLElement>(`[data-pdm-channel-id="${secondChannelId}"]`) ?? target
       if (current.kind === 'takeSecond') target = document.querySelector<HTMLElement>(`[data-pdm-channel-id="${secondChannelId}"] [data-pdm-channel-take]`) ?? target
+      if (current.kind === 'recordOpen') target = recordingPanel ?? target
+      if (current.kind === 'recordStart') target = recordingPanel ?? target
+      if (current.kind === 'recordStop') target = document.querySelector<HTMLElement>('[role="alertdialog"]') ?? recordingPanel ?? target
+      if (current.kind === 'montageOpen') target = montagePanel ?? target
+      if (current.kind === 'montageRange' || current.kind === 'montageClose') target = montagePanel ?? target
+      if (current.kind === 'montageFullscreen') target = fullscreenPreview ?? target
+      if (current.kind === 'montageEdit') target = fullscreenPreview
+        ? document.querySelector<HTMLElement>('[data-pdm-training-edit-window]') ?? fullscreenPreview
+        : montagePanel ?? target
       if (current.kind === 'external') target = document.querySelector<HTMLElement>('[data-scene-external-source="device:training-camera"]') ?? document.querySelector<HTMLElement>('[data-scene-external-source-picker]') ?? target
       if (current.kind === 'chroma') {
         const chromaToggle = document.querySelector<HTMLElement>('[data-program-scene-chroma-toggle]')
@@ -301,6 +343,22 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
         setRequiredFieldRects(old => old.length === requiredFields.length && old.every((oldRect, index) => (
           Object.keys(oldRect).every(key => Math.abs(oldRect[key as keyof Rect] - requiredFields[index][key as keyof Rect]) < 1)
         )) ? old : requiredFields)
+      } else if (['recordStart', 'recordStop', 'montageRange', 'montageFullscreen', 'montageEdit', 'montageClose'].includes(current.kind)) {
+        const markedStart = montagePanel?.querySelector<HTMLInputElement>('[data-pdm-training-edit-start-time]')?.value
+        const required = current.kind === 'recordStart' ? document.querySelector<HTMLElement>('[data-pdm-training-record-start]')
+          : current.kind === 'recordStop' ? document.querySelector<HTMLElement>('[data-pdm-training-record-confirm]') ?? document.querySelector<HTMLElement>('[data-pdm-training-record-stop]')
+            : current.kind === 'montageRange' ? document.querySelector<HTMLElement>(markedStart === '00:00:00.00' ? '[data-pdm-training-edit-start-mark]' : '[data-pdm-training-edit-end-mark]')
+              : current.kind === 'montageFullscreen' ? document.querySelector<HTMLElement>(!fullscreenPreview ? '[data-pdm-training-edit-fullscreen]'
+                : !recordingScrubbed.current ? '[data-pdm-training-edit-scrub]' : '[data-pdm-training-edit-stop]')
+                : current.kind === 'montageEdit' ? document.querySelector<HTMLElement>('[data-pdm-training-edit-window]')
+                  : document.querySelector<HTMLElement>('[data-pdm-training-panel="montage"] [data-pdm-training-close]')
+        const requiredFields = required ? [required.getBoundingClientRect()].map(r => ({
+          left: Math.max(0, r.left - 4), top: Math.max(0, r.top - 4),
+          right: Math.min(innerWidth, r.right + 4), bottom: Math.min(innerHeight, r.bottom + 4)
+        })) : []
+        setRequiredFieldRects(old => old.length === requiredFields.length && old.every((oldRect, index) => (
+          Object.keys(oldRect).every(key => Math.abs(oldRect[key as keyof Rect] - requiredFields[index][key as keyof Rect]) < 1)
+        )) ? old : requiredFields)
       } else setRequiredFieldRects(old => old.length === 0 ? old : [])
       if ((current.kind === 'scene' || current.kind === 'menu' || current.kind === 'draft') && scene) target = scene
       const rightClickTarget = current.kind === 'menu' && !document.querySelector('[data-scene-add="text"]')
@@ -309,7 +367,9 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
           ? document.querySelector<HTMLElement>('[data-program-scene-participant-preview]')
           : current.kind === 'qr' && !document.querySelector('[data-scene-add="qr"]') && !document.querySelector('[data-pdm-training-qr-url]') && !document.querySelector('[data-scene-qr-object]')
             ? document.querySelector<HTMLElement>('[data-program-scene-preview]')
-            : null
+            : current.kind === 'montageEdit' && !fullscreenPreview && !document.querySelector('[data-pdm-training-edit-menu]')
+              ? document.querySelector<HTMLElement>('[data-pdm-training-edit-timeline] [aria-label="Видеодорожка с миниатюрами кадров"]')
+              : null
       if (rightClickTarget) {
         const previewRect = rightClickTarget.getBoundingClientRect()
         const nextGuideRect = { left: previewRect.left, top: previewRect.top, right: previewRect.right, bottom: previewRect.bottom }
@@ -335,6 +395,9 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
           actionButton = target.querySelector<HTMLElement>('button')
         }
       }
+      if (current.kind === 'recordOpen' && recordingPanel) actionButton = null
+      if (current.kind === 'montageOpen' && montagePanel) actionButton = null
+      if (['recordStart', 'recordStop', 'montageRange', 'montageFullscreen', 'montageEdit', 'montageClose'].includes(current.kind)) actionButton = null
       if (actionButton) {
         const buttonRect = actionButton.getBoundingClientRect()
         const nextActionButtonRect = {
@@ -406,6 +469,7 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
 
   const continueAfterResult = (): void => {
     if (!ready || finished || !(current.doneText || actionResult)) return
+    if (current.kind === 'montageEdit') document.querySelector('[data-pdm-training-edit-menu]')?.parentElement?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
     advancing.current = false
     setStep(value => Math.min(value + 1, LAST_INTERFACE_TOUR_STEP))
   }
@@ -419,7 +483,9 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
     window.location.replace(url.href)
   }
 
-  const width = Math.min(340, innerWidth - 24)
+  const recordingStep = ['recordOpen', 'recordStart', 'recordStop', 'montageOpen'].includes(current.kind)
+  const montageStep = ['montageRange', 'montageFullscreen', 'montageEdit', 'montageClose'].includes(current.kind)
+  const width = Math.min(recordingStep ? 300 : 340, innerWidth - 24)
   const defaultLeft = rect.right + width + 20 < innerWidth ? rect.right + 12 : rect.left > width + 20 ? rect.left - width - 12 : innerWidth - width - 16
   const dragStep = current.kind === 'file' || current.kind === 'fileSecond'
   const formStep = current.kind === 'qr' || current.kind === 'titles'
@@ -428,8 +494,17 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
     : undefined
   const cardWidth = formStep ? Math.min(620, innerWidth - 32) : width
   const formCardMaxHeight = formPreviewTop === undefined ? undefined : Math.max(170, formPreviewTop - 28)
-  const left = formStep ? 16 : defaultLeft
-  const top = formStep ? 8 : rect.bottom + 335 < innerHeight ? rect.bottom + 12 : Math.max(14, innerHeight - 360)
+  const fullscreenButtonRect = current.kind === 'montageFullscreen'
+    ? document.querySelector<HTMLElement>('[data-pdm-training-edit-fullscreen]')?.getBoundingClientRect()
+    : undefined
+  const fullscreenCardLeft = innerWidth - cardWidth - 16
+  const fullscreenCardFitsRight = !fullscreenButtonRect || fullscreenCardLeft >= fullscreenButtonRect.right + 12
+  const left = current.kind === 'montageFullscreen' && fullscreenCardFitsRight
+    ? fullscreenCardLeft
+    : formStep || montageStep || recordingStep ? 16 : defaultLeft
+  const top = current.kind === 'montageFullscreen' && !fullscreenCardFitsRight && fullscreenButtonRect
+    ? Math.max(fullscreenButtonRect.bottom + 14, innerHeight - 340)
+    : formStep ? 8 : montageStep || recordingStep ? 18 : rect.bottom + 335 < innerHeight ? rect.bottom + 12 : Math.max(14, innerHeight - 360)
   const virtualCameraTargetRect = requiredFieldRects[0]
   const virtualCameraCardHeight = 270
   const virtualCameraCardPosition = (() => {
@@ -495,7 +570,7 @@ export function InterfaceTour({ initialStep }: { initialStep: number }): JSX.Ele
         <header><span>{finished ? 'Знакомство пройдено' : `Шаг ${step + 1} из ${lessons.length}`}</span><button title="Свернуть подсказку" aria-label="Свернуть подсказку" onClick={() => setCollapsed(true)}>−</button></header>
         {!finished && <div className="interface-tour-progress"><i style={{ width: `${(step + 1) / lessons.length * 100}%` }} /></div>}
         <h3>{finished ? 'Теперь вы знаете, как пользоваться PDM' : ready && (actionResult || current.doneText) ? 'Готово' : current.title}</h3>
-        <p>{finished ? 'Теперь вы знаете, как пользоваться PDM: добавлять материалы, переключать презентации, собирать Сцену и управлять показом.' : ready && (actionResult || current.doneText) ? actionResult || current.doneText : current.kind === 'virtualCamera' ? virtualCameraInstruction : current.text}</p>
+        <p>{finished ? `Теперь вы знаете, как пользоваться PDM: добавлять материалы, переключать презентации, собирать Сцену${__PDM_STREAM_ENABLED__ ? ', записывать эфир и монтировать запись' : ''}.` : ready && (actionResult || current.doneText) ? actionResult || current.doneText : current.kind === 'virtualCamera' ? virtualCameraInstruction : current.text}</p>
         {!finished && <small>{ready ? current.doneText || actionResult ? '✓ Готово — прочитайте и нажмите «Далее»' : '✓ Готово — переходим дальше…' : 'Выполните действие в выделенной области'}</small>}
         <div>
           {!finished && <button className="interface-tour-back" disabled={step === 0} onClick={goBack}>Назад</button>}

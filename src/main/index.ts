@@ -21,6 +21,7 @@ import { extname, isAbsolute, join, resolve } from 'path'
 import { scriptPath } from './paths'
 import { pptDaemon } from './powerpoint-daemon'
 import { StreamingManager } from './streaming'
+import { RecordingManager } from './recording'
 import { VirtualCameraManager } from './virtual-camera'
 import { diagnosticLog, formatDiagnosticError, getDiagnosticLogPath, initDiagnosticLog } from './diagnostic-log'
 import { getPowerPointNativePlacement } from './program-scene-state'
@@ -81,6 +82,7 @@ const directStreamDeckManager = new DirectStreamDeckManager(
   }
 )
 let streamingManager: StreamingManager | null = null
+let recordingManager: RecordingManager | null = null
 let virtualCameraManager: VirtualCameraManager | null = null
 let presentationWindow: BrowserWindow | null = null
 let rendererInternalProgramOutputRequested = false
@@ -107,6 +109,7 @@ function setProgramOutputPowerRequest(active: boolean): void {
 function isInternalProgramOutputActive(): boolean {
   return rendererInternalProgramOutputRequested ||
     streamingManager?.isInternalProgramOutputActive() === true ||
+    recordingManager?.isInternalProgramOutputActive() === true ||
     virtualCameraManager?.isInternalProgramOutputActive() === true
 }
 const outputReadablePaths = new Map<number, Set<string>>()
@@ -1655,6 +1658,7 @@ function createWindows(): void {
   controlWindow.on('closed', () => {
     setProgramOutputPowerRequest(false)
     streamingManager?.stop()
+    void recordingManager?.shutdown()
     virtualCameraManager?.stop()
     diagnosticLog('lifecycle', `control window closed trigger=${shutdownTrigger}`)
     cancelMemoryReleaseSnapshots()
@@ -4125,18 +4129,18 @@ app.whenReady().then(() => {
     return isPresentation || isTrustedAuxiliaryCapture
   }
 
-  // Default-deny remains in place for every permission except media requested
+  // Default-deny remains in place for every permission except media/capture requested
   // by the exact local presentation renderer and the auxiliary renderers that
   // need video capture (program mirrors and information displays). The control
   // renderer itself never opens a camera or microphone.
   session.defaultSession.setPermissionCheckHandler((contents, permission) => {
-    const allowed = permission === 'media' && isTrustedMediaRequester(contents)
+    const allowed = (permission === 'media' || permission === 'display-capture') && isTrustedMediaRequester(contents)
     diagnosticLog('capture', `permission check=${permission} allowed=${allowed} wc=${contents?.id ?? '-'}`)
     return allowed
   })
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
-    const allowed = permission === 'media' && isTrustedMediaRequester(contents)
-    const mediaTypes = permission === 'media' && 'mediaTypes' in details
+    const allowed = (permission === 'media' || permission === 'display-capture') && isTrustedMediaRequester(contents)
+    const mediaTypes = (permission === 'media' || permission === 'display-capture') && 'mediaTypes' in details
       ? details.mediaTypes?.join(',') || '-'
       : '-'
     diagnosticLog(
@@ -4223,6 +4227,7 @@ app.whenReady().then(() => {
       const isControl = controlWindow?.webContents.id === contents.id
       if (isControl) {
         streamingManager?.stop()
+        void recordingManager?.shutdown()
         virtualCameraManager?.stop()
       }
       const isPresentation = presentationWindow?.webContents.id === contents.id
@@ -4256,6 +4261,11 @@ app.whenReady().then(() => {
 
   if (__PDM_STREAM_ENABLED__) {
     streamingManager = new StreamingManager(
+      () => controlWindow,
+      () => presentationDisplayId,
+      () => presentationWindow
+    )
+    recordingManager = new RecordingManager(
       () => controlWindow,
       () => presentationDisplayId,
       () => presentationWindow
@@ -4350,7 +4360,8 @@ app.on('before-quit', (event) => {
     // hide, and all later hides become no-ops during shutdown.
     showAllTaskbars(true),
     closeAllExternalFiles(),
-    directStreamDeckManager.shutdown()
+    directStreamDeckManager.shutdown(),
+    recordingManager?.shutdown() ?? Promise.resolve()
   ])
     .then((results) => {
       if (results[0].status === 'rejected') {

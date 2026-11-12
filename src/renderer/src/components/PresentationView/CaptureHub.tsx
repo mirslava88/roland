@@ -418,9 +418,9 @@ function CaptureSourceLayer({
       if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) return
       resolveFrameWaiters()
       if (holdImageRef.current) holdImageRef.current.style.opacity = '0'
-      // Three preview frames per second are ample for the operator thumbnail
-      // and avoid JPEG/IPC/GC spikes during presentation layer swaps.
-      if (previewEncoding || now - lastPreviewAtRef.current < 330) return
+      // Keep the operator preview smooth while limiting JPEG/IPC/GC work.
+      // Encoding backpressure below prevents a queue of stale camera frames.
+      if (previewEncoding || now - lastPreviewAtRef.current < 1000 / 15) return
       lastPreviewAtRef.current = now
 
       const canvas = canvasRef.current || document.createElement('canvas')

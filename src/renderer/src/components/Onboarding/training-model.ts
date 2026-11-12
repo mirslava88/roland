@@ -1,7 +1,7 @@
 // Deliberately independent of the application store and Electron IPC.
 export const ONBOARDING_KEY = 'pdm-introduction-v5'
 export const ONBOARDING_EVENT = 'pdm-open-introduction'
-export const LAST_TRAINING_STEP = 31
+export const LAST_TRAINING_STEP = typeof __PDM_STREAM_ENABLED__ !== 'undefined' && __PDM_STREAM_ENABLED__ ? 39 : 31
 export interface IntroductionProgress { status: 'new' | 'paused' | 'skipped' | 'completed'; step: number }
 export function readIntroduction(storage: Pick<Storage, 'getItem'>): IntroductionProgress {
   try {

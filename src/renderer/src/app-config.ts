@@ -1,4 +1,5 @@
 import { releasePdfiumResources, warmPdfiumDocument } from './pdfium-renderer'
+import { normalizeSpeakerSlideLayout, type SpeakerSlideLayout } from '../../shared/speaker-layout'
 import { normalizeProgramSceneAudio, type ProgramSceneAudioConfig } from '../../shared/program-scene-audio'
 import {
   channelIdFromIndex,
@@ -99,6 +100,7 @@ interface PdmConfigV1 {
     }>
   }
   displays: SavedDisplayOutput[]
+  speakerSlideLayout?: SpeakerSlideLayout
   backdropImage: string | null
   informationMedia: InformationMediaConfig | null
   captureSources: FileEntry[]
@@ -590,6 +592,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
       isMainProgram: display.id === state.selectedDisplayId,
       order
     })),
+    speakerSlideLayout: normalizeSpeakerSlideLayout(state.speakerSlideLayout),
     backdropImage: state.backdropImage,
     informationMedia: serializableInformationMedia(state.informationMedia),
     captureSources,
@@ -1145,6 +1148,9 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     pptxAspectRatios: {},
     pptxCacheStatuses: {},
     displayAssignments: displays.assignments,
+    speakerSlideLayout: normalizeSpeakerSlideLayout(raw.speakerSlideLayout),
+    speakerSlideLayoutDraft: null,
+    speakerTimerEditDraft: null,
     displayNames: displays.displayNames,
     selectedDisplayId: displays.selectedDisplayId,
     informationMedia,

@@ -29,6 +29,8 @@
     "test:powerpoint-display-recovery": "node scripts/test-powerpoint-display-recovery.mjs",
     "test:powerpoint-output-recovery": "node scripts/test-powerpoint-output-recovery.mjs",
     "test:streaming": "node scripts/test-streaming.mjs && node scripts/test-streaming-handshake.mjs && node scripts/test-streaming-keyframes.mjs",
+    "test:recording": "node scripts/test-recording-engine.mjs",
+    "test:recording:editor": "node scripts/test-recording-editor.mjs",
     "test:streaming:capture": "node scripts/run-streaming-capture-test.mjs",
     "test:streaming:latency": "node scripts/run-streaming-latency-test.mjs",
     "test:virtual-camera": "node scripts/test-virtual-camera.mjs",

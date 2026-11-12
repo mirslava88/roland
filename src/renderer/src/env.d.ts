@@ -92,6 +92,7 @@ interface ProgramDirectContent {
 
 interface SpeakerDisplayState {
   active: boolean
+  layout?: import('../../shared/speaker-layout').SpeakerSlideLayout
   fileType: 'presentation' | 'pdf' | null
   filePath: string | null
   fileName: string
@@ -217,6 +218,7 @@ interface Api {
   disconnectDirectStreamDeck(): Promise<import('../../shared/direct-stream-deck').DirectStreamDeckStatus | null>
   updateDirectStreamDeckKeys(states: import('../../shared/direct-stream-deck').DirectStreamDeckKeyState[]): void
   streaming: import('../../shared/streaming').StreamingApi
+  recording: import('../../shared/recording').RecordingApi
   getAppVersion(): Promise<string>
   loadQrWifiPassword(): Promise<string>
   saveQrWifiPassword(password: string): Promise<boolean>

@@ -34,6 +34,7 @@ import {
   type QrOverlayConfig
 } from '../../../shared/qr-overlay'
 import { selectProgramSnapshotTimer } from '../program-snapshot-timer'
+import { DEFAULT_SPEAKER_SLIDE_LAYOUT, normalizeSpeakerSlideLayout, type SpeakerSlideLayout } from '../../../shared/speaker-layout'
 import { visibleLibraryFiles } from '../library-visible-files'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
@@ -183,11 +184,16 @@ export type InformationMediaType = 'presentation' | 'pdf' | 'video' | 'image' | 
 export type DisplayOutputMode = 'off' | 'program' | 'speaker' | 'information' | 'timer' | 'event-timer'
 export type AppTheme = 'classic' | 'broadcast-pro'
 export type DisplayAssignments = Record<string, DisplayOutputMode>
-export type InternalProgramOutputConsumer = 'headless' | 'stream' | 'virtualCamera'
+export type SpeakerTimerEditDraft = {
+  enabled: boolean
+  position: { x: number; y: number }
+  scale: number
+}
+export type InternalProgramOutputConsumer = 'headless' | 'stream' | 'recording' | 'virtualCamera'
 export type InternalProgramOutputConsumers = Record<InternalProgramOutputConsumer, boolean>
 
 function hasInternalProgramOutputConsumer(consumers: InternalProgramOutputConsumers): boolean {
-  return consumers.headless || consumers.stream || consumers.virtualCamera
+  return consumers.headless || consumers.stream || consumers.recording || consumers.virtualCamera
 }
 
 type DisplayRoutingSnapshot = {
@@ -674,6 +680,14 @@ interface AppState {
   pptxCacheStatuses: Record<string, ChannelCacheStatus>
   displays: DisplayInfo[]
   displayAssignments: DisplayAssignments
+  speakerSlideLayout: SpeakerSlideLayout
+  setSpeakerSlideLayout: (layout: SpeakerSlideLayout) => void
+  speakerSlideLayoutDraft: SpeakerSlideLayout | null
+  setSpeakerSlideLayoutDraft: (layout: SpeakerSlideLayout) => void
+  speakerTimerEditDraft: SpeakerTimerEditDraft | null
+  setSpeakerTimerEditDraft: (draft: SpeakerTimerEditDraft) => void
+  publishSpeakerSlideLayout: () => void
+  discardSpeakerEditorDraft: () => void
   displayNames: Record<string, string>
   selectedDisplayId: number | null
   informationMedia: InformationMediaConfig | null
@@ -871,6 +885,32 @@ export const useAppStore = create<AppState>()(persist(
   pptxCacheStatuses: {},
   displays: [],
   displayAssignments: {},
+  speakerSlideLayout: DEFAULT_SPEAKER_SLIDE_LAYOUT,
+  setSpeakerSlideLayout: (layout) => set({ speakerSlideLayout: normalizeSpeakerSlideLayout(layout) }),
+  speakerSlideLayoutDraft: null,
+  setSpeakerSlideLayoutDraft: (layout) => set({ speakerSlideLayoutDraft: normalizeSpeakerSlideLayout(layout) }),
+  speakerTimerEditDraft: null,
+  setSpeakerTimerEditDraft: (draft) => set({
+    speakerTimerEditDraft: {
+      enabled: draft.enabled,
+      position: {
+        x: Math.max(8, Math.min(92, draft.position.x)),
+        y: Math.max(8, Math.min(92, draft.position.y))
+      },
+      scale: Math.max(0.5, Math.min(2, draft.scale))
+    }
+  }),
+  publishSpeakerSlideLayout: () => set((state) => ({
+    speakerSlideLayout: state.speakerSlideLayoutDraft
+      ? normalizeSpeakerSlideLayout(state.speakerSlideLayoutDraft)
+      : state.speakerSlideLayout,
+    speakerSlideLayoutDraft: null,
+    timerSpeakerOutputEnabled: state.speakerTimerEditDraft?.enabled ?? state.timerSpeakerOutputEnabled,
+    timerSpeakerPosition: state.speakerTimerEditDraft?.position ?? state.timerSpeakerPosition,
+    timerSpeakerScale: state.speakerTimerEditDraft?.scale ?? state.timerSpeakerScale,
+    speakerTimerEditDraft: null
+  })),
+  discardSpeakerEditorDraft: () => set({ speakerSlideLayoutDraft: null, speakerTimerEditDraft: null }),
   displayNames: {},
   selectedDisplayId: null,
   informationMedia: null,
@@ -901,7 +941,7 @@ export const useAppStore = create<AppState>()(persist(
   // surface. If a physical Program display exists, setDisplays disables this
   // fallback without affecting an active stream or virtual-camera consumer.
   internalProgramOutputActive: true,
-  internalProgramOutputConsumers: { headless: true, stream: false, virtualCamera: false },
+  internalProgramOutputConsumers: { headless: true, stream: false, recording: false, virtualCamera: false },
   qrOverlay: { ...DEFAULT_QR_OVERLAY },
   contentZoom: { ...DEFAULT_CONTENT_ZOOM },
   appTheme: readStoredAppTheme() ?? 'broadcast-pro',
@@ -1819,7 +1859,7 @@ export const useAppStore = create<AppState>()(persist(
     // safely with the automatic channel transition disabled.
     // timerDuration/timerRemaining/timerRunning — runtime state, не persist.
     name: 'roland-app-preferences',
-    version: 44,
+    version: 46,
     storage: createJSONStorage(() => localStorage),
     migrate: (persistedState, version) => {
       if (!persistedState || typeof persistedState !== 'object') return persistedState
@@ -2086,6 +2126,7 @@ export const useAppStore = create<AppState>()(persist(
         mediaLayers: normalizeProgramSceneMediaLayers(rawScene.mediaLayers),
         mediaLayersVisible: rawScene.mediaLayersVisible === true
       }
+      migrated.speakerSlideLayout = normalizeSpeakerSlideLayout(migrated.speakerSlideLayout)
       return migrated
     },
     partialize: (state) => ({
@@ -2105,6 +2146,7 @@ export const useAppStore = create<AppState>()(persist(
       slidePositions: state.slidePositions,
       selectedDisplayId: state.selectedDisplayId,
       displayAssignments: state.displayAssignments,
+      speakerSlideLayout: normalizeSpeakerSlideLayout(state.speakerSlideLayout),
       displayNames: state.displayNames,
       folderPath: state.folderPath,
       rootFolderPath: state.rootFolderPath,

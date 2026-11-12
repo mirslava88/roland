@@ -76,6 +76,13 @@ export function SceneTimerSettings({
   const timerSoundEnd = useAppStore((state) => state.timerSoundEnd)
   const setTimerSoundWarning = useAppStore((state) => state.setTimerSoundWarning)
   const setTimerSoundEnd = useAppStore((state) => state.setTimerSoundEnd)
+  const displays = useAppStore((state) => state.displays)
+  const displayAssignments = useAppStore((state) => state.displayAssignments)
+  const timerSpeakerOutputEnabled = useAppStore((state) => state.timerSpeakerOutputEnabled)
+  const setTimerSpeakerOutputEnabled = useAppStore((state) => state.setTimerSpeakerOutputEnabled)
+  const hasSpeakerDisplay = displays.some((display) => (
+    !display.isPrimary && displayAssignments[String(display.id)] === 'speaker'
+  ))
   const initialTimerSeconds = timerDuration > 0 ? timerDuration : 15 * 60
   const [inputHours, setInputHours] = useState(() => String(Math.floor(initialTimerSeconds / 3600)))
   const [inputMinutes, setInputMinutes] = useState(() => String(Math.floor((initialTimerSeconds % 3600) / 60)))
@@ -205,6 +212,24 @@ export function SceneTimerSettings({
             </div>
           )
         })}
+        <label
+          className={`flex items-center gap-1.5 border-t border-gray-700 pt-1.5 text-[10px] ${
+            hasSpeakerDisplay ? 'cursor-pointer text-gray-200' : 'cursor-not-allowed text-gray-500'
+          }`}
+          title={hasSpeakerDisplay
+            ? 'Показывать опубликованный таймер Сцены поверх слайдов суфлёра'
+            : 'Сначала назначьте дополнительный экран режимом «Суфлёр»'}
+        >
+          <input
+            data-program-scene-timer-speaker-output
+            type="checkbox"
+            checked={timerSpeakerOutputEnabled}
+            disabled={!hasSpeakerDisplay}
+            onChange={(event) => setTimerSpeakerOutputEnabled(event.target.checked)}
+            className="h-3.5 w-3.5 accent-blue-500 disabled:cursor-not-allowed"
+          />
+          <span>Отправить наложенный таймер в суфлёр</span>
+        </label>
       </div>}
 
       {activeSection === 'appearance' && <div className="grid grid-cols-2 gap-2">

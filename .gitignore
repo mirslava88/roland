@@ -13,6 +13,7 @@ stream-settings*
 
 # Test media files
 *.mp4
+!src/renderer/src/assets/training-recording.mp4
 *.pptx
 *.pdf
 *.ppt

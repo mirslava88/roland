@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { streamingApi } from './streaming-api'
+import { recordingApi } from './recording-api'
 import type {
   DirectStreamDeckConfig,
   DirectStreamDeckDeviceInfo,
@@ -45,6 +46,7 @@ interface ChannelMusicState {
 
 const api = {
   ...(__PDM_STREAM_ENABLED__ ? { streaming: streamingApi } : {}),
+  ...(__PDM_STREAM_ENABLED__ ? { recording: recordingApi } : {}),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke('get-app-version'),
   virtualCamera: {
     status: () => ipcRenderer.invoke('virtual-camera-status'),

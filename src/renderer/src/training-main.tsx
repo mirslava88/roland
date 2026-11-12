@@ -1,4 +1,5 @@
-import { installTrainingRuntime, TRAINING_FILE, TRAINING_FILE_SECOND, trainingFrames, trainingFramesSecond, trainingCalls, emitTraining } from './components/Onboarding/training-runtime'
+import { installTrainingRuntime, TRAINING_FILE, TRAINING_FILE_SECOND, trainingFrames, trainingFramesSecond, trainingCalls, emitTraining, setTrainingRecordingStage } from './components/Onboarding/training-runtime'
+import { LAST_TRAINING_STEP } from './components/Onboarding/training-model'
 import './assets/index.css'
 import './components/Onboarding/introduction.css'
 
@@ -7,7 +8,8 @@ try {
   // Dynamic imports ensure the real store hydrates only from in-memory storage.
   void Promise.all([import('react'), import('react-dom/client'), import('./App'), import('./stores/useAppStore'), import('./components/Onboarding/InterfaceTour')]).then(([React, ReactDOM, { default: App }, { useAppStore }, { InterfaceTour }]) => {
     const query = new URLSearchParams(location.search)
-    const step = Math.max(0, Math.min(31, Number(query.get('step')) || 0))
+    const step = Math.max(0, Math.min(LAST_TRAINING_STEP, Number(query.get('step')) || 0))
+    setTrainingRecordingStage(step === 33 ? 'running' : step >= 34 ? 'finished' : 'ready')
     const theme = query.get('theme') === 'classic' ? 'classic' : 'broadcast-pro'
     const state = useAppStore.getState()
     const channelId = state.channelIds[0]
@@ -98,6 +100,25 @@ try {
         }
         setTimeout(prepareSceneStep, 100)
       }, 350)
+    }
+    if (__PDM_STREAM_ENABLED__ && step >= 32 && step <= 38) {
+      const prepareRecordingStep = (attempt = 0): void => {
+        if (attempt >= 50) return
+        const recordingPanel = document.querySelector<HTMLElement>('[data-pdm-training-panel="recording"]')
+        const montagePanel = document.querySelector<HTMLElement>('[data-pdm-training-panel="montage"]')
+        if (!recordingPanel && !montagePanel) document.querySelector<HTMLButtonElement>('[data-pdm-training-record-open]')?.click()
+        else if (step >= 35 && recordingPanel) recordingPanel.querySelector<HTMLButtonElement>('[data-pdm-training-record-montage]')?.click()
+        else if (step >= 35 && montagePanel && !montagePanel.querySelector('[data-pdm-training-edit-start-time]')) {
+          montagePanel.querySelector<HTMLButtonElement>('[data-pdm-training-edit-last]')?.click()
+        } else if (step === 37 && montagePanel?.querySelector('[data-pdm-training-edit-start-time]') &&
+          !montagePanel.querySelector('[data-pdm-training-edit-preview="fullscreen"]')) {
+          montagePanel.querySelector<HTMLButtonElement>('[data-pdm-training-edit-fullscreen]')?.click()
+        }
+        if (step >= 35 ? !document.querySelector('[data-pdm-training-edit-start-time]') ||
+          step === 37 && !document.querySelector('[data-pdm-training-edit-preview="fullscreen"]')
+          : !document.querySelector('[data-pdm-training-panel="recording"]')) setTimeout(() => prepareRecordingStep(attempt + 1), 80)
+      }
+      setTimeout(prepareRecordingStep, 350)
     }
     // Inspection is local to the sandbox, never exposed by the main preload.
     Object.assign(window, { trainingStore: useAppStore, trainingCalls })
