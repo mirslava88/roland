@@ -1,5 +1,6 @@
 import { releasePdfiumResources, warmPdfiumDocument } from './pdfium-renderer'
 import { normalizeSpeakerSlideLayout, type SpeakerSlideLayout } from '../../shared/speaker-layout'
+import { normalizeClockOverlay, type ClockOverlayConfig } from '../../shared/clock-overlay'
 import { normalizeProgramSceneAudio, type ProgramSceneAudioConfig } from '../../shared/program-scene-audio'
 import {
   channelIdFromIndex,
@@ -101,6 +102,7 @@ interface PdmConfigV1 {
   }
   displays: SavedDisplayOutput[]
   speakerSlideLayout?: SpeakerSlideLayout
+  speakerClock?: ClockOverlayConfig
   backdropImage: string | null
   informationMedia: InformationMediaConfig | null
   captureSources: FileEntry[]
@@ -161,6 +163,7 @@ interface PdmConfigV1 {
     soundWarning: string | null
     overlayPosition: { x: number; y: number }
     overlayScale: number
+    clock?: ClockOverlayConfig
     textColor: string
     warningTextColor: string
     overtimeTextColor: string
@@ -593,6 +596,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
       order
     })),
     speakerSlideLayout: normalizeSpeakerSlideLayout(state.speakerSlideLayout),
+    speakerClock: state.speakerClock,
     backdropImage: state.backdropImage,
     informationMedia: serializableInformationMedia(state.informationMedia),
     captureSources,
@@ -633,6 +637,7 @@ export async function saveCurrentAppConfig(): Promise<ConfigResult> {
       soundWarning: state.timerSoundWarning,
       overlayPosition: state.timerOverlayPosition,
       overlayScale: state.timerOverlayScale,
+      clock: state.programClock,
       textColor: state.timerTextColor,
       warningTextColor: state.timerWarningTextColor,
       overtimeTextColor: state.timerOvertimeTextColor,
@@ -1150,6 +1155,8 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
     displayAssignments: displays.assignments,
     speakerSlideLayout: normalizeSpeakerSlideLayout(raw.speakerSlideLayout),
     speakerSlideLayoutDraft: null,
+    speakerClock: normalizeClockOverlay(raw.speakerClock as Partial<ClockOverlayConfig> | undefined, 'speaker'),
+    speakerClockEditDraft: null,
     speakerTimerEditDraft: null,
     displayNames: displays.displayNames,
     selectedDisplayId: displays.selectedDisplayId,
@@ -1210,6 +1217,7 @@ export async function loadAppConfigFromFile(): Promise<ConfigResult> {
       y: safeNumber(position.y, 90, 0, 100)
     },
     timerOverlayScale: safeNumber(rawTimer.overlayScale, 1, 0.25, 8),
+    programClock: normalizeClockOverlay(rawTimer.clock as Partial<ClockOverlayConfig> | undefined, 'program'),
     timerTextColor: safeColor(rawTimer.textColor, '#ffffff'),
     timerWarningTextColor: safeColor(rawTimer.warningTextColor, '#facc15'),
     timerOvertimeTextColor: safeColor(rawTimer.overtimeTextColor, '#ef4444'),

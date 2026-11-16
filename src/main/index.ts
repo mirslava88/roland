@@ -6,6 +6,7 @@ import {
   createPresentationWindow,
   createOverlayWindow,
   createQrOverlayWindow,
+  createClockOverlayWindow,
   createProgramSceneMediaOverlayWindow,
   createMusicPlayerWindow
 } from './windows'
@@ -177,6 +178,9 @@ const programMirrorHoldIntents = new Map<number, {
 let programMirrorHoldRevision = 0
 let overlayWindow: BrowserWindow | null = null
 let qrOverlayWindow: BrowserWindow | null = null
+let clockOverlayWindow: BrowserWindow | null = null
+let clockOverlayDisplayId: number | null = null
+let clockOverlayRevision = 0
 let qrOverlayRevision = 0
 let qrOverlayDisplayId: number | null = null
 let qrOverlayLayoutKey: string | null = null
@@ -3420,6 +3424,12 @@ function createWindows(): void {
       qrOverlayDisplayId = null
       qrOverlayLayoutKey = null
     }
+    if (clockOverlayDisplayId !== null && !connectedIds.has(clockOverlayDisplayId)) {
+      clockOverlayRevision += 1
+      if (clockOverlayWindow && !clockOverlayWindow.isDestroyed()) clockOverlayWindow.destroy()
+      clockOverlayWindow = null
+      clockOverlayDisplayId = null
+    }
     if (programSceneMediaOverlayDisplayId !== null && !connectedIds.has(programSceneMediaOverlayDisplayId)) {
       programSceneMediaOverlayRevision += 1
       if (programSceneMediaOverlayWindow && !programSceneMediaOverlayWindow.isDestroyed()) {
@@ -3797,6 +3807,55 @@ app.whenReady().then(() => {
     }
     const buffer = await readFile(filePath)
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+  })
+
+  ipcMain.on('clock-overlay-update', async (event, raw: unknown) => {
+    if (!isTrustedWindowMainFrame(event, controlWindow, 'index.html')) return
+    const payload = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const displayId = typeof payload.displayId === 'number' && Number.isInteger(payload.displayId)
+      ? payload.displayId : null
+    const display = screen.getAllDisplays().find((entry) => entry.id === displayId)
+    const revision = ++clockOverlayRevision
+    if (payload.visible !== true || !display || display.id === screen.getPrimaryDisplay().id) {
+      if (clockOverlayWindow && !clockOverlayWindow.isDestroyed()) clockOverlayWindow.destroy()
+      clockOverlayWindow = null
+      clockOverlayDisplayId = null
+      return
+    }
+    const bounded = (value: unknown, fallback: number, min: number, max: number): number =>
+      typeof value === 'number' && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback
+    const x = bounded(payload.x, 10, 0, 100)
+    const y = bounded(payload.y, 8, 0, 100)
+    const scale = bounded(payload.scale, 1, 0.5, 8)
+    const opacity = bounded(payload.opacity, 1, 0.1, 1)
+    const color = typeof payload.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(payload.color)
+      ? payload.color : '#ffffff'
+    let win = clockOverlayWindow
+    if (!win || win.isDestroyed()) {
+      win = createClockOverlayWindow(display)
+      clockOverlayWindow = win
+      await new Promise<void>((resolve) => {
+        if (!win || win.isDestroyed() || !win.webContents.isLoading()) return resolve()
+        win.webContents.once('did-finish-load', () => resolve())
+      })
+    }
+    if (revision !== clockOverlayRevision || !win || win.isDestroyed()) return
+    if (clockOverlayDisplayId !== display.id || JSON.stringify(win.getBounds()) !== JSON.stringify(display.bounds)) {
+      win.setBounds(display.bounds, false)
+    }
+    clockOverlayDisplayId = display.id
+    await win.webContents.executeJavaScript(`(() => {
+      const el = document.getElementById('clock');
+      el.style.left = ${JSON.stringify(x + '%')};
+      el.style.top = ${JSON.stringify(y + '%')};
+      el.style.transform = ${JSON.stringify(`translate(-${x}%, -${y}%)`)};
+      el.style.fontSize = ${JSON.stringify(`${48 * scale}px`)};
+      el.style.color = ${JSON.stringify(color)};
+      el.style.opacity = ${JSON.stringify(String(opacity))};
+    })()`)
+    if (revision !== clockOverlayRevision || win.isDestroyed()) return
+    win.setAlwaysOnTop(true, 'screen-saver')
+    win.showInactive()
   })
 
   ipcMain.on('qr-overlay-update', async (event, raw: unknown) => {

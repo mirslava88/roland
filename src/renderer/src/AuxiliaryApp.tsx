@@ -6,6 +6,8 @@ import { EventTimerScene } from './components/EventTimer/EventTimerScene'
 import { BroadcastTitlesOverlay } from './components/BroadcastTitles/BroadcastTitlesOverlay'
 import { InformationTitlesLayer } from './components/AuxiliaryDisplays/InformationTitlesLayer'
 import { SpeakerSlideCanvas } from './components/AuxiliaryDisplays/SpeakerSlideCanvas'
+import { ClockOverlay } from './components/Clock/ClockOverlay'
+import { DEFAULT_PROGRAM_CLOCK, DEFAULT_SPEAKER_CLOCK, normalizeClockOverlay, type ClockOverlayConfig } from '../../shared/clock-overlay'
 import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
 import { ProgramSceneMediaLayerSurface } from './components/ProgramScene/ProgramSceneMediaLayers'
 import { normalizeQrOverlay, type QrOverlayConfig } from '../../shared/qr-overlay'
@@ -324,6 +326,7 @@ function SpeakerDisplay(): JSX.Element {
     backdropImage: null
   })
   const [timer, setTimer] = useState<SpeakerTimerDisplayState>(EMPTY_SPEAKER_TIMER)
+  const [clock, setClock] = useState<ClockOverlayConfig>(DEFAULT_SPEAKER_CLOCK)
 
   useEffect(() => {
     const offState = window.api.on('speaker-state', (...args: unknown[]) => {
@@ -332,8 +335,11 @@ function SpeakerDisplay(): JSX.Element {
     const offTimer = window.api.on('speaker-timer-update', (...args: unknown[]) => {
       setTimer(args[0] as SpeakerTimerDisplayState)
     })
+    const offClock = window.api.on('speaker-clock-update', (...args: unknown[]) => {
+      setClock(normalizeClockOverlay(args[0] as Partial<ClockOverlayConfig>, 'speaker'))
+    })
     window.api.sendToControl('speaker-state-ready', { displayId: auxiliaryDisplayId })
-    return () => { offState(); offTimer() }
+    return () => { offState(); offTimer(); offClock() }
   }, [])
 
   if (!state.active || !state.filePath || !state.fileType) {
@@ -344,12 +350,14 @@ function SpeakerDisplay(): JSX.Element {
           style={{ backgroundImage: `url("${mediaUrl(state.backdropImage)}")` }}
         >
           <SpeakerTimerOverlay timer={timer} />
+          <ClockOverlay config={clock} target="speaker" />
         </div>
       )
     }
     return (
       <div className="relative h-screen w-screen bg-black flex flex-col items-center justify-center text-gray-400 select-none">
         <SpeakerTimerOverlay timer={timer} />
+        <ClockOverlay config={clock} target="speaker" />
         <div className="text-4xl mb-3">Суфлёр</div>
         <div className="text-xl">Ожидание презентации</div>
       </div>
@@ -377,6 +385,7 @@ function SpeakerDisplay(): JSX.Element {
         totalSlides={state.totalSlides}
         notes={state.notes}
         timer={<SpeakerTimerOverlay timer={timer} />}
+        clock={<ClockOverlay config={clock} target="speaker" />}
       />
     </div>
   )
@@ -1115,6 +1124,7 @@ function ProgramMirrorDisplay(): JSX.Element {
   const [nativeReady, setNativeReady] = useState(false)
   const [sceneFrameUrl, setSceneFrameUrl] = useState<string | null>(null)
   const [mirrorQrOverlay, setMirrorQrOverlay] = useState<QrOverlayConfig | null>(null)
+  const [mirrorClock, setMirrorClock] = useState<ClockOverlayConfig>(DEFAULT_PROGRAM_CLOCK)
   const [programTimer, setProgramTimer] = useState<ProgramTimerOverlayState>(EMPTY_PROGRAM_TIMER)
   const [completedMirrorTransitionId, setCompletedMirrorTransitionId] = useState<string | null>(null)
 
@@ -1202,6 +1212,10 @@ function ProgramMirrorDisplay(): JSX.Element {
     setMirrorQrOverlay(raw && typeof raw === 'object'
       ? normalizeQrOverlay(raw as Partial<QrOverlayConfig>)
       : null)
+  }), [])
+
+  useEffect(() => window.api.on('mirror-clock-update', (...args: unknown[]) => {
+    setMirrorClock(normalizeClockOverlay(args[0] as Partial<ClockOverlayConfig>, 'program'))
   }), [])
 
   useEffect(() => window.api.on('program-timer-overlay', (...args: unknown[]) => {
@@ -1787,6 +1801,9 @@ function ProgramMirrorDisplay(): JSX.Element {
       )}
       {mirrorState.active && (hasDirectContent || mirrorState.sceneRendererCapture) && nativeReady && (
         <ProgramTimerOverlay timer={programTimer} sourcePixelHeight={mirrorState.sourcePixelHeight} />
+      )}
+      {mirrorState.active && hasDirectContent && !mirrorState.sceneRendererCapture && nativeReady && (
+        <ClockOverlay config={mirrorClock} target="program" />
       )}
     </div>
   )

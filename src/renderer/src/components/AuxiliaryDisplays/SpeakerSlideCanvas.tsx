@@ -19,6 +19,7 @@ interface Props {
   totalSlides: number
   notes?: string
   timer?: ReactNode
+  clock?: ReactNode
   onResizeStart?: (slide: 'current' | 'next', event: ReactPointerEvent<HTMLButtonElement>) => void
   onCaptionPointerDown?: (caption: SpeakerCaption, event: ReactPointerEvent<HTMLDivElement>) => void
   onCaptionWheel?: (caption: SpeakerCaption, event: ReactWheelEvent<HTMLDivElement>) => void
@@ -37,6 +38,7 @@ export function SpeakerSlideCanvas({
   totalSlides,
   notes,
   timer,
+  clock,
   onResizeStart,
   onCaptionPointerDown,
   onCaptionWheel,
@@ -127,11 +129,13 @@ export function SpeakerSlideCanvas({
       </div>
       {safeLayout.showTitle && <div
         data-speaker-caption-title
+        title={fileName}
         onPointerDown={onCaptionPointerDown ? (event) => onCaptionPointerDown('title', event) : undefined}
         onWheel={onCaptionWheel ? (event) => onCaptionWheel('title', event) : undefined}
         className={`absolute z-30 whitespace-nowrap rounded-md border border-gray-700 bg-gray-900/90 px-[1%] py-[0.5%] text-right ${captionInteraction} ${selectedCaptions.includes('title') ? 'outline-2 outline-blue-300' : ''}`}
         style={{
-          left: `${titleCaption.x}%`, top: `${titleCaption.y}%`, width: `${nextRect.width}%`,
+          left: `${titleCaption.x}%`, top: `${titleCaption.y}%`, width: 'max-content',
+          maxWidth: `${Math.max(1, (100 - titleCaption.x) / titleCaption.scale)}%`,
           transform: `scale(${titleCaption.scale})`, transformOrigin: 'top left', fontSize: '0.94cqw'
         }}
       >
@@ -147,6 +151,7 @@ export function SpeakerSlideCanvas({
         </section>
       )}
       {timer}
+      {clock}
     </div>
   )
 }

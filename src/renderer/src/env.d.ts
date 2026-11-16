@@ -354,6 +354,7 @@ interface Api {
   selectQrLogo(): Promise<string | null>
   selectQrImage(): Promise<string | null>
   updateQrOverlay(data: unknown): void
+  updateClockOverlay(data: unknown): void
   updateProgramSceneMediaOverlay(data: unknown): Promise<{ success: boolean; error?: string }>
   selectInformationMedia(): Promise<string | null>
   getAudioDevices(): Promise<{ id: string; name: string; isDefault: boolean }[]>

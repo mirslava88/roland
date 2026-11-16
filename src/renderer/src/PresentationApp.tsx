@@ -48,6 +48,8 @@ import { ProgramSceneBackgroundLayer } from './components/ProgramScene/ProgramSc
 import type { ProgramSceneBackgroundPayload } from './program-scene-background'
 import { SceneQrPreviewLayer } from './components/ProgramScene/SceneQrPreviewLayer'
 import { SceneTimerPreviewLayer } from './components/ProgramScene/SceneTimerPreviewLayer'
+import { ClockOverlay } from './components/Clock/ClockOverlay'
+import { normalizeClockOverlay, type ClockOverlayConfig } from '../../shared/clock-overlay'
 import { normalizeQrOverlay, type QrOverlayConfig } from '../../shared/qr-overlay'
 import type { ProgramSceneTimerSnapshot } from './stores/useAppStore'
 import {
@@ -259,6 +261,7 @@ export function PresentationApp(): JSX.Element {
   const [broadcastTitles, setBroadcastTitles] = useState<BroadcastTitlesOutput>(HIDDEN_BROADCAST_TITLES)
   const [programScene, setProgramScene] = useState<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
   const [rendererQrOverlay, setRendererQrOverlay] = useState<QrOverlayConfig | null>(null)
+  const [rendererClock, setRendererClock] = useState<ClockOverlayConfig | null>(null)
   const programSceneRef = useRef<ProgramScenePayload>(EMPTY_PROGRAM_SCENE)
   const [sceneTransitionRevision, setSceneTransitionRevision] = useState(0)
   const [powerPointHold, setPowerPointHold] = useState<ProgramScenePowerPointHold | null>(null)
@@ -813,6 +816,12 @@ export function PresentationApp(): JSX.Element {
     return unsubscribe
   }, [])
 
+  useEffect(() => window.api.on('program-clock-update', (...args: unknown[]) => {
+    const raw = args[0]
+    setRendererClock(raw && typeof raw === 'object'
+      ? normalizeClockOverlay(raw as Partial<ClockOverlayConfig>, 'program') : null)
+  }), [])
+
   useEffect(() => {
     const unsubscribe = window.api.on('program-scene-update', (...args: unknown[]) => {
       const raw = args[0] as Partial<ProgramScenePayload> | undefined
@@ -1275,6 +1284,7 @@ export function PresentationApp(): JSX.Element {
           dpiScale={window.devicePixelRatio || 1}
         />
       )}
+      {rendererClock && <ClockOverlay config={rendererClock} target="program" />}
       {!hasVisibleContent && !sceneActive && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-700 text-lg select-none">
           Waiting for content...

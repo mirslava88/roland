@@ -35,6 +35,7 @@ import {
 } from '../../../shared/qr-overlay'
 import { selectProgramSnapshotTimer } from '../program-snapshot-timer'
 import { DEFAULT_SPEAKER_SLIDE_LAYOUT, normalizeSpeakerSlideLayout, type SpeakerSlideLayout } from '../../../shared/speaker-layout'
+import { DEFAULT_PROGRAM_CLOCK, DEFAULT_SPEAKER_CLOCK, normalizeClockOverlay, type ClockOverlayConfig } from '../../../shared/clock-overlay'
 import { visibleLibraryFiles } from '../library-visible-files'
 
 // Module-state for collapsing rapid PPTX goto calls. См. navigatePptx
@@ -686,6 +687,8 @@ interface AppState {
   setSpeakerSlideLayoutDraft: (layout: SpeakerSlideLayout) => void
   speakerTimerEditDraft: SpeakerTimerEditDraft | null
   setSpeakerTimerEditDraft: (draft: SpeakerTimerEditDraft) => void
+  speakerClockEditDraft: ClockOverlayConfig | null
+  setSpeakerClockEditDraft: (draft: ClockOverlayConfig) => void
   publishSpeakerSlideLayout: () => void
   discardSpeakerEditorDraft: () => void
   displayNames: Record<string, string>
@@ -834,6 +837,10 @@ interface AppState {
   timerSpeakerOutputEnabled: boolean
   timerSpeakerPosition: { x: number; y: number }
   timerSpeakerScale: number
+  programClock: ClockOverlayConfig
+  speakerClock: ClockOverlayConfig
+  setProgramClock: (config: ClockOverlayConfig) => void
+  setSpeakerClock: (config: ClockOverlayConfig) => void
   timerSoundEnd: string | null
   timerSoundWarning: string | null
   timerOverlayPosition: { x: number; y: number } // percent from top-left
@@ -900,6 +907,8 @@ export const useAppStore = create<AppState>()(persist(
       scale: Math.max(0.5, Math.min(2, draft.scale))
     }
   }),
+  speakerClockEditDraft: null,
+  setSpeakerClockEditDraft: (draft) => set({ speakerClockEditDraft: normalizeClockOverlay(draft, 'speaker') }),
   publishSpeakerSlideLayout: () => set((state) => ({
     speakerSlideLayout: state.speakerSlideLayoutDraft
       ? normalizeSpeakerSlideLayout(state.speakerSlideLayoutDraft)
@@ -908,9 +917,11 @@ export const useAppStore = create<AppState>()(persist(
     timerSpeakerOutputEnabled: state.speakerTimerEditDraft?.enabled ?? state.timerSpeakerOutputEnabled,
     timerSpeakerPosition: state.speakerTimerEditDraft?.position ?? state.timerSpeakerPosition,
     timerSpeakerScale: state.speakerTimerEditDraft?.scale ?? state.timerSpeakerScale,
-    speakerTimerEditDraft: null
+    speakerTimerEditDraft: null,
+    speakerClock: state.speakerClockEditDraft ?? state.speakerClock,
+    speakerClockEditDraft: null
   })),
-  discardSpeakerEditorDraft: () => set({ speakerSlideLayoutDraft: null, speakerTimerEditDraft: null }),
+  discardSpeakerEditorDraft: () => set({ speakerSlideLayoutDraft: null, speakerTimerEditDraft: null, speakerClockEditDraft: null }),
   displayNames: {},
   selectedDisplayId: null,
   informationMedia: null,
@@ -1792,6 +1803,10 @@ export const useAppStore = create<AppState>()(persist(
   timerSpeakerOutputEnabled: false,
   timerSpeakerPosition: { x: 50, y: 10 },
   timerSpeakerScale: 1,
+  programClock: DEFAULT_PROGRAM_CLOCK,
+  speakerClock: DEFAULT_SPEAKER_CLOCK,
+  setProgramClock: (config) => set({ programClock: normalizeClockOverlay(config, 'program') }),
+  setSpeakerClock: (config) => set({ speakerClock: normalizeClockOverlay(config, 'speaker') }),
   timerSoundEnd: null,
   timerSoundWarning: null,
   timerOverlayPosition: { x: 90, y: 90 },
@@ -2156,6 +2171,8 @@ export const useAppStore = create<AppState>()(persist(
       timerOverlayScale: state.timerOverlayScale,
       timerSpeakerPosition: state.timerSpeakerPosition,
       timerSpeakerScale: state.timerSpeakerScale,
+      programClock: state.programClock,
+      speakerClock: state.speakerClock,
       timerTextColor: state.timerTextColor,
       timerWarningTextColor: state.timerWarningTextColor,
       timerOvertimeTextColor: state.timerOvertimeTextColor,
