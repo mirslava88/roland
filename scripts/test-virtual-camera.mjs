@@ -102,9 +102,9 @@ assert.match(settingsSource, /status\?\.supported !== false/, 'activation button
 assert.match(settingsSource, /value\.source === 'internal'/, 'the renderer must retain the virtual-camera internal Program consumer after physical fallback')
 
 const storeSource = readFileSync(resolve(root, 'src', 'renderer', 'src', 'stores', 'useAppStore.ts'), 'utf8')
-assert.match(storeSource, /InternalProgramOutputConsumer = 'headless' \| 'stream' \| 'virtualCamera'/, 'headless operation must be an explicit internal Program consumer')
+assert.match(storeSource, /InternalProgramOutputConsumer = 'headless' \| 'stream' \| 'recording' \| 'virtualCamera'/, 'headless operation must be an explicit internal Program consumer')
 assert.match(storeSource, /headless: presentationId === null/, 'missing physical Program display must automatically enable the hidden Program surface')
-assert.match(storeSource, /consumers\.headless \|\| consumers\.stream \|\| consumers\.virtualCamera/, 'headless output, stream and virtual camera must share the internal output safely')
+assert.match(storeSource, /consumers\.headless \|\| consumers\.stream \|\| consumers\.recording \|\| consumers\.virtualCamera/, 'headless output, stream, recording and virtual camera must share the internal output safely')
 
 const mainSource = readFileSync(resolve(root, 'src', 'main', 'index.ts'), 'utf8')
 assert.match(mainSource, /rendererInternalProgramOutputRequested \|\|/, 'main process must accept a renderer-owned hidden Program surface before stream or camera start')

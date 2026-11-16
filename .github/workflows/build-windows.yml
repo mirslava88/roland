@@ -52,8 +52,13 @@ jobs:
           "edition=$edition" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           $version = node -e "console.log(require('./build/editions.cjs').editionInfo().version)"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve edition version' }
-          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
-            throw "Tag does not match edition version v$version"
+          $baseVersion = $version.Replace('-stream', '')
+          $revision = node -p "require('./build/windows-runtime.json').releaseRevision"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve Windows build revision' }
+          $revisionTag = "v$baseVersion-build.$revision"
+          if ($edition -eq 'stream') { $revisionTag += '-stream' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -notin @("v$version", $revisionTag)) {
+            throw "Tag does not match edition version v$version or build revision $revisionTag"
           }
 
       - name: Install dependencies

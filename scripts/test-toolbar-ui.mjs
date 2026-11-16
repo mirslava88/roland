@@ -40,6 +40,7 @@ import { createRoot } from 'react-dom/client';
 import { Toolbar } from './src/renderer/src/components/Controls/Toolbar';
 import { useAppStore } from './src/renderer/src/stores/useAppStore';
 import { DEFAULT_STREAM_SETTINGS } from './src/shared/streaming';
+import { DEFAULT_RECORDING_SETTINGS } from './src/shared/recording';
 window.testStore = useAppStore;
 window.testCalls = [];
 window.testErrors = [];
@@ -73,7 +74,8 @@ window.api = {
   musicConsumeChannelTransition:serial => {if(serial!==window.testMusicState.transitionSerial)return Promise.resolve(null);const id=window.testMusicState.pendingChannel;window.testMusicState.pendingChannel=null;return Promise.resolve(id);},
   getAudioDevices:call('audio-devices',[]), getAppVersion:call('version','1.1.5 test'),
   virtualCamera:{status:call('virtual-camera-status',{phase:'idle',supported:true,installed:true,available:true,source:null,error:null,name:'PDM Virtual Camera',width:1920,height:1080,fps:30,startedAt:null}),install:call('virtual-camera-install'),start:call('virtual-camera-start'),stop:call('virtual-camera-stop')},
-  streaming:{load:call('stream-load',{settings:DEFAULT_STREAM_SETTINGS,available:true,canSave:true}),status:call('stream-status',{phase:'running',destinations:[]}),start:call('stream-start'),stop:call('stream-stop')}
+  streaming:{load:call('stream-load',{settings:DEFAULT_STREAM_SETTINGS,available:true,canSave:true}),status:call('stream-status',{phase:'running',destinations:[]}),start:call('stream-start'),stop:call('stream-stop')},
+  recording:{load:call('recording-load',DEFAULT_RECORDING_SETTINGS),status:call('recording-status',{phase:'idle'}),start:call('recording-start'),stop:call('recording-stop')}
 };
 window.setTestBusy = busy => {
   const state = useAppStore.getState();
@@ -93,7 +95,8 @@ createRoot(document.getElementById('root')).render(<TestApp/>);
     define:{__PDM_STREAM_ENABLED__:String(stream),'import.meta.url':JSON.stringify(pathToFileURL(resolve(directory,'index.html')).href)},
     outfile:resolve(directory,edition+'.js'),plugins:[{name:'no-output',setup(build){
       build.onResolve({filter:/(?:\/app-config|\/ProgramSceneModal|\/QrOverlayModal|\/AuxiliaryDisplaysModal)$/}, args=>({path:args.path.split('/').pop(),namespace:'fake'}))
-      build.onLoad({filter:/.*/,namespace:'fake'},args=>({contents:args.path==='app-config'?'export const loadAppConfigFromFile = async () => ({}); export const saveCurrentAppConfig = async () => ({});':`export const ${args.path} = () => null`,loader:'js'}))
+      build.onResolve({filter:/\.mp4\?inline$/},()=>({path:'training-video',namespace:'fake'}))
+      build.onLoad({filter:/.*/,namespace:'fake'},args=>({contents:args.path==='app-config'?'export const loadAppConfigFromFile = async () => ({}); export const saveCurrentAppConfig = async () => ({});':args.path==='training-video'?'export default "data:video/mp4;base64,";':`export const ${args.path} = () => null`,loader:'js'}))
     }}]})
   const assets = resolve('out/stream/renderer/assets')
   const css = readdirSync(assets).find(name=>name.endsWith('.css'))
