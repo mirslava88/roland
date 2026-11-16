@@ -99,7 +99,7 @@ function load(file, dependencies, globals = {}) {
     let api
     load('src/preload/index.ts', {
       electron: { contextBridge: { exposeInMainWorld: (_name, value) => { api = value } }, ipcRenderer: {}, webUtils: {} },
-      './streaming-api': {}
+      './streaming-api': {}, './recording-api': {}
     }, { process: { platform, contextIsolated: true }, __PDM_STREAM_ENABLED__: false })
     assert.equal(!!api.macSetup, platform === 'darwin', 'Mac setup IPC must not be exposed in the Windows preload')
   }
