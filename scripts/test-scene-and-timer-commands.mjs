@@ -12,6 +12,33 @@ const { reduceTimerCommand, shouldRenderTimerInProgramRenderer, shouldShowTimerO
 const { selectProgramSnapshotTimer } = await moduleFrom('src/renderer/src/program-snapshot-timer.ts')
 const { formatWallClock, normalizeClockOverlay, DEFAULT_PROGRAM_CLOCK, DEFAULT_SPEAKER_CLOCK } =
   await moduleFrom('src/shared/clock-overlay.ts')
+const { maxProgramTimerScale, programOverlayPreviewMetrics } =
+  await moduleFrom('src/shared/overlay-preview-metrics.ts')
+
+const mixedDpiPreview = programOverlayPreviewMetrics({
+  bounds: { width: 1920, height: 1080 }, scaleFactor: 1
+})
+assert.deepEqual(mixedDpiPreview, programOverlayPreviewMetrics({
+  bounds: { width: 1920, height: 1080 }, scaleFactor: 1.5
+}), 'the operator monitor DPI must not change the target monitor preview')
+assert.equal(mixedDpiPreview.fontCqw * 1920 / 100, 48,
+  'both the WPF timer and Electron clock must preview at 48 target-display logical pixels')
+const scaledOutputPreview = programOverlayPreviewMetrics({
+  bounds: { width: 1280, height: 720 }, scaleFactor: 1.5
+})
+assert.equal(scaledOutputPreview.fontCqw / 100 * 1920, 72,
+  'a 150% output monitor must show the same 48 DIP / CSS-pixel text as 72 physical pixels')
+assert.equal(mixedDpiPreview.clockPaddingXCqw / mixedDpiPreview.timerPaddingXCqw, 2,
+  'clock and timer widths must preserve their different on-air padding')
+assert.equal(programOverlayPreviewMetrics({ bounds: { width: 1280, height: 1024 } }).aspect, 1.25,
+  'the preview canvas must follow the selected output monitor aspect ratio')
+const outputBounds = { bounds: { width: 1280, height: 720 } }
+const shortTimerMax = maxProgramTimerScale(outputBounds, false)
+const longTimerMax = maxProgramTimerScale(outputBounds, true)
+assert.ok(184 * shortTimerMax <= 1272 && 52 * shortTimerMax <= 712,
+  'a short timer must fit entirely on a 150% scaled 1920x1080 output')
+assert.ok(268 * longTimerMax <= 1272 && longTimerMax < shortTimerMax,
+  'switching to HH:MM:SS must lower the allowed scale before the timer leaves the screen')
 
 assert.equal(formatWallClock(new Date(2020, 0, 1, 9, 5, 59)), '09:05',
   'wall clock must remain HH:MM with a steady colon and no seconds')
@@ -210,11 +237,11 @@ assert.match(timerControl, /speakerCurrentFrame[\s\S]*mediaUrl\(speakerCurrentFr
   'the speaker timer preview must show the real current and next speaker frames')
 assert.match(timerControl, /updateProgramTimerPosition[\s\S]*availableWidth[\s\S]*desiredLeft[\s\S]*setProgramDraftPosition/,
   'program timer dragging must use the available output travel after accounting for the timer footprint')
-assert.match(timerControl, /programPreviewFontCqw[\s\S]*transform: `translate\(-\$\{programDraftPosition\.x\}%, -\$\{programDraftPosition\.y\}%\)`[\s\S]*fontSize: `\$\{programPreviewFontCqw \* programDraftScale\}cqw`/,
-  'program preview typography and travel coordinates must match the real program timer overlay')
-assert.match(timerControl, /programDisplayWidth[\s\S]*programOverlayDpiScale[\s\S]*boxSizing: 'content-box'/,
-  'program preview must include the native WPF DPI scale and padding outside its reserved text width')
-assert.match(timerControl, /const primaryDisplay = displays\.find[\s\S]*const programPreviewDisplay = programDisplay \?\? primaryDisplay[\s\S]*programPreviewAspect = programDisplayWidth \/ programDisplayHeight/,
+assert.match(timerControl, /programPreviewFontCqw[\s\S]*transform: `translate\(-\$\{programDraftPosition\.x\}%, -\$\{programDraftPosition\.y\}%\)`[\s\S]*fontSize: `\$\{programPreviewFontCqw \* effectiveProgramDraftScale\}cqw`/,
+  'program preview typography and travel coordinates must match the fitted native timer overlay')
+assert.match(timerControl, /programOverlayPreviewMetrics\(programPreviewDisplay\)[\s\S]*boxSizing: 'content-box'/,
+  'program preview must use target-display logical dimensions and preserve the timer reserve width')
+assert.match(timerControl, /const primaryDisplay = displays\.find[\s\S]*const programPreviewDisplay = programDisplay \?\? primaryDisplay[\s\S]*programPreviewAspect = programPreviewMetrics\.aspect/,
   'headless timer preview must use the actual primary-display aspect ratio instead of an approximate 16:9 fallback')
 assert.match(timerControl, /!programScene\.enabled && timerOutputOwner === 'scene'[\s\S]*setTimerOutputState\(true, 'toolbar'\)/,
   'leaving Scene must preserve a visible timer by returning it to the ordinary Program route')
@@ -258,12 +285,16 @@ assert.match(timerOverlayScript, /MinWidth = useWideTimeLayout \? 260 : 176[\s\S
   'the native timer backing area must be compact while reserving stable room for a minus sign')
 assert.match(timerOverlayScript, /LineHeight = 48[\s\S]*LineStackingStrategy = LineStackingStrategy\.BlockLineHeight[\s\S]*text\.LineHeight = timerFontSize/,
   'the native timer must use the same one-line height as the leading-none Program preview')
-assert.match(mainProcess, /broadcastWpfTimerToMirrors[\s\S]*dpiScale: Math\.max\(0\.5, screen\.getPrimaryDisplay\(\)\.scaleFactor \|\| 1\)/,
-  'live copies must receive the DPI used by the native WPF timer')
+assert.match(mainProcess, /broadcastWpfTimerToMirrors[\s\S]*display\.id === wpfTimerDisplayId[\s\S]*dpiScale: Math\.max\(0\.5, timerDisplay\.scaleFactor \|\| 1\)/,
+  'live copies must receive the DPI of the native WPF timer display')
 assert.match(auxiliaryApp, /ProgramTimerOverlay[\s\S]*sourcePixelHeight[\s\S]*timer\.dpiScale[\s\S]*fontVh = 100 \* 48 \* timer\.scale \* dpiScale \/ sourceHeight/,
   'live copies must size the timer from the physical Program height and native DPI')
-assert.match(timerOverlayScript, /NeedsWideTimeLayout\(duration, remaining\)[\s\S]*text\.MinWidth = Math\.Round\(\(useWideTimeLayout \? 260 : 176\) \* scale\)/,
+assert.match(timerOverlayScript, /NeedsWideTimeLayout\(duration, remaining\)[\s\S]*text\.MinWidth = Math\.Round\(\(useWideTimeLayout \? 260 : 176\) \* scale \* renderRatio\)/,
   'hour timers must reserve their wider stable width before overtime changes the text')
+assert.match(mainProcess, /showWpfTimer\([\s\S]*displayScalePercent[\s\S]*'-DisplayScalePercent', String\(displayScalePercent\)/,
+  'the native timer process must receive the target monitor scale instead of inheriting the operator monitor scale')
+assert.match(timerOverlayScript, /targetDisplayScale \/ Math\.Max\(0\.5, wpfRenderScale\)[\s\S]*48 \* scale \* renderRatio/,
+  'WPF timer glyphs must compensate for the actual WPF render DPI to match the Electron clock')
 assert.match(timerOverlayScript, /Background = Brushes\.Transparent/,
   'the native program timer must use a fully transparent backing surface')
 assert.doesNotMatch(timerOverlayScript, /border\.Background = new SolidColorBrush/,

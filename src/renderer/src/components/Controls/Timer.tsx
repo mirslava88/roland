@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
 import { formatWallClock, type ClockOverlayConfig } from '../../../../shared/clock-overlay'
+import { maxProgramTimerScale, programOverlayPreviewMetrics } from '../../../../shared/overlay-preview-metrics'
 import {
   playTimerSound,
   reduceTimerCommand,
@@ -151,29 +152,20 @@ export function Timer(): JSX.Element {
   const setActiveClockDraft = activePreviewTarget === 'speaker' ? setSpeakerClockDraft : setProgramClockDraft
   const activeLayoutDirty = activePreviewTarget === 'speaker'
     ? speakerLayoutDirty || speakerClockDirty : programLayoutDirty || programClockDirty
+  const programPreviewMetrics = programOverlayPreviewMetrics(programPreviewDisplay)
+  const programPreviewAspect = programPreviewMetrics.aspect
+  const programPreviewFontCqw = programPreviewMetrics.fontCqw
+  const programPreviewPaddingXCqw = programPreviewMetrics.timerPaddingXCqw
+  const programPreviewPaddingYCqw = programPreviewMetrics.timerPaddingYCqw
+  const programClockPaddingXCqw = programPreviewMetrics.clockPaddingXCqw
+  const programClockPaddingYCqw = programPreviewMetrics.clockPaddingYCqw
+  const wideProgramTime = timerDuration >= 3600 || timerRemaining >= 3600 || timerRemaining <= -3600
+  const programMaxTimerScale = maxProgramTimerScale(programPreviewDisplay, wideProgramTime)
+  const effectiveProgramDraftScale = Math.min(programDraftScale, programMaxTimerScale)
+  const effectiveProgramOutputScale = Math.min(timerOverlayScale, programMaxTimerScale)
   const activeDraftScale = selectedOverlay === 'clock'
     ? activeClockDraft.scale
-    : activePreviewTarget === 'speaker' ? speakerDraftScale : programDraftScale
-  const programDisplayWidth = Math.max(
-    1,
-    (programPreviewDisplay?.bounds.width || 1920) * (programPreviewDisplay?.scaleFactor || 1)
-  )
-  const programDisplayHeight = Math.max(
-    1,
-    (programPreviewDisplay?.bounds.height || 1080) * (programPreviewDisplay?.scaleFactor || 1)
-  )
-  // The transparent WPF overlay is created by a PowerShell process whose
-  // logical 48 DIP timer follows the operator display DPI. Account for that
-  // scale in the miniature so its invisible text reserve and edge position
-  // match the real physical Program monitor.
-  const programOverlayDpiScale = Math.max(
-    0.5,
-    displays.find((display) => display.isPrimary)?.scaleFactor || 1
-  )
-  const programPreviewAspect = programDisplayWidth / programDisplayHeight
-  const programPreviewFontCqw = (48 * programOverlayDpiScale / programDisplayWidth) * 100
-  const programPreviewPaddingXCqw = (4 * programOverlayDpiScale / programDisplayWidth) * 100
-  const programPreviewPaddingYCqw = (2 * programOverlayDpiScale / programDisplayWidth) * 100
+    : activePreviewTarget === 'speaker' ? speakerDraftScale : effectiveProgramDraftScale
   const speakerPreviewAspect = speakerDisplay
     ? Math.max(1, speakerDisplay.bounds.width / Math.max(1, speakerDisplay.bounds.height))
     : 16 / 9
@@ -388,7 +380,7 @@ export function Timer(): JSX.Element {
       duration: timerDuration,
       posX: timerOverlayPosition.x,
       posY: timerOverlayPosition.y,
-      scale: timerOverlayScale,
+      scale: effectiveProgramOutputScale,
       textColor: timerTextColor,
       warningTextColor: timerWarningTextColor,
       overtimeTextColor: timerOvertimeTextColor,
@@ -400,7 +392,7 @@ export function Timer(): JSX.Element {
     timerDuration,
     timerOverlayPosition.x,
     timerOverlayPosition.y,
-    timerOverlayScale,
+    effectiveProgramOutputScale,
     timerOvertimeTextColor,
     timerRemaining,
     timerRunning,
@@ -873,7 +865,7 @@ export function Timer(): JSX.Element {
                     setSpeakerDraftPosition((current) => clampSpeakerDraftPosition(current, nextScale))
                   } else {
                     const nextScale = Math.max(0.5, Math.min(
-                      8,
+                      programMaxTimerScale,
                       Math.round((programDraftScale + direction) * 10) / 10
                     ))
                     setProgramDraftScale(nextScale)
@@ -999,9 +991,11 @@ export function Timer(): JSX.Element {
                     boxSizing: 'content-box',
                     color: currentTimerTextColor,
                     opacity: timerTextOpacity,
+                    fontFamily: 'Consolas, monospace',
+                    fontWeight: 700,
                     textShadow: '0 1px 4px rgba(0,0,0,0.95)',
-                    fontSize: `${programPreviewFontCqw * programDraftScale}cqw`,
-                    padding: `${programPreviewPaddingYCqw * programDraftScale}cqw ${programPreviewPaddingXCqw * programDraftScale}cqw`,
+                    fontSize: `${programPreviewFontCqw * effectiveProgramDraftScale}cqw`,
+                    padding: `${programPreviewPaddingYCqw * effectiveProgramDraftScale}cqw ${programPreviewPaddingXCqw * effectiveProgramDraftScale}cqw`,
                     minWidth: timerDuration >= 3600 || timerRemaining >= 3600 || timerRemaining <= -3600
                       ? '5.42em'
                       : '3.67em',
@@ -1017,16 +1011,19 @@ export function Timer(): JSX.Element {
                 {activeClockDraft.enabled && <div
                   ref={clockPreviewValueRef}
                   data-clock-preview-value
-                  className="absolute z-10 cursor-move whitespace-nowrap rounded border border-dashed border-blue-400 px-1 font-mono font-black leading-none tabular-nums"
+                  className="absolute z-10 cursor-move whitespace-nowrap outline outline-1 outline-dashed outline-blue-400 font-mono font-black leading-none tabular-nums tracking-tight"
                   style={activePreviewTarget === 'speaker' ? {
                     left: `${activeClockDraft.position.x}%`, top: `${activeClockDraft.position.y}%`,
                     transform: `translate(-50%, -50%) scale(${activeClockDraft.scale})`,
                     fontSize: `${speakerPreviewFontCqw}cqw`, color: activeClockDraft.color,
+                    padding: `${speakerPreviewPaddingYCqw}cqw ${speakerPreviewPaddingXCqw}cqw`,
                     opacity: activeClockDraft.opacity, textShadow: '0 1px 4px #000'
                   } : {
                     left: `${activeClockDraft.position.x}%`, top: `${activeClockDraft.position.y}%`,
                     transform: `translate(-${activeClockDraft.position.x}%, -${activeClockDraft.position.y}%)`,
                     fontSize: `${programPreviewFontCqw * activeClockDraft.scale}cqw`,
+                    padding: `${programClockPaddingYCqw}cqw ${programClockPaddingXCqw}cqw`,
+                    fontFamily: 'Consolas, monospace', letterSpacing: '-0.03em',
                     color: activeClockDraft.color, opacity: activeClockDraft.opacity,
                     textShadow: '0 1px 4px #000'
                   }}

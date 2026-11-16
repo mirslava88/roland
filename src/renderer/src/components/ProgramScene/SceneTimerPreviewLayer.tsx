@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
+import { maxProgramTimerScale } from '../../../../shared/overlay-preview-metrics'
 
 interface Props {
   remaining: number
@@ -57,14 +58,20 @@ export function SceneTimerPreviewLayer({
   const layerRef = useRef<HTMLDivElement>(null)
   const timerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null)
-  const safeScale = clamp(scale, 0.5, 8)
   const safeDpiScale = clamp(dpiScale, 0.5, 4)
   const wideTime = duration >= 3600 || remaining >= 3600 || remaining <= -3600
+  const maxFitScale = maxProgramTimerScale({
+    bounds: {
+      width: outputWidth / safeDpiScale,
+      height: outputHeight / safeDpiScale
+    }
+  }, wideTime)
+  const safeScale = clamp(scale, 0.5, maxFitScale)
 
   const geometry = useMemo(() => {
     // Exact SizeToContent footprint of timer-overlay.ps1: a 176/260 DIP text
     // reserve, 48 DIP one-line text and 4x2 DIP transparent padding. WPF uses
-    // the operator display DPI, so preview and internal Program use the same
+    // the output display DPI, so preview and internal Program use the same
     // physical ratio instead of the former approximate 280x80 rectangle.
     const widthDip = (wideTime ? 260 : 176) + 8
     const heightDip = 48 + 4
@@ -94,12 +101,13 @@ export function SceneTimerPreviewLayer({
       event.preventDefault()
       event.stopPropagation()
       onSelect?.()
-      const next = Math.round(clamp(safeScale + (event.deltaY < 0 ? 0.1 : -0.1), 0.5, 8) * 10) / 10
+      const next = Math.min(maxFitScale,
+        Math.round(clamp(safeScale + (event.deltaY < 0 ? 0.1 : -0.1), 0.5, maxFitScale) * 10) / 10)
       onScaleChange(next)
     }
     timer.addEventListener('wheel', handleWheel, { passive: false })
     return () => timer.removeEventListener('wheel', handleWheel)
-  }, [interactive, onScaleChange, onSelect, safeScale])
+  }, [interactive, maxFitScale, onScaleChange, onSelect, safeScale])
 
   if (duration <= 0) return null
 

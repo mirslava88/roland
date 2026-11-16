@@ -533,9 +533,10 @@ export function ProgramSceneModal({ onClose, initialEditor }: Props): JSX.Elemen
   }, [previewFile?.path, previewSlide])
   const outputDisplayId = connectedProgramDisplayId(useAppStore.getState())
   const outputDisplay = displays.find((display) => display.id === outputDisplayId)
+    ?? displays.find((display) => display.isPrimary)
   const outputWidth = Math.max(1, outputDisplay?.bounds?.width ?? 1920)
   const outputHeight = Math.max(1, outputDisplay?.bounds?.height ?? 1080)
-  const timerDpiScale = Math.max(0.5, displays.find((display) => display.isPrimary)?.scaleFactor || 1)
+  const timerDpiScale = Math.max(0.5, outputDisplay?.scaleFactor || 1)
   const timerOutputWidth = Math.max(1, outputWidth * (outputDisplay?.scaleFactor || 1))
   const timerOutputHeight = Math.max(1, outputHeight * (outputDisplay?.scaleFactor || 1))
   const selectedCaptureMatchesContent = candidatePreviewFile?.type === 'capture' &&

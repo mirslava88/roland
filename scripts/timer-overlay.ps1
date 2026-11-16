@@ -3,6 +3,7 @@ param(
     [int]$DisplayY = 0,
     [int]$DisplayWidth = 1920,
     [int]$DisplayHeight = 1080,
+    [int]$DisplayScalePercent = 100,
     [string]$DataFile = "",
     [string]$StateFile = ""
 )
@@ -83,6 +84,7 @@ public class TimerOverlay
     private int targetDisplayY;
     private int targetDisplayWidth;
     private int targetDisplayHeight;
+    private double targetDisplayScale = 1.0;
 
     public static void EnablePerMonitorDpiAwareness()
     {
@@ -93,7 +95,7 @@ public class TimerOverlay
         try { SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch {}
     }
 
-    public void Run(int displayX, int displayY, int displayWidth, int displayHeight, string file, string savedStateFile)
+    public void Run(int displayX, int displayY, int displayWidth, int displayHeight, int displayScalePercent, string file, string savedStateFile)
     {
         dataFile = file;
         stateFile = savedStateFile;
@@ -101,6 +103,7 @@ public class TimerOverlay
         targetDisplayY = displayY;
         targetDisplayWidth = Math.Max(1, displayWidth);
         targetDisplayHeight = Math.Max(1, displayHeight);
+        targetDisplayScale = Math.Max(0.5, Math.Min(4.0, displayScalePercent / 100.0));
         LoadState();
 
         window = new Window
@@ -188,11 +191,7 @@ public class TimerOverlay
             if (scale < 0.5) scale = 0.5;
             if (scale > 8.0) scale = 8.0;
             ApplyScale();
-            window.Dispatcher.BeginInvoke(new Action(() =>
-            {
-                RepositionToTarget();
-                SaveState();
-            }), DispatcherPriority.Loaded);
+            RepositionAfterLayout();
         };
 
         // Get HWND once window is loaded — нужен для SetWindowPos
@@ -205,13 +204,14 @@ public class TimerOverlay
         window.SourceInitialized += (s, e) =>
         {
             windowHwnd = new WindowInteropHelper(window).Handle;
+            ApplyScale();
             RepositionToTarget();
         };
         window.ContentRendered += (s, e) =>
         {
-            RepositionToTarget();
+            RepositionAfterLayout();
         };
-        window.SizeChanged += (s, e) => { RepositionToTarget(); };
+        window.SizeChanged += (s, e) => { RepositionAfterLayout(); };
         window.Closing += (s, e) => { SaveState(); };
 
         // A modal ShowDialog loop ends when Hide() is called. Use the normal
@@ -290,8 +290,12 @@ public class TimerOverlay
                 targetDisplayY = GetJsonInt(line, "displayY");
                 targetDisplayWidth = Math.Max(1, GetJsonInt(line, "displayWidth"));
                 targetDisplayHeight = Math.Max(1, GetJsonInt(line, "displayHeight"));
+                if (line.Contains("\"displayScalePercent\""))
+                    targetDisplayScale = Math.Max(0.5, Math.Min(4.0,
+                        GetJsonInt(line, "displayScalePercent") / 100.0));
                 lastPositionRevision = positionRevision;
-                RepositionToTarget();
+                ApplyScale();
+                RepositionAfterLayout();
             }
 
             // Scene preview edits use the same normalized travel coordinates
@@ -311,11 +315,7 @@ public class TimerOverlay
                 hasSavedPixelPosition = false;
                 lastLayoutRevision = layoutRevision;
                 ApplyScale();
-                window.Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    RepositionToTarget();
-                    SaveState();
-                }), DispatcherPriority.Loaded);
+                RepositionAfterLayout();
             }
 
             int remaining = GetJsonInt(line, "remaining");
@@ -423,19 +423,56 @@ public class TimerOverlay
         catch {}
     }
 
+    private void RepositionAfterLayout()
+    {
+        // SizeChanged fires while WPF is measuring its SizeToContent window.
+        // GetWindowRect still reports the previous HWND dimensions at that
+        // point, so anchoring immediately can push the enlarged timer off the
+        // display. ContextIdle runs after the render/native resize.
+        window.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (windowHwnd == IntPtr.Zero || window.Visibility != Visibility.Visible) return;
+            RepositionToTarget();
+            SaveState();
+        }), DispatcherPriority.ContextIdle);
+    }
+
     private void ApplyScale()
     {
-        double timerFontSize = Math.Round(48 * scale);
+        // At high scale or in the wide HH:MM:SS format, the timer can exceed
+        // the target monitor. Clamp by that monitor's usable logical size.
+        uint dpi = windowHwnd == IntPtr.Zero ? 96 : GetDpiForWindow(windowHwnd);
+        if (dpi == 0) dpi = 96;
+        double wpfRenderScale = dpi / 96.0;
+        try
+        {
+            PresentationSource source = PresentationSource.FromVisual(window);
+            if (source != null && source.CompositionTarget != null)
+                wpfRenderScale = Math.Max(wpfRenderScale, source.CompositionTarget.TransformToDevice.M11);
+        }
+        catch {}
+        // WPF can keep the primary monitor's DPI after moving to a secondary
+        // monitor. Compensate every measured element so 48 timer DIPs become
+        // the same physical height as 48 Electron CSS pixels on the target.
+        double renderRatio = targetDisplayScale / Math.Max(0.5, wpfRenderScale);
+        double widthDip = targetDisplayWidth / targetDisplayScale;
+        double heightDip = targetDisplayHeight / targetDisplayScale;
+        double baseWidthDip = (useWideTimeLayout ? 260 : 176) + 8;
+        double maxScale = Math.Min(8.0, Math.Min(
+            (widthDip - 8.0) / baseWidthDip,
+            (heightDip - 8.0) / 52.0));
+        scale = Math.Max(0.5, Math.Min(scale, maxScale));
+        double timerFontSize = Math.Round(48 * scale * renderRatio);
         text.FontSize = timerFontSize;
         // WPF's default font line spacing is taller than the CSS `leading-none`
         // preview even for a single line. Keep the line box equal to the timer
         // font so normalized top/bottom positions describe the same visible
         // footprint in preview, native Program output and live copies.
         text.LineHeight = timerFontSize;
-        text.MinWidth = Math.Round((useWideTimeLayout ? 260 : 176) * scale);
+        text.MinWidth = Math.Round((useWideTimeLayout ? 260 : 176) * scale * renderRatio);
         border.Padding = new Thickness(
-            Math.Round(4 * scale), Math.Round(2 * scale),
-            Math.Round(4 * scale), Math.Round(2 * scale));
+            Math.Round(4 * scale * renderRatio), Math.Round(2 * scale * renderRatio),
+            Math.Round(4 * scale * renderRatio), Math.Round(2 * scale * renderRatio));
     }
 
     private void UpdateTextAlignment()
@@ -617,4 +654,4 @@ Add-Type -TypeDefinition $code -ReferencedAssemblies PresentationFramework, Pres
 
 [TimerOverlay]::EnablePerMonitorDpiAwareness()
 $overlay = New-Object TimerOverlay
-$overlay.Run($DisplayX, $DisplayY, $DisplayWidth, $DisplayHeight, $DataFile, $StateFile)
+$overlay.Run($DisplayX, $DisplayY, $DisplayWidth, $DisplayHeight, $DisplayScalePercent, $DataFile, $StateFile)

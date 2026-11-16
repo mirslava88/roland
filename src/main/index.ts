@@ -545,6 +545,8 @@ function readWpfTimerLayout(): WpfTimerLayout {
 
 function broadcastWpfTimerToMirrors(force = false): void {
   const { valid: _layoutValid, ...layout } = readWpfTimerLayout()
+  const timerDisplay = screen.getAllDisplays().find((display) => display.id === wpfTimerDisplayId)
+    ?? screen.getPrimaryDisplay()
   const payload = {
     visible: timerActive && Number(lastWpfTimerData.duration || 0) > 0,
     remaining: Number(lastWpfTimerData.remaining || 0),
@@ -554,7 +556,7 @@ function broadcastWpfTimerToMirrors(force = false): void {
     warningTextColor: String(lastWpfTimerData.warningTextColor || '#facc15'),
     overtimeTextColor: String(lastWpfTimerData.overtimeTextColor || '#ef4444'),
     textOpacity: Math.max(0.1, Math.min(1, Number(lastWpfTimerData.textOpacity || 1))),
-    dpiScale: Math.max(0.5, screen.getPrimaryDisplay().scaleFactor || 1),
+    dpiScale: Math.max(0.5, timerDisplay.scaleFactor || 1),
     ...layout
   }
   const signature = JSON.stringify(payload)
@@ -978,8 +980,12 @@ function prewarmPresentationWindow(): void {
   })
 }
 
-function showWpfTimer(displayBounds: { x: number; y: number; width: number; height: number }): void {
-  const displayKey = `${displayBounds.x},${displayBounds.y},${displayBounds.width},${displayBounds.height}`
+function showWpfTimer(
+  displayBounds: { x: number; y: number; width: number; height: number },
+  displayScaleFactor: number
+): void {
+  const displayScalePercent = Math.max(50, Math.min(400, Math.round((displayScaleFactor || 1) * 100)))
+  const displayKey = `${displayBounds.x},${displayBounds.y},${displayBounds.width},${displayBounds.height},${displayScalePercent}`
   const timerProcessAlive = !!wpfTimerProcess &&
     !wpfTimerProcess.killed &&
     wpfTimerProcess.exitCode === null &&
@@ -994,6 +1000,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
       displayY: displayBounds.y,
       displayWidth: displayBounds.width,
       displayHeight: displayBounds.height,
+      displayScalePercent,
       windowPositionRevision: wpfTimerPositionRevision
     })
     diagnosticLog('window', `timer overlay ${changed ? 'relocated' : 'reanchored'} physicalBounds=${displayKey}`)
@@ -1020,6 +1027,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     displayY: displayBounds.y,
     displayWidth: displayBounds.width,
     displayHeight: displayBounds.height,
+    displayScalePercent,
     windowPositionRevision: wpfTimerPositionRevision
   })
   diagnosticLog('window', `timer overlay spawn physicalBounds=${displayKey}`)
@@ -1032,6 +1040,7 @@ function showWpfTimer(displayBounds: { x: number; y: number; width: number; heig
     '-DisplayY', String(displayBounds.y),
     '-DisplayWidth', String(displayBounds.width),
     '-DisplayHeight', String(displayBounds.height),
+    '-DisplayScalePercent', String(displayScalePercent),
     '-DataFile', wpfTimerDataFile,
     '-StateFile', timerStateFile
   ], { stdio: 'ignore', windowsHide: true })
@@ -2907,7 +2916,7 @@ function createWindows(): void {
       // DIP coordinates, so passing them directly moves the timer to the
       // wrong monitor in mixed 100%/150% layouts.
       const physicalBounds = screen.dipToScreenRect(null, targetDisplay.bounds)
-      showWpfTimer(physicalBounds)
+      showWpfTimer(physicalBounds, targetDisplay.scaleFactor)
       startWpfTimerMirrorSync()
     }
   })
@@ -3308,7 +3317,7 @@ function createWindows(): void {
       }
       wpfTimerDisplayId = timerTarget.id
       const physicalBounds = screen.dipToScreenRect(null, timerTarget.bounds)
-      showWpfTimer(physicalBounds)
+      showWpfTimer(physicalBounds, timerTarget.scaleFactor)
     }
 
     if (activeContentType === 'presentation') {

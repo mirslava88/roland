@@ -10,7 +10,7 @@
 
 [![Скачать для Windows](https://img.shields.io/badge/Скачать_для_Windows-.exe-16a34a?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/latest)
 
-[![Скачать Stream для Windows](https://img.shields.io/badge/PDM_1.1.7_stream-Windows-ef4444?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/v1.1.7-build.20261116.2-stream)
+[![Скачать Stream для Windows](https://img.shields.io/badge/PDM_1.1.7_stream-Windows-ef4444?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/v1.1.7-build.20261116.3-stream)
 
 [![Скачать для macOS](https://img.shields.io/badge/PDM_1.1.7-macOS-2563eb?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1)
 [![Скачать Stream для macOS](https://img.shields.io/badge/PDM_Stream_1.1.7-macOS-7c3aed?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1-stream)
@@ -36,8 +36,8 @@
 
 | Редакция | Для чего | Windows | macOS |
 |---|---|---|---|
-| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7-build.20261116.2) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1) |
-| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-build.20261116.2-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1-stream) |
+| **PDM** | Работа с локальными экранами без встроенного стриминга | [1.1.7](https://github.com/mirslava88/roland/releases/tag/v1.1.7-build.20261116.3) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1) |
+| **PDM Stream** | Локальный эфир + отправка в Telegram, VK и другие RTMP/RTMPS-сервисы до 1080p | [1.1.7 stream](https://github.com/mirslava88/roland/releases/tag/v1.1.7-build.20261116.3-stream) | [1.1.7 · Intel / Apple Silicon](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1-stream) |
 
 **Mac с процессором M:** [загрузки PDM Stream](https://github.com/mirslava88/roland/releases/tag/macos-v1.1.7-build.20261112.1-stream) → в **Assets** выберите **`PDM-Stream-1.1.7-stream-mac-arm64.dmg`**. Для Intel нужен файл `x64`. Обычная PDM доступна отдельным релизом в таблице выше.
 
@@ -55,7 +55,7 @@ Stream устанавливается отдельно: **Presentation Display M
 
 Mac-ревизия `20261112.1` переносит запись и монтаж **только в Stream**, а настройку суфлёра и защиту от засыпания — в обе редакции. Запись физического экрана использует ScreenCaptureKit в разрешении выхода; без монитора записывается внутренний выход PDM. Для системного звука нужна macOS **14.2+**; микрофон и запись без звука доступны на поддерживаемых версиях macOS. Подробнее об ограничении системного звука — в [документации Electron](https://www.electronjs.org/docs/latest/api/desktop-capturer#caveats). В DMG ревизии `20261109.1` этих новых функций ещё нет.
 
-**Техническая ревизия Windows 20261116.2:** установщики PDM и PDM Stream включают отдельные часы ЧЧ:ММ для эфира и суфлёра, а также автоматическую ширину названия презентации в суфлёре. Сборка использует Electron 45.3.3; номер приложения остаётся 1.1.7. Предыдущие установщики сохранены. Для macOS подготовлен исходный код с Electron 45.3.3 (ревизия 20261116.2); до проверки новых DMG доступны установщики предыдущей ревизии.
+**Техническая ревизия Windows 20261116.3:** исправлены размер и положение таймера у границ эфирного экрана при разном масштабе мониторов Windows. Предпросмотр таймера в настройках и Сцене соответствует физическому выходу, а цифры таймера и текущего времени при одинаковом выбранном масштабе имеют одинаковую базовую высоту. Сохранены часы ЧЧ:ММ и автоматическая ширина названия презентации в суфлёре из предыдущей ревизии. Сборка использует Electron 45.3.3; номер приложения остаётся 1.1.7. Предыдущие установщики сохранены. Для macOS подготовлен исходный код с Electron 45.3.3 (ревизия 20261116.2); до проверки новых DMG доступны установщики предыдущей ревизии.
 
 ## Новые функции macOS — ревизия 20261112.1
 
