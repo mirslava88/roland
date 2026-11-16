@@ -10,6 +10,18 @@ async function moduleFrom(path) {
 const { resolveProgramSceneChannel } = await moduleFrom('src/renderer/src/program-scene-channel.ts')
 const { reduceTimerCommand, shouldRenderTimerInProgramRenderer, shouldShowTimerOnProgram } = await moduleFrom('src/renderer/src/timer-controls.ts')
 const { selectProgramSnapshotTimer } = await moduleFrom('src/renderer/src/program-snapshot-timer.ts')
+const { formatWallClock, normalizeClockOverlay, DEFAULT_PROGRAM_CLOCK, DEFAULT_SPEAKER_CLOCK } =
+  await moduleFrom('src/shared/clock-overlay.ts')
+
+assert.equal(formatWallClock(new Date(2020, 0, 1, 9, 5, 59)), '09:05',
+  'wall clock must remain HH:MM with a steady colon and no seconds')
+assert.equal(DEFAULT_PROGRAM_CLOCK.enabled, false)
+assert.equal(DEFAULT_SPEAKER_CLOCK.enabled, false)
+assert.notDeepEqual(DEFAULT_PROGRAM_CLOCK.position, DEFAULT_SPEAKER_CLOCK.position,
+  'Program and speaker clocks must keep independent layouts')
+assert.deepEqual(normalizeClockOverlay({ enabled: true, position: { x: 120, y: -4 }, scale: 10, color: 'invalid', opacity: 0 }, 'speaker'), {
+  enabled: true, position: { x: 92, y: 8 }, scale: 2, color: '#ffffff', opacity: 0.1
+}, 'saved speaker clock settings must be bounded before rendering')
 
 const channels = {
   live: { file: { path: 'live.pdf' } },
@@ -180,8 +192,8 @@ assert.equal((timerControl.match(/data-timer-layout-preview/g) || []).length, 1,
   'timer settings must render exactly one shared output preview')
 assert.match(timerControl, /data-timer-layout-preview[\s\S]*onPointerDown[\s\S]*onPointerMove[\s\S]*onWheel/,
   'the shared timer preview must provide direct drag and wheel controls')
-assert.match(timerControl, /hasSpeakerDisplay && timerSpeakerOutputEnabled[\s\S]*data-timer-preview-selector[\s\S]*data-timer-preview-target="program"[\s\S]*data-timer-preview-target="speaker"/,
-  'enabling speaker output must reveal a target selector above the same preview')
+assert.match(timerControl, /hasSpeakerDisplay && \([\s\S]*data-timer-preview-selector[\s\S]*data-timer-preview-target="program"[\s\S]*data-timer-preview-target="speaker"/,
+  'a connected speaker display must remain selectable even when its countdown is off')
 assert.match(timerControl, /timerPreviewTarget[\s\S]*activePreviewTarget[\s\S]*data-preview-target=\{activePreviewTarget\}/,
   'the single preview must switch between program and speaker layouts instead of rendering both')
 assert.match(timerControl, /programDraftPosition[\s\S]*speakerDraftPosition[\s\S]*data-timer-layout-refresh[\s\S]*setTimerSpeakerPosition\(speakerDraftPosition\)[\s\S]*setTimerSpeakerScale\(speakerDraftScale\)[\s\S]*setTimerOverlayPosition\(programDraftPosition\)[\s\S]*setTimerOverlayScale\(programDraftScale\)/,

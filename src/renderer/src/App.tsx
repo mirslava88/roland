@@ -19,6 +19,7 @@ import { BroadcastTitlesBridge } from './components/BroadcastTitles/BroadcastTit
 import { DirectStreamDeckBridge } from './components/StreamDeck/DirectStreamDeckBridge'
 import { ProgramSceneBridge } from './components/ProgramScene/ProgramSceneBridge'
 import { QrOverlayBridge } from './components/QrOverlay/QrOverlayBridge'
+import { ClockBridge } from './components/Clock/ClockBridge'
 import { InternalProgramOutputBridge } from './components/ProgramScene/InternalProgramOutputBridge'
 import { Introduction } from './components/Onboarding/Introduction'
 import { MacSetupGate, isMacSetupOpen } from './components/Onboarding/MacSetupGate'
@@ -405,6 +406,7 @@ export default function App({ training = false }: { training?: boolean }): JSX.E
       <ProgramSceneBridge />
       <InternalProgramOutputBridge />
       <QrOverlayBridge />
+      <ClockBridge />
       <OperatorCursorGuard enabled={protectCapturedWindowFromOperatorCursor} />
       <div className="pdm-main-workspace flex flex-1 overflow-hidden">
         <ResizableFileLibrary><FileLibrary /></ResizableFileLibrary>

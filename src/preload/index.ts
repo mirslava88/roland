@@ -283,6 +283,9 @@ const api = {
   updateQrOverlay: (data: unknown): void => {
     ipcRenderer.send('qr-overlay-update', data)
   },
+  updateClockOverlay: (data: unknown): void => {
+    ipcRenderer.send('clock-overlay-update', data)
+  },
 
   updateProgramSceneMediaOverlay: (data: unknown): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('program-scene-media-overlay-update', data),

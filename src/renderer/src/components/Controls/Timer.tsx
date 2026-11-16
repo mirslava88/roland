@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { connectedProgramDisplayId, useAppStore } from '../../stores/useAppStore'
 import { mediaUrl } from '../../media'
+import { formatWallClock, type ClockOverlayConfig } from '../../../../shared/clock-overlay'
 import {
   playTimerSound,
   reduceTimerCommand,
@@ -32,6 +33,10 @@ export function Timer(): JSX.Element {
     timerSpeakerOutputEnabled,
     timerSpeakerPosition,
     timerSpeakerScale,
+    programClock,
+    speakerClock,
+    setProgramClock,
+    setSpeakerClock,
     activeFile,
     currentSlide,
     totalSlides,
@@ -80,6 +85,10 @@ export function Timer(): JSX.Element {
   const [programDraftScale, setProgramDraftScale] = useState(timerOverlayScale)
   const [speakerDraftPosition, setSpeakerDraftPosition] = useState(() => ({ ...timerSpeakerPosition }))
   const [speakerDraftScale, setSpeakerDraftScale] = useState(timerSpeakerScale)
+  const [programClockDraft, setProgramClockDraft] = useState<ClockOverlayConfig>(programClock)
+  const [speakerClockDraft, setSpeakerClockDraft] = useState<ClockOverlayConfig>(speakerClock)
+  const [selectedOverlay, setSelectedOverlay] = useState<'timer' | 'clock'>('timer')
+  const [clockText, setClockText] = useState(() => formatWallClock(new Date()))
   const [previewPdfFrames, setPreviewPdfFrames] = useState<{ current: string | null; next: string | null }>({
     current: null,
     next: null
@@ -92,6 +101,8 @@ export function Timer(): JSX.Element {
   const toggleRef = useRef<HTMLButtonElement>(null)
   const timerPreviewRef = useRef<HTMLDivElement>(null)
   const timerPreviewValueRef = useRef<HTMLDivElement>(null)
+  const clockPreviewValueRef = useRef<HTMLDivElement>(null)
+  const draggingOverlayRef = useRef<'timer' | 'clock'>('timer')
 
   const hasDedicatedTimerDisplay = displays.some((display) => (
     !display.isPrimary && displayAssignments[String(display.id)] === 'timer'
@@ -108,8 +119,7 @@ export function Timer(): JSX.Element {
   // travel coordinates land at a visibly different point in the real output.
   const programPreviewDisplay = programDisplay ?? primaryDisplay
   const hasSpeakerDisplay = speakerDisplay !== undefined
-  const activePreviewTarget: TimerPreviewTarget = timerPreviewTarget === 'speaker' &&
-    timerSpeakerOutputEnabled && hasSpeakerDisplay
+  const activePreviewTarget: TimerPreviewTarget = timerPreviewTarget === 'speaker' && hasSpeakerDisplay
     ? 'speaker'
     : 'program'
   const timerTargetsProgram = shouldShowTimerOnProgram({
@@ -129,8 +139,21 @@ export function Timer(): JSX.Element {
     Math.abs(speakerDraftPosition.x - timerSpeakerPosition.x) > 0.01 ||
     Math.abs(speakerDraftPosition.y - timerSpeakerPosition.y) > 0.01 ||
     Math.abs(speakerDraftScale - timerSpeakerScale) > 0.001
-  const activeLayoutDirty = activePreviewTarget === 'speaker' ? speakerLayoutDirty : programLayoutDirty
-  const activeDraftScale = activePreviewTarget === 'speaker' ? speakerDraftScale : programDraftScale
+  const clockDirty = (draft: ClockOverlayConfig, published: ClockOverlayConfig): boolean =>
+    draft.enabled !== published.enabled || draft.color !== published.color ||
+    Math.abs(draft.opacity - published.opacity) > 0.001 ||
+    Math.abs(draft.position.x - published.position.x) > 0.01 ||
+    Math.abs(draft.position.y - published.position.y) > 0.01 ||
+    Math.abs(draft.scale - published.scale) > 0.001
+  const programClockDirty = clockDirty(programClockDraft, programClock)
+  const speakerClockDirty = clockDirty(speakerClockDraft, speakerClock)
+  const activeClockDraft = activePreviewTarget === 'speaker' ? speakerClockDraft : programClockDraft
+  const setActiveClockDraft = activePreviewTarget === 'speaker' ? setSpeakerClockDraft : setProgramClockDraft
+  const activeLayoutDirty = activePreviewTarget === 'speaker'
+    ? speakerLayoutDirty || speakerClockDirty : programLayoutDirty || programClockDirty
+  const activeDraftScale = selectedOverlay === 'clock'
+    ? activeClockDraft.scale
+    : activePreviewTarget === 'speaker' ? speakerDraftScale : programDraftScale
   const programDisplayWidth = Math.max(
     1,
     (programPreviewDisplay?.bounds.width || 1920) * (programPreviewDisplay?.scaleFactor || 1)
@@ -226,6 +249,33 @@ export function Timer(): JSX.Element {
     else updateProgramTimerPosition(clientX, clientY)
   }
 
+  const updatePreviewClockPosition = (clientX: number, clientY: number): void => {
+    const preview = timerPreviewRef.current
+    const clock = clockPreviewValueRef.current
+    const bounds = preview?.getBoundingClientRect()
+    if (!preview || !clock || !bounds) return
+    if (activePreviewTarget === 'speaker') {
+      const insetX = Math.max(8, Math.min(49, clock.offsetWidth * activeClockDraft.scale / preview.clientWidth * 50 + 1))
+      const insetY = Math.max(8, Math.min(49, clock.offsetHeight * activeClockDraft.scale / preview.clientHeight * 50 + 1))
+      setActiveClockDraft((draft) => ({ ...draft, position: {
+        x: Math.max(insetX, Math.min(100 - insetX, (clientX - bounds.left) / bounds.width * 100)),
+        y: Math.max(insetY, Math.min(100 - insetY, (clientY - bounds.top) / bounds.height * 100))
+      } }))
+    } else {
+      const width = Math.max(0, preview.clientWidth - clock.offsetWidth)
+      const height = Math.max(0, preview.clientHeight - clock.offsetHeight)
+      setActiveClockDraft((draft) => ({ ...draft, position: {
+        x: width > 0 ? Math.max(0, Math.min(100, (clientX - bounds.left - clock.offsetWidth / 2) / width * 100)) : 50,
+        y: height > 0 ? Math.max(0, Math.min(100, (clientY - bounds.top - clock.offsetHeight / 2) / height * 100)) : 50
+      } }))
+    }
+  }
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockText(formatWallClock(new Date())), 250)
+    return () => window.clearInterval(interval)
+  }, [])
+
   useEffect(() => {
     if (!expanded || activePreviewTarget !== 'speaker') return
     const frame = requestAnimationFrame(() => {
@@ -248,9 +298,16 @@ export function Timer(): JSX.Element {
   ])
 
   useEffect(() => {
-    if (timerSpeakerOutputEnabled && hasSpeakerDisplay) return
+    if (hasSpeakerDisplay) return
     setTimerPreviewTarget('program')
-  }, [hasSpeakerDisplay, timerSpeakerOutputEnabled])
+  }, [hasSpeakerDisplay])
+
+  useEffect(() => {
+    if (!programClockDirty) setProgramClockDraft(programClock)
+  }, [programClock, programClockDirty])
+  useEffect(() => {
+    if (!speakerClockDirty) setSpeakerClockDraft(speakerClock)
+  }, [speakerClock, speakerClockDirty])
 
   useEffect(() => {
     if (programLayoutDirty) return
@@ -682,7 +739,7 @@ export function Timer(): JSX.Element {
               </div>
             )}
             <div className="mt-2 rounded-md border border-gray-700 bg-gray-950/80 p-2">
-              {hasSpeakerDisplay && timerSpeakerOutputEnabled && (
+              {hasSpeakerDisplay && (
                 <div data-timer-preview-selector className="mb-2 grid grid-cols-2 gap-1 rounded bg-gray-900 p-1">
                   <button
                     type="button"
@@ -706,6 +763,32 @@ export function Timer(): JSX.Element {
                   </button>
                 </div>
               )}
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] text-gray-300">
+                <label className="flex items-center gap-1.5">
+                  <input
+                    data-clock-enabled={activePreviewTarget}
+                    type="checkbox"
+                    checked={activeClockDraft.enabled}
+                    onChange={(event) => {
+                      setActiveClockDraft((draft) => ({ ...draft, enabled: event.target.checked }))
+                      setSelectedOverlay('clock')
+                    }}
+                    className="h-3.5 w-3.5 accent-blue-500"
+                  />
+                  Показывать текущее время
+                </label>
+                <input type="color" value={activeClockDraft.color}
+                  aria-label="Цвет текущего времени"
+                  onChange={(event) => setActiveClockDraft((draft) => ({ ...draft, color: event.target.value }))}
+                  className="h-6 w-8 rounded border border-gray-600 bg-gray-800 p-0.5" />
+                <label className="flex items-center gap-1">Прозрачность
+                  <input type="range" min="10" max="100" step="5"
+                    value={Math.round(activeClockDraft.opacity * 100)}
+                    onChange={(event) => setActiveClockDraft((draft) => ({ ...draft, opacity: Number(event.target.value) / 100 }))}
+                    className="w-16 accent-blue-500" />
+                  {Math.round(activeClockDraft.opacity * 100)}%
+                </label>
+              </div>
               <div className="mb-1.5 flex items-center justify-between gap-2">
                 <span className="text-[10px] text-gray-400">
                   {activePreviewTarget === 'speaker' ? 'Суфлёр' : 'Основной эфир'}: перетаскивание · колёсико — размер
@@ -724,9 +807,11 @@ export function Timer(): JSX.Element {
                       if (activePreviewTarget === 'speaker') {
                         setTimerSpeakerPosition(speakerDraftPosition)
                         setTimerSpeakerScale(speakerDraftScale)
+                        setSpeakerClock(speakerClockDraft)
                       } else {
                         setTimerOverlayPosition(programDraftPosition)
                         setTimerOverlayScale(programDraftScale)
+                        setProgramClock(programClockDraft)
                       }
                     }}
                     className={`flex h-7 w-7 items-center justify-center rounded-full border text-base font-bold leading-none transition-colors ${activeLayoutDirty
@@ -748,12 +833,17 @@ export function Timer(): JSX.Element {
                   containerType: 'inline-size'
                 }}
                 onPointerDown={(event) => {
+                  draggingOverlayRef.current = (event.target as HTMLElement).closest('[data-clock-preview-value]')
+                    ? 'clock' : 'timer'
+                  setSelectedOverlay(draggingOverlayRef.current)
                   event.currentTarget.setPointerCapture(event.pointerId)
-                  updatePreviewTimerPosition(event.clientX, event.clientY)
+                  if (draggingOverlayRef.current === 'clock') updatePreviewClockPosition(event.clientX, event.clientY)
+                  else updatePreviewTimerPosition(event.clientX, event.clientY)
                 }}
                 onPointerMove={(event) => {
                   if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                    updatePreviewTimerPosition(event.clientX, event.clientY)
+                    if (draggingOverlayRef.current === 'clock') updatePreviewClockPosition(event.clientX, event.clientY)
+                    else updatePreviewTimerPosition(event.clientX, event.clientY)
                   }
                 }}
                 onPointerUp={(event) => {
@@ -764,6 +854,16 @@ export function Timer(): JSX.Element {
                 onWheel={(event) => {
                   event.preventDefault()
                   const direction = event.deltaY < 0 ? 0.1 : -0.1
+                  const overClock = (event.target as HTMLElement).closest('[data-clock-preview-value]')
+                  const overTimer = (event.target as HTMLElement).closest('[data-timer-preview-value]')
+                  if (overClock || (!overTimer && selectedOverlay === 'clock')) {
+                    setSelectedOverlay('clock')
+                    setActiveClockDraft((draft) => ({ ...draft, scale: Math.max(0.5, Math.min(
+                      activePreviewTarget === 'speaker' ? 2 : 8,
+                      Math.round((draft.scale + direction) * 10) / 10
+                    )) }))
+                    return
+                  }
                   if (activePreviewTarget === 'speaker') {
                     const nextScale = Math.max(0.5, Math.min(
                       2,
@@ -877,7 +977,7 @@ export function Timer(): JSX.Element {
                 <div
                   ref={timerPreviewValueRef}
                   data-timer-preview-value
-                  className="pointer-events-none absolute whitespace-nowrap font-mono font-black leading-none text-white"
+                  className="absolute whitespace-nowrap font-mono font-black leading-none text-white"
                   style={activePreviewTarget === 'speaker' ? {
                     left: `${speakerDraftPosition.x}%`,
                     top: `${speakerDraftPosition.y}%`,
@@ -914,6 +1014,23 @@ export function Timer(): JSX.Element {
                 >
                   {timerDuration > 0 ? formatTime(timerRemaining) : '15:00'}
                 </div>
+                {activeClockDraft.enabled && <div
+                  ref={clockPreviewValueRef}
+                  data-clock-preview-value
+                  className="absolute z-10 cursor-move whitespace-nowrap rounded border border-dashed border-blue-400 px-1 font-mono font-black leading-none tabular-nums"
+                  style={activePreviewTarget === 'speaker' ? {
+                    left: `${activeClockDraft.position.x}%`, top: `${activeClockDraft.position.y}%`,
+                    transform: `translate(-50%, -50%) scale(${activeClockDraft.scale})`,
+                    fontSize: `${speakerPreviewFontCqw}cqw`, color: activeClockDraft.color,
+                    opacity: activeClockDraft.opacity, textShadow: '0 1px 4px #000'
+                  } : {
+                    left: `${activeClockDraft.position.x}%`, top: `${activeClockDraft.position.y}%`,
+                    transform: `translate(-${activeClockDraft.position.x}%, -${activeClockDraft.position.y}%)`,
+                    fontSize: `${programPreviewFontCqw * activeClockDraft.scale}cqw`,
+                    color: activeClockDraft.color, opacity: activeClockDraft.opacity,
+                    textShadow: '0 1px 4px #000'
+                  }}
+                >{clockText}</div>}
               </div>
               <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-500">
                 <span>{activeLayoutDirty

@@ -397,6 +397,42 @@ export function createQrOverlayWindow(display?: Display): BrowserWindow {
   return win
 }
 
+export function createClockOverlayWindow(display?: Display): BrowserWindow {
+  const target = display || screen.getPrimaryDisplay()
+  const win = new BrowserWindow({
+    ...target.bounds,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    resizable: false,
+    show: false,
+    hasShadow: false,
+    title: 'PDM Clock Overlay',
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  })
+  win.removeMenu()
+  win.setAlwaysOnTop(true, 'screen-saver')
+  win.setIgnoreMouseEvents(true)
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
+    #clock{position:absolute;white-space:nowrap;padding:4px 8px;font-family:Consolas,monospace;font-weight:900;line-height:1;letter-spacing:-.03em;tab-size:4;text-shadow:0 2px 8px rgba(0,0,0,.95);user-select:none}
+  </style></head><body><div id="clock"></div><script>
+    const clock = document.getElementById('clock');
+    function tick(){const date=new Date();clock.textContent=[date.getHours(),date.getMinutes()].map(n=>String(n).padStart(2,'0')).join(':')}
+    tick();setInterval(tick,250);
+  </script></body></html>`
+  void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  return win
+}
+
 export function createProgramSceneMediaOverlayWindow(display?: Display): BrowserWindow {
   const target = display || screen.getPrimaryDisplay()
   const { x, y, width, height } = target.bounds

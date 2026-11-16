@@ -16,6 +16,8 @@ import {
   type SpeakerSlideLayout
 } from '../../../../shared/speaker-layout'
 import { formatTimerTime, resolveTimerTextColor } from '../../../../shared/timer-format'
+import { type ClockOverlayConfig } from '../../../../shared/clock-overlay'
+import { useWallClock } from '../Clock/ClockOverlay'
 import { BroadcastTitlesOverlay } from '../BroadcastTitles/BroadcastTitlesOverlay'
 import {
   captureSourceIdentity,
@@ -141,6 +143,9 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
   const timerSpeakerOutputEnabled = useAppStore((state) => state.timerSpeakerOutputEnabled)
   const storedTimerDraft = useAppStore((state) => state.speakerTimerEditDraft)
   const setSpeakerTimerEditDraft = useAppStore((state) => state.setSpeakerTimerEditDraft)
+  const speakerClock = useAppStore((state) => state.speakerClock)
+  const storedClockDraft = useAppStore((state) => state.speakerClockEditDraft)
+  const setSpeakerClockEditDraft = useAppStore((state) => state.setSpeakerClockEditDraft)
   const timerOutputVisible = useAppStore((state) => state.timerOutputVisible)
   const timerDuration = useAppStore((state) => state.timerDuration)
   const timerRemaining = useAppStore((state) => state.timerRemaining)
@@ -163,6 +168,10 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
     scale: timerSpeakerScale
   })
   const timerDraftRef = useRef(timerDraft)
+  const [clockDraft, setClockDraft] = useState<ClockOverlayConfig>(() => storedClockDraft || speakerClock)
+  const clockDraftRef = useRef(clockDraft)
+  const clockElementRef = useRef<HTMLDivElement>(null)
+  const clockText = useWallClock()
   const canvasRef = useRef<HTMLDivElement>(null)
   const [notes, setNotes] = useState('')
   const isPdf = activeFile?.type === 'pdf'
@@ -177,7 +186,13 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
     Math.abs(timerDraft.position.x - timerSpeakerPosition.x) > 0.01 ||
     Math.abs(timerDraft.position.y - timerSpeakerPosition.y) > 0.01 ||
     Math.abs(timerDraft.scale - timerSpeakerScale) > 0.001
-  const layoutDirty = !sameSpeakerSlideLayout(layout, savedLayout) || timerDirty
+  const clockDirty = clockDraft.enabled !== speakerClock.enabled ||
+    clockDraft.color !== speakerClock.color ||
+    Math.abs(clockDraft.opacity - speakerClock.opacity) > 0.001 ||
+    Math.abs(clockDraft.position.x - speakerClock.position.x) > 0.01 ||
+    Math.abs(clockDraft.position.y - speakerClock.position.y) > 0.01 ||
+    Math.abs(clockDraft.scale - speakerClock.scale) > 0.001
+  const layoutDirty = !sameSpeakerSlideLayout(layout, savedLayout) || timerDirty || clockDirty
   const speakerDisplay = displays.find((display) => (
     !display.isPrimary && displayAssignments[String(display.id)] === 'speaker'
   ))
@@ -203,6 +218,12 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
     timerDraftRef.current = currentDraft
     setTimerDraft(currentDraft)
   }, [storedTimerDraft, timerSpeakerOutputEnabled, timerSpeakerPosition, timerSpeakerScale])
+
+  useEffect(() => {
+    const currentDraft = storedClockDraft || speakerClock
+    clockDraftRef.current = currentDraft
+    setClockDraft(currentDraft)
+  }, [storedClockDraft, speakerClock])
 
   useEffect(() => () => {
     if (scaleBadgeTimeoutRef.current) clearTimeout(scaleBadgeTimeoutRef.current)
@@ -352,6 +373,41 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
     setTimerDraft(next)
     setSpeakerTimerEditDraft(next)
   }
+  const changeClockDraft = (next: ClockOverlayConfig): void => {
+    clockDraftRef.current = next
+    setClockDraft(next)
+    setSpeakerClockEditDraft(next)
+  }
+  const beginClockMove = (event: React.PointerEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const start = { x: event.clientX, y: event.clientY, draft: clockDraftRef.current }
+    const onMove = (move: PointerEvent): void => {
+      const bounds = canvasRef.current?.getBoundingClientRect()
+      if (!bounds) return
+      const clockBounds = clockElementRef.current?.getBoundingClientRect()
+      const insetX = Math.max(8, Math.min(49, (clockBounds?.width || 0) / bounds.width * 50 + 1))
+      const insetY = Math.max(8, Math.min(49, (clockBounds?.height || 0) / bounds.height * 50 + 1))
+      const next = {
+        ...start.draft,
+        position: {
+          x: Math.max(insetX, Math.min(100 - insetX, start.draft.position.x + (move.clientX - start.x) / bounds.width * 100)),
+          y: Math.max(insetY, Math.min(100 - insetY, start.draft.position.y + (move.clientY - start.y) / bounds.height * 100))
+        }
+      }
+      clockDraftRef.current = next
+      setClockDraft(next)
+    }
+    const onEnd = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onEnd)
+      window.removeEventListener('pointercancel', onEnd)
+      setSpeakerClockEditDraft(clockDraftRef.current)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onEnd, { once: true })
+    window.addEventListener('pointercancel', onEnd, { once: true })
+  }
   const beginTimerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
     event.preventDefault()
     event.stopPropagation()
@@ -432,6 +488,22 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
               ? 'border-blue-400 bg-blue-700 text-white'
               : 'border-gray-600 bg-gray-800 text-gray-200 hover:border-blue-500'}`}
           >{timerVisible ? 'Убрать таймер' : '+ Таймер'}</button>
+          <button type="button" data-speaker-clock-toggle
+            onClick={() => changeClockDraft({ ...clockDraftRef.current, enabled: !clockDraftRef.current.enabled })}
+            className={`rounded border px-2 py-1 text-xs font-semibold ${clockDraft.enabled
+              ? 'border-blue-400 bg-blue-700 text-white'
+              : 'border-gray-600 bg-gray-800 text-gray-200 hover:border-blue-500'}`}
+          >{clockDraft.enabled ? 'Убрать текущее время' : '+ Текущее время'}</button>
+          {clockDraft.enabled && <label className="flex items-center gap-1 text-xs text-gray-200">
+            Цвет <input type="color" aria-label="Цвет текущего времени суфлёра" value={clockDraft.color}
+              onChange={(event) => changeClockDraft({ ...clockDraftRef.current, color: event.target.value })}
+              className="h-6 w-8 rounded border border-gray-600 bg-gray-800 p-0.5" />
+            Прозрачность <input type="range" min="10" max="100" step="5"
+              value={Math.round(clockDraft.opacity * 100)}
+              onChange={(event) => changeClockDraft({ ...clockDraftRef.current, opacity: Number(event.target.value) / 100 })}
+              className="w-16 accent-blue-500" />
+            {Math.round(clockDraft.opacity * 100)}%
+          </label>}
           {timerVisible && (!timerOutputVisible || timerDuration <= 0) && (
             <span className="text-[10px] text-amber-300">Для показа запустите «Таймер доклада».</span>
           )}
@@ -459,6 +531,7 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
             onClick={() => {
               setSpeakerSlideLayoutDraft(layoutRef.current)
               setSpeakerTimerEditDraft(timerDraftRef.current)
+              setSpeakerClockEditDraft(clockDraftRef.current)
               publishSpeakerSlideLayout()
             }}
             className={`flex h-9 w-9 items-center justify-center rounded-full border text-xl font-bold leading-none ${layoutDirty
@@ -509,6 +582,30 @@ function SpeakerLayoutEditor({ onClose }: { onClose: () => void }): JSX.Element 
               }}
             ><span style={{ color: previewTimerColor, opacity: timerTextOpacity }}>{timerDuration > 0 ? timerText : '15:00'}</span></div>
           ) : null}
+          clock={clockDraft.enabled ? <div
+            ref={clockElementRef}
+            data-speaker-clock-draft
+            onPointerDown={beginClockMove}
+            onWheel={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              const scale = Math.max(0.5, Math.min(2,
+                clockDraftRef.current.scale + (event.deltaY < 0 ? 0.05 : -0.05)))
+              const canvas = canvasRef.current
+              const clock = clockElementRef.current
+              const insetX = canvas && clock ? Math.max(8, Math.min(49, clock.offsetWidth * scale / canvas.clientWidth * 50 + 1)) : 8
+              const insetY = canvas && clock ? Math.max(8, Math.min(49, clock.offsetHeight * scale / canvas.clientHeight * 50 + 1)) : 8
+              changeClockDraft({ ...clockDraftRef.current, scale, position: {
+                x: Math.max(insetX, Math.min(100 - insetX, clockDraftRef.current.position.x)),
+                y: Math.max(insetY, Math.min(100 - insetY, clockDraftRef.current.position.y))
+              } })
+            }}
+            className="absolute z-[51] cursor-move touch-none select-none rounded px-2 py-1 text-center font-mono font-black tabular-nums leading-none tracking-tight outline outline-1 outline-dashed outline-blue-400/80"
+            style={{ left: `${clockDraft.position.x}%`, top: `${clockDraft.position.y}%`,
+              transform: `translate(-50%, -50%) scale(${clockDraft.scale})`,
+              fontSize: `${timerPreviewFontPercent}cqw`, color: clockDraft.color,
+              opacity: clockDraft.opacity, textShadow: '0 2px 8px #000' }}
+          >{clockText}</div> : null}
           onResizeStart={beginResize}
           onCaptionPointerDown={beginCaptionMove}
           onCaptionWheel={scaleCaption}

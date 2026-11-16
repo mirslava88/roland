@@ -28,6 +28,7 @@ const INBOUND_CHANNELS = new Set([
   'capture-source-unregister',
   'capture-devices-request',
   'program-scene-update',
+  'program-clock-update',
   'qr-overlay-renderer-update',
   'program-scene-audio-retry',
   'program-scene-audio-update',
@@ -38,6 +39,7 @@ const INBOUND_CHANNELS = new Set([
   'broadcast-titles-update',
   'speaker-state',
   'speaker-timer-update',
+  'speaker-clock-update',
   'event-timer-state',
   'information-state',
   'timer-update',
@@ -45,6 +47,7 @@ const INBOUND_CHANNELS = new Set([
   'mirror-state',
   'mirror-qr-overlay',
   'program-timer-overlay',
+  'mirror-clock-update',
   'program-mirror-transition-complete'
 ])
 
